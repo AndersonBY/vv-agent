@@ -185,3 +185,123 @@ def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
     response = llm.complete(model="kimi-k2-thinking", messages=[Message(role="user", content="hi")], tools=[])
     assert response.content == "final"
     assert response.raw["reasoning_content"] == "step-1|step-2"
+
+
+def test_resolve_request_options_aligns_claude_thinking_profile() -> None:
+    llm = OpenAICompatibleLLM(endpoint_targets=[])
+    options = llm._resolve_request_options("claude-opus-4-6-thinking", stream=True, endpoint_type="openai")
+    assert options.model == "claude-opus-4-6"
+    assert options.temperature == 1.0
+    assert options.max_tokens == 20000
+    assert options.thinking == {"type": "enabled", "budget_tokens": 16000}
+
+
+def test_resolve_request_options_aligns_gemini3_profile() -> None:
+    llm = OpenAICompatibleLLM(endpoint_targets=[])
+    options = llm._resolve_request_options("gemini-3-pro", stream=True, endpoint_type="openai")
+    assert options.model == "gemini-3-pro-preview"
+    assert options.temperature == 1.0
+    assert options.is_gemini_3_model is True
+    assert options.extra_body == {
+        "extra_body": {
+            "google": {
+                "thinking_config": {
+                    "thinkingLevel": "high",
+                    "include_thoughts": True,
+                }
+            }
+        }
+    }
+
+
+def test_llm_stream_request_payload_aligns_qwen_thinking(monkeypatch) -> None:
+    chunk = SimpleNamespace(
+        usage=_FakeUsage(),
+        choices=[SimpleNamespace(delta=SimpleNamespace(content="done", tool_calls=[]))],
+    )
+
+    def stream_call(kwargs):
+        assert kwargs["stream"] is True
+        assert kwargs["model"] == "qwen3-32b"
+        assert kwargs["extra_body"] == {"enable_thinking": True}
+        return [chunk]
+
+    _FakeOpenAI.behavior_by_base_url = {
+        "https://qwen.example/v1": stream_call,
+    }
+    monkeypatch.setattr("v_agent.llm.openai_compatible.OpenAI", _FakeOpenAI)
+
+    llm = OpenAICompatibleLLM(
+        endpoint_targets=[EndpointTarget(endpoint_id="qwen", api_key="k", api_base="https://qwen.example/v1")],
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    response = llm.complete(model="qwen3-32b-thinking", messages=[Message(role="user", content="hi")], tools=[])
+    assert response.content == "done"
+
+
+def test_llm_stream_aggregates_tool_calls_without_index(monkeypatch) -> None:
+    chunk_1 = SimpleNamespace(
+        usage=None,
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content="",
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=0,
+                            id="tc_missing_index",
+                            function=SimpleNamespace(
+                                name=TODO_WRITE_TOOL_NAME,
+                                arguments='{"todos":[{"title":"x",',
+                            ),
+                        )
+                    ],
+                )
+            )
+        ],
+    )
+    chunk_2 = SimpleNamespace(
+        usage=_FakeUsage(),
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content="",
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=None,
+                            id=None,
+                            function=SimpleNamespace(name=None, arguments='"status":"pending"}]}'),
+                        )
+                    ],
+                )
+            )
+        ],
+    )
+
+    def stream_call(kwargs):
+        assert kwargs["stream"] is True
+        return [chunk_1, chunk_2]
+
+    _FakeOpenAI.behavior_by_base_url = {
+        "https://missing-index.example/v1": stream_call,
+    }
+    monkeypatch.setattr("v_agent.llm.openai_compatible.OpenAI", _FakeOpenAI)
+
+    llm = OpenAICompatibleLLM(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="missing-index",
+                api_key="k",
+                api_base="https://missing-index.example/v1",
+            )
+        ],
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    response = llm.complete(model="kimi-k2-thinking", messages=[Message(role="user", content="hi")], tools=[])
+    assert response.tool_calls[0].arguments["todos"][0]["title"] == "x"

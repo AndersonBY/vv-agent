@@ -20,6 +20,7 @@
 | P9 高级工具接入 | ✅ 已完成 | 2026-02-17T15:41:52Z | 接入 `_bash`/`_check_background_command`/`_read_image`，支持后台会话生命周期与图像通知 |
 | P10 文档/工作流/skills 扩展 | ✅ 已完成 | 2026-02-17T15:41:52Z | 增加文档/工作流/技能扩展工具骨架，默认返回标准化未启用错误 |
 | P11 全量验收与收口 | ✅ 已完成 | 2026-02-17T15:41:52Z | 通过 ruff/ty/pytest/live；补齐 `TOOL_PROTOCOL` 与 `MIGRATION_FROM_V0` 文档 |
+| P12 LLM 统一接口对齐 | ✅ 已完成 | 2026-02-17T16:47:41Z | 按 `backend/.../utilities/llm.py` 对齐请求选项和流式 tool call 聚合语义，并通过真实命令验证 |
 
 ### 执行日志
 
@@ -30,6 +31,8 @@
 - 2026-02-17T15:17:28Z：完成 P4 动态工具规划器与 P5 Dispatcher，runtime 已通过 planner + dispatcher 执行工具，回归结果 `39 passed, 1 skipped`。
 - 2026-02-17T15:26:23Z：完成 P6/P7/P8，工具 handler 已模块化且控制语义对齐 backend 风格，runtime 主循环拆分，回归结果 `42 passed, 1 skipped`。
 - 2026-02-17T15:41:52Z：完成 P9/P10/P11，新增 bash/background/image 与 extension stubs，文档收口；回归 `51 passed, 1 skipped`，live `1 passed`。
+- 2026-02-17T16:45:22Z：启动 P12，开始将 `src/v_agent/llm/openai_compatible.py` 请求参数映射与流式工具聚合逻辑对齐 `backend/vector_vein_main/utilities/llm.py`。
+- 2026-02-17T16:47:41Z：完成 P12，请求参数与流式聚合逻辑改造落地；回归 `57 passed, 1 skipped`，live `1 passed`，CLI 真实命令 `uv run v-agent --prompt \"请概述一下这个框架的特点\" --backend moonshot --model kimi-k2.5` 返回 `status=completed`。
 
 ---
 
@@ -90,6 +93,7 @@ uv run pytest -q
 | P9 | 高级工具接入 | bash/background/read_image 协议化接入 |
 | P10 | 文档与扩展接口 | 文档工具/工作流/skills 扩展点 |
 | P11 | 全量测试与验收 | 回归+真实联调+文档收口 |
+| P12 | LLM 统一接口对齐 | 对齐 backend LLM 参数策略与流式 tool call 聚合 |
 
 ---
 
@@ -464,6 +468,48 @@ uv run pytest -q
 
 ---
 
+## P12 LLM 统一接口对齐（新增）
+
+### 目标
+- 直接对齐 `backend/vector_vein_main/utilities/llm.py` 的统一请求策略，避免在 `v-agent` 维护一套偏离实现。
+
+### 参考
+- `backend/vector_vein_main/utilities/llm.py`：
+  - `non_stream_response` 中模型参数映射（thinking / reasoning_effort / extra_body）
+  - `stream_response` 中流式 tool call 增量聚合与 `last_active_tool_call_id` 处理
+- `backend/vector_vein_main/utilities/constants.py`：
+  - `TOOL_CALL_INCREMENTAL_BACKENDS`
+  - `TOOL_CALL_INCREMENTAL_MODELS`
+  - `CLAUDE_THINKING_MODELS`
+
+### 改动文件
+- 修改：
+  - `v-agent/src/v_agent/llm/openai_compatible.py`
+  - `v-agent/tests/test_llm_interface.py`
+
+### 具体任务
+1. 新增请求选项解析层（`_RequestOptions` + `_resolve_request_options`）并对齐模型特化规则：
+   - deepseek temperature 默认值
+   - claude thinking 模型后缀与 thinking 参数
+   - o3/o4/gpt-5 `-high` 的 reasoning_effort 映射
+   - qwen3 thinking / glm thinking / gemini 2.5 与 gemini 3 extra body 规则
+2. 将 stream / non-stream 调用统一走 payload 构建器，避免参数分叉。
+3. 对齐流式 tool call 聚合：
+   - 支持“name+arguments”与“仅 arguments 片段”混合到达
+   - 通过 `last_active_tool_call_id` 归并跨 chunk 参数
+   - 兼容 provider extra（如 Gemini 3 的附加字段）保留到 raw。
+4. 补齐单测：
+   - 请求选项映射测试（claude/gemini/qwen）
+   - 无 index 参数片段的 tool call 归并测试
+   - 原有 failover/推理内容聚合测试保持通过
+
+### DoD
+- `openai_compatible.py` 的参数策略与 backend 参考实现一致（不再是自定义分叉实现）。
+- `tests/test_llm_interface.py` 对关键模型和流式工具聚合行为有回归覆盖。
+- 通过 `ruff` / `ty` / `pytest`，并能真实执行 CLI 命令。
+
+---
+
 ## 4. 提交策略（建议）
 
 建议按阶段拆 10~12 个 commit（每阶段至少 1 个 commit），示例：
@@ -478,6 +524,7 @@ uv run pytest -q
 8. `refactor: split runtime cycle and tool-call runners`
 9. `feat: add bash/background/image tool protocol`
 10. `docs/test: add parity tests and migration docs`
+11. `refactor: align llm request and streaming logic with backend utilities`
 
 ---
 
