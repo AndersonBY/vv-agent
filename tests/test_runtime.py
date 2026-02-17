@@ -18,7 +18,7 @@ def test_runtime_finishes_via_task_finish(tmp_path: Path) -> None:
                     ToolCall(
                         id="c1",
                         name=TODO_WRITE_TOOL_NAME,
-                        arguments={"action": "replace", "items": [{"title": "draft", "done": True}]},
+                        arguments={"todos": [{"title": "draft", "status": "completed", "priority": "medium"}]},
                     )
                 ],
             ),
@@ -76,7 +76,7 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
                     ToolCall(
                         id="c1",
                         name=TODO_WRITE_TOOL_NAME,
-                        arguments={"action": "replace", "items": [{"title": "t1", "done": False}]},
+                        arguments={"todos": [{"title": "t1", "status": "pending", "priority": "medium"}]},
                     )
                 ],
             ),
@@ -90,7 +90,7 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
                     ToolCall(
                         id="c3",
                         name=TODO_WRITE_TOOL_NAME,
-                        arguments={"action": "set_done", "index": 0, "done": True},
+                        arguments={"todos": [{"title": "t1", "status": "completed", "priority": "medium"}]},
                     )
                 ],
             ),
@@ -107,7 +107,7 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "done for real"
     assert len(result.cycles) == 4
-    assert result.todo_list[0]["done"] is True
+    assert result.todo_list[0]["status"] == "completed"
 
 
 def test_runtime_hits_max_cycles_with_continue_policy(tmp_path: Path) -> None:

@@ -169,49 +169,48 @@ Guidance:
         "type": "function",
         "function": {
             "name": TODO_WRITE_TOOL_NAME,
-            "description": """Update runtime TODO list.
+            "description": """Create and manage structured TODO list for multi-step execution.
 
-Current protocol (transitional):
-- action=replace: replace the entire list with `items`
-- action=append: append items to the end
-- action=set_done: update one item completion flag
+Protocol:
+- Send the complete `todos` array each time.
+- Existing items with matching `id` are updated.
+- Items omitted from the new array are removed.
+- Only one item may have `status=in_progress`.
 
-Use this tool for multi-step tasks to keep plan state explicit.""",
+Use this tool to keep task planning explicit and machine-readable.""",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["replace", "append", "set_done"],
-                        "description": "Mutation mode for TODO list.",
-                    },
-                    "items": {
+                    "todos": {
                         "type": "array",
+                        "description": "Complete TODO list payload.",
                         "items": {
                             "type": "object",
                             "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Existing TODO id for update; omit for new item.",
+                                },
                                 "title": {
                                     "type": "string",
                                     "description": "TODO title.",
                                 },
-                                "done": {
-                                    "type": "boolean",
-                                    "description": "Completion flag.",
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "TODO status.",
+                                },
+                                "priority": {
+                                    "type": "string",
+                                    "enum": ["low", "medium", "high"],
+                                    "description": "TODO priority.",
                                 },
                             },
-                            "required": ["title"],
+                            "required": ["title", "status", "priority"],
                         },
                     },
-                    "index": {
-                        "type": "integer",
-                        "description": "Item index when action=set_done.",
-                    },
-                    "done": {
-                        "type": "boolean",
-                        "description": "Target completion flag when action=set_done.",
-                    },
                 },
-                "required": ["action"],
+                "required": ["todos"],
             },
         },
     },
@@ -241,12 +240,13 @@ TASK_FINISH_TOOL_SCHEMA: ToolSchema = {
                     "type": "string",
                     "description": "Final response shown to user.",
                 },
-                "require_all_todos_completed": {
-                    "type": "boolean",
-                    "description": "When true, reject finish if TODO list contains unfinished items.",
+                "exposed_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional output file paths that should be exposed as final deliverables.",
                 },
             },
-            "required": ["message"],
+            "required": [],
         },
     },
 }

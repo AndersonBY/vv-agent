@@ -51,7 +51,7 @@ def test_todo_finish_guard(registry, tool_context: ToolContext) -> None:
     create_todo = ToolCall(
         id="call1",
         name=TODO_WRITE_TOOL_NAME,
-        arguments={"action": "replace", "items": [{"title": "task 1", "done": False}]},
+        arguments={"todos": [{"title": "task 1", "status": "pending", "priority": "high"}]},
     )
     registry.execute(create_todo, tool_context)
 
@@ -61,7 +61,7 @@ def test_todo_finish_guard(registry, tool_context: ToolContext) -> None:
 
     assert finish_result.status == "error"
     assert finish_result.directive == ToolDirective.CONTINUE
-    assert payload["error"] == "todo_incomplete"
+    assert payload["error_code"] == "todo_incomplete"
 
 
 def test_ask_user_sets_wait_directive(registry, tool_context: ToolContext) -> None:

@@ -79,7 +79,10 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
                         SimpleNamespace(
                             index=0,
                             id="tc1",
-                            function=SimpleNamespace(name=TODO_WRITE_TOOL_NAME, arguments='{"action":"append",'),
+                            function=SimpleNamespace(
+                                name=TODO_WRITE_TOOL_NAME,
+                                arguments='{"todos":[{"title":"a","status":"pending",',
+                            ),
                         )
                     ],
                 )
@@ -96,7 +99,7 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
                         SimpleNamespace(
                             index=0,
                             id=None,
-                            function=SimpleNamespace(name=None, arguments='"items":[{"title":"a"}]}'),
+                            function=SimpleNamespace(name=None, arguments='"priority":"medium"}]}'),
                         )
                     ],
                 )
@@ -127,4 +130,4 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
     assert response.raw["stream_collected"] is True
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].name == TODO_WRITE_TOOL_NAME
-    assert response.tool_calls[0].arguments["action"] == "append"
+    assert response.tool_calls[0].arguments["todos"][0]["title"] == "a"

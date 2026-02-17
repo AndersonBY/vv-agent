@@ -7,9 +7,9 @@ from typing import Any
 from v_agent.constants import TASK_FINISH_TOOL_NAME
 from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
-from v_agent.runtime.tool_planner import plan_tool_schemas
+from v_agent.runtime.cycle_runner import CycleRunner
+from v_agent.runtime.tool_call_runner import ToolCallRunner
 from v_agent.tools import ToolContext, ToolRegistry
-from v_agent.tools.dispatcher import dispatch_tool_call
 from v_agent.types import AgentResult, AgentStatus, AgentTask, CycleRecord, Message, ToolDirective, ToolExecutionResult
 
 
@@ -24,6 +24,8 @@ class AgentRuntime:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
         self.default_workspace = Path(default_workspace).resolve() if default_workspace else None
+        self.cycle_runner = CycleRunner(llm_client=llm_client, tool_registry=tool_registry)
+        self.tool_call_runner = ToolCallRunner(tool_registry=tool_registry)
 
     def run(
         self,
@@ -46,17 +48,11 @@ class AgentRuntime:
 
         for cycle_index in range(1, task.max_cycles + 1):
             try:
-                messages, memory_compacted = memory_manager.compact(messages)
-                memory_usage_percentage = self._estimate_memory_usage_percentage(messages, task.memory_threshold_chars)
-                tool_schemas = plan_tool_schemas(
-                    registry=self.tool_registry,
+                messages, cycle_record = self.cycle_runner.run_cycle(
                     task=task,
-                    memory_usage_percentage=memory_usage_percentage,
-                )
-                llm_response = self.llm_client.complete(
-                    model=task.model,
                     messages=messages,
-                    tools=tool_schemas,
+                    cycle_index=cycle_index,
+                    memory_manager=memory_manager,
                 )
             except Exception as exc:
                 return AgentResult(
@@ -67,17 +63,14 @@ class AgentRuntime:
                     shared_state=shared,
                 )
 
-            messages.append(Message(role="assistant", content=llm_response.content))
-            cycle_record = CycleRecord(
-                index=cycle_index,
-                assistant_message=llm_response.content,
-                tool_calls=llm_response.tool_calls,
-                memory_compacted=memory_compacted,
-            )
-
-            if llm_response.tool_calls:
+            if cycle_record.tool_calls:
                 context = ToolContext(workspace=workspace_path, shared_state=shared, cycle_index=cycle_index)
-                tool_result = self._run_tools(llm_response.tool_calls, context, messages, cycle_record)
+                tool_result = self.tool_call_runner.run(
+                    tool_calls=cycle_record.tool_calls,
+                    context=context,
+                    messages=messages,
+                    cycle_record=cycle_record,
+                )
                 cycles.append(cycle_record)
 
                 if tool_result and tool_result.directive == ToolDirective.WAIT_USER:
@@ -110,7 +103,7 @@ class AgentRuntime:
                     status=AgentStatus.COMPLETED,
                     messages=messages,
                     cycles=cycles,
-                    final_answer=llm_response.content,
+                    final_answer=cycle_record.assistant_message,
                     shared_state=shared,
                 )
 
@@ -119,21 +112,12 @@ class AgentRuntime:
                     status=AgentStatus.WAIT_USER,
                     messages=messages,
                     cycles=cycles,
-                    wait_reason=llm_response.content or "No tool call and runtime is waiting for user.",
+                    wait_reason=cycle_record.assistant_message or "No tool call and runtime is waiting for user.",
                     shared_state=shared,
                 )
 
             if cycle_index < task.max_cycles:
-                messages.append(
-                    Message(
-                        role="user",
-                        content=(
-                            "No tool call was produced. "
-                            f"Continue the task and call `{TASK_FINISH_TOOL_NAME}` "
-                            "when all todo items are done."
-                        ),
-                    )
-                )
+                messages.append(Message(role="user", content=self._build_continue_hint()))
 
         return AgentResult(
             status=AgentStatus.MAX_CYCLES,
@@ -142,31 +126,6 @@ class AgentRuntime:
             final_answer="Reached max cycles without finish signal.",
             shared_state=shared,
         )
-
-    def _run_tools(
-        self,
-        tool_calls,
-        context: ToolContext,
-        messages: list[Message],
-        cycle_record: CycleRecord,
-    ) -> ToolExecutionResult | None:
-        latest_directive_result: ToolExecutionResult | None = None
-
-        for call in tool_calls:
-            result = dispatch_tool_call(
-                registry=self.tool_registry,
-                context=context,
-                call=call,
-            )
-
-            cycle_record.tool_results.append(result)
-            messages.append(result.to_tool_message())
-
-            if result.directive in (ToolDirective.WAIT_USER, ToolDirective.FINISH):
-                latest_directive_result = result
-                break
-
-        return latest_directive_result
 
     def _prepare_workspace(self, workspace: str | Path | None) -> Path:
         target = Path(workspace) if workspace else self.default_workspace
@@ -177,11 +136,12 @@ class AgentRuntime:
         return target
 
     @staticmethod
-    def _estimate_memory_usage_percentage(messages: list[Message], threshold_chars: int) -> int:
-        if threshold_chars <= 0:
-            return 0
-        used_chars = sum(len(message.content) for message in messages)
-        return int((used_chars / threshold_chars) * 100)
+    def _build_continue_hint() -> str:
+        return (
+            "No tool call was produced. "
+            f"Continue the task and call `{TASK_FINISH_TOOL_NAME}` "
+            "when all todo items are done."
+        )
 
     @staticmethod
     def _extract_final_message(result: ToolExecutionResult) -> str:

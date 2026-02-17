@@ -14,10 +14,10 @@
 | P3 Prompt Builder | ✅ 已完成 | 2026-02-17T15:09:08Z | 新增分层 `prompt.builder`，生成 `<Agent Definition>/<Environment>/<Tools>/<Current Time>` |
 | P4 动态工具规划器 | ✅ 已完成 | 2026-02-17T15:17:28Z | 新增 `runtime/tool_planner.py`，按 capability + memory 阈值动态规划工具集 |
 | P5 Dispatcher | ✅ 已完成 | 2026-02-17T15:17:28Z | 新增 `tools/dispatcher.py`，标准化参数解析/错误码/WAIT_RESPONSE 状态映射 |
-| P6 工具实现拆分 | ⏳ 进行中 | - | - |
-| P7 控制工具语义对齐 | ⏸️ 未开始 | - | - |
-| P8 runtime 状态机重构 | ⏸️ 未开始 | - | - |
-| P9 高级工具接入 | ⏸️ 未开始 | - | - |
+| P6 工具实现拆分 | ✅ 已完成 | 2026-02-17T15:26:23Z | `builtins.py` 已精简为注册层，workspace/control/todo/search 拆分到 `tools/handlers/` |
+| P7 控制工具语义对齐 | ✅ 已完成 | 2026-02-17T15:26:23Z | `todo_write` 升级为完整列表写入语义，加入单 `in_progress` 约束与结构化错误码 |
+| P8 runtime 状态机重构 | ✅ 已完成 | 2026-02-17T15:26:23Z | runtime 拆为 `cycle_runner` + `tool_call_runner`，状态迁移路径清晰化 |
+| P9 高级工具接入 | ⏳ 进行中 | - | - |
 | P10 文档/工作流/skills 扩展 | ⏸️ 未开始 | - | - |
 | P11 全量验收与收口 | ⏸️ 未开始 | - | - |
 
@@ -28,6 +28,7 @@
 - 2026-02-17T15:04:41Z：完成 P2 常量与 schema 中心化，工具名切换到 backend 风格 `_tool_name`，回归结果 `28 passed, 1 skipped`。
 - 2026-02-17T15:09:08Z：完成 P3 Prompt Builder，CLI 改为通过 builder 构建系统提示词，回归结果 `31 passed, 1 skipped`。
 - 2026-02-17T15:17:28Z：完成 P4 动态工具规划器与 P5 Dispatcher，runtime 已通过 planner + dispatcher 执行工具，回归结果 `39 passed, 1 skipped`。
+- 2026-02-17T15:26:23Z：完成 P6/P7/P8，工具 handler 已模块化且控制语义对齐 backend 风格，runtime 主循环拆分，回归结果 `42 passed, 1 skipped`。
 
 ---
 
