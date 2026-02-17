@@ -7,8 +7,9 @@ from typing import Any
 from v_agent.constants import TASK_FINISH_TOOL_NAME
 from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
+from v_agent.runtime.tool_planner import plan_tool_schemas
 from v_agent.tools import ToolContext, ToolRegistry
-from v_agent.tools.registry import ToolNotFoundError
+from v_agent.tools.dispatcher import dispatch_tool_call
 from v_agent.types import AgentResult, AgentStatus, AgentTask, CycleRecord, Message, ToolDirective, ToolExecutionResult
 
 
@@ -46,10 +47,16 @@ class AgentRuntime:
         for cycle_index in range(1, task.max_cycles + 1):
             try:
                 messages, memory_compacted = memory_manager.compact(messages)
+                memory_usage_percentage = self._estimate_memory_usage_percentage(messages, task.memory_threshold_chars)
+                tool_schemas = plan_tool_schemas(
+                    registry=self.tool_registry,
+                    task=task,
+                    memory_usage_percentage=memory_usage_percentage,
+                )
                 llm_response = self.llm_client.complete(
                     model=task.model,
                     messages=messages,
-                    tools=self.tool_registry.list_openai_schemas(),
+                    tools=tool_schemas,
                 )
             except Exception as exc:
                 return AgentResult(
@@ -146,23 +153,11 @@ class AgentRuntime:
         latest_directive_result: ToolExecutionResult | None = None
 
         for call in tool_calls:
-            try:
-                result = self.tool_registry.execute(call, context)
-            except ToolNotFoundError:
-                result = ToolExecutionResult(
-                    tool_call_id=call.id,
-                    status="error",
-                    content=f"Unknown tool: {call.name}",
-                )
-            except Exception as exc:
-                result = ToolExecutionResult(
-                    tool_call_id=call.id,
-                    status="error",
-                    content=f"Tool execution failed ({call.name}): {exc}",
-                )
-
-            if not result.tool_call_id or result.tool_call_id == "pending":
-                result.tool_call_id = call.id
+            result = dispatch_tool_call(
+                registry=self.tool_registry,
+                context=context,
+                call=call,
+            )
 
             cycle_record.tool_results.append(result)
             messages.append(result.to_tool_message())
@@ -180,6 +175,13 @@ class AgentRuntime:
         target = target.resolve()
         target.mkdir(parents=True, exist_ok=True)
         return target
+
+    @staticmethod
+    def _estimate_memory_usage_percentage(messages: list[Message], threshold_chars: int) -> int:
+        if threshold_chars <= 0:
+            return 0
+        used_chars = sum(len(message.content) for message in messages)
+        return int((used_chars / threshold_chars) * 100)
 
     @staticmethod
     def _extract_final_message(result: ToolExecutionResult) -> str:

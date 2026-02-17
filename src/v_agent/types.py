@@ -130,7 +130,17 @@ class AgentTask:
     user_prompt: str
     max_cycles: int = 8
     memory_threshold_chars: int = 24_000
+    memory_threshold_percentage: int = 90
     no_tool_policy: NoToolPolicy = "continue"
+    allow_interruption: bool = True
+    use_workspace: bool = True
+    has_sub_agents: bool = False
+    agent_type: str | None = None
+    enable_document_tools: bool = False
+    enable_document_write_tools: bool = False
+    enable_workflow_tools: bool = False
+    native_multimodal: bool = False
+    exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

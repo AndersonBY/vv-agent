@@ -39,6 +39,12 @@ class ToolRegistry:
             raise ToolNotFoundError(name)
         return tool
 
+    def has_tool(self, name: str) -> bool:
+        return name in self._tools
+
+    def has_schema(self, name: str) -> bool:
+        return name in self._schemas
+
     def get_schema(self, name: str) -> dict[str, Any]:
         schema = self._schemas.get(name)
         if schema is None:
