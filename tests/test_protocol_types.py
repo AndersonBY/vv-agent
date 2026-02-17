@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from v_agent.types import CycleStatus, ToolExecutionResult, ToolResultStatus
+from v_agent.types import CycleStatus, Message, ToolExecutionResult, ToolResultStatus
 
 
 def test_tool_result_keeps_tool_message_shape() -> None:
@@ -31,3 +31,26 @@ def test_protocol_enums_are_json_serializable() -> None:
     encoded = json.dumps(payload)
     assert "\"PENDING_COMPRESS\"" in encoded
     assert "\"wait_response\"" in encoded
+
+
+def test_assistant_message_keeps_tool_calls_in_openai_payload() -> None:
+    message = Message(
+        role="assistant",
+        content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "_todo_read",
+                    "arguments": "{}",
+                },
+            }
+        ],
+        reasoning_content="analysis",
+    )
+    payload = message.to_openai_message()
+    assert "tool_calls" in payload
+    assert payload["content"] is None
+    assert payload["reasoning_content"] == "analysis"
+    assert payload["tool_calls"][0]["function"]["name"] == "_todo_read"

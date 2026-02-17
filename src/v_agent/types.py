@@ -61,6 +61,8 @@ class Message:
     content: str
     name: str | None = None
     tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
 
     def to_openai_message(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"role": self.role, "content": self.content}
@@ -68,6 +70,12 @@ class Message:
             payload["name"] = self.name
         if self.tool_call_id:
             payload["tool_call_id"] = self.tool_call_id
+        if self.role == "assistant" and self.tool_calls:
+            payload["tool_calls"] = self.tool_calls
+            if not self.content:
+                payload["content"] = None
+        if self.role == "assistant" and self.reasoning_content:
+            payload["reasoning_content"] = self.reasoning_content
         return payload
 
 

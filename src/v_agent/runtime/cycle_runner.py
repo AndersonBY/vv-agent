@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
 from v_agent.runtime.tool_planner import plan_tool_schemas
 from v_agent.tools import ToolRegistry
-from v_agent.types import AgentTask, CycleRecord, Message
+from v_agent.types import AgentTask, CycleRecord, Message, ToolCall
 
 
 class CycleRunner:
@@ -35,7 +38,17 @@ class CycleRunner:
         )
 
         next_messages = list(compacted_messages)
-        next_messages.append(Message(role="assistant", content=llm_response.content))
+        serialized_tool_calls = self._serialize_tool_calls(llm_response.tool_calls)
+        raw_reasoning = llm_response.raw.get("reasoning_content")
+        reasoning_content = raw_reasoning if isinstance(raw_reasoning, str) and raw_reasoning else None
+        next_messages.append(
+            Message(
+                role="assistant",
+                content=llm_response.content,
+                tool_calls=serialized_tool_calls or None,
+                reasoning_content=reasoning_content,
+            )
+        )
 
         cycle_record = CycleRecord(
             index=cycle_index,
@@ -51,3 +64,19 @@ class CycleRunner:
             return 0
         used_chars = sum(len(message.content) for message in messages)
         return int((used_chars / threshold_chars) * 100)
+
+    @staticmethod
+    def _serialize_tool_calls(tool_calls: list[ToolCall]) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            serialized.append(
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                    },
+                }
+            )
+        return serialized

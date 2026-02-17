@@ -189,10 +189,14 @@ class OpenAICompatibleLLM(LLMClient):
         assistant_message = choice.message
 
         parsed_tool_calls = self._parse_non_stream_tool_calls(assistant_message.tool_calls)
+        reasoning_content = self._extract_reasoning_content(getattr(assistant_message, "reasoning_content", None))
+        raw_payload = response.model_dump(exclude_none=True)
+        if reasoning_content:
+            raw_payload["reasoning_content"] = reasoning_content
         return LLMResponse(
             content=self._extract_content(assistant_message.content),
             tool_calls=parsed_tool_calls,
-            raw=response.model_dump(exclude_none=True),
+            raw=raw_payload,
         )
 
     def _stream_completion(
@@ -216,6 +220,7 @@ class OpenAICompatibleLLM(LLMClient):
         stream = cast(Any, client.chat.completions.create)(**payload)
 
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_call_parts: dict[int, dict[str, Any]] = {}
         usage_dump: dict[str, Any] | None = None
 
@@ -235,6 +240,12 @@ class OpenAICompatibleLLM(LLMClient):
             text = self._extract_content(getattr(delta, "content", None))
             if text:
                 content_parts.append(text)
+
+            reasoning_text = self._extract_reasoning_content(getattr(delta, "reasoning_content", None))
+            if not reasoning_text:
+                reasoning_text = self._extract_reasoning_content(getattr(delta, "reasoning", None))
+            if reasoning_text:
+                reasoning_parts.append(reasoning_text)
 
             for tool_delta in getattr(delta, "tool_calls", None) or []:
                 index = getattr(tool_delta, "index", None)
@@ -278,10 +289,13 @@ class OpenAICompatibleLLM(LLMClient):
             )
 
         normalized = self._normalize_tool_calls(parsed_tool_calls)
+        raw_payload: dict[str, Any] = {"usage": usage_dump or {}, "stream_collected": True}
+        if reasoning_parts:
+            raw_payload["reasoning_content"] = "".join(reasoning_parts)
         return LLMResponse(
             content="".join(content_parts),
             tool_calls=normalized,
-            raw={"usage": usage_dump or {}, "stream_collected": True},
+            raw=raw_payload,
         )
 
     def _parse_non_stream_tool_calls(self, tool_calls_raw: Any) -> list[ToolCall]:
@@ -342,6 +356,32 @@ class OpenAICompatibleLLM(LLMClient):
         if content is None:
             return ""
         return str(content)
+
+    @staticmethod
+    def _extract_reasoning_content(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            for key in ("reasoning_content", "reasoning", "thinking", "text", "content"):
+                value = content.get(key)
+                if isinstance(value, str) and value:
+                    return value
+            return ""
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    if item:
+                        parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    for key in ("reasoning_content", "reasoning", "thinking", "text", "content"):
+                        value = item.get(key)
+                        if isinstance(value, str) and value:
+                            parts.append(value)
+                            break
+            return "".join(parts)
+        return ""
 
     def _sleep_backoff(self, attempt: int) -> None:
         jitter = random.uniform(0.0, 0.5)

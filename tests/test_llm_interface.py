@@ -131,3 +131,57 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].name == TODO_WRITE_TOOL_NAME
     assert response.tool_calls[0].arguments["todos"][0]["title"] == "a"
+
+
+def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
+    chunk_1 = SimpleNamespace(
+        usage=None,
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content="",
+                    reasoning_content="step-1",
+                    tool_calls=[],
+                )
+            )
+        ],
+    )
+    chunk_2 = SimpleNamespace(
+        usage=_FakeUsage(),
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content="final",
+                    reasoning_content="|step-2",
+                    tool_calls=[],
+                )
+            )
+        ],
+    )
+
+    def stream_call(kwargs):
+        assert kwargs["stream"] is True
+        return [chunk_1, chunk_2]
+
+    _FakeOpenAI.behavior_by_base_url = {
+        "https://stream-reasoning.example/v1": stream_call,
+    }
+
+    monkeypatch.setattr("v_agent.llm.openai_compatible.OpenAI", _FakeOpenAI)
+
+    llm = OpenAICompatibleLLM(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="stream-reasoning",
+                api_key="k",
+                api_base="https://stream-reasoning.example/v1",
+            )
+        ],
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    response = llm.complete(model="kimi-k2-thinking", messages=[Message(role="user", content="hi")], tools=[])
+    assert response.content == "final"
+    assert response.raw["reasoning_content"] == "step-1|step-2"
