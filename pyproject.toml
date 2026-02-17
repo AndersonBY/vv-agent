@@ -1,0 +1,50 @@
+[project]
+name = "v-agent"
+version = "0.1.0"
+description = "Vector Vein inspired agent framework with cycle runtime, tools and memory management"
+readme = "README.md"
+authors = [
+    { name = "andersonby", email = "andersonby@163.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.109.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-cov>=6.2.1",
+    "ruff>=0.12.10",
+    "ty>=0.0.1a19",
+]
+
+[project.scripts]
+v-agent = "v_agent.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.13,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+    "live: tests that call real remote LLM endpoints",
+]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+exclude = [
+    "local_settings.py",
+    ".venv",
+    ".pytest_cache",
+    ".ruff_cache",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ty.src]
+include = ["src", "tests"]
