@@ -23,6 +23,38 @@ class ToolDirective(StrEnum):
     FINISH = "finish"
 
 
+class ToolResultStatus(StrEnum):
+    SUCCESS = "SUCCESS"
+    ERROR = "ERROR"
+    WAIT_RESPONSE = "WAIT_RESPONSE"
+    RUNNING = "RUNNING"
+    BATCH_RUNNING = "BATCH_RUNNING"
+    PENDING_COMPRESS = "PENDING_COMPRESS"
+
+
+class CycleStatus(StrEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    WAIT_RESPONSE = "wait_response"
+    FAILED = "failed"
+
+
+_LEGACY_STATUS_TO_CODE: dict[str, ToolResultStatus] = {
+    "success": ToolResultStatus.SUCCESS,
+    "error": ToolResultStatus.ERROR,
+}
+
+_STATUS_CODE_TO_LEGACY: dict[ToolResultStatus, Literal["success", "error"]] = {
+    ToolResultStatus.SUCCESS: "success",
+    ToolResultStatus.ERROR: "error",
+    ToolResultStatus.WAIT_RESPONSE: "success",
+    ToolResultStatus.RUNNING: "success",
+    ToolResultStatus.BATCH_RUNNING: "success",
+    ToolResultStatus.PENDING_COMPRESS: "success",
+}
+
+
 @dataclass(slots=True)
 class Message:
     role: Role
@@ -49,10 +81,26 @@ class ToolCall:
 @dataclass(slots=True)
 class ToolExecutionResult:
     tool_call_id: str
-    status: Literal["success", "error"]
     content: str
+    status: Literal["success", "error"] | None = None
+    status_code: ToolResultStatus | None = None
     directive: ToolDirective = ToolDirective.CONTINUE
+    error_code: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    image_url: str | None = None
+    image_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status is None and self.status_code is None:
+            self.status = "success"
+            self.status_code = ToolResultStatus.SUCCESS
+            return
+
+        if self.status_code is None:
+            self.status_code = _LEGACY_STATUS_TO_CODE.get(self.status or "success", ToolResultStatus.SUCCESS)
+
+        if self.status is None:
+            self.status = _STATUS_CODE_TO_LEGACY[self.status_code]
 
     def to_tool_message(self) -> Message:
         return Message(role="tool", content=self.content, tool_call_id=self.tool_call_id)
