@@ -8,11 +8,6 @@ class DocumentIntegration(Protocol):
         ...
 
 
-class WorkflowIntegration(Protocol):
-    def enabled(self) -> bool:
-        ...
-
-
 class SkillIntegration(Protocol):
     def enabled(self) -> bool:
         ...

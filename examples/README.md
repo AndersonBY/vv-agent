@@ -45,6 +45,13 @@ uv run python examples/sdk_style_client.py \
 ```
 
 演示点：
-- `AgentDefinition` + `VAgentSDKOptions` + `VAgentClient` 的三层抽象
+- `AgentDefinition` + `AgentSDKOptions` + `AgentSDKClient` 的三层抽象
 - `client.run_agent(agent_name=..., prompt=...)` 的 SDK 调用体验
-- 一个进程里管理多个命名 Agent（planner / translator / document-worker）
+- 一个进程里管理多个命名 Agent（planner / translator / orchestrator）
+- `orchestrator` 示例包含 `sub_agents` 配置输入方式
+
+## 4) 自定义 workflow 工具
+
+workflow 建议作为自定义工具注册，不做内建特殊分支。可参考：
+
+- `tests/test_custom_tools.py`

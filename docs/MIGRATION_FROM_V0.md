@@ -46,7 +46,7 @@ Use constants modules as source of truth:
 
 - `src/v_agent/constants/workspace.py`
 - `src/v_agent/constants/document.py`
-- `src/v_agent/constants/workflow.py`
+- workflow 建议作为自定义工具注册到 `ToolRegistry`（不再内建专项模块）
 
 ## 5) Prompt system changes
 
@@ -59,5 +59,5 @@ CLI now uses `build_system_prompt(...)` to generate layered prompt sections:
 
 ## 6) New extension stubs
 
-Document/workflow/skill tool interfaces are now present in registry.
+Document/skill tool interfaces are now present in registry.
 By default, handlers return structured `not_enabled` errors until adapters are wired.

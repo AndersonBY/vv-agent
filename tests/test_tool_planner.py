@@ -3,14 +3,16 @@ from __future__ import annotations
 from v_agent.constants import (
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
+    BATCH_SUB_TASKS_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
+    CREATE_SUB_TASK_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
 from v_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
 from v_agent.tools import build_default_registry
-from v_agent.types import AgentTask
+from v_agent.types import AgentTask, SubAgentConfig
 
 
 def _task(**overrides: object) -> AgentTask:
@@ -59,6 +61,24 @@ def test_plan_tool_names_adds_computer_tools() -> None:
 
     assert BASH_TOOL_NAME in names
     assert CHECK_BACKGROUND_COMMAND_TOOL_NAME in names
+
+
+def test_plan_tool_names_adds_sub_agent_tools_when_configured() -> None:
+    names = plan_tool_names(
+        _task(
+            sub_agents={
+                "research-sub": SubAgentConfig(model="kimi-k2.5", description="collect context"),
+            }
+        )
+    )
+
+    assert CREATE_SUB_TASK_TOOL_NAME in names
+    assert BATCH_SUB_TASKS_TOOL_NAME in names
+
+
+def test_plan_tool_names_includes_extra_tool_names() -> None:
+    names = plan_tool_names(_task(extra_tool_names=["_custom_workflow_tool"]))
+    assert "_custom_workflow_tool" in names
 
 
 def test_plan_tool_schemas_only_returns_registered_tools() -> None:

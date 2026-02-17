@@ -131,6 +131,17 @@ class CycleRecord:
 
 
 @dataclass(slots=True)
+class SubAgentConfig:
+    model: str
+    description: str
+    backend: str | None = None
+    system_prompt: str | None = None
+    max_cycles: int = 8
+    exclude_tools: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class AgentTask:
     task_id: str
     model: str
@@ -142,14 +153,20 @@ class AgentTask:
     no_tool_policy: NoToolPolicy = "continue"
     allow_interruption: bool = True
     use_workspace: bool = True
+    # Legacy switch; prefer configuring `sub_agents` with concrete entries.
     has_sub_agents: bool = False
+    sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)
     agent_type: str | None = None
     enable_document_tools: bool = False
     enable_document_write_tools: bool = False
-    enable_workflow_tools: bool = False
     native_multimodal: bool = False
+    extra_tool_names: list[str] = field(default_factory=list)
     exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def sub_agents_enabled(self) -> bool:
+        return self.has_sub_agents or bool(self.sub_agents)
 
 
 @dataclass(slots=True)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from v_agent.types import CycleStatus, Message, ToolExecutionResult, ToolResultStatus
+from v_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolExecutionResult, ToolResultStatus
 
 
 def test_tool_result_keeps_tool_message_shape() -> None:
@@ -54,3 +54,17 @@ def test_assistant_message_keeps_tool_calls_in_openai_payload() -> None:
     assert payload["content"] is None
     assert payload["reasoning_content"] == "analysis"
     assert payload["tool_calls"][0]["function"]["name"] == "_todo_read"
+
+
+def test_agent_task_sub_agent_config_support() -> None:
+    task = AgentTask(
+        task_id="task_sub",
+        model="m",
+        system_prompt="sys",
+        user_prompt="u",
+        sub_agents={
+            "research": SubAgentConfig(model="kimi-k2.5", description="collect data"),
+        },
+    )
+    assert task.sub_agents_enabled is True
+    assert task.sub_agents["research"].model == "kimi-k2.5"

@@ -5,9 +5,7 @@ from pathlib import Path
 
 from v_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
-    CREATE_WORKFLOW_TOOL_NAME,
     LIST_MOUNTED_DOCUMENTS_TOOL_NAME,
-    RUN_WORKFLOW_TOOL_NAME,
 )
 from v_agent.runtime.tool_planner import plan_tool_schemas
 from v_agent.tools import ToolContext, build_default_registry
@@ -38,20 +36,14 @@ def test_extension_handlers_return_not_enabled_errors(tmp_path: Path) -> None:
         ToolCall(id="c1", name=LIST_MOUNTED_DOCUMENTS_TOOL_NAME, arguments={}),
         context,
     )
-    wf_result = registry.execute(
-        ToolCall(id="c2", name=CREATE_WORKFLOW_TOOL_NAME, arguments={"json_file_path": "a.json", "title": "t"}),
-        context,
-    )
     skill_result = registry.execute(
-        ToolCall(id="c3", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
+        ToolCall(id="c2", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
         context,
     )
 
     assert doc_result.status_code == ToolResultStatus.ERROR
-    assert wf_result.status_code == ToolResultStatus.ERROR
     assert skill_result.status_code == ToolResultStatus.ERROR
     assert json.loads(doc_result.content)["error_code"] == "document_tools_not_enabled"
-    assert json.loads(wf_result.content)["error_code"] == "workflow_tools_not_enabled"
     assert json.loads(skill_result.content)["error_code"] == "skill_activation_not_enabled"
 
 
@@ -62,13 +54,10 @@ def test_planner_can_inject_extension_tool_schemas() -> None:
         task=_task(
             enable_document_tools=True,
             enable_document_write_tools=True,
-            enable_workflow_tools=True,
             metadata={"available_skills": ["demo"]},
         ),
     )
 
     names = {schema["function"]["name"] for schema in schemas}
     assert LIST_MOUNTED_DOCUMENTS_TOOL_NAME in names
-    assert CREATE_WORKFLOW_TOOL_NAME in names
-    assert RUN_WORKFLOW_TOOL_NAME in names
     assert ACTIVATE_SKILL_TOOL_NAME in names

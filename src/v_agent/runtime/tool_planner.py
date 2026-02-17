@@ -14,7 +14,6 @@ from v_agent.constants import (
     DOCUMENT_WRITE_TOOLS,
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
-    WORKFLOW_DESIGN_TOOLS,
     WORKSPACE_TOOLS,
 )
 from v_agent.tools.registry import ToolRegistry
@@ -41,7 +40,7 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
     if task.agent_type == "computer":
         tool_names.extend([BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME])
 
-    if task.has_sub_agents:
+    if task.sub_agents_enabled:
         tool_names.extend([CREATE_SUB_TASK_TOOL_NAME, BATCH_SUB_TASKS_TOOL_NAME])
 
     if task.metadata.get("available_skills"):
@@ -52,11 +51,11 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
         if task.enable_document_write_tools:
             tool_names.extend(DOCUMENT_WRITE_TOOLS)
 
-    if task.enable_workflow_tools:
-        tool_names.extend(WORKFLOW_DESIGN_TOOLS)
-
     if task.native_multimodal:
         tool_names.append(READ_IMAGE_TOOL_NAME)
+
+    if task.extra_tool_names:
+        tool_names.extend(task.extra_tool_names)
 
     if task.exclude_tools:
         excluded = set(task.exclude_tools)

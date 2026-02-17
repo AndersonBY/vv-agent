@@ -37,11 +37,12 @@ Tool-level status code (`ToolResultStatus`):
 
 - Tool names and schemas are centralized in `src/v_agent/constants/`.
 - Built-in handlers are split by responsibility in `src/v_agent/tools/handlers/`.
+- Workflow 语义不做框架内置特殊处理；如需 workflow，按自定义工具注册到 `ToolRegistry`。
 - Default registry preloads:
   - control: `_task_finish`, `_ask_user`, `_todo_write`, `_todo_read`
   - workspace: `_read_file`, `_write_file`, `_list_files`, `_workspace_grep`
   - computer: `_bash`, `_check_background_command`, `_read_image`
-  - extension stubs: document/workflow/skill tools (return standard not-enabled errors by default)
+  - extension stubs: document/skill tools (return standard not-enabled errors by default)
 
 ## Prompt Layer
 

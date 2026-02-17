@@ -5,7 +5,6 @@ from v_agent.constants import (
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
-    CREATE_WORKFLOW_TOOL_NAME,
     DOCUMENT_FIND_TOOL_NAME,
     DOCUMENT_GREP_TOOL_NAME,
     DOCUMENT_NAVIGATION_TOOLS_SCHEMAS,
@@ -18,11 +17,9 @@ from v_agent.constants import (
     READ_FILE_TOOL_NAME,
     READ_FOLDER_ABSTRACT_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
-    RUN_WORKFLOW_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_READ_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
-    WORKFLOW_DESIGN_TOOLS_SCHEMAS,
     WORKSPACE_GREP_TOOL_NAME,
     WRITE_DOCUMENT_CONTENT_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
@@ -33,7 +30,6 @@ from v_agent.tools.handlers import (
     activate_skill,
     ask_user,
     check_background_command,
-    create_workflow,
     document_abstract_read,
     document_find,
     document_grep,
@@ -47,7 +43,6 @@ from v_agent.tools.handlers import (
     read_file,
     read_image,
     run_bash_command,
-    run_workflow,
     task_finish,
     todo_read,
     todo_write,
@@ -61,7 +56,6 @@ def build_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register_schemas(get_default_tool_schemas())
     registry.register_schemas(DOCUMENT_NAVIGATION_TOOLS_SCHEMAS)
-    registry.register_schemas(WORKFLOW_DESIGN_TOOLS_SCHEMAS)
     registry.register_many(
         [
             ToolSpec(name=TASK_FINISH_TOOL_NAME, handler=task_finish),
@@ -85,8 +79,6 @@ def build_default_registry() -> ToolRegistry:
             ToolSpec(name=DOCUMENT_FIND_TOOL_NAME, handler=document_find),
             ToolSpec(name=WRITE_DOCUMENT_CONTENT_TOOL_NAME, handler=document_write),
             ToolSpec(name=DOCUMENT_STR_REPLACE_TOOL_NAME, handler=document_str_replace),
-            ToolSpec(name=CREATE_WORKFLOW_TOOL_NAME, handler=create_workflow),
-            ToolSpec(name=RUN_WORKFLOW_TOOL_NAME, handler=run_workflow),
         ]
     )
     return registry

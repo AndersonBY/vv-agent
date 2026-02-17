@@ -8,12 +8,17 @@ from v_agent.config import (
     resolve_model_endpoint,
 )
 from v_agent.runtime import AgentRuntime
+from v_agent.sdk import AgentDefinition, AgentRun, AgentSDKClient, AgentSDKOptions
 from v_agent.tools import ToolRegistry, build_default_registry
 from v_agent.types import AgentResult, AgentStatus, AgentTask
 
 __all__ = [
+    "AgentDefinition",
     "AgentResult",
+    "AgentRun",
     "AgentRuntime",
+    "AgentSDKClient",
+    "AgentSDKOptions",
     "AgentStatus",
     "AgentTask",
     "ConfigError",

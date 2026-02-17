@@ -55,6 +55,3 @@ DOCUMENT_STR_REPLACE_TOOL_NAME = "document_str_replace"
 READ_DOCUMENT_ABSTRACT_TOOL_NAME = "document_abstract_read"
 READ_DOCUMENT_OVERVIEW_TOOL_NAME = "document_overview_read"
 READ_FOLDER_ABSTRACT_TOOL_NAME = "folder_abstract_read"
-
-CREATE_WORKFLOW_TOOL_NAME = "_create_workflow"
-RUN_WORKFLOW_TOOL_NAME = "_run_workflow"

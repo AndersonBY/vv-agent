@@ -17,6 +17,7 @@
 - `v_agent.runtime.tool_planner`: 按 capability 动态规划可用工具 schema。
 - `v_agent.tools.dispatcher`: 统一处理参数解析/错误码/状态码映射。
 - `v_agent.tools.build_default_registry`: 默认工具集（workspace/todo/control/bash/background/image + extension stubs）。
+- `v_agent.sdk.AgentSDKClient`: 代码式 SDK 封装（命名 Agent、复用配置、一次注册多 Agent）。
 - `v_agent.memory.MemoryManager`: 历史压缩器。
 - `v_agent.llm.OpenAICompatibleLLM`: 统一 LLM 接口（端点轮询、重试、流式/非流式聚合、tool call 归一化）。
 - `v_agent.config`: 从本地 `local_settings.py` 解析模型+端点+key。
@@ -68,6 +69,8 @@ uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonsho
 - `examples/quick_start_programmatic.py`：最小代码式调用
 - `examples/agent_profiles.py`：通过 profile 复用不同 Agent 配置
 - `examples/sdk_style_client.py`：参考 `claude-agent-sdk-python` 设计风格的 SDK 式封装
+
+说明：workflow 不再作为内建特殊能力；如需 workflow，请按自定义工具注册（见 `tests/test_custom_tools.py` 的方式）。
 
 快速查看：
 
