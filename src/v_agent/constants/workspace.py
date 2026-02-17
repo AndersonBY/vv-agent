@@ -4,9 +4,13 @@ from copy import deepcopy
 from typing import Any
 
 from v_agent.constants.tool_names import (
+    ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
+    BASH_TOOL_NAME,
+    CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
+    READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_READ_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
@@ -226,6 +230,64 @@ Use this tool to keep task planning explicit and machine-readable.""",
             },
         },
     },
+    BASH_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": BASH_TOOL_NAME,
+            "description": """Execute bash command in workspace.
+
+Guidelines:
+- Prefer specialized read/write/search/edit tools when possible.
+- Use this tool for command execution, package install, scripts, and piped workflows.
+- Use `run_in_background=true` for long-running commands and poll with check tool.""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Bash command string."},
+                    "exec_dir": {"type": "string", "description": "Workspace-relative execution directory."},
+                    "timeout": {"type": "integer", "description": "Timeout seconds, default 300, max 600."},
+                    "stdin": {"type": "string", "description": "Optional stdin content."},
+                    "auto_confirm": {"type": "boolean", "description": "Pipe yes to command when true."},
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "Run command in background and return session_id for polling.",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    CHECK_BACKGROUND_COMMAND_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": CHECK_BACKGROUND_COMMAND_TOOL_NAME,
+            "description": "Check status/output for command launched in background mode.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Background session identifier."},
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
+    READ_IMAGE_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": READ_IMAGE_TOOL_NAME,
+            "description": "Read image from workspace path or HTTP URL and attach it to runtime context.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative image path or http(s) image URL.",
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+    },
 }
 
 TASK_FINISH_TOOL_SCHEMA: ToolSchema = {
@@ -283,12 +345,37 @@ ASK_USER_TOOL_SCHEMA: ToolSchema = {
     },
 }
 
+ACTIVATE_SKILL_TOOL_SCHEMA: ToolSchema = {
+    "type": "function",
+    "function": {
+        "name": ACTIVATE_SKILL_TOOL_NAME,
+        "description": "Activate a named skill and load its instructions into current task context.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "Skill identifier from available skill list.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional reason for activating this skill.",
+                },
+            },
+            "required": ["skill_name"],
+        },
+    },
+}
+
 
 def get_default_tool_schemas() -> dict[str, ToolSchema]:
     merged: dict[str, ToolSchema] = {
         TASK_FINISH_TOOL_NAME: deepcopy(TASK_FINISH_TOOL_SCHEMA),
         ASK_USER_TOOL_NAME: deepcopy(ASK_USER_TOOL_SCHEMA),
+        ACTIVATE_SKILL_TOOL_NAME: deepcopy(ACTIVATE_SKILL_TOOL_SCHEMA),
     }
     for tool_name in WORKSPACE_TOOLS:
         merged[tool_name] = deepcopy(WORKSPACE_TOOLS_SCHEMAS[tool_name])
+    for extra_tool_name in (BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME, READ_IMAGE_TOOL_NAME):
+        merged[extra_tool_name] = deepcopy(WORKSPACE_TOOLS_SCHEMAS[extra_tool_name])
     return merged

@@ -2,52 +2,63 @@
 
 ## Design Inputs
 
-- Source domain logic: `backend/vector_vein_main/ai_agents/`
-  - cycle task orchestration (`agent_cycle.py`, `task_lifecycle.py`)
-  - tool dispatch and status transitions (`tool_calls.py`, `tasks/tools/*`)
-  - todo-driven finish constraints
-  - memory compression strategy
-- Reference agent framework: `ref_repos/agent_framework/hive/`
-  - explicit runtime topology
-  - observable execution stream and stateful lifecycle
-  - composable runtime abstractions (runtime / tools / storage)
+- Source domain logic: `backend/vector_vein_main/ai_agents/tasks/`
+  - prompt composition
+  - tool schema constants
+  - tool-call status protocol and runtime transitions
+- Reference framework: `ref_repos/agent_framework/`
+  - modular runtime topology
+  - explicit lifecycle states and observability
 
-## Core Runtime State Machine
+## Runtime Topology
+
+- `AgentRuntime`: orchestrates full task lifecycle
+- `CycleRunner`: executes one LLM cycle
+- `ToolCallRunner`: executes and collects tool calls for a cycle
+- `ToolPlanner`: decides which tools are visible for current capability set
+- `ToolDispatcher`: normalizes tool-call arguments, handles errors, and standardizes result payloads
+
+## State Model
+
+Task-level state:
 
 `pending -> running -> (completed | wait_user | failed | max_cycles)`
 
-Each cycle executes:
+Tool-level status code (`ToolResultStatus`):
 
-1. compact memory (if over threshold)
-2. call LLM with current messages + tool schemas
-3. append assistant response
-4. execute tool calls in order
-5. transition by tool directive:
-   - `finish` -> `completed`
-   - `wait_user` -> `wait_user`
-   - otherwise continue
+- `SUCCESS`
+- `ERROR`
+- `WAIT_RESPONSE`
+- `RUNNING`
+- `BATCH_RUNNING`
+- `PENDING_COMPRESS`
 
-## Tool Philosophy
+## Tool System
 
-- `task_finish` and `ask_user` are explicit lifecycle controls.
-- `todo_write` / `todo_read` make plan tracking machine-readable.
-- `task_finish` enforces todo completeness by default.
-- workspace tools are isolated inside a root path to avoid path escape.
+- Tool names and schemas are centralized in `src/v_agent/constants/`.
+- Built-in handlers are split by responsibility in `src/v_agent/tools/handlers/`.
+- Default registry preloads:
+  - control: `_task_finish`, `_ask_user`, `_todo_write`, `_todo_read`
+  - workspace: `_read_file`, `_write_file`, `_list_files`, `_workspace_grep`
+  - computer: `_bash`, `_check_background_command`, `_read_image`
+  - extension stubs: document/workflow/skill tools (return standard not-enabled errors by default)
 
-## Memory Strategy
+## Prompt Layer
 
-- If message chars exceed threshold:
-  - keep first system message
-  - summarize middle section into `memory_summary`
-  - keep recent N messages untouched
+`build_system_prompt(...)` composes:
 
-This keeps context bounded while preserving short-term execution fidelity.
+- `<Agent Definition>`
+- `<Environment>` (optional, agent_type=computer)
+- `<Tools>`
+- `<Current Time>`
 
-## LLM Adapter Strategy
+Prompt templates include tool-priority governance (prefer specialized tools over shell).
 
-- OpenAI-compatible transport to support multiple providers.
-- Model/endpoint resolution parsed from standalone project `local_settings.py` (template: `local_settings.example.py`).
-- key normalization supports encoded formats used in existing settings.
-- Endpoint failover + per-endpoint retry with backoff.
-- Stream/non-stream mode auto routing for reasoning-focused model families (inspired by `utilities/llm.py`).
-- Tool call ID/名称归一化，避免不同模型的增量差异影响运行时。
+## Memory and LLM
+
+- `MemoryManager` performs context compaction by threshold.
+- `OpenAICompatibleLLM` implements:
+  - endpoint failover and retries
+  - stream/non-stream routing
+  - tool-call normalization
+  - backend-like settings parsing from `local_settings.py`

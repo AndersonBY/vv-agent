@@ -50,6 +50,7 @@ from v_agent.constants.workflow import (
     WORKFLOW_DESIGN_TOOLS_SCHEMAS,
 )
 from v_agent.constants.workspace import (
+    ACTIVATE_SKILL_TOOL_SCHEMA,
     ASK_USER_TOOL_SCHEMA,
     TASK_FINISH_TOOL_SCHEMA,
     WORKSPACE_TOOLS,
@@ -59,6 +60,7 @@ from v_agent.constants.workspace import (
 
 __all__ = (
     "ACTIVATE_SKILL_TOOL_NAME",
+    "ACTIVATE_SKILL_TOOL_SCHEMA",
     "ASK_USER_TOOL_NAME",
     "ASK_USER_TOOL_SCHEMA",
     "BASH_TOOL_NAME",

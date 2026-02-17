@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from v_agent.constants import (
+    ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
     BATCH_SUB_TASKS_TOOL_NAME,
@@ -42,6 +43,9 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
 
     if task.has_sub_agents:
         tool_names.extend([CREATE_SUB_TASK_TOOL_NAME, BATCH_SUB_TASKS_TOOL_NAME])
+
+    if task.metadata.get("available_skills"):
+        tool_names.append(ACTIVATE_SKILL_TOOL_NAME)
 
     if task.enable_document_tools:
         tool_names.extend(DOCUMENT_NAVIGATION_TOOLS)

@@ -5,15 +5,18 @@
 ## Agent Philosophy
 
 - **Cycle-first**：每一轮都清晰记录「输入上下文 -> LLM 决策 -> 工具执行 -> 状态迁移」。
-- **Tool-driven completion**：任务完成/等待用户由工具显式触发（`task_finish` / `ask_user`）。
+- **Tool-driven completion**：任务完成/等待用户由工具显式触发（`_task_finish` / `_ask_user`）。
 - **Memory with compression**：上下文超阈值后自动压缩历史，保留最近高价值对话。
 - **Portable runtime**：不依赖 Django/Celery，可嵌入 CLI、服务端 worker 或测试环境。
 
 ## 核心模块
 
-- `v_agent.runtime.AgentRuntime`: 任务循环状态机。
-- `v_agent.tools.ToolRegistry`: 工具注册、schema 暴露、执行调度。
-- `v_agent.tools.build_default_registry`: 默认工具集（workspace/todo/finish/ask_user）。
+- `v_agent.runtime.AgentRuntime`: 顶层任务状态机（completed/wait_user/max_cycles/failed）。
+- `v_agent.runtime.CycleRunner`: 单轮 LLM 调用与 cycle 记录构建。
+- `v_agent.runtime.ToolCallRunner`: 工具调用执行与 directive 收敛。
+- `v_agent.runtime.tool_planner`: 按 capability 动态规划可用工具 schema。
+- `v_agent.tools.dispatcher`: 统一处理参数解析/错误码/状态码映射。
+- `v_agent.tools.build_default_registry`: 默认工具集（workspace/todo/control/bash/background/image + extension stubs）。
 - `v_agent.memory.MemoryManager`: 历史压缩器。
 - `v_agent.llm.OpenAICompatibleLLM`: 统一 LLM 接口（端点轮询、重试、流式/非流式聚合、tool call 归一化）。
 - `v_agent.config`: 从本地 `local_settings.py` 解析模型+端点+key。
