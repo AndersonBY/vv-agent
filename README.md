@@ -61,6 +61,20 @@ uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonsho
 - `--model`: 模型名称（支持别名 `kimi-k2.5` -> `kimi-k2-thinking`）
 - `--verbose`: 输出每轮 cycle 日志（LLM 响应摘要、tool 调用结果、状态迁移）
 
+## 代码式示例（非 CLI）
+
+`examples/` 下提供了多种集成模式，包含：
+
+- `examples/quick_start_programmatic.py`：最小代码式调用
+- `examples/agent_profiles.py`：通过 profile 复用不同 Agent 配置
+- `examples/sdk_style_client.py`：参考 `claude-agent-sdk-python` 设计风格的 SDK 式封装
+
+快速查看：
+
+```bash
+cat examples/README.md
+```
+
 ## 实时集成测试
 
 默认不会跑真实 LLM。
