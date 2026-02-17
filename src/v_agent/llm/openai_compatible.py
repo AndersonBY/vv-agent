@@ -152,7 +152,15 @@ class OpenAICompatibleLLM(LLMClient):
     def _build_tool_payload(tools: list[dict[str, object]]) -> list[dict[str, Any]]:
         if not tools:
             return []
-        return [{"type": "function", "function": schema} for schema in tools]
+        payload: list[dict[str, Any]] = []
+        for schema in tools:
+            schema_type = schema.get("type")
+            schema_function = schema.get("function")
+            if schema_type == "function" and isinstance(schema_function, dict):
+                payload.append(cast(dict[str, Any], schema))
+                continue
+            payload.append({"type": "function", "function": schema})
+        return payload
 
     @staticmethod
     def _should_use_stream(model: str) -> bool:

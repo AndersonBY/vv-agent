@@ -27,6 +27,4 @@ class ToolContext:
 @dataclass(slots=True)
 class ToolSpec:
     name: str
-    description: str
-    input_schema: dict[str, Any]
     handler: ToolHandler

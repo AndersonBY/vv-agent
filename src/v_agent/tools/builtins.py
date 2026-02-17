@@ -5,6 +5,18 @@ import re
 from pathlib import Path
 from typing import Any
 
+from v_agent.constants import (
+    ASK_USER_TOOL_NAME,
+    LIST_FILES_TOOL_NAME,
+    READ_FILE_TOOL_NAME,
+    TASK_FINISH_TOOL_NAME,
+    TODO_INCOMPLETE_ERROR_CODE,
+    TODO_READ_TOOL_NAME,
+    TODO_WRITE_TOOL_NAME,
+    WORKSPACE_GREP_TOOL_NAME,
+    WRITE_FILE_TOOL_NAME,
+    get_default_tool_schemas,
+)
 from v_agent.tools.base import ToolContext, ToolSpec
 from v_agent.tools.registry import ToolRegistry
 from v_agent.types import ToolDirective, ToolExecutionResult
@@ -52,10 +64,11 @@ def _task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
         return ToolExecutionResult(
             tool_call_id="",
             status="error",
+            error_code=TODO_INCOMPLETE_ERROR_CODE,
             content=_json(
                 {
                     "ok": False,
-                    "error": "todo_incomplete",
+                    "error": TODO_INCOMPLETE_ERROR_CODE,
                     "message": "Cannot finish task while todo items are incomplete",
                     "incomplete": incomplete,
                 }
@@ -74,8 +87,32 @@ def _task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
 def _ask_user(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     del context
     question = str(arguments.get("question", "Need user input"))
-    options = arguments.get("options", [])
-    payload = {"question": question, "options": options}
+    selection_type = str(arguments.get("selection_type", "single"))
+    allow_custom_options = bool(arguments.get("allow_custom_options", False))
+
+    options_raw = arguments.get("options")
+    options: list[str] | None = None
+    if isinstance(options_raw, list):
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for option in options_raw:
+            option_text = str(option).strip()
+            if option_text and option_text not in seen:
+                seen.add(option_text)
+                normalized.append(option_text)
+        options = normalized or None
+
+    if selection_type not in {"single", "multi"}:
+        selection_type = "single"
+
+    payload: dict[str, Any] = {
+        "question": question,
+        "selection_type": selection_type,
+        "allow_custom_options": allow_custom_options,
+    }
+    if options is not None:
+        payload["options"] = options
+
     return ToolExecutionResult(
         tool_call_id="",
         status="success",
@@ -214,7 +251,14 @@ def _workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
     max_results = int(arguments.get("max_results", 50))
 
     flags = 0 if case_sensitive else re.IGNORECASE
-    regex = re.compile(pattern, flags)
+    try:
+        regex = re.compile(pattern, flags)
+    except re.error as exc:
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="error",
+            content=_json({"error": f"invalid regex pattern: {exc}"}),
+        )
 
     matches: list[dict[str, Any]] = []
     for candidate in root.glob(glob_pattern):
@@ -250,122 +294,17 @@ def _workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
 
 def build_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
+    registry.register_schemas(get_default_tool_schemas())
     registry.register_many(
         [
-            ToolSpec(
-                name="task_finish",
-                description="Mark task as finished. Enforces todo completion by default.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "message": {"type": "string"},
-                        "require_all_todos_completed": {"type": "boolean", "default": True},
-                    },
-                    "required": ["message"],
-                },
-                handler=_task_finish,
-            ),
-            ToolSpec(
-                name="ask_user",
-                description="Pause execution and request user input.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "question": {"type": "string"},
-                        "options": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["question"],
-                },
-                handler=_ask_user,
-            ),
-            ToolSpec(
-                name="todo_write",
-                description="Manage runtime todo list.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string", "enum": ["replace", "append", "set_done"]},
-                        "items": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "title": {"type": "string"},
-                                    "done": {"type": "boolean", "default": False},
-                                },
-                                "required": ["title"],
-                            },
-                        },
-                        "index": {"type": "integer"},
-                        "done": {"type": "boolean"},
-                    },
-                    "required": ["action"],
-                },
-                handler=_todo_write,
-            ),
-            ToolSpec(
-                name="todo_read",
-                description="Read runtime todo list.",
-                input_schema={"type": "object", "properties": {}},
-                handler=_todo_read,
-            ),
-            ToolSpec(
-                name="list_files",
-                description="List workspace files.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "default": "."},
-                        "glob": {"type": "string", "default": "**/*"},
-                        "include_hidden": {"type": "boolean", "default": False},
-                    },
-                },
-                handler=_list_files,
-            ),
-            ToolSpec(
-                name="read_file",
-                description="Read file content with optional line range.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "start_line": {"type": "integer", "minimum": 1, "default": 1},
-                        "end_line": {"type": "integer", "minimum": 1},
-                    },
-                    "required": ["path"],
-                },
-                handler=_read_file,
-            ),
-            ToolSpec(
-                name="write_file",
-                description="Write file content into workspace.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "content": {"type": "string"},
-                        "append": {"type": "boolean", "default": False},
-                    },
-                    "required": ["path", "content"],
-                },
-                handler=_write_file,
-            ),
-            ToolSpec(
-                name="workspace_grep",
-                description="Search text across workspace files.",
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string"},
-                        "path": {"type": "string", "default": "."},
-                        "glob": {"type": "string", "default": "**/*"},
-                        "case_sensitive": {"type": "boolean", "default": False},
-                        "max_results": {"type": "integer", "default": 50, "minimum": 1},
-                    },
-                    "required": ["pattern"],
-                },
-                handler=_workspace_grep,
-            ),
+            ToolSpec(name=TASK_FINISH_TOOL_NAME, handler=_task_finish),
+            ToolSpec(name=ASK_USER_TOOL_NAME, handler=_ask_user),
+            ToolSpec(name=TODO_WRITE_TOOL_NAME, handler=_todo_write),
+            ToolSpec(name=TODO_READ_TOOL_NAME, handler=_todo_read),
+            ToolSpec(name=LIST_FILES_TOOL_NAME, handler=_list_files),
+            ToolSpec(name=READ_FILE_TOOL_NAME, handler=_read_file),
+            ToolSpec(name=WRITE_FILE_TOOL_NAME, handler=_write_file),
+            ToolSpec(name=WORKSPACE_GREP_TOOL_NAME, handler=_workspace_grep),
         ]
     )
     return registry

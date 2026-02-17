@@ -4,6 +4,7 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import ClassVar, cast
 
+from v_agent.constants import TODO_WRITE_TOOL_NAME
 from v_agent.llm.openai_compatible import EndpointTarget, OpenAICompatibleLLM
 from v_agent.types import Message
 
@@ -78,7 +79,7 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
                         SimpleNamespace(
                             index=0,
                             id="tc1",
-                            function=SimpleNamespace(name="todo_write", arguments='{"action":"append",'),
+                            function=SimpleNamespace(name=TODO_WRITE_TOOL_NAME, arguments='{"action":"append",'),
                         )
                     ],
                 )
@@ -125,5 +126,5 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
     assert response.content == "hello world"
     assert response.raw["stream_collected"] is True
     assert len(response.tool_calls) == 1
-    assert response.tool_calls[0].name == "todo_write"
+    assert response.tool_calls[0].name == TODO_WRITE_TOOL_NAME
     assert response.tool_calls[0].arguments["action"] == "append"

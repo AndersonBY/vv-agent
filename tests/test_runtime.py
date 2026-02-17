@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from v_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
 from v_agent.llm import ScriptedLLM
 from v_agent.runtime import AgentRuntime
 from v_agent.tools import build_default_registry
@@ -16,14 +17,14 @@ def test_runtime_finishes_via_task_finish(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name="todo_write",
+                        name=TODO_WRITE_TOOL_NAME,
                         arguments={"action": "replace", "items": [{"title": "draft", "done": True}]},
                     )
                 ],
             ),
             LLMResponse(
                 content="finalizing",
-                tool_calls=[ToolCall(id="c2", name="task_finish", arguments={"message": "all done"})],
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "all done"})],
             ),
         ]
     )
@@ -48,7 +49,13 @@ def test_runtime_waits_for_user_when_ask_user_called(tmp_path: Path) -> None:
         steps=[
             LLMResponse(
                 content="need input",
-                tool_calls=[ToolCall(id="c1", name="ask_user", arguments={"question": "confirm?", "options": ["yes", "no"]})],
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name=ASK_USER_TOOL_NAME,
+                        arguments={"question": "confirm?", "options": ["yes", "no"]},
+                    )
+                ],
             )
         ]
     )
@@ -68,22 +75,28 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name="todo_write",
+                        name=TODO_WRITE_TOOL_NAME,
                         arguments={"action": "replace", "items": [{"title": "t1", "done": False}]},
                     )
                 ],
             ),
             LLMResponse(
                 content="try finish",
-                tool_calls=[ToolCall(id="c2", name="task_finish", arguments={"message": "done"})],
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
             ),
             LLMResponse(
                 content="mark done",
-                tool_calls=[ToolCall(id="c3", name="todo_write", arguments={"action": "set_done", "index": 0, "done": True})],
+                tool_calls=[
+                    ToolCall(
+                        id="c3",
+                        name=TODO_WRITE_TOOL_NAME,
+                        arguments={"action": "set_done", "index": 0, "done": True},
+                    )
+                ],
             ),
             LLMResponse(
                 content="finish",
-                tool_calls=[ToolCall(id="c4", name="task_finish", arguments={"message": "done for real"})],
+                tool_calls=[ToolCall(id="c4", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done for real"})],
             ),
         ]
     )

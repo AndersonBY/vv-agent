@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 from v_agent.config import build_openai_llm_from_local_settings
+from v_agent.constants import TASK_FINISH_TOOL_NAME
 from v_agent.runtime import AgentRuntime
 from v_agent.tools import build_default_registry
 from v_agent.types import AgentTask
@@ -42,7 +43,8 @@ def main() -> None:
         task_id=f"task_{uuid.uuid4().hex[:8]}",
         model=resolved.model_id,
         system_prompt=(
-            "You are Vector Vein agent runtime demo. Prefer tools for file/todo operations and finish via task_finish."
+            "You are Vector Vein agent runtime demo. "
+            f"Prefer tools for file/todo operations and finish via {TASK_FINISH_TOOL_NAME}."
         ),
         user_prompt=args.prompt,
         max_cycles=max(args.max_cycles, 1),

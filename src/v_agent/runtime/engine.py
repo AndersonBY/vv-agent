@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from v_agent.constants import TASK_FINISH_TOOL_NAME
 from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
 from v_agent.tools import ToolContext, ToolRegistry
@@ -120,7 +121,9 @@ class AgentRuntime:
                     Message(
                         role="user",
                         content=(
-                            "No tool call was produced. Continue the task and call `task_finish` when all todo items are done."
+                            "No tool call was produced. "
+                            f"Continue the task and call `{TASK_FINISH_TOOL_NAME}` "
+                            "when all todo items are done."
                         ),
                     )
                 )
