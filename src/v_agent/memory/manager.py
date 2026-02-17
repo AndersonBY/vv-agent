@@ -23,8 +23,14 @@ class MemoryManager:
             return cleaned, False
 
         head = cleaned[:1]
-        recent = cleaned[-self.keep_recent_messages :]
-        middle = cleaned[1 : len(cleaned) - self.keep_recent_messages]
+        recent_start = max(1, len(cleaned) - self.keep_recent_messages)
+        # Preserve assistant->tool call structure at the compaction boundary.
+        # Some OpenAI-compatible providers reject histories that start with a dangling tool message.
+        while recent_start > 1 and cleaned[recent_start].role == "tool":
+            recent_start -= 1
+
+        recent = cleaned[recent_start:]
+        middle = cleaned[1:recent_start]
         summary_lines: list[str] = []
         limit = 40
         for idx, msg in enumerate(middle[:limit], start=1):

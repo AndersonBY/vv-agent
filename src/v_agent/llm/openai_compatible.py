@@ -145,6 +145,7 @@ class OpenAICompatibleLLM(LLMClient):
                 stream=should_stream,
                 endpoint_type=target.endpoint_type,
             )
+            request_messages = self._prepare_messages_for_model(message_payload, request_options.model)
 
             for attempt in range(1, self.max_retries_per_endpoint + 1):
                 try:
@@ -153,14 +154,14 @@ class OpenAICompatibleLLM(LLMClient):
                         response = self._stream_completion(
                             client=client,
                             options=request_options,
-                            messages=message_payload,
+                            messages=request_messages,
                             tool_payload=tool_payload,
                         )
                     else:
                         response = self._non_stream_completion(
                             client=client,
                             options=request_options,
-                            messages=message_payload,
+                            messages=request_messages,
                             tool_payload=tool_payload,
                         )
 
@@ -244,6 +245,44 @@ class OpenAICompatibleLLM(LLMClient):
         if model in _STREAM_MODEL_EXACT:
             return True
         return model.startswith(_STREAM_MODEL_PREFIXES)
+
+    @staticmethod
+    def _prepare_messages_for_model(
+        messages: list[ChatCompletionMessageParam],
+        model: str,
+    ) -> list[ChatCompletionMessageParam]:
+        # MiniMax OpenAI-compatible endpoint validates message roles strictly and
+        # rejects requests containing multiple system-role turns.
+        minimax_strict_system = model.startswith("MiniMax")
+        prepared: list[ChatCompletionMessageParam] = []
+        seen_system = False
+
+        for raw_message in messages:
+            message = dict(raw_message)
+            role = message.get("role")
+            if role == "system":
+                if not seen_system:
+                    seen_system = True
+                    prepared.append(cast(ChatCompletionMessageParam, message))
+                    continue
+                if minimax_strict_system:
+                    summary_content = message.get("content")
+                    summary_text = summary_content if isinstance(summary_content, str) else ""
+                    prefix = "[memory_summary]\n" if message.get("name") == "memory_summary" else ""
+                    prepared.append(
+                        cast(
+                            ChatCompletionMessageParam,
+                            {
+                                "role": "user",
+                                "content": f"{prefix}{summary_text}".strip(),
+                            },
+                        )
+                    )
+                    continue
+
+            prepared.append(cast(ChatCompletionMessageParam, message))
+
+        return prepared
 
     def _resolve_request_options(self, model: str, *, stream: bool, endpoint_type: str | None) -> _RequestOptions:
         resolved_model = model

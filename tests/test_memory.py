@@ -49,3 +49,33 @@ def test_memory_replaces_previous_summary() -> None:
     assert changed is True
     summaries = [msg for msg in compacted if msg.name == "memory_summary"]
     assert len(summaries) == 1
+
+
+def test_memory_compaction_keeps_tool_boundary_consistent() -> None:
+    manager = MemoryManager(threshold_chars=80, keep_recent_messages=4)
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="u" * 30),
+        Message(
+            role="assistant",
+            content="plan tools",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "_read_file", "arguments": "{}"},
+                }
+            ],
+        ),
+        Message(role="tool", content="tool result 1", tool_call_id="call_1"),
+        Message(role="tool", content="tool result 2", tool_call_id="call_1"),
+        Message(role="assistant", content="next step"),
+        Message(role="user", content="continue"),
+        Message(role="assistant", content="done"),
+    ]
+
+    compacted, changed = manager.compact(messages)
+    assert changed is True
+    assert compacted[1].name == "memory_summary"
+    # The first retained recent message should not be a dangling tool message.
+    assert compacted[2].role == "assistant"

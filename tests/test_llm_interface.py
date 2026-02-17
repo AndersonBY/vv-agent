@@ -4,6 +4,8 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import ClassVar, cast
 
+from openai.types.chat import ChatCompletionMessageParam
+
 from v_agent.constants import TODO_WRITE_TOOL_NAME
 from v_agent.llm.openai_compatible import EndpointTarget, OpenAICompatibleLLM
 from v_agent.types import Message
@@ -305,3 +307,30 @@ def test_llm_stream_aggregates_tool_calls_without_index(monkeypatch) -> None:
 
     response = llm.complete(model="kimi-k2-thinking", messages=[Message(role="user", content="hi")], tools=[])
     assert response.tool_calls[0].arguments["todos"][0]["title"] == "x"
+
+
+def test_prepare_messages_for_minimax_converts_extra_system_messages() -> None:
+    messages = [
+        {"role": "system", "content": "base system"},
+        {"role": "system", "name": "memory_summary", "content": "summary"},
+        {"role": "assistant", "content": "next"},
+    ]
+
+    prepared = OpenAICompatibleLLM._prepare_messages_for_model(cast(list[ChatCompletionMessageParam], messages), "MiniMax-M2.5")
+    assert prepared[0]["role"] == "system"
+    assert prepared[1]["role"] == "user"
+    assert prepared[1]["content"] == "[memory_summary]\nsummary"
+    assert prepared[2]["role"] == "assistant"
+
+
+def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
+    messages = [
+        {"role": "system", "content": "base system"},
+        {"role": "system", "name": "memory_summary", "content": "summary"},
+    ]
+    prepared = OpenAICompatibleLLM._prepare_messages_for_model(
+        cast(list[ChatCompletionMessageParam], messages),
+        "kimi-k2-thinking",
+    )
+    assert prepared[0]["role"] == "system"
+    assert prepared[1]["role"] == "system"
