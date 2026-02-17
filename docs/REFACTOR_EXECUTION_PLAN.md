@@ -11,8 +11,8 @@
 | P0 基线冻结 | ✅ 已完成 | 2026-02-17T14:52:49Z | 新建 `docs/REFACTOR_BASELINE.md`，并完成 ruff/ty/pytest 基线验证 |
 | P1 协议类型重构 | ✅ 已完成 | 2026-02-17T14:55:07Z | 新增 `ToolResultStatus`/`CycleStatus` 协议枚举并兼容旧 `status` 字段 |
 | P2 常量与 schema 中心化 | ✅ 已完成 | 2026-02-17T15:04:41Z | 新增 `constants/` 体系，registry 改为从 constants 读取 backend 风格 schema |
-| P3 Prompt Builder | ⏳ 进行中 | - | - |
-| P4 动态工具规划器 | ⏸️ 未开始 | - | - |
+| P3 Prompt Builder | ✅ 已完成 | 2026-02-17T15:09:08Z | 新增分层 `prompt.builder`，生成 `<Agent Definition>/<Environment>/<Tools>/<Current Time>` |
+| P4 动态工具规划器 | ⏳ 进行中 | - | - |
 | P5 Dispatcher | ⏸️ 未开始 | - | - |
 | P6 工具实现拆分 | ⏸️ 未开始 | - | - |
 | P7 控制工具语义对齐 | ⏸️ 未开始 | - | - |
@@ -26,6 +26,7 @@
 - 2026-02-17T14:52:49Z：启动 `refactor/tool-protocol-runtime` 分支并完成基线检查（ruff/ty/pytest 全绿，23 passed, 1 skipped）。
 - 2026-02-17T14:55:07Z：完成 P1 协议类型重构，新增 `tests/test_protocol_types.py`，回归结果 `26 passed, 1 skipped`。
 - 2026-02-17T15:04:41Z：完成 P2 常量与 schema 中心化，工具名切换到 backend 风格 `_tool_name`，回归结果 `28 passed, 1 skipped`。
+- 2026-02-17T15:09:08Z：完成 P3 Prompt Builder，CLI 改为通过 builder 构建系统提示词，回归结果 `31 passed, 1 skipped`。
 
 ---
 
