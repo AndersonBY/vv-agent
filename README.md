@@ -48,11 +48,18 @@ uv run ty check
 uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonshot --model kimi-k2.5
 ```
 
+查看每轮 LLM/工具执行日志（方便观察运行过程）:
+
+```bash
+uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonshot --model kimi-k2.5 --verbose
+```
+
 可用参数：
 
 - `--settings-file`: 指定配置文件路径（默认 `local_settings.py`）
 - `--backend`: 后端名称（如 `moonshot`）
 - `--model`: 模型名称（支持别名 `kimi-k2.5` -> `kimi-k2-thinking`）
+- `--verbose`: 输出每轮 cycle 日志（LLM 响应摘要、tool 调用结果、状态迁移）
 
 ## 实时集成测试
 

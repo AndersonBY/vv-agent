@@ -142,3 +142,52 @@ def test_runtime_can_finish_without_tool_on_policy(tmp_path: Path) -> None:
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "direct answer"
+
+
+def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="planning",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name=TODO_WRITE_TOOL_NAME,
+                        arguments={"todos": [{"title": "draft", "status": "completed", "priority": "medium"}]},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finalizing",
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "all done"})],
+            ),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def handler(event: str, payload: dict[str, object]) -> None:
+        events.append((event, payload))
+
+    runtime = AgentRuntime(
+        llm_client=llm,
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        log_handler=handler,
+    )
+    task = AgentTask(
+        task_id="task_log",
+        model="dummy-model",
+        system_prompt="sys",
+        user_prompt="finish this",
+        max_cycles=4,
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+
+    event_names = [name for name, _ in events]
+    assert "run_started" in event_names
+    assert "cycle_started" in event_names
+    assert "cycle_llm_response" in event_names
+    assert "tool_result" in event_names
+    assert "run_completed" in event_names

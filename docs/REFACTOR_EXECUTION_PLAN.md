@@ -34,6 +34,7 @@
 - 2026-02-17T16:45:22Z：启动 P12，开始将 `src/v_agent/llm/openai_compatible.py` 请求参数映射与流式工具聚合逻辑对齐 `backend/vector_vein_main/utilities/llm.py`。
 - 2026-02-17T16:47:41Z：完成 P12，请求参数与流式聚合逻辑改造落地；回归 `57 passed, 1 skipped`，live `1 passed`，CLI 真实命令 `uv run v-agent --prompt \"请概述一下这个框架的特点\" --backend moonshot --model kimi-k2.5` 返回 `status=completed`。
 - 2026-02-17T17:29:06Z：完成 P12 兼容性补丁：修复 memory compaction 边界下 tool 对话结构破损风险，并对 MiniMax 端点在发送前将附加 `system` 摘要消息降级为 `user` 消息，解决 `invalid chat setting (2013)`；回归 `60 passed, 1 skipped`，`uv run v-agent --backend minimax --model MiniMax-M2.5` 不再出现 cycle 6 的 400 失败。
+- 2026-02-17T17:55:09Z：新增 CLI 可观测性日志：`--verbose` 下实时输出 cycle 启动、LLM 响应摘要、tool 执行结果与结束状态；并补充 runtime 日志回调与测试覆盖。
 
 ---
 
