@@ -5,7 +5,6 @@ from v_agent.constants import (
     BASH_TOOL_NAME,
     BATCH_SUB_TASKS_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
-    FILE_LINE_REPLACE_TOOL_NAME,
     FILE_STR_REPLACE_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
@@ -57,14 +56,14 @@ TOOL_PRIORITY_PROMPT = {
     "en-US": (
         "Tool priority: prefer specialized tools over shell commands. "
         f"Read with `{READ_FILE_TOOL_NAME}`, write with `{WRITE_FILE_TOOL_NAME}`, "
-        f"edit with `{FILE_STR_REPLACE_TOOL_NAME}`/`{FILE_LINE_REPLACE_TOOL_NAME}`, "
+        f"edit with `{FILE_STR_REPLACE_TOOL_NAME}`, "
         f"search with `{WORKSPACE_GREP_TOOL_NAME}`. "
         f"Use `{BASH_TOOL_NAME}` only when specialized tools are insufficient."
     ),
     "zh-CN": (
         "工具优先级: 优先使用专用工具而不是 shell. "
         f"读取用 `{READ_FILE_TOOL_NAME}`, 写入用 `{WRITE_FILE_TOOL_NAME}`, "
-        f"编辑用 `{FILE_STR_REPLACE_TOOL_NAME}`/`{FILE_LINE_REPLACE_TOOL_NAME}`, "
+        f"编辑用 `{FILE_STR_REPLACE_TOOL_NAME}`, "
         f"搜索用 `{WORKSPACE_GREP_TOOL_NAME}`. "
         f"仅在专用工具不足时使用 `{BASH_TOOL_NAME}`."
     ),

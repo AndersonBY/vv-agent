@@ -7,6 +7,9 @@ import pytest
 
 from v_agent.constants import (
     ASK_USER_TOOL_NAME,
+    COMPRESS_MEMORY_TOOL_NAME,
+    FILE_INFO_TOOL_NAME,
+    FILE_STR_REPLACE_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
@@ -45,6 +48,40 @@ def test_workspace_grep(registry, tool_context: ToolContext) -> None:
     result = registry.execute(call, tool_context)
     payload = json.loads(result.content)
     assert payload["matches"][0]["line"] == 1
+
+
+def test_file_info_and_string_replace(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "edit.txt"
+    target.write_text("hello world\nhello agent", encoding="utf-8")
+
+    info_call = ToolCall(id="call_info", name=FILE_INFO_TOOL_NAME, arguments={"path": "edit.txt"})
+    info_result = registry.execute(info_call, tool_context)
+    info_payload = json.loads(info_result.content)
+    assert info_payload["is_file"] is True
+    assert info_payload["size"] > 0
+
+    replace_call = ToolCall(
+        id="call_replace",
+        name=FILE_STR_REPLACE_TOOL_NAME,
+        arguments={"path": "edit.txt", "old_str": "hello", "new_str": "hi", "replace_all": True},
+    )
+    replace_result = registry.execute(replace_call, tool_context)
+    replace_payload = json.loads(replace_result.content)
+    assert replace_payload["replaced_count"] == 2
+    assert target.read_text(encoding="utf-8") == "hi world\nhi agent"
+
+
+def test_compress_memory_writes_note(registry, tool_context: ToolContext) -> None:
+    call = ToolCall(
+        id="call_mem",
+        name=COMPRESS_MEMORY_TOOL_NAME,
+        arguments={"core_information": "current decision and progress"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+    assert payload["ok"] is True
+    assert payload["saved_notes"] == 1
+    assert tool_context.shared_state["memory_notes"][0]["core_information"] == "current decision and progress"
 
 
 def test_todo_finish_guard(registry, tool_context: ToolContext) -> None:

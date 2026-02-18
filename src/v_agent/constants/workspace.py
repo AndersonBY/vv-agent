@@ -9,12 +9,14 @@ from v_agent.constants.tool_names import (
     BASH_TOOL_NAME,
     BATCH_SUB_TASKS_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
+    COMPRESS_MEMORY_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
+    FILE_INFO_TOOL_NAME,
+    FILE_STR_REPLACE_TOOL_NAME,
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
-    TODO_READ_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
@@ -23,12 +25,14 @@ from v_agent.constants.tool_names import (
 ToolSchema = dict[str, Any]
 
 WORKSPACE_TOOLS = [
+    LIST_FILES_TOOL_NAME,
+    FILE_INFO_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
-    LIST_FILES_TOOL_NAME,
+    FILE_STR_REPLACE_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
+    COMPRESS_MEMORY_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
-    TODO_READ_TOOL_NAME,
 ]
 
 WORKSPACE_TOOLS_SCHEMAS: dict[str, ToolSchema] = {
@@ -128,6 +132,23 @@ Guidance:
             },
         },
     },
+    FILE_INFO_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": FILE_INFO_TOOL_NAME,
+            "description": "Read file metadata in workspace, including size, modified time and type.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative target file path.",
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+    },
     WORKSPACE_GREP_TOOL_NAME: {
         "type": "function",
         "function": {
@@ -168,6 +189,57 @@ Guidance:
                     },
                 },
                 "required": ["pattern"],
+            },
+        },
+    },
+    FILE_STR_REPLACE_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": FILE_STR_REPLACE_TOOL_NAME,
+            "description": "Replace text in a workspace file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative file path.",
+                    },
+                    "old_str": {
+                        "type": "string",
+                        "description": "The source text to replace.",
+                    },
+                    "new_str": {
+                        "type": "string",
+                        "description": "Replacement text.",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace all matches when true. Default false.",
+                    },
+                    "max_replacements": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional cap when replace_all=false. Default 1.",
+                    },
+                },
+                "required": ["path", "old_str", "new_str"],
+            },
+        },
+    },
+    COMPRESS_MEMORY_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": COMPRESS_MEMORY_TOOL_NAME,
+            "description": "Store key summary notes to reduce future context load.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "core_information": {
+                        "type": "string",
+                        "description": "Key information that should be preserved after compression.",
+                    },
+                },
+                "required": ["core_information"],
             },
         },
     },
@@ -217,18 +289,6 @@ Use this tool to keep task planning explicit and machine-readable.""",
                     },
                 },
                 "required": ["todos"],
-            },
-        },
-    },
-    TODO_READ_TOOL_NAME: {
-        "type": "function",
-        "function": {
-            "name": TODO_READ_TOOL_NAME,
-            "description": "Read current TODO list from runtime shared state.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
             },
         },
     },

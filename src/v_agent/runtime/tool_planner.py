@@ -8,7 +8,6 @@ from v_agent.constants import (
     BASH_TOOL_NAME,
     BATCH_SUB_TASKS_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
-    COMPRESS_MEMORY_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
@@ -19,6 +18,7 @@ from v_agent.types import AgentTask
 
 
 def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = None) -> list[str]:
+    del memory_usage_percentage
     tool_names: list[str] = [TASK_FINISH_TOOL_NAME]
 
     if task.allow_interruption:
@@ -26,14 +26,6 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
 
     if task.use_workspace:
         tool_names.extend(WORKSPACE_TOOLS)
-
-    effective_memory_usage = task.metadata.get("memory_usage_percentage")
-    memory_pct = effective_memory_usage if isinstance(effective_memory_usage, int) else 0
-    if memory_usage_percentage is not None:
-        memory_pct = memory_usage_percentage
-
-    if memory_pct >= task.memory_threshold_percentage:
-        tool_names.append(COMPRESS_MEMORY_TOOL_NAME)
 
     if task.agent_type == "computer":
         tool_names.extend([BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME])

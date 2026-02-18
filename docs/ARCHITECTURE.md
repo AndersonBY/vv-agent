@@ -39,8 +39,8 @@ Tool-level status code (`ToolResultStatus`):
 - Built-in handlers are split by responsibility in `src/v_agent/tools/handlers/`.
 - Workflow 语义不做框架内置特殊处理；如需 workflow，按自定义工具注册到 `ToolRegistry`。
 - Default registry preloads:
-  - control: `_task_finish`, `_ask_user`, `_todo_write`, `_todo_read`
-  - workspace: `_read_file`, `_write_file`, `_list_files`, `_workspace_grep`
+  - control: `_task_finish`, `_ask_user`, `_todo_write`, `_compress_memory`
+  - workspace: `_list_files`, `_file_info`, `_read_file`, `_write_file`, `_file_str_replace`, `_workspace_grep`
   - computer: `_bash`, `_check_background_command`, `_read_image`
   - sub-agent delegation: `_create_sub_task`, `_batch_sub_tasks`（由 runtime 内建子任务执行链路驱动）
   - extension stubs: skill tool (`_activate_skill`, default returns structured not-enabled error)

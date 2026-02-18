@@ -29,6 +29,7 @@ Rules:
 
 - Omitted previous items are removed.
 - At most one `in_progress` item is allowed.
+- `_todo_read` 不再作为默认内建工具暴露（如需可作为自定义工具注册）。
 
 ## 3) Runtime structure changes
 
