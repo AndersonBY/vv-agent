@@ -12,10 +12,18 @@ from v_agent.types import AgentStatus, AgentTask
 
 
 class AgentSDKClient:
-    """Minimal SDK-style client for running named v-agent definitions."""
+    """SDK client with both simple single-agent mode and named profile mode."""
 
-    def __init__(self, *, options: AgentSDKOptions, agents: dict[str, AgentDefinition] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        options: AgentSDKOptions,
+        agent: AgentDefinition | None = None,
+        agents: dict[str, AgentDefinition] | None = None,
+    ) -> None:
         self.options = options
+        self._default_agent = agent
+        self._default_agent_name = "default"
         self._agents: dict[str, AgentDefinition] = dict(agents or {})
 
     def register_agent(self, name: str, definition: AgentDefinition) -> None:
@@ -30,14 +38,20 @@ class AgentSDKClient:
     def list_agents(self) -> list[str]:
         return sorted(self._agents.keys())
 
+    def set_default_agent(self, definition: AgentDefinition) -> None:
+        self._default_agent = definition
+
     def prepare_task(
         self,
         *,
-        agent_name: str,
         prompt: str,
         resolved_model_id: str,
+        agent: str | AgentDefinition | None = None,
+        agent_name: str | None = None,
+        task_name: str | None = None,
     ) -> AgentTask:
-        definition = self._get_agent(agent_name)
+        resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
+        effective_task_name = task_name or resolved_name
         metadata = dict(definition.metadata)
         metadata.setdefault("language", definition.language)
         if definition.sub_agents:
@@ -96,7 +110,7 @@ class AgentSDKClient:
             )
 
         return AgentTask(
-            task_id=f"{agent_name}_{uuid.uuid4().hex[:8]}",
+            task_id=f"{effective_task_name}_{uuid.uuid4().hex[:8]}",
             model=resolved_model_id,
             system_prompt=system_prompt,
             user_prompt=prompt,
@@ -113,14 +127,15 @@ class AgentSDKClient:
             metadata=metadata,
         )
 
-    def run_agent(
+    def run(
         self,
         *,
-        agent_name: str,
         prompt: str,
+        agent: str | AgentDefinition | None = None,
+        agent_name: str | None = None,
         shared_state: dict[str, Any] | None = None,
     ) -> AgentRun:
-        definition = self._get_agent(agent_name)
+        resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
         backend = definition.backend or self.options.default_backend
         llm_builder = self.options.llm_builder or build_openai_llm_from_local_settings
         llm, resolved = llm_builder(
@@ -143,22 +158,38 @@ class AgentSDKClient:
         )
 
         task = self.prepare_task(
-            agent_name=agent_name,
             prompt=prompt,
             resolved_model_id=resolved.model_id,
+            agent=definition,
+            task_name=resolved_name,
         )
         result = runtime.run(task, shared_state=shared_state)
-        return AgentRun(agent_name=agent_name, result=result, resolved=resolved)
+        return AgentRun(agent_name=resolved_name, result=result, resolved=resolved)
 
-    def query(
+    def run_agent(
         self,
         *,
         agent_name: str,
         prompt: str,
         shared_state: dict[str, Any] | None = None,
+    ) -> AgentRun:
+        return self.run(prompt=prompt, agent=agent_name, shared_state=shared_state)
+
+    def query(
+        self,
+        *,
+        prompt: str,
+        agent: str | AgentDefinition | None = None,
+        agent_name: str | None = None,
+        shared_state: dict[str, Any] | None = None,
         require_completed: bool = True,
     ) -> str:
-        run = self.run_agent(agent_name=agent_name, prompt=prompt, shared_state=shared_state)
+        run = self.run(
+            prompt=prompt,
+            agent=agent,
+            agent_name=agent_name,
+            shared_state=shared_state,
+        )
         if run.result.status == AgentStatus.COMPLETED:
             return run.result.final_answer or ""
 
@@ -173,9 +204,88 @@ class AgentSDKClient:
 
         return run.result.final_answer or run.result.wait_reason or run.result.error or ""
 
+    def query_agent(
+        self,
+        *,
+        agent_name: str,
+        prompt: str,
+        shared_state: dict[str, Any] | None = None,
+        require_completed: bool = True,
+    ) -> str:
+        return self.query(
+            prompt=prompt,
+            agent=agent_name,
+            shared_state=shared_state,
+            require_completed=require_completed,
+        )
+
+    def _resolve_agent(
+        self,
+        *,
+        agent: str | AgentDefinition | None = None,
+        agent_name: str | None = None,
+    ) -> tuple[str, AgentDefinition]:
+        if agent is not None and agent_name is not None:
+            raise ValueError("Use either 'agent' or 'agent_name', not both.")
+
+        if agent_name is not None:
+            agent = agent_name
+
+        if isinstance(agent, AgentDefinition):
+            return "inline", agent
+
+        if isinstance(agent, str):
+            return agent, self._get_agent(agent)
+
+        if self._default_agent is not None:
+            return self._default_agent_name, self._default_agent
+
+        if len(self._agents) == 1:
+            only_name = next(iter(self._agents))
+            return only_name, self._agents[only_name]
+
+        if not self._agents:
+            raise ValueError(
+                "No agent configured. Pass agent=AgentDefinition(...) or register named agents first."
+            )
+
+        available = ", ".join(sorted(self._agents))
+        raise ValueError(f"Multiple agents configured. Pass agent='name'. Available: {available}")
+
     def _get_agent(self, agent_name: str) -> AgentDefinition:
         definition = self._agents.get(agent_name)
         if definition is None:
             available = ", ".join(sorted(self._agents))
             raise ValueError(f"Unknown agent: {agent_name}. Available: {available}")
         return definition
+
+
+def run(
+    *,
+    prompt: str,
+    agent: AgentDefinition,
+    options: AgentSDKOptions,
+    shared_state: dict[str, Any] | None = None,
+) -> AgentRun:
+    """One-shot helper aligned with SDK-style simple invocation."""
+
+    client = AgentSDKClient(options=options, agent=agent)
+    return client.run(prompt=prompt, shared_state=shared_state)
+
+
+def query(
+    *,
+    prompt: str,
+    agent: AgentDefinition,
+    options: AgentSDKOptions,
+    shared_state: dict[str, Any] | None = None,
+    require_completed: bool = True,
+) -> str:
+    """One-shot text helper aligned with SDK-style simple invocation."""
+
+    client = AgentSDKClient(options=options, agent=agent)
+    return client.query(
+        prompt=prompt,
+        shared_state=shared_state,
+        require_completed=require_completed,
+    )

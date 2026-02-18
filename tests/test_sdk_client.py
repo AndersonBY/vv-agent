@@ -5,9 +5,24 @@ from pathlib import Path
 import pytest
 
 from v_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from v_agent.constants import ASK_USER_TOOL_NAME, BATCH_SUB_TASKS_TOOL_NAME, CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from v_agent.constants import (
+    ASK_USER_TOOL_NAME,
+    BATCH_SUB_TASKS_TOOL_NAME,
+    CREATE_SUB_TASK_TOOL_NAME,
+    TASK_FINISH_TOOL_NAME,
+)
 from v_agent.llm import ScriptedLLM
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from v_agent.sdk import (
+    AgentDefinition,
+    AgentSDKClient,
+    AgentSDKOptions,
+)
+from v_agent.sdk import (
+    query as sdk_query,
+)
+from v_agent.sdk import (
+    run as sdk_run,
+)
 from v_agent.tools import build_default_registry
 from v_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
@@ -67,6 +82,140 @@ def test_sdk_client_runs_named_agent(tmp_path: Path) -> None:
     assert run.result.final_answer == "ok"
     assert run.resolved.backend == "moonshot"
     assert builder_calls == [("local_settings.py", "moonshot", "kimi-k2.5")]
+
+
+def test_sdk_client_runs_default_agent_without_name(tmp_path: Path) -> None:
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "default-ok"})],
+                )
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="you are helper", model="kimi-k2.5"),
+    )
+
+    run = client.run(prompt="say ok")
+    assert run.agent_name == "default"
+    assert run.result.status == AgentStatus.COMPLETED
+    assert run.result.final_answer == "default-ok"
+
+
+def test_sdk_client_run_accepts_inline_agent_definition(tmp_path: Path) -> None:
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "inline-ok"})],
+                )
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+    )
+
+    run = client.run(
+        prompt="say ok",
+        agent=AgentDefinition(description="inline helper", model="kimi-k2.5"),
+    )
+    assert run.agent_name == "inline"
+    assert run.result.status == AgentStatus.COMPLETED
+    assert run.result.final_answer == "inline-ok"
+
+
+def test_sdk_client_run_requires_agent_when_multiple_profiles(tmp_path: Path) -> None:
+    client = AgentSDKClient(
+        options=AgentSDKOptions(settings_file=Path("local_settings.py"), default_backend="moonshot", workspace=tmp_path),
+        agents={
+            "a": AgentDefinition(description="helper a", model="m"),
+            "b": AgentDefinition(description="helper b", model="m"),
+        },
+    )
+    with pytest.raises(ValueError, match="Multiple agents configured"):
+        client.run(prompt="hi")
+
+
+def test_sdk_client_run_auto_selects_only_profile(tmp_path: Path) -> None:
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "auto-profile"})],
+                )
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agents={"only": AgentDefinition(description="helper", model="kimi-k2.5")},
+    )
+
+    run = client.run(prompt="say ok")
+    assert run.agent_name == "only"
+    assert run.result.final_answer == "auto-profile"
+
+
+def test_sdk_client_rejects_conflicting_agent_selectors(tmp_path: Path) -> None:
+    client = AgentSDKClient(
+        options=AgentSDKOptions(settings_file=Path("local_settings.py"), default_backend="moonshot", workspace=tmp_path),
+        agents={"demo": AgentDefinition(description="helper", model="m")},
+    )
+    with pytest.raises(ValueError, match="Use either 'agent' or 'agent_name'"):
+        client.run(
+            prompt="hi",
+            agent="demo",
+            agent_name="demo",
+        )
 
 
 def test_sdk_prepare_task_supports_sub_agent_configs(tmp_path: Path) -> None:
@@ -141,6 +290,40 @@ def test_sdk_query_returns_text_for_completed_run(tmp_path: Path) -> None:
     assert text == "query-ok"
 
 
+def test_sdk_query_works_for_default_agent(tmp_path: Path) -> None:
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "default-query"})],
+                )
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+    )
+
+    text = client.query(prompt="say ok")
+    assert text == "default-query"
+
+
 def test_sdk_query_raises_on_non_completed_status(tmp_path: Path) -> None:
     def fake_llm_builder(
         settings_path: str | Path,
@@ -200,6 +383,40 @@ def test_sdk_query_can_return_wait_reason_when_not_strict(tmp_path: Path) -> Non
 
     text = client.query(agent_name="demo", prompt="say ok", require_completed=False)
     assert "pick one" in text
+
+
+def test_sdk_query_agent_compatibility_wrapper(tmp_path: Path) -> None:
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "compat-query"})],
+                )
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agents={"demo": AgentDefinition(description="helper", model="kimi-k2.5")},
+    )
+
+    text = client.query_agent(agent_name="demo", prompt="say ok")
+    assert text == "compat-query"
 
 
 def test_sdk_prepare_task_injects_available_skills_into_prompt(tmp_path: Path) -> None:
@@ -269,3 +486,69 @@ Body
     assert "<available_skills>" in task.system_prompt
     assert "<name>\nalpha\n</name>" in task.system_prompt
     assert task.metadata["available_skills"] == ["skills"]
+
+
+def test_sdk_module_level_run_helper(tmp_path: Path) -> None:
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "module-run"})],
+                )
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    run = sdk_run(
+        prompt="say ok",
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+    )
+    assert run.result.final_answer == "module-run"
+
+
+def test_sdk_module_level_query_helper(tmp_path: Path) -> None:
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "module-query"})],
+                )
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    text = sdk_query(
+        prompt="say ok",
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+    )
+    assert text == "module-query"

@@ -117,20 +117,18 @@ client = AgentSDKClient(
         workspace=workspace,
         log_handler=log_handler if verbose else None,
     ),
-    agents={
-        "remotion_skill_agent": AgentDefinition(
-            description="你是 Remotion 视频工程助手, 会自主匹配并激活合适技能后落地代码.",
-            backend=backend,
-            model=model,
-            language="zh-CN",
-            max_cycles=max(max_cycles, 1),
-            enable_todo_management=True,
-            use_workspace=True,
-            agent_type="computer",
-            skill_directories=[runtime_skills_root],
-        )
-    },
+    agent=AgentDefinition(
+        description="你是 Remotion 视频工程助手, 会自主匹配并激活合适技能后落地代码.",
+        backend=backend,
+        model=model,
+        language="zh-CN",
+        max_cycles=max(max_cycles, 1),
+        enable_todo_management=True,
+        use_workspace=True,
+        agent_type="computer",
+        skill_directories=[runtime_skills_root],
+    ),
 )
 
-run = client.run_agent(agent_name="remotion_skill_agent", prompt=prompt)
+run = client.run(prompt=prompt)
 print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

@@ -63,20 +63,18 @@ client = AgentSDKClient(
         workspace=workspace,
         log_handler=log_handler if verbose else None,
     ),
-    agents={
-        "arxiv_memory_agent": AgentDefinition(
-            description="你是资深 AI 研究助理, 擅长检索论文、处理 PDF、解释图片并做中文学术翻译.",
-            backend=backend,
-            model=model,
-            language="zh-CN",
-            max_cycles=200,
-            enable_todo_management=True,
-            use_workspace=True,
-            agent_type="computer",
-            native_multimodal=True,
-        )
-    },
+    agent=AgentDefinition(
+        description="你是资深 AI 研究助理, 擅长检索论文、处理 PDF、解释图片并做中文学术翻译.",
+        backend=backend,
+        model=model,
+        language="zh-CN",
+        max_cycles=200,
+        enable_todo_management=True,
+        use_workspace=True,
+        agent_type="computer",
+        native_multimodal=True,
+    ),
 )
 
-run = client.run_agent(agent_name="arxiv_memory_agent", prompt=prompt)
+run = client.run(prompt=prompt)
 print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

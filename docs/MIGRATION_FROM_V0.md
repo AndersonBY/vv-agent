@@ -65,8 +65,10 @@ By default, handlers return structured `not_enabled` errors until adapters are w
 ## 7) Sub-agent delegation and SDK query
 
 - `_create_sub_task` / `_batch_sub_tasks` are now built-in and execute configured `AgentTask.sub_agents`.
-- `AgentSDKClient` now supports one-shot text API:
+- `AgentSDKClient` now supports both default single-agent and named-agent one-shot APIs:
 
 ```python
-text = client.query(agent_name="planner", prompt="一句话总结进展")
+run = client.run(prompt="执行任务")
+text = client.query(prompt="一句话总结进展")
+text = client.query(agent="planner", prompt="一句话总结进展")
 ```

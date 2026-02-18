@@ -49,6 +49,10 @@ uv run python examples/agent_profiles.py
 
 文件: `examples/sdk_style_client.py`
 
+这个示例演示两种方式:
+- 默认单 Agent：`client.run(prompt=...)` / `client.query(prompt=...)`
+- 命名 profile：`client.run(agent=\"translator\", prompt=...)`
+
 ```bash
 uv run python examples/sdk_style_client.py
 ```

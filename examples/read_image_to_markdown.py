@@ -68,21 +68,19 @@ client = AgentSDKClient(
         workspace=workspace,
         log_handler=log_handler if verbose else None,
     ),
-    agents={
-        "image_markdown_agent": AgentDefinition(
-            description="你是视觉理解助手, 你会读取图片并输出结构化 Markdown 分析.",
-            backend=backend,
-            model=model,
-            language="zh-CN",
-            max_cycles=12,
-            use_workspace=True,
-            native_multimodal=True,
-            enable_todo_management=True,
-        )
-    },
+    agent=AgentDefinition(
+        description="你是视觉理解助手, 你会读取图片并输出结构化 Markdown 分析.",
+        backend=backend,
+        model=model,
+        language="zh-CN",
+        max_cycles=12,
+        use_workspace=True,
+        native_multimodal=True,
+        enable_todo_management=True,
+    ),
 )
 
-run = client.run_agent(agent_name="image_markdown_agent", prompt=prompt)
+run = client.run(prompt=prompt)
 print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
 
 output_file = (workspace / output_path).resolve()

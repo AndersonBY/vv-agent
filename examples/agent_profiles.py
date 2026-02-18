@@ -53,5 +53,5 @@ client = AgentSDKClient(
     agents=profiles,
 )
 
-run = client.run_agent(agent_name=profile_name, prompt=prompt)
+run = client.run(agent=profile_name, prompt=prompt)
 print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

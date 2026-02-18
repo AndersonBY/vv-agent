@@ -15,7 +15,7 @@ settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
 backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
 workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
 verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
-agent_name = os.getenv("V_AGENT_EXAMPLE_AGENT", "planner")
+agent_name = os.getenv("V_AGENT_EXAMPLE_AGENT", "default")
 mode = os.getenv("V_AGENT_EXAMPLE_MODE", "run")
 prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "先拆分任务, 再逐步完成并汇报")
 
@@ -34,13 +34,14 @@ def log_handler(event: str, payload: dict[str, Any]) -> None:
         print(f"[{event}] {payload}", flush=True)
 
 
+default_agent = AgentDefinition(
+    description="你是任务规划 Agent, 先拆任务, 再逐步执行并维护 todo.",
+    model="kimi-k2.5",
+    max_cycles=10,
+    enable_todo_management=True,
+)
+
 agents = {
-    "planner": AgentDefinition(
-        description="你是任务规划 Agent, 先拆任务, 再逐步执行并维护 todo.",
-        model="kimi-k2.5",
-        max_cycles=10,
-        enable_todo_management=True,
-    ),
     "translator": AgentDefinition(
         description="你是专业翻译 Agent, 按段翻译并持续写入目标文件.",
         model="MiniMax-M2.5",
@@ -68,8 +69,8 @@ agents = {
     ),
 }
 
-if agent_name not in agents:
-    agent_name = "planner"
+if agent_name != "default" and agent_name not in agents:
+    agent_name = "default"
 if mode not in {"run", "query"}:
     mode = "run"
 
@@ -80,11 +81,15 @@ client = AgentSDKClient(
         workspace=workspace,
         log_handler=log_handler if verbose else None,
     ),
+    agent=default_agent,
     agents=agents,
 )
 
 if mode == "query":
-    print(client.query(agent_name=agent_name, prompt=prompt, require_completed=False))
+    if agent_name == "default":
+        print(client.query(prompt=prompt, require_completed=False))
+    else:
+        print(client.query(prompt=prompt, agent=agent_name, require_completed=False))
 else:
-    run = client.run_agent(agent_name=agent_name, prompt=prompt)
+    run = client.run(prompt=prompt) if agent_name == "default" else client.run(prompt=prompt, agent=agent_name)
     print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

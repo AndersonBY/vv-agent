@@ -57,6 +57,7 @@
 - 2026-02-18T09:34:33Z：完成 P16 增强版：支持将 skills 根目录（如 `skills/`）直接注入 Agent，系统提示词自动扫描并构建 `<available_skills>`；`_activate_skill` 支持从 skill collection 解析多技能并按名称激活；SDK 新增 `AgentDefinition.skill_directories`，示例 `examples/remotion_skill_demo.py` 改为目录级自动技能发现并由 Agent 自主选择激活。实测命令 `uv run python examples/remotion_skill_demo.py --workspace ./workspace --skills-dir skills --backend moonshot --model kimi-k2.5 --verbose` 返回 `status=completed`。
 - 2026-02-18T13:48:38Z：完成 P17：`examples/` 下全部示例移除 argparse CLI 入参，统一改为脚本内默认配置 + 环境变量覆盖（如 `V_AGENT_EXAMPLE_*`）；更新 `examples/README.md` 为嵌入式运行说明并给出 env override 示例。质量门禁回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 - 2026-02-18T14:44:02Z：继续优化 P17 示例易嵌入性：移除示例中的 `main()/if __name__ == "__main__"` 包装，统一改为脚本顶层平铺执行（保留最小必要日志函数）；回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
+- 2026-02-18T14:58:11Z：基于 `claude-agent-sdk-python` 风格重构 SDK 入口：`AgentSDKClient` 新增默认单 Agent 模式与 `run/query` 直接调用（无需预注册 agents map），保留 `run_agent/query_agent` 兼容层；同时新增模块级 `v_agent.sdk.run/query` one-shot helper，示例脚本改为优先展示新接口；回归 `ruff/ty/pytest` 全绿（`130 passed, 1 skipped`）。
 
 ---
 
