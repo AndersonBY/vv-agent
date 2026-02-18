@@ -23,7 +23,7 @@ class CycleRunner:
         cycle_index: int,
         memory_manager: MemoryManager,
     ) -> tuple[list[Message], CycleRecord]:
-        compacted_messages, memory_compacted = memory_manager.compact(messages)
+        compacted_messages, memory_compacted = memory_manager.compact(messages, cycle_index=cycle_index)
         memory_usage_percentage = self._estimate_memory_usage_percentage(compacted_messages, task.memory_threshold_chars)
         tool_schemas = plan_tool_schemas(
             registry=self.tool_registry,

@@ -94,7 +94,7 @@ class AgentRuntime:
             max_cycles=task.max_cycles,
         )
 
-        memory_manager = MemoryManager(threshold_chars=task.memory_threshold_chars)
+        memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
 
         for cycle_index in range(1, task.max_cycles + 1):
             self._emit_log(
@@ -250,6 +250,35 @@ class AgentRuntime:
         if self.log_handler is None:
             return
         self.log_handler(event, payload)
+
+    def _build_memory_manager(self, *, task: AgentTask, workspace_path: Path) -> MemoryManager:
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+
+        def read_int(key: str, default: int, *, minimum: int = 0) -> int:
+            raw = metadata.get(key, default)
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                value = default
+            return max(value, minimum)
+
+        warning_threshold = max(1, min(task.memory_threshold_percentage, 100))
+        return MemoryManager(
+            threshold_chars=max(task.memory_threshold_chars, 0),
+            keep_recent_messages=read_int("memory_keep_recent_messages", 10, minimum=1),
+            language=str(metadata.get("language", "zh-CN")),
+            warning_threshold_percentage=warning_threshold,
+            include_memory_warning=bool(metadata.get("include_memory_warning", False)),
+            tool_result_compact_threshold=read_int("tool_result_compact_threshold", 2000),
+            tool_result_keep_last=read_int("tool_result_keep_last", 3),
+            tool_result_excerpt_head=read_int("tool_result_excerpt_head", 200),
+            tool_result_excerpt_tail=read_int("tool_result_excerpt_tail", 200),
+            tool_calls_keep_last=read_int("tool_calls_keep_last", 3),
+            assistant_no_tool_keep_last=read_int("assistant_no_tool_keep_last", 1),
+            tool_result_artifact_dir=str(metadata.get("tool_result_artifact_dir", ".memory/tool_results")),
+            workspace=workspace_path if task.use_workspace else None,
+            summary_event_limit=read_int("summary_event_limit", 40, minimum=1),
+        )
 
     def _preview_text(self, text: str) -> str:
         cleaned = text.replace("\n", " ").strip()
