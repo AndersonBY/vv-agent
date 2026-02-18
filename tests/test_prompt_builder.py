@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from v_agent.constants import ASK_USER_TOOL_NAME, READ_FILE_TOOL_NAME, TASK_FINISH_TOOL_NAME, WRITE_FILE_TOOL_NAME
+from v_agent.constants import (
+    ASK_USER_TOOL_NAME,
+    BATCH_SUB_TASKS_TOOL_NAME,
+    CREATE_SUB_TASK_TOOL_NAME,
+    READ_FILE_TOOL_NAME,
+    TASK_FINISH_TOOL_NAME,
+    WRITE_FILE_TOOL_NAME,
+)
 from v_agent.prompt import build_system_prompt
 
 
@@ -34,3 +41,16 @@ def test_prompt_can_include_computer_environment() -> None:
 
     assert "<Environment>" in prompt
     assert "Linux" in prompt
+
+
+def test_prompt_can_include_sub_agent_guidance() -> None:
+    prompt = build_system_prompt(
+        "Agent",
+        language="zh-CN",
+        available_sub_agents={"research-sub": "负责资料检索", "writer-sub": "负责初稿撰写"},
+    )
+
+    assert CREATE_SUB_TASK_TOOL_NAME in prompt
+    assert BATCH_SUB_TASKS_TOOL_NAME in prompt
+    assert "research-sub" in prompt
+    assert "writer-sub" in prompt

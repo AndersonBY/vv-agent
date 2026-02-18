@@ -9,6 +9,7 @@ from v_agent.prompt.templates import (
     TASK_FINISH_PROMPT,
     TODO_PROMPT,
     TOOL_PRIORITY_PROMPT,
+    render_sub_agents,
     render_workspace_tools,
 )
 
@@ -21,6 +22,7 @@ def build_system_prompt(
     use_workspace: bool = True,
     enable_todo_management: bool = True,
     agent_type: str | None = None,
+    available_sub_agents: dict[str, str] | None = None,
     current_time_utc: datetime | None = None,
 ) -> str:
     prompt_sections: list[str] = [f"<Agent Definition>\n{original_system_prompt}\n</Agent Definition>"]
@@ -37,6 +39,8 @@ def build_system_prompt(
         tools_lines.append(TOOL_PRIORITY_PROMPT.get(language, TOOL_PRIORITY_PROMPT["en-US"]))
     if enable_todo_management:
         tools_lines.append(TODO_PROMPT.get(language, TODO_PROMPT["en-US"]))
+    if available_sub_agents:
+        tools_lines.append(render_sub_agents(language, available_sub_agents))
     tools_lines.append(TASK_FINISH_PROMPT.get(language, TASK_FINISH_PROMPT["en-US"]))
     prompt_sections.append(f"<Tools>\n{'\n\n'.join(tools_lines)}\n</Tools>")
 

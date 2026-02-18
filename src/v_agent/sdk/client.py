@@ -8,7 +8,7 @@ from v_agent.prompt import build_system_prompt
 from v_agent.runtime import AgentRuntime
 from v_agent.sdk.types import AgentDefinition, AgentRun, AgentSDKOptions
 from v_agent.tools import build_default_registry
-from v_agent.types import AgentTask
+from v_agent.types import AgentStatus, AgentTask
 
 
 class AgentSDKClient:
@@ -39,6 +39,7 @@ class AgentSDKClient:
     ) -> AgentTask:
         definition = self._get_agent(agent_name)
         metadata = dict(definition.metadata)
+        metadata.setdefault("language", definition.language)
         if definition.sub_agents:
             metadata.setdefault("sub_agent_names", sorted(definition.sub_agents.keys()))
 
@@ -52,6 +53,11 @@ class AgentSDKClient:
                 use_workspace=definition.use_workspace,
                 enable_todo_management=definition.enable_todo_management,
                 agent_type=definition.agent_type,
+                available_sub_agents={
+                    name: config.description for name, config in definition.sub_agents.items()
+                }
+                if definition.sub_agents
+                else None,
             )
 
         return AgentTask(
@@ -97,6 +103,10 @@ class AgentSDKClient:
             tool_registry=tool_registry_factory(),
             default_workspace=self.options.workspace,
             log_handler=self.options.log_handler,
+            settings_file=self.options.settings_file,
+            default_backend=backend,
+            llm_builder=llm_builder,
+            tool_registry_factory=tool_registry_factory,
         )
 
         task = self.prepare_task(
@@ -106,6 +116,29 @@ class AgentSDKClient:
         )
         result = runtime.run(task, shared_state=shared_state)
         return AgentRun(agent_name=agent_name, result=result, resolved=resolved)
+
+    def query(
+        self,
+        *,
+        agent_name: str,
+        prompt: str,
+        shared_state: dict[str, Any] | None = None,
+        require_completed: bool = True,
+    ) -> str:
+        run = self.run_agent(agent_name=agent_name, prompt=prompt, shared_state=shared_state)
+        if run.result.status == AgentStatus.COMPLETED:
+            return run.result.final_answer or ""
+
+        if require_completed:
+            reason = (
+                run.result.error
+                or run.result.wait_reason
+                or run.result.final_answer
+                or "query did not complete successfully"
+            )
+            raise RuntimeError(f"Agent query failed with status={run.result.status.value}: {reason}")
+
+        return run.result.final_answer or run.result.wait_reason or run.result.error or ""
 
     def _get_agent(self, agent_name: str) -> AgentDefinition:
         definition = self._agents.get(agent_name)

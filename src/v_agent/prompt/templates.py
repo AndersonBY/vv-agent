@@ -3,6 +3,8 @@ from __future__ import annotations
 from v_agent.constants import (
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
+    BATCH_SUB_TASKS_TOOL_NAME,
+    CREATE_SUB_TASK_TOOL_NAME,
     FILE_LINE_REPLACE_TOOL_NAME,
     FILE_STR_REPLACE_TOOL_NAME,
     READ_FILE_TOOL_NAME,
@@ -78,7 +80,26 @@ CURRENT_TIME_PROMPT = {
     "zh-CN": "任务开始时的真实 UTC 时间:",
 }
 
+SUB_AGENT_PROMPT = {
+    "en-US": (
+        f"If sub-agents are configured, delegate focused tasks with `{CREATE_SUB_TASK_TOOL_NAME}`. "
+        f"For multiple independent tasks of the same agent, use `{BATCH_SUB_TASKS_TOOL_NAME}`."
+    ),
+    "zh-CN": (
+        f"如果已配置子 Agent, 可使用 `{CREATE_SUB_TASK_TOOL_NAME}` 委派单个子任务; "
+        f"同类型并行任务可使用 `{BATCH_SUB_TASKS_TOOL_NAME}` 批量委派。"
+    ),
+}
+
 
 def render_workspace_tools(language: str) -> str:
     template = WORKSPACE_PROMPT_TEMPLATE.get(language, WORKSPACE_PROMPT_TEMPLATE["en-US"])
     return template.format(tools=", ".join(WORKSPACE_TOOLS))
+
+
+def render_sub_agents(language: str, available_sub_agents: dict[str, str]) -> str:
+    header = SUB_AGENT_PROMPT.get(language, SUB_AGENT_PROMPT["en-US"])
+    lines = [header, "Available sub-agents:"]
+    for name, description in sorted(available_sub_agents.items()):
+        lines.append(f"- {name}: {description}")
+    return "\n".join(lines)

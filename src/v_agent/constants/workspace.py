@@ -7,7 +7,9 @@ from v_agent.constants.tool_names import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
+    BATCH_SUB_TASKS_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
+    CREATE_SUB_TASK_TOOL_NAME,
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
@@ -271,6 +273,104 @@ Guidelines:
             },
         },
     },
+    CREATE_SUB_TASK_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": CREATE_SUB_TASK_TOOL_NAME,
+            "description": """Create one sub-task and let a configured sub-agent execute it.
+
+Use cases:
+- Delegate a focused sub-problem to a specialized sub-agent.
+- Keep parent context concise while getting targeted output.
+
+Input rules:
+- `agent_name` should match one key from configured `sub_agents`.
+- `task_description` should be specific and actionable.
+- `output_requirements` can constrain response format.
+- `agent_id` is accepted as a compatibility alias for `agent_name`.""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_name": {
+                        "type": "string",
+                        "description": "Sub-agent name from configured sub_agents mapping.",
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Compatibility alias of agent_name.",
+                    },
+                    "task_description": {
+                        "type": "string",
+                        "description": "Task description passed to the sub-agent.",
+                    },
+                    "output_requirements": {
+                        "type": "string",
+                        "description": "Optional output format or content constraints.",
+                    },
+                    "include_main_summary": {
+                        "type": "boolean",
+                        "description": "Whether to include parent-task summary context. Default false.",
+                    },
+                    "exclude_files_pattern": {
+                        "type": "string",
+                        "description": "Optional regex for excluding files in shared context (reserved for compatibility).",
+                    },
+                },
+                "required": ["task_description"],
+            },
+        },
+    },
+    BATCH_SUB_TASKS_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": BATCH_SUB_TASKS_TOOL_NAME,
+            "description": """Create multiple sub-tasks for one sub-agent and aggregate results.
+
+Use this when you have multiple independent tasks of the same skill type.
+Each task can define its own output requirement. The tool returns a summary
+with per-item execution result.""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_name": {
+                        "type": "string",
+                        "description": "Sub-agent name from configured sub_agents mapping.",
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Compatibility alias of agent_name.",
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "description": "Batch sub-task definitions.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task_description": {
+                                    "type": "string",
+                                    "description": "Task description for one sub-task.",
+                                },
+                                "output_requirements": {
+                                    "type": "string",
+                                    "description": "Optional per-task output requirements.",
+                                },
+                            },
+                            "required": ["task_description"],
+                        },
+                    },
+                    "include_main_summary": {
+                        "type": "boolean",
+                        "description": "Whether to include parent-task summary context. Default false.",
+                    },
+                    "exclude_files_pattern": {
+                        "type": "string",
+                        "description": "Optional regex for excluding files in shared context (reserved for compatibility).",
+                    },
+                },
+                "required": ["tasks"],
+            },
+        },
+    },
     READ_IMAGE_TOOL_NAME: {
         "type": "function",
         "function": {
@@ -376,6 +476,12 @@ def get_default_tool_schemas() -> dict[str, ToolSchema]:
     }
     for tool_name in WORKSPACE_TOOLS:
         merged[tool_name] = deepcopy(WORKSPACE_TOOLS_SCHEMAS[tool_name])
-    for extra_tool_name in (BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME, READ_IMAGE_TOOL_NAME):
+    for extra_tool_name in (
+        BASH_TOOL_NAME,
+        CHECK_BACKGROUND_COMMAND_TOOL_NAME,
+        CREATE_SUB_TASK_TOOL_NAME,
+        BATCH_SUB_TASKS_TOOL_NAME,
+        READ_IMAGE_TOOL_NAME,
+    ):
         merged[extra_tool_name] = deepcopy(WORKSPACE_TOOLS_SCHEMAS[extra_tool_name])
     return merged

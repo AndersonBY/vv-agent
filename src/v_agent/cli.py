@@ -96,6 +96,9 @@ def main() -> None:
         tool_registry=build_default_registry(),
         default_workspace=Path(args.workspace),
         log_handler=_build_cli_log_handler(enabled=args.verbose),
+        settings_file=Path(args.settings_file),
+        default_backend=args.backend,
+        tool_registry_factory=build_default_registry,
     )
 
     system_prompt = build_system_prompt(

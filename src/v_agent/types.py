@@ -170,6 +170,42 @@ class AgentTask:
 
 
 @dataclass(slots=True)
+class SubTaskRequest:
+    agent_name: str
+    task_description: str
+    output_requirements: str = ""
+    include_main_summary: bool = False
+    exclude_files_pattern: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SubTaskOutcome:
+    task_id: str
+    agent_name: str
+    status: AgentStatus
+    final_answer: str | None = None
+    wait_reason: str | None = None
+    error: str | None = None
+    cycles: int = 0
+    todo_list: list[dict[str, Any]] = field(default_factory=list)
+    resolved: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "agent_name": self.agent_name,
+            "status": self.status.value,
+            "final_answer": self.final_answer,
+            "wait_reason": self.wait_reason,
+            "error": self.error,
+            "cycles": self.cycles,
+            "todo_list": self.todo_list,
+            "resolved": self.resolved,
+        }
+
+
+@dataclass(slots=True)
 class AgentResult:
     status: AgentStatus
     messages: list[Message]

@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from v_agent.types import ToolExecutionResult
+from v_agent.types import SubTaskOutcome, SubTaskRequest, ToolExecutionResult
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], ToolExecutionResult]
+SubTaskRunner = Callable[[SubTaskRequest], SubTaskOutcome]
 
 
 @dataclass(slots=True)
@@ -15,6 +16,7 @@ class ToolContext:
     workspace: Path
     shared_state: dict[str, Any]
     cycle_index: int
+    sub_task_runner: SubTaskRunner | None = None
 
     def resolve_workspace_path(self, raw_path: str) -> Path:
         base = self.workspace.resolve()

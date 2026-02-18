@@ -76,6 +76,21 @@ def test_plan_tool_names_adds_sub_agent_tools_when_configured() -> None:
     assert BATCH_SUB_TASKS_TOOL_NAME in names
 
 
+def test_plan_tool_schemas_adds_sub_agent_tools_when_configured() -> None:
+    registry = build_default_registry()
+    schemas = plan_tool_schemas(
+        registry=registry,
+        task=_task(
+            sub_agents={
+                "research-sub": SubAgentConfig(model="kimi-k2.5", description="collect context"),
+            }
+        ),
+    )
+    names = {schema["function"]["name"] for schema in schemas}
+    assert CREATE_SUB_TASK_TOOL_NAME in names
+    assert BATCH_SUB_TASKS_TOOL_NAME in names
+
+
 def test_plan_tool_names_includes_extra_tool_names() -> None:
     names = plan_tool_names(_task(extra_tool_names=["_custom_workflow_tool"]))
     assert "_custom_workflow_tool" in names
