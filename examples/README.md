@@ -104,3 +104,25 @@ uv run python examples/read_image_to_markdown.py \
 - 使用 `native_multimodal=true` 启用 `_read_image`
 - 强制先读图，再由模型输出结构化中文 Markdown
 - 通过 `_write_file` 将结果写入 `.md` 文件
+
+## 7) Remotion Skill 实测（使用 workspace/skills/remotion/SKILL.md）
+
+文件：`examples/remotion_skill_demo.py`
+
+```bash
+uv run python examples/remotion_skill_demo.py \
+  --settings-file local_settings.py \
+  --workspace ./workspace \
+  --skill-path skills/remotion/SKILL.md \
+  --backend moonshot \
+  --model kimi-k2.5 \
+  --verbose
+```
+
+演示点：
+- 启动前会校验 `SKILL.md` 是否符合 Agent Skills frontmatter 规范
+- 若 `SKILL.md` 所在目录名与 `name` 不一致，会自动复制到 `.v_agent_skill_cache/<name>/SKILL.md` 后再实测
+- 通过 `metadata.available_skills` 注入 Remotion skill（含 `location`）
+- 提示模型先调用 `_activate_skill`，再按 skill 规则生成 Remotion 工程脚手架
+- 最终在 `workspace/artifacts/remotion_demo/` 输出可继续开发的代码与说明文档
+
