@@ -7,7 +7,7 @@ from typing import Any
 
 from v_agent.skills.errors import SkillError
 from v_agent.skills.models import SkillProperties
-from v_agent.skills.parser import find_skill_md, read_properties
+from v_agent.skills.parser import discover_skill_dirs, find_skill_md, read_properties
 
 
 @dataclass(slots=True)
@@ -58,6 +58,49 @@ def _resolve_skill_location(location: str, *, workspace: Path | None = None) -> 
     return path
 
 
+def _is_existing_path(value: str, *, workspace: Path | None = None) -> bool:
+    raw = Path(value).expanduser()
+    if raw.exists():
+        return True
+    if workspace is not None and not raw.is_absolute():
+        return (workspace / raw).exists()
+    return False
+
+
+def _entries_from_skill_directory(*, skill_dir: Path, workspace: Path | None = None) -> list[PromptSkillEntry]:
+    try:
+        properties = read_properties(skill_dir)
+    except SkillError:
+        return []
+
+    skill_md_path = find_skill_md(skill_dir)
+    if skill_md_path is None:
+        return []
+
+    try:
+        location = skill_md_path.relative_to(workspace).as_posix() if workspace is not None else skill_md_path.as_posix()
+    except ValueError:
+        location = skill_md_path.as_posix()
+
+    return [
+        PromptSkillEntry(
+            name=properties.name,
+            description=properties.description,
+            location=location,
+        )
+    ]
+
+
+def _entries_from_skill_path(*, path: Path, workspace: Path | None = None) -> list[PromptSkillEntry]:
+    if path.is_dir() and find_skill_md(path) is None:
+        entries: list[PromptSkillEntry] = []
+        for skill_dir in discover_skill_dirs(path):
+            entries.extend(_entries_from_skill_directory(skill_dir=skill_dir, workspace=workspace))
+        return entries
+
+    return _entries_from_skill_directory(skill_dir=path, workspace=workspace)
+
+
 def metadata_to_prompt_entries(
     available_skills: list[dict[str, Any] | str],
     *,
@@ -71,19 +114,10 @@ def metadata_to_prompt_entries(
             raw_location = item.strip()
             if not raw_location:
                 continue
-            try:
-                skill_dir = _resolve_skill_location(raw_location, workspace=workspace)
-                properties = read_properties(skill_dir)
-                skill_md_path = find_skill_md(skill_dir)
-            except SkillError:
+            if not _is_existing_path(raw_location, workspace=workspace):
                 continue
-            entries.append(
-                PromptSkillEntry(
-                    name=properties.name,
-                    description=properties.description,
-                    location=str(skill_md_path) if skill_md_path else raw_location,
-                )
-            )
+            path = _resolve_skill_location(raw_location, workspace=workspace)
+            entries.extend(_entries_from_skill_path(path=path, workspace=workspace))
             continue
 
         if not isinstance(item, dict):
@@ -100,20 +134,23 @@ def metadata_to_prompt_entries(
         )
         location = str(location_value).strip() if isinstance(location_value, str) and location_value.strip() else None
 
-        if (not name or not description) and location:
-            try:
-                skill_dir = _resolve_skill_location(location, workspace=workspace)
-                properties = read_properties(skill_dir)
-                skill_md_path = find_skill_md(skill_dir)
-            except SkillError:
-                continue
-            name = properties.name
-            description = properties.description
-            location = str(skill_md_path) if skill_md_path else location
+        if (not name or not description) and location and _is_existing_path(location, workspace=workspace):
+            path = _resolve_skill_location(location, workspace=workspace)
+            entries.extend(_entries_from_skill_path(path=path, workspace=workspace))
+            continue
 
         if not name or not description:
             continue
 
         entries.append(PromptSkillEntry(name=name, description=description, location=location))
 
-    return entries
+    deduped: list[PromptSkillEntry] = []
+    seen: set[tuple[str, str | None]] = set()
+    for entry in entries:
+        key = (entry.name, entry.location)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+
+    return deduped

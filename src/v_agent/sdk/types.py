@@ -41,6 +41,7 @@ class AgentDefinition:
     native_multimodal: bool = False
     enable_sub_agents: bool = False
     sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)
+    skill_directories: list[str] = field(default_factory=list)
     extra_tool_names: list[str] = field(default_factory=list)
     exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)

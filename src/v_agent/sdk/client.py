@@ -43,11 +43,38 @@ class AgentSDKClient:
         if definition.sub_agents:
             metadata.setdefault("sub_agent_names", sorted(definition.sub_agents.keys()))
 
-        available_skills = metadata.get("available_skills")
-        if not isinstance(available_skills, list):
-            available_skills = metadata.get("bound_skills")
-        if not isinstance(available_skills, list):
-            available_skills = None
+        raw_available_skills = metadata.get("available_skills")
+        if not isinstance(raw_available_skills, list):
+            raw_available_skills = metadata.get("bound_skills")
+
+        if not isinstance(raw_available_skills, list):
+            configured_skill_dirs: list[str] = []
+            for item in definition.skill_directories:
+                if isinstance(item, str) and item.strip():
+                    configured_skill_dirs.append(item.strip())
+
+            metadata_skill_dirs = metadata.get("skill_directories")
+            if isinstance(metadata_skill_dirs, str) and metadata_skill_dirs.strip():
+                configured_skill_dirs.append(metadata_skill_dirs.strip())
+            elif isinstance(metadata_skill_dirs, list):
+                for item in metadata_skill_dirs:
+                    if isinstance(item, str) and item.strip():
+                        configured_skill_dirs.append(item.strip())
+
+            if configured_skill_dirs:
+                raw_available_skills = configured_skill_dirs
+                metadata.setdefault("available_skills", list(configured_skill_dirs))
+            else:
+                raw_available_skills = None
+
+        available_skills: list[dict[str, Any] | str] | None = None
+        if isinstance(raw_available_skills, list):
+            normalized_skills: list[dict[str, Any] | str] = []
+            for item in raw_available_skills:
+                if isinstance(item, (str, dict)):
+                    normalized_skills.append(item)
+            if normalized_skills:
+                available_skills = normalized_skills
 
         if definition.system_prompt:
             system_prompt = definition.system_prompt

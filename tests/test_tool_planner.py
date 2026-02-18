@@ -104,3 +104,9 @@ def test_plan_tool_schemas_only_returns_registered_tools() -> None:
     for tool_name in WORKSPACE_TOOLS:
         assert tool_name in names
     assert TASK_FINISH_TOOL_NAME in names
+
+
+def test_plan_tool_names_includes_activate_skill_for_skill_directories() -> None:
+    names = plan_tool_names(_task(metadata={"skill_directories": ["skills"]}))
+
+    assert ACTIVATE_SKILL_TOOL_NAME in names

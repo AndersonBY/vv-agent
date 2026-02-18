@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from v_agent.skills import SkillParseError, SkillValidationError, read_skill
+from v_agent.skills import SkillParseError, SkillValidationError, discover_skill_dirs, find_skill_md, read_skill
 from v_agent.tools.base import ToolContext
 from v_agent.tools.handlers.common import to_json
 from v_agent.types import ToolExecutionResult, ToolResultStatus
@@ -43,6 +43,15 @@ def _resolve_skill_path(raw_path: str, *, workspace: Path) -> Path:
     return path
 
 
+def _path_exists(raw_path: str, *, workspace: Path) -> bool:
+    path = Path(raw_path).expanduser()
+    if path.exists():
+        return True
+    if not path.is_absolute():
+        return (workspace / path).exists()
+    return False
+
+
 def _load_from_standard_skill(
     raw_path: str,
     *,
@@ -79,6 +88,56 @@ def _load_from_standard_skill(
     return binding
 
 
+def _bindings_from_path(
+    raw_path: str,
+    *,
+    workspace: Path,
+    configured_name: str | None = None,
+) -> list[_SkillBinding]:
+    resolved = _resolve_skill_path(raw_path, workspace=workspace)
+
+    if resolved.is_dir() and find_skill_md(resolved) is None:
+        discovered_dirs = discover_skill_dirs(resolved)
+        if not discovered_dirs:
+            fallback_name = configured_name or Path(raw_path).name
+            return [
+                _SkillBinding(
+                    name=fallback_name,
+                    display_name=fallback_name,
+                    location=str(resolved),
+                    load_error=f"No SKILL.md found under {resolved}",
+                )
+            ]
+
+        bindings = [
+            _load_from_standard_skill(skill_dir.as_posix(), workspace=workspace)
+            for skill_dir in discovered_dirs
+        ]
+        if configured_name:
+            for binding in bindings:
+                if binding.name == configured_name:
+                    return [binding]
+            return [
+                _SkillBinding(
+                    name=configured_name,
+                    display_name=configured_name,
+                    location=str(resolved),
+                    load_error=(
+                        f"Configured skill name '{configured_name}' not found in skill collection '{resolved}'"
+                    ),
+                )
+            ]
+        return bindings
+
+    return [
+        _load_from_standard_skill(
+            raw_path,
+            workspace=workspace,
+            configured_name=configured_name,
+        )
+    ]
+
+
 def _looks_like_path(text: str) -> bool:
     return "/" in text or "\\" in text or text.endswith(".md") or text.startswith(".")
 
@@ -94,9 +153,9 @@ def _normalize_skills(raw_skills: Any, *, workspace: Path) -> dict[str, _SkillBi
             if not value:
                 continue
 
-            if _looks_like_path(value):
-                binding = _load_from_standard_skill(value, workspace=workspace)
-                skill_map[binding.name] = binding
+            if _looks_like_path(value) or _path_exists(value, workspace=workspace):
+                for binding in _bindings_from_path(value, workspace=workspace):
+                    skill_map[binding.name] = binding
             else:
                 skill_map[value] = _SkillBinding(name=value, display_name=value)
             continue
@@ -119,13 +178,15 @@ def _normalize_skills(raw_skills: Any, *, workspace: Path) -> dict[str, _SkillBi
             or item.get("path")
         )
         if isinstance(location, str) and location.strip():
-            binding = _load_from_standard_skill(
+            bindings = _bindings_from_path(
                 location.strip(),
                 workspace=workspace,
                 configured_name=configured_name,
             )
-            key = configured_name or binding.name
-            skill_map[key] = binding
+            for binding in bindings:
+                key = configured_name or binding.name
+                skill_map[key] = binding
+                configured_name = None
             continue
 
         if not configured_name:

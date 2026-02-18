@@ -56,3 +56,31 @@ def test_metadata_to_prompt_entries_skips_invalid_entries(tmp_path: Path) -> Non
         workspace=tmp_path,
     )
     assert entries == []
+
+
+def test_metadata_to_prompt_entries_supports_skill_root_directory(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    (root / "alpha").mkdir(parents=True)
+    (root / "beta").mkdir(parents=True)
+    (root / "alpha" / "SKILL.md").write_text(
+        """---
+name: alpha
+description: skill alpha
+---
+Body
+""",
+        encoding="utf-8",
+    )
+    (root / "beta" / "SKILL.md").write_text(
+        """---
+name: beta
+description: skill beta
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    entries = metadata_to_prompt_entries(["skills"], workspace=tmp_path)
+    names = {item.name for item in entries}
+    assert names == {"alpha", "beta"}

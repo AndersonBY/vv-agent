@@ -21,6 +21,35 @@ def find_skill_md(skill_dir: Path) -> Path | None:
     return None
 
 
+def discover_skill_dirs(root: Path) -> list[Path]:
+    """Discover all skill directories under a root path.
+
+    A directory is considered a skill directory when it directly contains SKILL.md/skill.md.
+    """
+    root = Path(root)
+    if not root.exists() or not root.is_dir():
+        return []
+
+    discovered: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_if_skill(dir_path: Path) -> None:
+        normalized = dir_path.resolve()
+        if normalized in seen:
+            return
+        if find_skill_md(normalized) is None:
+            return
+        seen.add(normalized)
+        discovered.append(normalized)
+
+    add_if_skill(root)
+    for candidate in sorted(root.rglob("*")):
+        if candidate.is_dir():
+            add_if_skill(candidate)
+
+    return discovered
+
+
 def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     """Parse YAML frontmatter and markdown body from SKILL.md content."""
     if not content.startswith("---"):

@@ -105,7 +105,7 @@ uv run python examples/read_image_to_markdown.py \
 - 强制先读图，再由模型输出结构化中文 Markdown
 - 通过 `_write_file` 将结果写入 `.md` 文件
 
-## 7) Remotion Skill 实测（使用 workspace/skills/remotion/SKILL.md）
+## 7) Remotion Skill 实测（使用 skills/ 目录自动发现）
 
 文件：`examples/remotion_skill_demo.py`
 
@@ -113,16 +113,16 @@ uv run python examples/read_image_to_markdown.py \
 uv run python examples/remotion_skill_demo.py \
   --settings-file local_settings.py \
   --workspace ./workspace \
-  --skill-path skills/remotion/SKILL.md \
+  --skills-dir skills \
   --backend moonshot \
   --model kimi-k2.5 \
   --verbose
 ```
 
 演示点：
-- 启动前会校验 `SKILL.md` 是否符合 Agent Skills frontmatter 规范
-- 若 `SKILL.md` 所在目录名与 `name` 不一致，会自动复制到 `.v_agent_skill_cache/<name>/SKILL.md` 后再实测
-- 通过 `metadata.available_skills` 注入 Remotion skill（含 `location`）
-- 提示模型先调用 `_activate_skill`，再按 skill 规则生成 Remotion 工程脚手架
+- 给定一个 `skills/` 目录后，会自动发现其中全部 `SKILL.md` 并构建运行时技能包
+- 若目录名与 frontmatter 的 `name` 不一致，会自动归一化到 `.v_agent_skill_cache/bundle/<name>/`
+- 通过 `AgentDefinition.skill_directories` 自动把可用技能注入系统提示词 `<available_skills>`
+- 用户提示词不指定技能名，由 Agent 根据技能描述自行选择并调用 `_activate_skill`
 - 最终在 `workspace/artifacts/remotion_demo/` 输出可继续开发的代码与说明文档
 

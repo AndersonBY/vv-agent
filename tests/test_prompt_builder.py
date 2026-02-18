@@ -80,3 +80,27 @@ Body
     assert "<available_skills>" in prompt
     assert "<name>\ndemo\n</name>" in prompt
     assert "<description>\nDemo skill\n</description>" in prompt
+
+
+def test_prompt_can_expand_skill_root_directory(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    (root / "alpha").mkdir(parents=True)
+    (root / "alpha" / "SKILL.md").write_text(
+        """---
+name: alpha
+description: Alpha skill
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    prompt = build_system_prompt(
+        "Agent",
+        language="en-US",
+        available_skills=["skills"],
+        workspace=tmp_path,
+    )
+
+    assert "<available_skills>" in prompt
+    assert "<name>\nalpha\n</name>" in prompt

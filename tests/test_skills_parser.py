@@ -101,3 +101,33 @@ Body
 
     with pytest.raises(SkillValidationError, match="must match skill name"):
         read_skill(skill_dir)
+
+
+def test_discover_skill_dirs_from_root(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    (root / "alpha").mkdir(parents=True)
+    (root / "beta").mkdir(parents=True)
+    (root / "alpha" / "SKILL.md").write_text(
+        """---
+name: alpha
+description: skill alpha
+---
+Body
+""",
+        encoding="utf-8",
+    )
+    (root / "beta" / "skill.md").write_text(
+        """---
+name: beta
+description: skill beta
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    from v_agent.skills.parser import discover_skill_dirs
+
+    discovered = discover_skill_dirs(root)
+    names = {path.name for path in discovered}
+    assert names == {"alpha", "beta"}

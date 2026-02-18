@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example: run v-agent with the remotion skill at workspace/skills/remotion/SKILL.md."""
+"""Example: auto-load skills directory and let agent choose skill(s) to activate."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from v_agent.skills import read_properties, validate
+from v_agent.skills import discover_skill_dirs, read_properties, validate
 
 
 def _log_handler(event: str, payload: dict[str, Any]) -> None:
@@ -27,91 +27,92 @@ def _log_handler(event: str, payload: dict[str, Any]) -> None:
         print(f"[{event}] {payload}", flush=True)
 
 
-def _resolve_skill_path(*, workspace: Path, skill_path: str) -> Path:
-    path = Path(skill_path).expanduser()
+def _resolve_path(*, workspace: Path, value: str) -> Path:
+    path = Path(value).expanduser()
     if not path.is_absolute():
         path = (workspace / path).resolve()
     return path
 
 
-def _to_workspace_location(*, workspace: Path, path: Path) -> str:
+def _to_workspace_path(*, workspace: Path, path: Path) -> str:
     try:
-        return path.relative_to(workspace).as_posix()
+        return path.resolve().relative_to(workspace).as_posix()
     except ValueError:
-        return path.as_posix()
+        return path.resolve().as_posix()
 
 
-def _normalize_skill_directory(*, workspace: Path, source_dir: Path, skill_name: str) -> Path:
-    cache_dir = (workspace / ".v_agent_skill_cache" / skill_name).resolve()
-    cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_dir, cache_dir, dirs_exist_ok=True)
-    return cache_dir
+def prepare_runtime_skill_bundle(*, workspace: Path, skills_dir: str) -> tuple[str, list[dict[str, str]]]:
+    source_root = _resolve_path(workspace=workspace, value=skills_dir)
+    if not source_root.exists() or not source_root.is_dir():
+        raise FileNotFoundError(f"Skills directory not found: {source_root}")
 
+    discovered = discover_skill_dirs(source_root)
+    if not discovered:
+        raise ValueError(f"No SKILL.md discovered under: {source_root}")
 
-def ensure_skill_ready(*, workspace: Path, skill_path: str) -> tuple[str, str, str, str]:
-    resolved = _resolve_skill_path(workspace=workspace, skill_path=skill_path)
-    source_skill_md = resolved
-    if resolved.is_dir():
-        source_skill_md = (resolved / "SKILL.md").resolve()
+    runtime_root = (workspace / ".v_agent_skill_cache" / "bundle").resolve()
+    if runtime_root.exists():
+        shutil.rmtree(runtime_root)
+    runtime_root.mkdir(parents=True, exist_ok=True)
 
-    if not source_skill_md.is_file():
-        raise FileNotFoundError(f"Skill file not found: {source_skill_md}")
+    prepared: list[dict[str, str]] = []
+    used_names: set[str] = set()
 
-    source_skill_dir = source_skill_md.parent
-    props = read_properties(source_skill_dir)
+    for skill_dir in discovered:
+        props = read_properties(skill_dir)
+        if props.name in used_names:
+            continue
 
-    errors = validate(source_skill_dir)
-    runtime_skill_dir = source_skill_dir
-    if errors:
-        if any("must match skill name" in message for message in errors):
-            runtime_skill_dir = _normalize_skill_directory(
-                workspace=workspace,
-                source_dir=source_skill_dir,
-                skill_name=props.name,
-            )
-            normalized_errors = validate(runtime_skill_dir)
-            if normalized_errors:
-                joined = "\n".join(f"- {item}" for item in normalized_errors)
-                raise ValueError(f"Normalized skill validation failed:\n{joined}")
-            print(
-                "[skill] source directory name does not match skill name; "
-                f"using normalized copy: {_to_workspace_location(workspace=workspace, path=runtime_skill_dir / 'SKILL.md')}",
-                flush=True,
-            )
-        else:
+        target_dir = (runtime_root / props.name).resolve()
+        shutil.copytree(skill_dir, target_dir, dirs_exist_ok=True)
+
+        errors = validate(target_dir)
+        if errors:
             joined = "\n".join(f"- {item}" for item in errors)
-            raise ValueError(f"Skill validation failed:\n{joined}")
+            raise ValueError(
+                f"Skill '{props.name}' is invalid after normalization copy:\n{joined}"
+            )
 
-    runtime_skill_md = (runtime_skill_dir / "SKILL.md").resolve()
-    runtime_location = _to_workspace_location(workspace=workspace, path=runtime_skill_md)
-    source_location = _to_workspace_location(workspace=workspace, path=source_skill_md)
-    return props.name, props.description, runtime_location, source_location
+        used_names.add(props.name)
+        prepared.append(
+            {
+                "name": props.name,
+                "description": props.description,
+                "source": _to_workspace_path(workspace=workspace, path=skill_dir),
+                "runtime": _to_workspace_path(workspace=workspace, path=target_dir),
+            }
+        )
+
+    if not prepared:
+        raise ValueError("No valid skills available after preparation.")
+
+    runtime_root_rel = _to_workspace_path(workspace=workspace, path=runtime_root)
+    return runtime_root_rel, prepared
 
 
-def build_prompt(*, skill_name: str, runtime_skill_location: str, source_skill_location: str) -> str:
+def build_prompt(*, runtime_skills_root: str) -> str:
     return (
-        "请执行一个 Remotion 技能实测任务, 并严格按顺序完成:\n"
-        f"1) 第一步必须调用 `_activate_skill`, 参数 `skill_name` 必须是 `{skill_name}`.\n"
-        "2) 激活后阅读技能文档中至少 3 个规则文件(其中必须包含 compositions 与 animations), "
-        "并简要记录你读取了哪些文件.\n"
-        "3) 在 `artifacts/remotion_demo/` 下生成一个最小 Remotion 工程骨架, 至少包含:\n"
+        "请执行一个 Remotion 视频工程任务, 并尽量利用已提供的技能元数据:\n"
+        "1) 请先查看系统提示词中的 `<available_skills>` 列表, "
+        "若有匹配技能, 由你自主选择并调用 `_activate_skill` (不要等待我指定技能名).\n"
+        "2) 激活后, 读取必要规则文件(至少 3 个), 并记录你读取了哪些文件.\n"
+        "3) 在 `artifacts/remotion_demo/` 下生成最小 Remotion 工程骨架, 至少包含:\n"
         "   - `package.json`\n"
         "   - `src/index.ts`\n"
         "   - `src/Root.tsx`\n"
         "   - `src/compositions/IntroCard.tsx`\n"
-        "4) 这个示例视频模板要求:\n"
+        "4) 示例视频规格:\n"
         "   - 1280x720, 30fps, 150 帧\n"
-        "   - 包含标题、副标题和一个简单入场动画\n"
-        "   - props 参数可配置 title/subtitle\n"
-        "5) 生成 `artifacts/remotion_demo/README_zh.md`, 说明如何安装依赖、预览、渲染视频.\n"
-        "6) 最后调用 `_task_finish`, 最终消息必须包含:\n"
-        "   - 激活的 skill 名称\n"
-        "   - 读取过的规则文件列表\n"
-        "   - 生成的文件路径列表\n"
-        "   - 下一步用户可执行的命令\n"
+        "   - 标题 + 副标题 + 简单入场动画\n"
+        "   - props 可配置 title/subtitle\n"
+        "5) 写出 `artifacts/remotion_demo/README_zh.md`, 说明如何安装依赖、预览、渲染视频.\n"
+        "6) 最后调用 `_task_finish`, 汇报中必须包含:\n"
+        "   - 你激活的技能名\n"
+        "   - 读取的规则文件\n"
+        "   - 生成文件路径\n"
+        "   - 下一步命令\n"
         "约束:\n"
-        f"- 技能来源文件: `{source_skill_location}`\n"
-        f"- 运行时技能文件: `{runtime_skill_location}`\n"
+        f"- 运行时技能目录: `{runtime_skills_root}`\n"
         "- 不要只输出计划, 必须实际写文件.\n"
     )
 
@@ -122,9 +123,7 @@ def build_client(
     workspace: Path,
     backend: str,
     model: str,
-    skill_name: str,
-    skill_description: str,
-    runtime_skill_location: str,
+    runtime_skills_root: str,
     max_cycles: int,
     verbose: bool,
 ) -> AgentSDKClient:
@@ -135,10 +134,7 @@ def build_client(
         log_handler=_log_handler if verbose else None,
     )
     definition = AgentDefinition(
-        description=(
-            "你是 Remotion 视频工程助手。"
-            "你会先激活指定技能, 再按技能建议生成结构化视频工程文件。"
-        ),
+        description="你是 Remotion 视频工程助手, 会自主匹配并激活合适技能后落地代码。",
         backend=backend,
         model=model,
         language="zh-CN",
@@ -146,27 +142,19 @@ def build_client(
         enable_todo_management=True,
         use_workspace=True,
         agent_type="computer",
-        metadata={
-            "available_skills": [
-                {
-                    "name": skill_name,
-                    "description": skill_description,
-                    "location": runtime_skill_location,
-                }
-            ]
-        },
+        skill_directories=[runtime_skills_root],
     )
     return AgentSDKClient(options=options, agents={"remotion_skill_agent": definition})
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run remotion skill demo with v-agent SDK")
+    parser = argparse.ArgumentParser(description="Run remotion skill demo with auto skill discovery")
     parser.add_argument("--settings-file", default="local_settings.py", help="Path to local_settings.py")
     parser.add_argument("--workspace", default="./workspace", help="Workspace directory")
     parser.add_argument(
-        "--skill-path",
-        default="skills/remotion/SKILL.md",
-        help="Skill path relative to workspace (or absolute path)",
+        "--skills-dir",
+        default="skills",
+        help="Skills directory relative to workspace (or absolute path)",
     )
     parser.add_argument("--backend", default="moonshot", help="Backend key in local settings")
     parser.add_argument("--model", default="kimi-k2.5", help="Model key in backend config")
@@ -177,30 +165,30 @@ def main() -> None:
     workspace = Path(args.workspace).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
-    skill_name, skill_description, runtime_skill_location, source_skill_location = ensure_skill_ready(
+    runtime_skills_root, prepared_skills = prepare_runtime_skill_bundle(
         workspace=workspace,
-        skill_path=args.skill_path,
+        skills_dir=args.skills_dir,
     )
+    print("[skills] prepared runtime bundle:", flush=True)
+    for item in prepared_skills:
+        print(
+            f"- {item['name']}: source={item['source']} -> runtime={item['runtime']}",
+            flush=True,
+        )
 
     client = build_client(
         settings_file=Path(args.settings_file),
         workspace=workspace,
         backend=args.backend,
         model=args.model,
-        skill_name=skill_name,
-        skill_description=skill_description,
-        runtime_skill_location=runtime_skill_location,
+        runtime_skills_root=runtime_skills_root,
         max_cycles=args.max_cycles,
         verbose=args.verbose,
     )
 
     run = client.run_agent(
         agent_name="remotion_skill_agent",
-        prompt=build_prompt(
-            skill_name=skill_name,
-            runtime_skill_location=runtime_skill_location,
-            source_skill_location=source_skill_location,
-        ),
+        prompt=build_prompt(runtime_skills_root=runtime_skills_root),
     )
     print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
 

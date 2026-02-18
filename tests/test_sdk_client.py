@@ -234,3 +234,38 @@ Body
 
     assert "<available_skills>" in task.system_prompt
     assert "<name>\ndemo\n</name>" in task.system_prompt
+
+
+def test_sdk_prepare_task_supports_skill_directories_auto_prompt(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    (root / "alpha").mkdir(parents=True)
+    (root / "alpha" / "SKILL.md").write_text(
+        """---
+name: alpha
+description: Alpha skill
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(settings_file=Path("local_settings.py"), default_backend="moonshot", workspace=tmp_path),
+        agents={
+            "assistant": AgentDefinition(
+                description="assist",
+                model="kimi-k2.5",
+                skill_directories=["skills"],
+            )
+        },
+    )
+
+    task = client.prepare_task(
+        agent_name="assistant",
+        prompt="hello",
+        resolved_model_id="kimi-k2.5",
+    )
+
+    assert "<available_skills>" in task.system_prompt
+    assert "<name>\nalpha\n</name>" in task.system_prompt
+    assert task.metadata["available_skills"] == ["skills"]

@@ -276,3 +276,49 @@ def test_runtime_propagates_available_skills_into_tool_context(tmp_path: Path) -
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.shared_state["active_skills"] == ["demo"]
+
+
+def test_runtime_propagates_skill_directories_into_tool_context(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="activate skill",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name=ACTIVATE_SKILL_TOOL_NAME,
+                        arguments={"skill_name": "demo"},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finish",
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            ),
+        ]
+    )
+
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: demo
+description: demo skill
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    task = AgentTask(
+        task_id="task_skill_dir",
+        model="m",
+        system_prompt="sys",
+        user_prompt="activate",
+        max_cycles=4,
+        metadata={"skill_directories": ["skills"]},
+    )
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+    assert result.shared_state["active_skills"] == ["demo"]

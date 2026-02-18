@@ -128,3 +128,34 @@ def test_planner_can_inject_skill_extension_tool_schema() -> None:
 
     names = {schema["function"]["name"] for schema in schemas}
     assert ACTIVATE_SKILL_TOOL_NAME in names
+
+
+def test_skill_extension_handler_can_load_from_skill_root_directory(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    root = tmp_path / "skills"
+    skill_dir = root / "demo"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: demo
+description: Demo skill from root
+---
+## Demo skill
+Follow this guide.
+""",
+        encoding="utf-8",
+    )
+    context = ToolContext(
+        workspace=tmp_path,
+        shared_state={"todo_list": [], "available_skills": ["skills"]},
+        cycle_index=1,
+    )
+
+    result = registry.execute(
+        ToolCall(id="c5", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
+        context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status_code == ToolResultStatus.SUCCESS
+    assert payload["skill_name"] == "demo"
