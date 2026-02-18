@@ -85,28 +85,41 @@ Guidance:
             "name": WRITE_FILE_TOOL_NAME,
             "description": """Write content to a file in workspace.
 
-Modes:
-- Overwrite mode by default.
-- Append mode when `append=true`.
+MODES:
+- Overwrite (default): Replaces entire file content.
+- Append: Adds to existing content (`append=true`).
 
-Guidance:
-- Prefer this tool instead of shell redirection.
-- Use append for incremental logs or notes.
-- Ensure content is final before overwrite.""",
+WARNING:
+- By default, this OVERWRITES the entire file.
+- Use `append=true` to add content instead.
+
+PARAMETERS:
+- `path` (required): Relative path from workspace root.
+- `content` (required): Content to write.
+- `append` (optional): Set true to append instead of overwrite.
+- `leading_newline`/`trailing_newline` (optional): Add newlines when appending.""",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative path to write.",
+                        "description": "The relative path of the file to write to from the workspace root.",
                     },
                     "content": {
                         "type": "string",
-                        "description": "File content to write.",
+                        "description": "The content to write to the file.",
                     },
                     "append": {
                         "type": "boolean",
-                        "description": "Append instead of overwrite. Default false.",
+                        "description": "Set true to append instead of overwrite. Default is false (overwrite).",
+                    },
+                    "leading_newline": {
+                        "type": "boolean",
+                        "description": "Add a leading newline when appending. Default is false.",
+                    },
+                    "trailing_newline": {
+                        "type": "boolean",
+                        "description": "Add a trailing newline when appending. Default is false.",
                     },
                 },
                 "required": ["path", "content"],

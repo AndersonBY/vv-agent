@@ -42,6 +42,53 @@ def test_workspace_write_and_read(registry, tool_context: ToolContext) -> None:
     assert payload["content"] == "hello"
 
 
+def test_write_file_append_with_optional_newlines(registry, tool_context: ToolContext) -> None:
+    base_call = ToolCall(id="call_write_base", name=WRITE_FILE_TOOL_NAME, arguments={"path": "notes/log.txt", "content": "line1"})
+    base_result = registry.execute(base_call, tool_context)
+    assert base_result.status == "success"
+
+    append_call = ToolCall(
+        id="call_write_append",
+        name=WRITE_FILE_TOOL_NAME,
+        arguments={
+            "path": "notes/log.txt",
+            "content": "line2",
+            "append": True,
+            "leading_newline": True,
+            "trailing_newline": True,
+        },
+    )
+    append_result = registry.execute(append_call, tool_context)
+    append_payload = json.loads(append_result.content)
+
+    assert append_payload["append"] is True
+    assert append_payload["leading_newline"] is True
+    assert append_payload["trailing_newline"] is True
+    assert append_payload["written_chars"] == 7
+    assert (tool_context.workspace / "notes/log.txt").read_text(encoding="utf-8") == "line1\nline2\n"
+
+
+def test_write_file_ignores_newline_flags_when_overwriting(registry, tool_context: ToolContext) -> None:
+    write_call = ToolCall(
+        id="call_write",
+        name=WRITE_FILE_TOOL_NAME,
+        arguments={
+            "path": "notes/overwrite.txt",
+            "content": "final",
+            "leading_newline": True,
+            "trailing_newline": True,
+        },
+    )
+    write_result = registry.execute(write_call, tool_context)
+    payload = json.loads(write_result.content)
+
+    assert payload["append"] is False
+    assert payload["leading_newline"] is False
+    assert payload["trailing_newline"] is False
+    assert payload["written_chars"] == 5
+    assert (tool_context.workspace / "notes/overwrite.txt").read_text(encoding="utf-8") == "final"
+
+
 def test_read_file_can_show_line_numbers(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "notes.txt"
     target.write_text("alpha\nbeta\ngamma", encoding="utf-8")

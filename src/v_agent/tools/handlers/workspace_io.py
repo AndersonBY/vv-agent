@@ -131,10 +131,18 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
 
     content = str(arguments.get("content", ""))
     append = bool(arguments.get("append", False))
+    leading_newline = bool(arguments.get("leading_newline", False))
+    trailing_newline = bool(arguments.get("trailing_newline", False))
+
+    write_content = content
+    if append:
+        prefix = "\n" if leading_newline else ""
+        suffix = "\n" if trailing_newline else ""
+        write_content = f"{prefix}{content}{suffix}"
 
     mode = "a" if append else "w"
     with target.open(mode, encoding="utf-8") as file_obj:
-        file_obj.write(content)
+        file_obj.write(write_content)
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -143,7 +151,10 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
             {
                 "ok": True,
                 "path": target.relative_to(context.workspace).as_posix(),
-                "written_chars": len(content),
+                "append": append,
+                "leading_newline": leading_newline if append else False,
+                "trailing_newline": trailing_newline if append else False,
+                "written_chars": len(write_content),
             }
         ),
     )
