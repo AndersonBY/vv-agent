@@ -84,3 +84,23 @@ uv run python examples/arxiv_agent_memory_pipeline.py \
 - 自动搜索最近 30 天的 AI Agent Memory 相关 arXiv 论文并下载 PDF
 - 抽取第一张图并调用 `_read_image` 做图像解释
 - 将论文分段翻译为中文并持续写入结果文件
+
+## 6) 读取图片并输出 Markdown 报告
+
+文件：`examples/read_image_to_markdown.py`
+
+```bash
+uv run python examples/read_image_to_markdown.py \
+  --settings-file local_settings.py \
+  --workspace ./workspace \
+  --image-path test_image.png \
+  --output-path artifacts/image_read_report.md \
+  --backend moonshot \
+  --model kimi-k2.5 \
+  --verbose
+```
+
+演示点：
+- 使用 `native_multimodal=true` 启用 `_read_image`
+- 强制先读图，再由模型输出结构化中文 Markdown
+- 通过 `_write_file` 将结果写入 `.md` 文件

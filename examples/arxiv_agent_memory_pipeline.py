@@ -39,7 +39,7 @@ def build_client(*, settings_file: Path, workspace: Path, model: str, verbose: b
         backend="moonshot",
         model=model,
         language="zh-CN",
-        max_cycles=24,
+        max_cycles=200,
         enable_todo_management=True,
         use_workspace=True,
         agent_type="computer",
