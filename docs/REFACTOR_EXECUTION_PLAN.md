@@ -56,6 +56,7 @@
 - 2026-02-18T08:54:55Z：对齐 Agent Skills 官方规范（`agentskills/agentskills`）：新增 `v_agent.skills` 标准解析/校验/提示词模块（含 `read_properties`/`validate`/`metadata_to_prompt_entries`），`build_system_prompt` 支持注入 `<available_skills>` XML，`_activate_skill` 优先按 `location/path` 加载并验证 `SKILL.md` frontmatter；新增 skills parser/prompt/validator 测试与扩展链路测试，质量门禁回归 `ruff/ty/pytest` 全绿（`115 passed, 1 skipped`）。
 - 2026-02-18T09:34:33Z：完成 P16 增强版：支持将 skills 根目录（如 `skills/`）直接注入 Agent，系统提示词自动扫描并构建 `<available_skills>`；`_activate_skill` 支持从 skill collection 解析多技能并按名称激活；SDK 新增 `AgentDefinition.skill_directories`，示例 `examples/remotion_skill_demo.py` 改为目录级自动技能发现并由 Agent 自主选择激活。实测命令 `uv run python examples/remotion_skill_demo.py --workspace ./workspace --skills-dir skills --backend moonshot --model kimi-k2.5 --verbose` 返回 `status=completed`。
 - 2026-02-18T13:48:38Z：完成 P17：`examples/` 下全部示例移除 argparse CLI 入参，统一改为脚本内默认配置 + 环境变量覆盖（如 `V_AGENT_EXAMPLE_*`）；更新 `examples/README.md` 为嵌入式运行说明并给出 env override 示例。质量门禁回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
+- 2026-02-18T14:44:02Z：继续优化 P17 示例易嵌入性：移除示例中的 `main()/if __name__ == "__main__"` 包装，统一改为脚本顶层平铺执行（保留最小必要日志函数）；回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 
 ---
 
