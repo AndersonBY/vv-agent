@@ -12,34 +12,73 @@ from typing import Any
 from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 from v_agent.skills import discover_skill_dirs, read_properties, validate
 
+settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+skills_dir = os.getenv("V_AGENT_EXAMPLE_SKILLS_DIR", "skills")
+backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
+model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+max_cycles = int(os.getenv("V_AGENT_EXAMPLE_MAX_CYCLES", "80"))
+verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
-def _bool_env(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+workspace.mkdir(parents=True, exist_ok=True)
+
+source_root = Path(skills_dir).expanduser()
+if not source_root.is_absolute():
+    source_root = (workspace / source_root).resolve()
+if not source_root.exists() or not source_root.is_dir():
+    raise FileNotFoundError(f"Skills directory not found: {source_root}")
 
 
-def _int_env(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
+def to_workspace(path: Path) -> str:
     try:
-        return int(value)
+        return path.resolve().relative_to(workspace).as_posix()
     except ValueError:
-        return default
+        return path.resolve().as_posix()
 
 
-SETTINGS_FILE = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-WORKSPACE = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-SKILLS_DIR = os.getenv("V_AGENT_EXAMPLE_SKILLS_DIR", "skills")
-BACKEND = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-MODEL = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
-MAX_CYCLES = max(_int_env("V_AGENT_EXAMPLE_MAX_CYCLES", 80), 1)
-VERBOSE = _bool_env("V_AGENT_EXAMPLE_VERBOSE", True)
+discovered_skill_dirs = discover_skill_dirs(source_root)
+if not discovered_skill_dirs:
+    raise ValueError(f"No SKILL.md discovered under: {source_root}")
+
+runtime_root = (workspace / ".v_agent_skill_cache" / "bundle").resolve()
+if runtime_root.exists():
+    shutil.rmtree(runtime_root)
+runtime_root.mkdir(parents=True, exist_ok=True)
+
+used_names: set[str] = set()
+prepared: list[dict[str, str]] = []
+for skill_dir in discovered_skill_dirs:
+    props = read_properties(skill_dir)
+    if props.name in used_names:
+        continue
+
+    target_dir = (runtime_root / props.name).resolve()
+    shutil.copytree(skill_dir, target_dir, dirs_exist_ok=True)
+
+    errors = validate(target_dir)
+    if errors:
+        joined = "\n".join(f"- {item}" for item in errors)
+        raise ValueError(f"Skill '{props.name}' is invalid after normalization copy:\n{joined}")
+
+    used_names.add(props.name)
+    prepared.append(
+        {
+            "name": props.name,
+            "source": to_workspace(skill_dir),
+            "runtime": to_workspace(target_dir),
+        }
+    )
+
+if not prepared:
+    raise ValueError("No valid skills available after preparation.")
+
+runtime_skills_root = to_workspace(runtime_root)
+print("[skills] prepared runtime bundle:", flush=True)
+for item in prepared:
+    print(f"- {item['name']}: source={item['source']} -> runtime={item['runtime']}", flush=True)
 
 
-def _log_handler(event: str, payload: dict[str, Any]) -> None:
+def log_handler(event: str, payload: dict[str, Any]) -> None:
     if event in {
         "run_started",
         "cycle_started",
@@ -53,156 +92,45 @@ def _log_handler(event: str, payload: dict[str, Any]) -> None:
         print(f"[{event}] {payload}", flush=True)
 
 
-def _resolve_path(*, workspace: Path, value: str) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = (workspace / path).resolve()
-    return path
+prompt = (
+    "请执行一个 Remotion 视频工程任务, 并尽量利用已提供的技能元数据:\n"
+    "1) 请先查看系统提示词中的 `<available_skills>` 列表, 若有匹配技能, "
+    "由你自主选择并调用 `_activate_skill` (不要等待我指定技能名).\n"
+    "2) 激活后, 读取必要规则文件(至少 3 个), 并记录你读取了哪些文件.\n"
+    "3) 在 `artifacts/remotion_demo/` 下生成最小 Remotion 工程骨架, 至少包含:\n"
+    "   - `package.json`\n"
+    "   - `src/index.ts`\n"
+    "   - `src/Root.tsx`\n"
+    "   - `src/compositions/IntroCard.tsx`\n"
+    "4) 示例视频规格: 1280x720, 30fps, 150 帧, 标题+副标题+入场动画, props 可配置.\n"
+    "5) 写出 `artifacts/remotion_demo/README_zh.md`, 说明如何安装依赖、预览、渲染视频.\n"
+    "6) 最后调用 `_task_finish`, 汇报中必须包含: 激活技能名、读取规则文件、生成路径、下一步命令.\n"
+    "约束:\n"
+    f"- 运行时技能目录: `{runtime_skills_root}`\n"
+    "- 不要只输出计划, 必须实际写文件.\n"
+)
 
-
-def _to_workspace_path(*, workspace: Path, path: Path) -> str:
-    try:
-        return path.resolve().relative_to(workspace).as_posix()
-    except ValueError:
-        return path.resolve().as_posix()
-
-
-def prepare_runtime_skill_bundle(*, workspace: Path, skills_dir: str) -> tuple[str, list[dict[str, str]]]:
-    source_root = _resolve_path(workspace=workspace, value=skills_dir)
-    if not source_root.exists() or not source_root.is_dir():
-        raise FileNotFoundError(f"Skills directory not found: {source_root}")
-
-    discovered = discover_skill_dirs(source_root)
-    if not discovered:
-        raise ValueError(f"No SKILL.md discovered under: {source_root}")
-
-    runtime_root = (workspace / ".v_agent_skill_cache" / "bundle").resolve()
-    if runtime_root.exists():
-        shutil.rmtree(runtime_root)
-    runtime_root.mkdir(parents=True, exist_ok=True)
-
-    prepared: list[dict[str, str]] = []
-    used_names: set[str] = set()
-
-    for skill_dir in discovered:
-        props = read_properties(skill_dir)
-        if props.name in used_names:
-            continue
-
-        target_dir = (runtime_root / props.name).resolve()
-        shutil.copytree(skill_dir, target_dir, dirs_exist_ok=True)
-
-        errors = validate(target_dir)
-        if errors:
-            joined = "\n".join(f"- {item}" for item in errors)
-            raise ValueError(
-                f"Skill '{props.name}' is invalid after normalization copy:\n{joined}"
-            )
-
-        used_names.add(props.name)
-        prepared.append(
-            {
-                "name": props.name,
-                "description": props.description,
-                "source": _to_workspace_path(workspace=workspace, path=skill_dir),
-                "runtime": _to_workspace_path(workspace=workspace, path=target_dir),
-            }
-        )
-
-    if not prepared:
-        raise ValueError("No valid skills available after preparation.")
-
-    runtime_root_rel = _to_workspace_path(workspace=workspace, path=runtime_root)
-    return runtime_root_rel, prepared
-
-
-def build_prompt(*, runtime_skills_root: str) -> str:
-    return (
-        "请执行一个 Remotion 视频工程任务, 并尽量利用已提供的技能元数据:\n"
-        "1) 请先查看系统提示词中的 `<available_skills>` 列表, "
-        "若有匹配技能, 由你自主选择并调用 `_activate_skill` (不要等待我指定技能名).\n"
-        "2) 激活后, 读取必要规则文件(至少 3 个), 并记录你读取了哪些文件.\n"
-        "3) 在 `artifacts/remotion_demo/` 下生成最小 Remotion 工程骨架, 至少包含:\n"
-        "   - `package.json`\n"
-        "   - `src/index.ts`\n"
-        "   - `src/Root.tsx`\n"
-        "   - `src/compositions/IntroCard.tsx`\n"
-        "4) 示例视频规格:\n"
-        "   - 1280x720, 30fps, 150 帧\n"
-        "   - 标题 + 副标题 + 简单入场动画\n"
-        "   - props 可配置 title/subtitle\n"
-        "5) 写出 `artifacts/remotion_demo/README_zh.md`, 说明如何安装依赖, 预览, 渲染视频.\n"
-        "6) 最后调用 `_task_finish`, 汇报中必须包含:\n"
-        "   - 你激活的技能名\n"
-        "   - 读取的规则文件\n"
-        "   - 生成文件路径\n"
-        "   - 下一步命令\n"
-        "约束:\n"
-        f"- 运行时技能目录: `{runtime_skills_root}`\n"
-        "- 不要只输出计划, 必须实际写文件.\n"
-    )
-
-
-def build_client(
-    *,
-    settings_file: Path,
-    workspace: Path,
-    backend: str,
-    model: str,
-    runtime_skills_root: str,
-    max_cycles: int,
-    verbose: bool,
-) -> AgentSDKClient:
-    options = AgentSDKOptions(
+client = AgentSDKClient(
+    options=AgentSDKOptions(
         settings_file=settings_file,
         default_backend=backend,
         workspace=workspace,
-        log_handler=_log_handler if verbose else None,
-    )
-    definition = AgentDefinition(
-        description="你是 Remotion 视频工程助手, 会自主匹配并激活合适技能后落地代码.",
-        backend=backend,
-        model=model,
-        language="zh-CN",
-        max_cycles=max(max_cycles, 1),
-        enable_todo_management=True,
-        use_workspace=True,
-        agent_type="computer",
-        skill_directories=[runtime_skills_root],
-    )
-    return AgentSDKClient(options=options, agents={"remotion_skill_agent": definition})
-
-
-def main() -> None:
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-
-    runtime_skills_root, prepared_skills = prepare_runtime_skill_bundle(
-        workspace=WORKSPACE,
-        skills_dir=SKILLS_DIR,
-    )
-    print("[skills] prepared runtime bundle:", flush=True)
-    for item in prepared_skills:
-        print(
-            f"- {item['name']}: source={item['source']} -> runtime={item['runtime']}",
-            flush=True,
+        log_handler=log_handler if verbose else None,
+    ),
+    agents={
+        "remotion_skill_agent": AgentDefinition(
+            description="你是 Remotion 视频工程助手, 会自主匹配并激活合适技能后落地代码.",
+            backend=backend,
+            model=model,
+            language="zh-CN",
+            max_cycles=max(max_cycles, 1),
+            enable_todo_management=True,
+            use_workspace=True,
+            agent_type="computer",
+            skill_directories=[runtime_skills_root],
         )
+    },
+)
 
-    client = build_client(
-        settings_file=SETTINGS_FILE,
-        workspace=WORKSPACE,
-        backend=BACKEND,
-        model=MODEL,
-        runtime_skills_root=runtime_skills_root,
-        max_cycles=MAX_CYCLES,
-        verbose=VERBOSE,
-    )
-
-    run = client.run_agent(
-        agent_name="remotion_skill_agent",
-        prompt=build_prompt(runtime_skills_root=runtime_skills_root),
-    )
-    print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+run = client.run_agent(agent_name="remotion_skill_agent", prompt=prompt)
+print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Programmatic profile examples built on v-agent SDK primitives (non-CLI style)."""
+"""Programmatic profile examples built on v-agent SDK primitives."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 
-PROFILES: dict[str, AgentDefinition] = {
+profiles: dict[str, AgentDefinition] = {
     "researcher": AgentDefinition(
         description="你是研究助理, 先检索材料再输出结构化结论.",
         backend="moonshot",
@@ -33,49 +33,25 @@ PROFILES: dict[str, AgentDefinition] = {
     ),
 }
 
-SETTINGS_FILE = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-WORKSPACE = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-DEFAULT_BACKEND = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-PROFILE_NAME = os.getenv("V_AGENT_EXAMPLE_PROFILE", "researcher")
-PROMPT = os.getenv(
-    "V_AGENT_EXAMPLE_PROMPT",
-    "分析 workspace 下这个文档的核心结论",
+settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+default_backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
+profile_name = os.getenv("V_AGENT_EXAMPLE_PROFILE", "researcher")
+prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "分析 workspace 下这个文档的核心结论")
+
+workspace.mkdir(parents=True, exist_ok=True)
+
+if profile_name not in profiles:
+    profile_name = "researcher"
+
+client = AgentSDKClient(
+    options=AgentSDKOptions(
+        settings_file=settings_file,
+        default_backend=default_backend,
+        workspace=workspace,
+    ),
+    agents=profiles,
 )
 
-
-def run_profile(
-    *,
-    profile_name: str,
-    prompt: str,
-    settings_file: Path,
-    workspace: Path,
-    default_backend: str = "moonshot",
-) -> dict[str, object]:
-    client = AgentSDKClient(
-        options=AgentSDKOptions(
-            settings_file=settings_file,
-            default_backend=default_backend,
-            workspace=workspace,
-        ),
-        agents=PROFILES,
-    )
-    run = client.run_agent(agent_name=profile_name, prompt=prompt)
-    return run.to_dict()
-
-
-def main() -> None:
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-
-    selected_profile = PROFILE_NAME if PROFILE_NAME in PROFILES else "researcher"
-    output = run_profile(
-        profile_name=selected_profile,
-        prompt=PROMPT,
-        settings_file=SETTINGS_FILE,
-        workspace=WORKSPACE,
-        default_backend=DEFAULT_BACKEND,
-    )
-    print(json.dumps(output, ensure_ascii=False, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+run = client.run_agent(agent_name=profile_name, prompt=prompt)
+print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
