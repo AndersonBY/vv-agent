@@ -66,3 +66,21 @@ uv run python examples/sdk_style_client.py \
 workflow 建议作为自定义工具注册，不做内建特殊分支。可参考：
 
 - `tests/test_custom_tools.py`
+
+## 5) arXiv 论文检索 + 下载 + 图片解释 + 中文翻译（AI Agent Memory）
+
+文件：`examples/arxiv_agent_memory_pipeline.py`
+
+```bash
+uv run python examples/arxiv_agent_memory_pipeline.py \
+  --settings-file local_settings.py \
+  --workspace ./workspace/arxiv_memory_demo \
+  --model kimi-k2.5 \
+  --verbose
+```
+
+演示点：
+- 使用 `moonshot` + `kimi-k2.5` 运行一个端到端研究任务
+- 自动搜索最近 30 天的 AI Agent Memory 相关 arXiv 论文并下载 PDF
+- 抽取第一张图并调用 `_read_image` 做图像解释
+- 将论文分段翻译为中文并持续写入结果文件
