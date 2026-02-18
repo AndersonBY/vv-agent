@@ -3,6 +3,7 @@ from v_agent.runtime.engine import AgentRuntime, RuntimeLogHandler
 from v_agent.runtime.hooks import (
     AfterLLMEvent,
     AfterToolCallEvent,
+    BaseRuntimeHook,
     BeforeLLMEvent,
     BeforeLLMPatch,
     BeforeMemoryCompactEvent,
@@ -17,6 +18,7 @@ __all__ = [
     "AfterLLMEvent",
     "AfterToolCallEvent",
     "AgentRuntime",
+    "BaseRuntimeHook",
     "BeforeLLMEvent",
     "BeforeLLMPatch",
     "BeforeMemoryCompactEvent",

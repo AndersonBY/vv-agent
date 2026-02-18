@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from v_agent.constants import WRITE_FILE_TOOL_NAME
-from v_agent.runtime import BeforeLLMPatch
+from v_agent.runtime import BaseRuntimeHook, BeforeLLMEvent, BeforeLLMPatch, BeforeToolCallEvent
 from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 from v_agent.types import Message, ToolExecutionResult, ToolResultStatus
 
@@ -20,8 +20,8 @@ model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
 workspace.mkdir(parents=True, exist_ok=True)
 
 
-class GuardAndHintHook:
-    def before_llm(self, event):  # type: ignore[no-untyped-def]
+class GuardAndHintHook(BaseRuntimeHook):
+    def before_llm(self, event: BeforeLLMEvent) -> BeforeLLMPatch:
         patched_messages = list(event.messages)
         patched_messages.append(
             Message(
@@ -31,7 +31,7 @@ class GuardAndHintHook:
         )
         return BeforeLLMPatch(messages=patched_messages)
 
-    def before_tool_call(self, event):  # type: ignore[no-untyped-def]
+    def before_tool_call(self, event: BeforeToolCallEvent) -> ToolExecutionResult | None:
         if event.call.name != WRITE_FILE_TOOL_NAME:
             return None
         path = str(event.call.arguments.get("path", ""))

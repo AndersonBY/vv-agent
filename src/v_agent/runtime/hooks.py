@@ -70,6 +70,36 @@ class RuntimeHook(Protocol):
     """
 
 
+class BaseRuntimeHook:
+    """Typed base class for runtime hooks.
+
+    Subclass this and override only the methods you need.
+    """
+
+    def before_memory_compact(self, event: BeforeMemoryCompactEvent) -> list[Message] | None:
+        del event
+        return None
+
+    def before_llm(self, event: BeforeLLMEvent) -> BeforeLLMPatch | None:
+        del event
+        return None
+
+    def after_llm(self, event: AfterLLMEvent) -> LLMResponse | None:
+        del event
+        return None
+
+    def before_tool_call(
+        self,
+        event: BeforeToolCallEvent,
+    ) -> BeforeToolCallPatch | ToolCall | ToolExecutionResult | None:
+        del event
+        return None
+
+    def after_tool_call(self, event: AfterToolCallEvent) -> ToolExecutionResult | None:
+        del event
+        return None
+
+
 @dataclass(slots=True)
 class RuntimeHookManager:
     hooks: list[RuntimeHook] = field(default_factory=list)
