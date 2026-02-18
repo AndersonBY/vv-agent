@@ -56,6 +56,19 @@ def test_assistant_message_keeps_tool_calls_in_openai_payload() -> None:
     assert payload["tool_calls"][0]["function"]["name"] == "_todo_read"
 
 
+def test_user_message_with_image_url_uses_multimodal_content() -> None:
+    message = Message(
+        role="user",
+        content="Please inspect this image",
+        image_url="https://example.com/demo.png",
+    )
+    payload = message.to_openai_message()
+    assert isinstance(payload["content"], list)
+    assert payload["content"][0]["type"] == "text"
+    assert payload["content"][1]["type"] == "image_url"
+    assert payload["content"][1]["image_url"]["url"] == "https://example.com/demo.png"
+
+
 def test_agent_task_sub_agent_config_support() -> None:
     task = AgentTask(
         task_id="task_sub",

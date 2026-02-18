@@ -39,6 +39,13 @@ class ToolCallRunner:
     @staticmethod
     def _append_image_notification(*, result: ToolExecutionResult, messages: list[Message]) -> None:
         if result.image_url:
-            messages.append(Message(role="user", content=f"[Image loaded] {result.image_url}"))
+            image_ref = result.image_path or result.image_url
+            messages.append(
+                Message(
+                    role="user",
+                    content=f"[Image loaded] {image_ref}",
+                    image_url=result.image_url,
+                )
+            )
         elif result.image_path:
             messages.append(Message(role="user", content=f"[Image loaded] {result.image_path}"))

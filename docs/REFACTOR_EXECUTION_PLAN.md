@@ -48,6 +48,7 @@
 - 2026-02-18T03:42:45Z：对齐 `_workspace_grep` 语义与 backend：新增 `output_mode`（content/files_with_matches/count）、`type` 文件类型过滤、`b/a/c` 上下文、`n` 行号、`i` 忽略大小写、`multiline`、`head_limit`（兼容 `max_results`）及结果截断摘要；补齐多场景测试（模式切换、上下文、多行、类型过滤、错误分支），回归 `89 passed, 1 skipped`。
 - 2026-02-18T04:19:58Z：新增 `examples/arxiv_agent_memory_pipeline.py` 代码式端到端示例（arXiv 最近 30 天检索 + PDF 下载 + 首图提取 + `_read_image` 图片解释 + 中文分段翻译），并更新 `examples/README.md` 使用说明；质量门禁回归 `ruff/ty/pytest` 全绿（`89 passed, 1 skipped`）。
 - 2026-02-18T06:44:56Z：新增 `examples/read_image_to_markdown.py` 示例：读取 workspace 图片并强制调用 `_read_image`，让 kimi-k2.5 生成中文 Markdown 报告并写入 `.md` 文件；同步更新 `examples/README.md` 启动命令。已用真实 moonshot/kimi-k2.5 在 `workspace/test_image.png` 回归运行并产出 `workspace/artifacts/image_read_report.md`。
+- 2026-02-18T07:08:20Z：修复 `_read_image` 多模态链路：workspace 图片会编码为 data URL 并通过消息列表注入下一轮 LLM（不再只追加文本提示），`Message.to_openai_message` 支持 user text+image content blocks；补充 runtime/protocol/image 工具测试并完成真实回归运行。
 
 ---
 

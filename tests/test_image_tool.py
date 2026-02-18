@@ -33,7 +33,10 @@ def test_read_image_from_workspace_file(tmp_path: Path) -> None:
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
     assert result.image_path == "img.png"
+    assert isinstance(result.image_url, str)
+    assert result.image_url.startswith("data:image/png;base64,")
     assert payload["source"] == "workspace"
+    assert payload["inline_transport"] is True
 
 
 def test_read_image_from_url(tmp_path: Path) -> None:

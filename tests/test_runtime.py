@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from v_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
+from v_agent.constants import ASK_USER_TOOL_NAME, READ_IMAGE_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
 from v_agent.llm import ScriptedLLM
 from v_agent.runtime import AgentRuntime
 from v_agent.tools import build_default_registry
-from v_agent.types import AgentStatus, AgentTask, LLMResponse, ToolCall
+from v_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall
+
+_PNG_1X1 = bytes.fromhex(
+    "89504e470d0a1a0a"
+    "0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c6360000000020001e221bc330000000049454e44ae426082"
+)
 
 
 def test_runtime_finishes_via_task_finish(tmp_path: Path) -> None:
@@ -191,3 +197,43 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert "cycle_llm_response" in event_names
     assert "tool_result" in event_names
     assert "run_completed" in event_names
+
+
+def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
+    image_path = tmp_path / "img.png"
+    image_path.write_bytes(_PNG_1X1)
+
+    def assert_image_message(model: str, messages: list[Message]) -> LLMResponse:
+        del model
+        image_messages = [msg for msg in messages if msg.role == "user" and isinstance(msg.image_url, str)]
+        assert image_messages, "Expected image message with image_url in runtime history."
+        assert image_messages[-1].content.startswith("[Image loaded]")
+        assert image_messages[-1].image_url is not None
+        assert image_messages[-1].image_url.startswith("data:image/png;base64,")
+        return LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+        )
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="read image",
+                tool_calls=[ToolCall(id="c1", name=READ_IMAGE_TOOL_NAME, arguments={"path": "img.png"})],
+            ),
+            assert_image_message,
+        ]
+    )
+    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    task = AgentTask(
+        task_id="task_img",
+        model="m",
+        system_prompt="sys",
+        user_prompt="read image",
+        max_cycles=4,
+        native_multimodal=True,
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+    assert result.final_answer == "ok"

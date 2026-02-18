@@ -508,7 +508,10 @@ with per-item execution result.""",
         "type": "function",
         "function": {
             "name": READ_IMAGE_TOOL_NAME,
-            "description": "Read image from workspace path or HTTP URL and attach it to runtime context.",
+            "description": (
+                "Read image from workspace path or HTTP URL, then attach the image payload "
+                "to the next LLM turn as multimodal content."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
