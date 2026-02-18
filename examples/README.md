@@ -4,6 +4,13 @@
 
 你可以直接运行脚本, 也可以通过环境变量覆盖默认配置.
 
+下面的示例设计参考了 `ref_repos/agent_framework/` 中常见的 SDK 用法模式:
+- 单 Agent one-shot
+- session/streaming 风格可观测性
+- runtime hooks guardrail
+- 自定义工具注入
+- sub-agent 委派 pipeline
+
 ## 通用环境变量
 
 - `V_AGENT_LOCAL_SETTINGS` (默认 `local_settings.py`)
@@ -156,3 +163,69 @@ uv run python examples/resource_loader_embed.py
 这个示例会:
 - 自动发现 `workspace/.v-agent/` 与 `~/.v-agent/` 资源
 - 自动加载 profile、prompt template、skills 目录和 runtime hooks
+
+## 10) 自定义工单工具（业务插件式工具注入）
+
+文件: `examples/custom_ticket_tool_embed.py`
+
+```bash
+uv run python examples/custom_ticket_tool_embed.py
+```
+
+这个示例会:
+- 通过 `tool_registry_factory` 注入业务工具 `_ticket_store`
+- 读取 `workspace/logs/app.log` 并生成结构化工单到 `workspace/artifacts/tickets.json`
+- 演示 custom schema + custom handler + Agent 调用闭环
+
+## 11) Sub-agent 报告流水线（research -> writer）
+
+文件: `examples/sub_agent_report_pipeline.py`
+
+```bash
+uv run python examples/sub_agent_report_pipeline.py
+```
+
+这个示例会:
+- 配置主 Agent + 多个子 Agent
+- 显式引导主 Agent 通过 `_create_sub_task` 做任务分派
+- 将最终报告写入 `workspace/artifacts/final_report.md`
+
+## 12) Cycle Budget Guard（运行轮次预算钩子）
+
+文件: `examples/cycle_budget_guard_hook.py`
+
+```bash
+uv run python examples/cycle_budget_guard_hook.py
+```
+
+可选覆盖示例:
+
+```bash
+V_AGENT_EXAMPLE_CYCLE_BUDGET=4 \
+uv run python examples/cycle_budget_guard_hook.py
+```
+
+这个示例会:
+- 通过 `after_llm` hook 实现“轮次预算保护”
+- 当达到预算时自动注入 `_task_finish`，避免无限探索
+- 适合长任务成本/时延控制场景
+
+## 13) WAIT_USER 后续恢复（session continue_run）
+
+文件: `examples/ask_user_resume_session.py`
+
+```bash
+uv run python examples/ask_user_resume_session.py
+```
+
+可选覆盖示例:
+
+```bash
+V_AGENT_EXAMPLE_USER_REPLY="请使用口语化风格，输出到 artifacts/reply.md" \
+uv run python examples/ask_user_resume_session.py
+```
+
+这个示例会:
+- 第一轮强制走 `_ask_user` 交互
+- 捕获 `WAIT_USER` 后通过 `session.continue_run(...)` 恢复执行
+- 演示会话状态延续和交互闭环

@@ -74,6 +74,10 @@ uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonsho
 - `examples/quick_start_programmatic.py`：最小代码式调用
 - `examples/agent_profiles.py`：通过 profile 复用不同 Agent 配置
 - `examples/sdk_style_client.py`：参考 `claude-agent-sdk-python` 设计风格的 SDK 式封装
+- `examples/custom_ticket_tool_embed.py`：自定义业务工具注入（custom schema + handler）
+- `examples/sub_agent_report_pipeline.py`：多子 Agent 委派流水线
+- `examples/cycle_budget_guard_hook.py`：运行轮次预算 guardrail hook
+- `examples/ask_user_resume_session.py`：`WAIT_USER` -> `session.continue_run(...)` 恢复闭环
 
 说明：
 - workflow 不再作为内建特殊能力；如需 workflow，请按自定义工具注册（见 `tests/test_custom_tools.py` 的方式）。
