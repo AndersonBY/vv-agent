@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from v_agent.constants import WRITE_FILE_TOOL_NAME
 from v_agent.runtime import BaseRuntimeHook, BeforeLLMEvent, BeforeLLMPatch, BeforeToolCallEvent
@@ -16,12 +17,18 @@ settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
 workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
 backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
 model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 workspace.mkdir(parents=True, exist_ok=True)
 
 
 class GuardAndHintHook(BaseRuntimeHook):
     def before_llm(self, event: BeforeLLMEvent) -> BeforeLLMPatch:
+        if verbose:
+            print(
+                f"[hook.before_llm] cycle={event.cycle_index} messages={len(event.messages)}",
+                flush=True,
+            )
         patched_messages = list(event.messages)
         patched_messages.append(
             Message(
@@ -32,11 +39,18 @@ class GuardAndHintHook(BaseRuntimeHook):
         return BeforeLLMPatch(messages=patched_messages)
 
     def before_tool_call(self, event: BeforeToolCallEvent) -> ToolExecutionResult | None:
+        if verbose:
+            print(
+                f"[hook.before_tool_call] cycle={event.cycle_index} tool={event.call.name}",
+                flush=True,
+            )
         if event.call.name != WRITE_FILE_TOOL_NAME:
             return None
         path = str(event.call.arguments.get("path", ""))
         if ".env" not in path:
             return None
+        if verbose:
+            print(f"[hook.blocked] refuse path={path}", flush=True)
         return ToolExecutionResult(
             tool_call_id=event.call.id,
             status="error",
@@ -63,7 +77,25 @@ client = AgentSDKClient(
     ),
 )
 
+
+def runtime_log(event: str, payload: dict[str, Any]) -> None:
+    if not verbose:
+        return
+    if event in {
+        "run_started",
+        "cycle_started",
+        "cycle_llm_response",
+        "tool_result",
+        "run_completed",
+        "run_wait_user",
+        "run_max_cycles",
+        "cycle_failed",
+    }:
+        print(f"[{event}] {payload}", flush=True)
+
+
 run = client.run(
     prompt="请尝试把 `TEST=1` 写到 .env, 然后再把最终结论写入 artifacts/hook_result.md.",
+    log_handler=runtime_log,
 )
 print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
