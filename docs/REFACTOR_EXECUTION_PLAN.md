@@ -45,6 +45,7 @@
 - 2026-02-18T03:13:05Z：完成 P15：workspace 内建工具收敛为 `WORKSPACE_TOOLS = [list_files, file_info, read_file, write_file, file_str_replace, workspace_grep, compress_memory, todo_write]`，移除 `todo_read` 默认暴露，并新增 `file_info/file_str_replace/compress_memory` 实现与测试；回归 `78 passed, 1 skipped`。
 - 2026-02-18T03:22:17Z：补齐 `_read_file` 行号与限流语义：支持 `show_line_numbers`，并在单次读取超过 `2000` 行或 `50000` 字符时返回结构化 `file_info/limits/suggested_range`（不直接回传大内容）；新增多场景测试覆盖（行号、行数超限、字符超限、区间超限），回归 `82 passed, 1 skipped`。
 - 2026-02-18T03:30:44Z：对齐 `_write_file` 参数与描述：新增 `leading_newline`/`trailing_newline`（仅 append 模式生效），强化 overwrite 警示文案与参数说明，并补充 append/overwrite 双场景测试；回归 `84 passed, 1 skipped`。
+- 2026-02-18T03:42:45Z：对齐 `_workspace_grep` 语义与 backend：新增 `output_mode`（content/files_with_matches/count）、`type` 文件类型过滤、`b/a/c` 上下文、`n` 行号、`i` 忽略大小写、`multiline`、`head_limit`（兼容 `max_results`）及结果截断摘要；补齐多场景测试（模式切换、上下文、多行、类型过滤、错误分支），回归 `89 passed, 1 skipped`。
 
 ---
 

@@ -151,10 +151,89 @@ def test_read_file_returns_file_info_when_requested_range_exceeds_limit(registry
 
 def test_workspace_grep(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("hello world\nsecond line", encoding="utf-8")
-    call = ToolCall(id="call1", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "hello"})
+    call = ToolCall(id="call1", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "hello", "output_mode": "content"})
     result = registry.execute(call, tool_context)
     payload = json.loads(result.content)
+    assert payload["summary"]["total_matches"] == 1
     assert payload["matches"][0]["line"] == 1
+
+
+def test_workspace_grep_supports_files_with_matches_mode(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "a.py").write_text("TOKEN = 1", encoding="utf-8")
+    (tool_context.workspace / "b.py").write_text("token = 2", encoding="utf-8")
+    (tool_context.workspace / "c.md").write_text("no hit", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_files",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "token", "output_mode": "files_with_matches", "i": True, "type": "py"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["a.py", "b.py"]
+    assert payload["summary"]["files_with_matches"] == 2
+    assert payload["summary"]["total_matches"] == 2
+
+
+def test_workspace_grep_supports_count_mode(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "logs").mkdir(parents=True, exist_ok=True)
+    (tool_context.workspace / "logs" / "x.log").write_text("err\nok\nerr", encoding="utf-8")
+    (tool_context.workspace / "logs" / "y.log").write_text("err", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_count",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "err", "output_mode": "count", "path": "logs", "type": "log"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["file_counts"] == {"logs/x.log": 2, "logs/y.log": 1}
+    assert payload["summary"]["total_matches"] == 3
+
+
+def test_workspace_grep_supports_context_lines(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "ctx.txt").write_text("line1\nhit\nline3", encoding="utf-8")
+    call = ToolCall(
+        id="call_ctx",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "hit", "output_mode": "content", "c": 1, "n": True},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert [row["line"] for row in payload["matches"]] == [1, 2, 3]
+    assert payload["matches"][0]["is_match"] is False
+    assert payload["matches"][1]["is_match"] is True
+
+
+def test_workspace_grep_supports_multiline_and_head_limit(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "multi.txt").write_text("start\nalpha\nbeta\nend", encoding="utf-8")
+    call = ToolCall(
+        id="call_multi",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "alpha\\nbeta", "multiline": True, "head_limit": 1},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert len(payload["matches"]) == 1
+    assert payload["head_limit"] == 1
+    assert payload["summary"]["total_matches"] == 1
+
+
+def test_workspace_grep_rejects_unknown_file_type(registry, tool_context: ToolContext) -> None:
+    call = ToolCall(
+        id="call_invalid_type",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "x", "type": "unknown"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert result.status == "error"
+    assert "Unsupported file type" in payload["error"]
 
 
 def test_file_info_and_string_replace(registry, tool_context: ToolContext) -> None:

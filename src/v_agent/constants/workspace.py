@@ -172,16 +172,32 @@ PARAMETERS:
         "type": "function",
         "function": {
             "name": WORKSPACE_GREP_TOOL_NAME,
-            "description": """Search text across workspace files with regex.
+            "description": """Search workspace files with regex (backend-style grep semantics).
 
-Capabilities:
-- Supports regex pattern matching.
-- Supports path and glob filters.
-- Returns file path, line number, and matching text.
+OUTPUT MODES:
+- `content` (default): show matching lines (supports context and line numbers)
+- `files_with_matches`: show only file paths
+- `count`: show per-file match counts
+
+FILTERS:
+- `path` + `glob`: scope the search root and file pattern
+- `type`: language/file-type shortcut (py/js/ts/md/json/...)
+- `i`: case-insensitive search
+- `multiline`: let `.` match newlines and allow multi-line patterns
+
+CONTENT OPTIONS (only for `content` mode):
+- `b`: lines before each match
+- `a`: lines after each match
+- `c`: lines before+after (overrides b/a)
+- `n`: include line numbers (default true)
+
+LIMITING:
+- `head_limit`: return only first N output rows/entries
+- `max_results`: compatibility alias for `head_limit`
 
 Guidance:
-- Prefer this tool over ad-hoc shell grep for direct search tasks.
-- Limit broad searches with path/glob and max_results.""",
+- Prefer this tool over ad-hoc shell grep for direct content search.
+- Narrow broad searches with `path`/`glob`/`type` for better performance.""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -191,20 +207,58 @@ Guidance:
                     },
                     "path": {
                         "type": "string",
-                        "description": "Optional search root relative to workspace. Default ..",
+                        "description": "Optional search root relative to workspace root. Default '.'.",
                     },
                     "glob": {
                         "type": "string",
                         "description": "Optional file glob filter. Default **/*.",
                     },
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"],
+                        "description": "Search output mode. Default is 'content'.",
+                    },
+                    "b": {
+                        "type": "integer",
+                        "description": "Lines before each match. Only used in content mode.",
+                    },
+                    "a": {
+                        "type": "integer",
+                        "description": "Lines after each match. Only used in content mode.",
+                    },
+                    "c": {
+                        "type": "integer",
+                        "description": "Context lines before and after each match. Overrides b/a.",
+                    },
+                    "n": {
+                        "type": "boolean",
+                        "description": "Whether to include line numbers in content output. Default true.",
+                    },
+                    "i": {
+                        "type": "boolean",
+                        "description": "Case-insensitive search.",
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "File type shortcut (e.g. py/js/ts/md/json).",
+                    },
+                    "head_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Limit to first N output rows/entries.",
+                    },
+                    "multiline": {
+                        "type": "boolean",
+                        "description": "Enable multiline regex mode.",
+                    },
                     "case_sensitive": {
                         "type": "boolean",
-                        "description": "Case sensitive search when true.",
+                        "description": "Compatibility parameter. When set, overrides `i`.",
                     },
                     "max_results": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Maximum match rows to return. Default 50.",
+                        "description": "Compatibility alias for `head_limit`.",
                     },
                 },
                 "required": ["pattern"],
