@@ -470,8 +470,6 @@ class AgentRuntime:
             has_sub_agents=False,
             sub_agents={},
             agent_type=parent_task.agent_type,
-            enable_document_tools=parent_task.enable_document_tools,
-            enable_document_write_tools=parent_task.enable_document_write_tools,
             native_multimodal=parent_task.native_multimodal,
             extra_tool_names=list(parent_task.extra_tool_names),
             exclude_tools=sorted(excluded_tools),

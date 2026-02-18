@@ -3,10 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from v_agent.constants import (
-    ACTIVATE_SKILL_TOOL_NAME,
-    LIST_MOUNTED_DOCUMENTS_TOOL_NAME,
-)
+from v_agent.constants import ACTIVATE_SKILL_TOOL_NAME
 from v_agent.runtime.tool_planner import plan_tool_schemas
 from v_agent.tools import ToolContext, build_default_registry
 from v_agent.types import AgentTask, ToolCall, ToolResultStatus
@@ -28,36 +25,25 @@ def _task(**overrides: object) -> AgentTask:
     return task
 
 
-def test_extension_handlers_return_not_enabled_errors(tmp_path: Path) -> None:
+def test_skill_extension_handler_returns_not_enabled_error(tmp_path: Path) -> None:
     registry = build_default_registry()
     context = _context(tmp_path)
 
-    doc_result = registry.execute(
-        ToolCall(id="c1", name=LIST_MOUNTED_DOCUMENTS_TOOL_NAME, arguments={}),
-        context,
-    )
-    skill_result = registry.execute(
-        ToolCall(id="c2", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
+    result = registry.execute(
+        ToolCall(id="c1", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
         context,
     )
 
-    assert doc_result.status_code == ToolResultStatus.ERROR
-    assert skill_result.status_code == ToolResultStatus.ERROR
-    assert json.loads(doc_result.content)["error_code"] == "document_tools_not_enabled"
-    assert json.loads(skill_result.content)["error_code"] == "skill_activation_not_enabled"
+    assert result.status_code == ToolResultStatus.ERROR
+    assert json.loads(result.content)["error_code"] == "skill_activation_not_enabled"
 
 
-def test_planner_can_inject_extension_tool_schemas() -> None:
+def test_planner_can_inject_skill_extension_tool_schema() -> None:
     registry = build_default_registry()
     schemas = plan_tool_schemas(
         registry=registry,
-        task=_task(
-            enable_document_tools=True,
-            enable_document_write_tools=True,
-            metadata={"available_skills": ["demo"]},
-        ),
+        task=_task(metadata={"available_skills": ["demo"]}),
     )
 
     names = {schema["function"]["name"] for schema in schemas}
-    assert LIST_MOUNTED_DOCUMENTS_TOOL_NAME in names
     assert ACTIVATE_SKILL_TOOL_NAME in names

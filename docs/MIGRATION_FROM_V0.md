@@ -45,8 +45,7 @@ Tool schemas are no longer hardcoded in handlers.
 Use constants modules as source of truth:
 
 - `src/v_agent/constants/workspace.py`
-- `src/v_agent/constants/document.py`
-- workflow 建议作为自定义工具注册到 `ToolRegistry`（不再内建专项模块）
+- workflow/document 建议作为自定义工具注册到 `ToolRegistry`（不再内建专项模块）
 
 ## 5) Prompt system changes
 
@@ -59,7 +58,7 @@ CLI now uses `build_system_prompt(...)` to generate layered prompt sections:
 
 ## 6) New extension stubs
 
-Document/skill tool interfaces are now present in registry.
+Skill activation tool interface is present in registry.
 By default, handlers return structured `not_enabled` errors until adapters are wired.
 
 ## 7) Sub-agent delegation and SDK query

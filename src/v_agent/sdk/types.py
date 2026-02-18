@@ -38,8 +38,6 @@ class AgentDefinition:
     use_workspace: bool = True
     enable_todo_management: bool = True
     agent_type: str | None = None
-    enable_document_tools: bool = False
-    enable_document_write_tools: bool = False
     native_multimodal: bool = False
     enable_sub_agents: bool = False
     sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)

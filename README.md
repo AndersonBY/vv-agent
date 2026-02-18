@@ -16,7 +16,7 @@
 - `v_agent.runtime.ToolCallRunner`: 工具调用执行与 directive 收敛。
 - `v_agent.runtime.tool_planner`: 按 capability 动态规划可用工具 schema。
 - `v_agent.tools.dispatcher`: 统一处理参数解析/错误码/状态码映射。
-- `v_agent.tools.build_default_registry`: 默认工具集（workspace/todo/control/bash/background/image + extension stubs）。
+- `v_agent.tools.build_default_registry`: 默认工具集（workspace/todo/control/bash/background/image/sub-agent + skill extension stub）。
 - `v_agent.sdk.AgentSDKClient`: 代码式 SDK 封装（命名 Agent、复用配置、一次注册多 Agent，支持 `query(...)` one-shot 调用）。
 - `v_agent.memory.MemoryManager`: 历史压缩器。
 - `v_agent.llm.OpenAICompatibleLLM`: 统一 LLM 接口（端点轮询、重试、流式/非流式聚合、tool call 归一化）。
@@ -72,6 +72,7 @@ uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonsho
 
 说明：
 - workflow 不再作为内建特殊能力；如需 workflow，请按自定义工具注册（见 `tests/test_custom_tools.py` 的方式）。
+- document 工具不再作为内建能力；如需 document 能力，请按自定义工具注册。
 - 子 Agent 已有内建工具支持：`_create_sub_task` / `_batch_sub_tasks`（基于 `AgentTask.sub_agents` 配置）。
 - 子 Agent 如需使用与父任务不同的模型/后端，请确保 runtime 提供 `settings_file` + `default_backend`（CLI/SDK 默认会提供）。
 

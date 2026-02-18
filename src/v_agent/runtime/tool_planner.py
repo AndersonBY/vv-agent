@@ -10,8 +10,6 @@ from v_agent.constants import (
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
-    DOCUMENT_NAVIGATION_TOOLS,
-    DOCUMENT_WRITE_TOOLS,
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
@@ -45,11 +43,6 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
 
     if task.metadata.get("available_skills"):
         tool_names.append(ACTIVATE_SKILL_TOOL_NAME)
-
-    if task.enable_document_tools:
-        tool_names.extend(DOCUMENT_NAVIGATION_TOOLS)
-        if task.enable_document_write_tools:
-            tool_names.extend(DOCUMENT_WRITE_TOOLS)
 
     if task.native_multimodal:
         tool_names.append(READ_IMAGE_TOOL_NAME)

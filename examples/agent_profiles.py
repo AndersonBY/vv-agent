@@ -30,7 +30,6 @@ PROFILES: dict[str, AgentDefinition] = {
         model="kimi-k2.5",
         max_cycles=16,
         agent_type="computer",
-        enable_document_tools=True,
     ),
 }
 

@@ -157,8 +157,6 @@ class AgentTask:
     has_sub_agents: bool = False
     sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)
     agent_type: str | None = None
-    enable_document_tools: bool = False
-    enable_document_write_tools: bool = False
     native_multimodal: bool = False
     extra_tool_names: list[str] = field(default_factory=list)
     exclude_tools: list[str] = field(default_factory=list)

@@ -43,7 +43,7 @@ Tool-level status code (`ToolResultStatus`):
   - workspace: `_read_file`, `_write_file`, `_list_files`, `_workspace_grep`
   - computer: `_bash`, `_check_background_command`, `_read_image`
   - sub-agent delegation: `_create_sub_task`, `_batch_sub_tasks`（由 runtime 内建子任务执行链路驱动）
-  - extension stubs: document/skill tools (return standard not-enabled errors by default)
+  - extension stubs: skill tool (`_activate_skill`, default returns structured not-enabled error)
 
 ## Prompt Layer
 

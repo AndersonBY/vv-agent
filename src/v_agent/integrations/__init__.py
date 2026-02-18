@@ -1,3 +1,3 @@
-from v_agent.integrations.protocols import DocumentIntegration, SkillIntegration
+from v_agent.integrations.protocols import SkillIntegration
 
-__all__ = ["DocumentIntegration", "SkillIntegration"]
+__all__ = ["SkillIntegration"]

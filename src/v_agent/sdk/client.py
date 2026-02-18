@@ -72,8 +72,6 @@ class AgentSDKClient:
             has_sub_agents=definition.enable_sub_agents,
             sub_agents=dict(definition.sub_agents),
             agent_type=definition.agent_type,
-            enable_document_tools=definition.enable_document_tools,
-            enable_document_write_tools=definition.enable_document_write_tools,
             native_multimodal=definition.native_multimodal,
             extra_tool_names=list(definition.extra_tool_names),
             exclude_tools=list(definition.exclude_tools),
