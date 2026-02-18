@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Quick start for using v-agent in pure Python (no CLI wrapper)."""
+"""Quick start for embedding v-agent into a Python project (non-CLI style)."""
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +15,32 @@ from v_agent.prompt import build_system_prompt
 from v_agent.runtime import AgentRuntime
 from v_agent.tools import build_default_registry
 from v_agent.types import AgentTask
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+SETTINGS_FILE = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+BACKEND = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
+MODEL = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+WORKSPACE = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+MAX_CYCLES = max(_int_env("V_AGENT_EXAMPLE_MAX_CYCLES", 10), 1)
+PROMPT = os.getenv("V_AGENT_EXAMPLE_PROMPT", "请概述一下这个框架的特点")
+VERBOSE = _bool_env("V_AGENT_EXAMPLE_VERBOSE", True)
 
 
 def _print_runtime_log(event: str, payload: dict[str, Any]) -> None:
@@ -38,27 +64,19 @@ def _print_runtime_log(event: str, payload: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Programmatic v-agent quick start")
-    parser.add_argument("--prompt", required=True, help="Task prompt")
-    parser.add_argument("--backend", default="moonshot", help="Backend key in local_settings.py")
-    parser.add_argument("--model", default="kimi-k2.5", help="Model key in backend models")
-    parser.add_argument("--settings-file", default="local_settings.py", help="Path to local_settings.py")
-    parser.add_argument("--workspace", default="./workspace", help="Workspace directory")
-    parser.add_argument("--max-cycles", type=int, default=10)
-    parser.add_argument("--verbose", action="store_true", help="Print per-cycle runtime logs")
-    args = parser.parse_args()
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
 
     llm, resolved = build_openai_llm_from_local_settings(
-        Path(args.settings_file),
-        backend=args.backend,
-        model=args.model,
+        SETTINGS_FILE,
+        backend=BACKEND,
+        model=MODEL,
     )
 
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
-        default_workspace=Path(args.workspace),
-        log_handler=_print_runtime_log if args.verbose else None,
+        default_workspace=WORKSPACE,
+        log_handler=_print_runtime_log if VERBOSE else None,
     )
 
     system_prompt = build_system_prompt(
@@ -73,8 +91,8 @@ def main() -> None:
         task_id=f"quickstart_{uuid.uuid4().hex[:8]}",
         model=resolved.model_id,
         system_prompt=system_prompt,
-        user_prompt=args.prompt,
-        max_cycles=max(args.max_cycles, 1),
+        user_prompt=PROMPT,
+        max_cycles=MAX_CYCLES,
     )
 
     result = runtime.run(task)

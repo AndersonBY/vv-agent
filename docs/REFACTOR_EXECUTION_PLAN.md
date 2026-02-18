@@ -25,6 +25,7 @@
 | P14 移除 document 内建工具 | ✅ 已完成 | 2026-02-18T02:59:18Z | 删除 document constants/handlers/registry/planner 注入，document 改为纯自定义工具能力 |
 | P15 收敛 workspace 内建工具集 | ✅ 已完成 | 2026-02-18T03:13:05Z | workspace 内建仅保留 `list/info/read/write/str_replace/grep/compress/todo_write` 并补齐对应 handler/schema/test |
 | P16 Agent Skills 标准化 | ✅ 已完成 | 2026-02-18T09:34:33Z | 对齐 agentskills 规范，并新增 skills 目录自动发现与系统提示词自动注入，支持 Agent 自主选择激活技能 |
+| P17 示例嵌入式改造 | ✅ 已完成 | 2026-02-18T13:48:38Z | examples 全部改为非 argparse 模式，参数改为脚本内默认值 + 环境变量覆盖，便于直接嵌入 Python 项目 |
 
 ### 执行日志
 
@@ -54,6 +55,7 @@
 - 2026-02-18T08:29:37Z：按 backend `tools/activate_skill.py` 语义落地 `_activate_skill`：从 `available_skills/bound_skills` 做白名单校验与激活，支持读取 `instructions` 或 `SKILL.md`，回写 `active_skills/skill_activation_log` 到 shared_state；runtime 新增 metadata->shared_state 的 skill 透传，并补齐 extension/runtime 测试，回归 `96 passed, 1 skipped`。
 - 2026-02-18T08:54:55Z：对齐 Agent Skills 官方规范（`agentskills/agentskills`）：新增 `v_agent.skills` 标准解析/校验/提示词模块（含 `read_properties`/`validate`/`metadata_to_prompt_entries`），`build_system_prompt` 支持注入 `<available_skills>` XML，`_activate_skill` 优先按 `location/path` 加载并验证 `SKILL.md` frontmatter；新增 skills parser/prompt/validator 测试与扩展链路测试，质量门禁回归 `ruff/ty/pytest` 全绿（`115 passed, 1 skipped`）。
 - 2026-02-18T09:34:33Z：完成 P16 增强版：支持将 skills 根目录（如 `skills/`）直接注入 Agent，系统提示词自动扫描并构建 `<available_skills>`；`_activate_skill` 支持从 skill collection 解析多技能并按名称激活；SDK 新增 `AgentDefinition.skill_directories`，示例 `examples/remotion_skill_demo.py` 改为目录级自动技能发现并由 Agent 自主选择激活。实测命令 `uv run python examples/remotion_skill_demo.py --workspace ./workspace --skills-dir skills --backend moonshot --model kimi-k2.5 --verbose` 返回 `status=completed`。
+- 2026-02-18T13:48:38Z：完成 P17：`examples/` 下全部示例移除 argparse CLI 入参，统一改为脚本内默认配置 + 环境变量覆盖（如 `V_AGENT_EXAMPLE_*`）；更新 `examples/README.md` 为嵌入式运行说明并给出 env override 示例。质量门禁回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 
 ---
 

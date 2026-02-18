@@ -3,12 +3,28 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+SETTINGS_FILE = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+WORKSPACE = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+IMAGE_PATH = os.getenv("V_AGENT_EXAMPLE_IMAGE_PATH", "test_image.png")
+OUTPUT_PATH = os.getenv("V_AGENT_EXAMPLE_OUTPUT_PATH", "artifacts/image_read_report.md")
+BACKEND = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
+MODEL = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+VERBOSE = _bool_env("V_AGENT_EXAMPLE_VERBOSE", True)
 
 
 def _log_handler(event: str, payload: dict[str, Any]) -> None:
@@ -25,14 +41,7 @@ def _log_handler(event: str, payload: dict[str, Any]) -> None:
         print(f"[{event}] {payload}", flush=True)
 
 
-def build_client(
-    *,
-    settings_file: Path,
-    workspace: Path,
-    backend: str,
-    model: str,
-    verbose: bool,
-) -> AgentSDKClient:
+def build_client(*, settings_file: Path, workspace: Path, backend: str, model: str, verbose: bool) -> AgentSDKClient:
     options = AgentSDKOptions(
         settings_file=settings_file,
         default_backend=backend,
@@ -40,7 +49,7 @@ def build_client(
         log_handler=_log_handler if verbose else None,
     )
     image_agent = AgentDefinition(
-        description="你是视觉理解助手. 你会读取图片并输出结构化 Markdown 分析.",
+        description="你是视觉理解助手, 你会读取图片并输出结构化 Markdown 分析.",
         backend=backend,
         model=model,
         language="zh-CN",
@@ -87,38 +96,27 @@ def ensure_image_exists(*, workspace: Path, image_path: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Use kimi-k2.5 to read image and write Markdown output.")
-    parser.add_argument("--settings-file", default="local_settings.py", help="Path to local_settings.py")
-    parser.add_argument("--workspace", default="./workspace", help="Workspace directory")
-    parser.add_argument("--image-path", default="test_image.png", help="Workspace-relative image path")
-    parser.add_argument("--output-path", default="artifacts/image_read_report.md", help="Workspace-relative output markdown path")
-    parser.add_argument("--backend", default="moonshot", help="Backend key in local_settings.py")
-    parser.add_argument("--model", default="kimi-k2.5", help="Model key in backend models")
-    parser.add_argument("--verbose", action="store_true", help="Print runtime logs")
-    args = parser.parse_args()
-
-    workspace = Path(args.workspace).resolve()
-    workspace.mkdir(parents=True, exist_ok=True)
-    ensure_image_exists(workspace=workspace, image_path=args.image_path)
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
+    ensure_image_exists(workspace=WORKSPACE, image_path=IMAGE_PATH)
 
     client = build_client(
-        settings_file=Path(args.settings_file),
-        workspace=workspace,
-        backend=args.backend,
-        model=args.model,
-        verbose=args.verbose,
+        settings_file=SETTINGS_FILE,
+        workspace=WORKSPACE,
+        backend=BACKEND,
+        model=MODEL,
+        verbose=VERBOSE,
     )
 
     run = client.run_agent(
         agent_name="image_markdown_agent",
-        prompt=build_prompt(image_path=args.image_path, output_path=args.output_path),
+        prompt=build_prompt(image_path=IMAGE_PATH, output_path=OUTPUT_PATH),
     )
     print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
 
-    output_file = (workspace / args.output_path).resolve()
+    output_file = (WORKSPACE / OUTPUT_PATH).resolve()
     if output_file.is_file():
         print("\n[Generated Markdown]")
-        print(f"path: {output_file.relative_to(workspace)}")
+        print(f"path: {output_file.relative_to(WORKSPACE)}")
         print(output_file.read_text(encoding="utf-8", errors="replace"))
 
 

@@ -3,14 +3,40 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any
 
 from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 from v_agent.skills import discover_skill_dirs, read_properties, validate
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+SETTINGS_FILE = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+WORKSPACE = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+SKILLS_DIR = os.getenv("V_AGENT_EXAMPLE_SKILLS_DIR", "skills")
+BACKEND = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
+MODEL = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+MAX_CYCLES = max(_int_env("V_AGENT_EXAMPLE_MAX_CYCLES", 80), 1)
+VERBOSE = _bool_env("V_AGENT_EXAMPLE_VERBOSE", True)
 
 
 def _log_handler(event: str, payload: dict[str, Any]) -> None:
@@ -105,7 +131,7 @@ def build_prompt(*, runtime_skills_root: str) -> str:
         "   - 1280x720, 30fps, 150 帧\n"
         "   - 标题 + 副标题 + 简单入场动画\n"
         "   - props 可配置 title/subtitle\n"
-        "5) 写出 `artifacts/remotion_demo/README_zh.md`, 说明如何安装依赖、预览、渲染视频.\n"
+        "5) 写出 `artifacts/remotion_demo/README_zh.md`, 说明如何安装依赖, 预览, 渲染视频.\n"
         "6) 最后调用 `_task_finish`, 汇报中必须包含:\n"
         "   - 你激活的技能名\n"
         "   - 读取的规则文件\n"
@@ -134,7 +160,7 @@ def build_client(
         log_handler=_log_handler if verbose else None,
     )
     definition = AgentDefinition(
-        description="你是 Remotion 视频工程助手, 会自主匹配并激活合适技能后落地代码。",
+        description="你是 Remotion 视频工程助手, 会自主匹配并激活合适技能后落地代码.",
         backend=backend,
         model=model,
         language="zh-CN",
@@ -148,26 +174,11 @@ def build_client(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run remotion skill demo with auto skill discovery")
-    parser.add_argument("--settings-file", default="local_settings.py", help="Path to local_settings.py")
-    parser.add_argument("--workspace", default="./workspace", help="Workspace directory")
-    parser.add_argument(
-        "--skills-dir",
-        default="skills",
-        help="Skills directory relative to workspace (or absolute path)",
-    )
-    parser.add_argument("--backend", default="moonshot", help="Backend key in local settings")
-    parser.add_argument("--model", default="kimi-k2.5", help="Model key in backend config")
-    parser.add_argument("--max-cycles", type=int, default=80, help="Max runtime cycles")
-    parser.add_argument("--verbose", action="store_true", help="Print per-cycle logs")
-    args = parser.parse_args()
-
-    workspace = Path(args.workspace).resolve()
-    workspace.mkdir(parents=True, exist_ok=True)
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
 
     runtime_skills_root, prepared_skills = prepare_runtime_skill_bundle(
-        workspace=workspace,
-        skills_dir=args.skills_dir,
+        workspace=WORKSPACE,
+        skills_dir=SKILLS_DIR,
     )
     print("[skills] prepared runtime bundle:", flush=True)
     for item in prepared_skills:
@@ -177,13 +188,13 @@ def main() -> None:
         )
 
     client = build_client(
-        settings_file=Path(args.settings_file),
-        workspace=workspace,
-        backend=args.backend,
-        model=args.model,
+        settings_file=SETTINGS_FILE,
+        workspace=WORKSPACE,
+        backend=BACKEND,
+        model=MODEL,
         runtime_skills_root=runtime_skills_root,
-        max_cycles=args.max_cycles,
-        verbose=args.verbose,
+        max_cycles=MAX_CYCLES,
+        verbose=VERBOSE,
     )
 
     run = client.run_agent(
