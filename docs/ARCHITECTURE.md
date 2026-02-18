@@ -42,6 +42,7 @@ Tool-level status code (`ToolResultStatus`):
   - control: `_task_finish`, `_ask_user`, `_todo_write`, `_todo_read`
   - workspace: `_read_file`, `_write_file`, `_list_files`, `_workspace_grep`
   - computer: `_bash`, `_check_background_command`, `_read_image`
+  - sub-agent delegation: `_create_sub_task`, `_batch_sub_tasks`（由 runtime 内建子任务执行链路驱动）
   - extension stubs: document/skill tools (return standard not-enabled errors by default)
 
 ## Prompt Layer

@@ -71,6 +71,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SDK-style v-agent example with named agents")
     parser.add_argument("--agent", required=True, choices=["planner", "translator", "orchestrator"])
     parser.add_argument("--prompt", required=True)
+    parser.add_argument("--mode", choices=["run", "query"], default="run")
     parser.add_argument("--settings-file", default="local_settings.py")
     parser.add_argument("--backend", default="moonshot")
     parser.add_argument("--workspace", default="./workspace")
@@ -83,6 +84,11 @@ def main() -> None:
         workspace=Path(args.workspace),
         verbose=args.verbose,
     )
+    if args.mode == "query":
+        text = client.query(agent_name=args.agent, prompt=args.prompt, require_completed=False)
+        print(text)
+        return
+
     run = client.run_agent(agent_name=args.agent, prompt=args.prompt)
     print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
 

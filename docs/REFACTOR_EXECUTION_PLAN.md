@@ -21,6 +21,7 @@
 | P10 文档/工作流/skills 扩展 | ✅ 已完成 | 2026-02-17T15:41:52Z | 增加文档/工作流/技能扩展工具骨架，默认返回标准化未启用错误 |
 | P11 全量验收与收口 | ✅ 已完成 | 2026-02-17T15:41:52Z | 通过 ruff/ty/pytest/live；补齐 `TOOL_PROTOCOL` 与 `MIGRATION_FROM_V0` 文档 |
 | P12 LLM 统一接口对齐 | ✅ 已完成 | 2026-02-17T16:47:41Z | 按 `backend/.../utilities/llm.py` 对齐请求选项和流式 tool call 聚合语义，并通过真实命令验证 |
+| P13 子 Agent 链路与 SDK query | ✅ 已完成 | 2026-02-18T02:39:12Z | 内建 `_create_sub_task/_batch_sub_tasks` 实际执行链路，补齐 SDK `query()` one-shot 接口与测试 |
 
 ### 执行日志
 
@@ -37,6 +38,7 @@
 - 2026-02-17T17:55:09Z：新增 CLI 可观测性日志：`--verbose` 下实时输出 cycle 启动、LLM 响应摘要、tool 执行结果与结束状态；并补充 runtime 日志回调与测试覆盖。
 - 2026-02-17T18:17:45Z：新增 `examples/` 目录，补充代码式集成示例（quick start / agent profiles / SDK-style client），展示多 Agent 配置与可复用封装方式。
 - 2026-02-17T18:45:52Z：移除内建 workflow 特化代码（改为自定义工具注入），补充 SDK 核心类型与 `AgentSDKClient`，并新增 `sub_agents` 配置字段支持显式子 Agent 定义。
+- 2026-02-18T02:39:12Z：完成 P13：新增 `_create_sub_task/_batch_sub_tasks` 内建 schema + handler + runtime 子任务执行链路；`AgentSDKClient` 新增 `query()` one-shot 文本接口；新增 `tests/test_sub_agent_runtime.py` 等测试并通过全量回归。
 
 ---
 

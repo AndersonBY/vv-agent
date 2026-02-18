@@ -41,14 +41,25 @@ uv run python examples/agent_profiles.py \
 ```bash
 uv run python examples/sdk_style_client.py \
   --agent planner \
-  --prompt "先拆分任务，再逐步完成并汇报"
+  --prompt "先拆分任务，再逐步完成并汇报" \
+  --mode run
+```
+
+只要最终文本时可用 one-shot query 风格：
+
+```bash
+uv run python examples/sdk_style_client.py \
+  --agent planner \
+  --prompt "一句话总结当前任务进展" \
+  --mode query
 ```
 
 演示点：
 - `AgentDefinition` + `AgentSDKOptions` + `AgentSDKClient` 的三层抽象
 - `client.run_agent(agent_name=..., prompt=...)` 的 SDK 调用体验
+- `client.query(agent_name=..., prompt=...)` 的 one-shot 文本查询体验
 - 一个进程里管理多个命名 Agent（planner / translator / orchestrator）
-- `orchestrator` 示例包含 `sub_agents` 配置输入方式
+- `orchestrator` 示例包含 `sub_agents` 配置输入方式（可触发 `_create_sub_task` / `_batch_sub_tasks`）
 
 ## 4) 自定义 workflow 工具
 
