@@ -13,6 +13,7 @@ from v_agent.memory import MemoryManager
 from v_agent.prompt import build_system_prompt
 from v_agent.runtime.cycle_runner import CycleRunner
 from v_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
+from v_agent.runtime.token_usage import summarize_task_token_usage
 from v_agent.runtime.tool_call_runner import ToolCallRunner
 from v_agent.tools import ToolContext, ToolRegistry
 from v_agent.types import (
@@ -159,6 +160,7 @@ class AgentRuntime:
                     cycles=cycles,
                     error=f"LLM call failed in cycle {cycle_index}: {exc}",
                     shared_state=shared,
+                    token_usage=summarize_task_token_usage(cycles),
                 )
             self._emit_log(
                 "cycle_llm_response",
@@ -225,6 +227,7 @@ class AgentRuntime:
                         cycles=cycles,
                         wait_reason=str(wait_reason),
                         shared_state=shared,
+                        token_usage=summarize_task_token_usage(cycles),
                     )
 
                 if tool_result and tool_result.directive == ToolDirective.FINISH:
@@ -240,6 +243,7 @@ class AgentRuntime:
                         cycles=cycles,
                         final_answer=final_answer,
                         shared_state=shared,
+                        token_usage=summarize_task_token_usage(cycles),
                     )
 
                 continue
@@ -257,6 +261,7 @@ class AgentRuntime:
                     cycles=cycles,
                     final_answer=cycle_record.assistant_message,
                     shared_state=shared,
+                    token_usage=summarize_task_token_usage(cycles),
                 )
 
             if task.no_tool_policy == "wait_user":
@@ -271,6 +276,7 @@ class AgentRuntime:
                     cycles=cycles,
                     wait_reason=cycle_record.assistant_message or "No tool call and runtime is waiting for user.",
                     shared_state=shared,
+                    token_usage=summarize_task_token_usage(cycles),
                 )
 
             if cycle_index < task.max_cycles:
@@ -287,6 +293,7 @@ class AgentRuntime:
             cycles=cycles,
             final_answer="Reached max cycles without finish signal.",
             shared_state=shared,
+            token_usage=summarize_task_token_usage(cycles),
         )
 
     def _emit_cycle_tool_results(self, *, cycle_record: CycleRecord) -> None:

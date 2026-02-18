@@ -245,6 +245,64 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
     assert result.final_answer == "ok"
 
 
+def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="planning",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name=TODO_WRITE_TOOL_NAME,
+                        arguments={"todos": [{"title": "draft", "status": "completed", "priority": "medium"}]},
+                    )
+                ],
+                raw={
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 25,
+                        "total_tokens": 125,
+                        "prompt_tokens_details": {"cached_tokens": 40},
+                        "completion_tokens_details": {"reasoning_tokens": 10},
+                    }
+                },
+            ),
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                raw={
+                    "usage": {
+                        "input_tokens": 50,
+                        "output_tokens": 30,
+                        "total_tokens": 80,
+                        "input_tokens_details": {"cache_creation_tokens": 12},
+                    }
+                },
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    task = AgentTask(task_id="task_usage", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+
+    assert len(result.token_usage.cycles) == 2
+    assert result.token_usage.cycles[0].usage.prompt_tokens == 100
+    assert result.token_usage.cycles[0].usage.completion_tokens == 25
+    assert result.token_usage.cycles[0].usage.cached_tokens == 40
+    assert result.token_usage.cycles[1].usage.prompt_tokens == 50
+    assert result.token_usage.cycles[1].usage.completion_tokens == 30
+    assert result.token_usage.cycles[1].usage.cache_creation_tokens == 12
+
+    assert result.token_usage.prompt_tokens == 150
+    assert result.token_usage.completion_tokens == 55
+    assert result.token_usage.total_tokens == 205
+    assert result.token_usage.cached_tokens == 40
+    assert result.token_usage.reasoning_tokens == 10
+    assert result.token_usage.cache_creation_tokens == 12
+
+
 def test_runtime_propagates_available_skills_into_tool_context(tmp_path: Path) -> None:
     llm = ScriptedLLM(
         steps=[

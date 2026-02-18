@@ -6,6 +6,7 @@ from typing import Any
 from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
 from v_agent.runtime.hooks import RuntimeHookManager
+from v_agent.runtime.token_usage import normalize_token_usage
 from v_agent.runtime.tool_planner import plan_tool_schemas
 from v_agent.tools import ToolRegistry
 from v_agent.types import AgentTask, CycleRecord, Message, ToolCall
@@ -86,6 +87,7 @@ class CycleRunner:
             assistant_message=llm_response.content,
             tool_calls=llm_response.tool_calls,
             memory_compacted=memory_compacted,
+            token_usage=normalize_token_usage(llm_response.raw.get("usage")),
         )
         return next_messages, cycle_record
 

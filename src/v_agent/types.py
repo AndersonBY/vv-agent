@@ -94,6 +94,96 @@ class ToolCall:
 
 
 @dataclass(slots=True)
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def has_usage(self) -> bool:
+        return any(
+            (
+                self.prompt_tokens,
+                self.completion_tokens,
+                self.total_tokens,
+                self.cached_tokens,
+                self.reasoning_tokens,
+                self.input_tokens,
+                self.output_tokens,
+                self.cache_creation_tokens,
+            )
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "cached_tokens": self.cached_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "raw": dict(self.raw),
+        }
+
+
+@dataclass(slots=True)
+class CycleTokenUsage:
+    cycle_index: int
+    usage: TokenUsage
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = self.usage.to_dict()
+        payload["cycle_index"] = self.cycle_index
+        return payload
+
+
+@dataclass(slots=True)
+class TaskTokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cycles: list[CycleTokenUsage] = field(default_factory=list)
+
+    def add_cycle(self, cycle_index: int, usage: TokenUsage) -> None:
+        if not usage.has_usage():
+            return
+        self.prompt_tokens += usage.prompt_tokens
+        self.completion_tokens += usage.completion_tokens
+        self.total_tokens += usage.total_tokens
+        self.cached_tokens += usage.cached_tokens
+        self.reasoning_tokens += usage.reasoning_tokens
+        self.input_tokens += usage.input_tokens
+        self.output_tokens += usage.output_tokens
+        self.cache_creation_tokens += usage.cache_creation_tokens
+        self.cycles.append(CycleTokenUsage(cycle_index=cycle_index, usage=usage))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "cached_tokens": self.cached_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+            "cycles": [item.to_dict() for item in self.cycles],
+        }
+
+
+@dataclass(slots=True)
 class ToolExecutionResult:
     tool_call_id: str
     content: str
@@ -135,6 +225,7 @@ class CycleRecord:
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_results: list[ToolExecutionResult] = field(default_factory=list)
     memory_compacted: bool = False
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
 
 
 @dataclass(slots=True)
@@ -219,6 +310,7 @@ class AgentResult:
     wait_reason: str | None = None
     error: str | None = None
     shared_state: dict[str, Any] = field(default_factory=dict)
+    token_usage: TaskTokenUsage = field(default_factory=TaskTokenUsage)
 
     @property
     def todo_list(self) -> list[dict[str, Any]]:

@@ -82,6 +82,7 @@ class AgentRun:
             "error": self.result.error,
             "cycles": len(self.result.cycles),
             "todo_list": self.result.todo_list,
+            "token_usage": self.result.token_usage.to_dict(),
             "resolved": {
                 "backend": self.resolved.backend,
                 "selected_model": self.resolved.selected_model,

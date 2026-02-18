@@ -248,3 +248,45 @@ def test_session_emits_session_and_runtime_events(tmp_path: Path) -> None:
     assert "run_started" in events
     assert "run_completed" in events
     assert "session_run_end" in events
+
+
+def test_session_run_to_dict_contains_structured_token_usage(tmp_path: Path) -> None:
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="finish",
+                    tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                    raw={"usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}},
+                )
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+    )
+    session = client.create_session()
+    run = session.prompt("run")
+
+    payload = run.to_dict()
+    usage = payload["token_usage"]
+    assert usage["prompt_tokens"] == 11
+    assert usage["completion_tokens"] == 7
+    assert usage["total_tokens"] == 18
+    assert len(usage["cycles"]) == 1
+    assert usage["cycles"][0]["cycle_index"] == 1
