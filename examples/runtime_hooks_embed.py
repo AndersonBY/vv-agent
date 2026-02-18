@@ -60,24 +60,6 @@ class GuardAndHintHook(BaseRuntimeHook):
         )
 
 
-client = AgentSDKClient(
-    options=AgentSDKOptions(
-        settings_file=settings_file,
-        default_backend=backend,
-        workspace=workspace,
-        runtime_hooks=[GuardAndHintHook()],
-    ),
-    agent=AgentDefinition(
-        description="你是一个注重安全和可执行性的开发 Agent。",
-        model=model,
-        backend=backend,
-        max_cycles=20,
-        enable_todo_management=True,
-        use_workspace=True,
-    ),
-)
-
-
 def runtime_log(event: str, payload: dict[str, Any]) -> None:
     if not verbose:
         return
@@ -94,8 +76,25 @@ def runtime_log(event: str, payload: dict[str, Any]) -> None:
         print(f"[{event}] {payload}", flush=True)
 
 
+client = AgentSDKClient(
+    options=AgentSDKOptions(
+        settings_file=settings_file,
+        default_backend=backend,
+        workspace=workspace,
+        runtime_hooks=[GuardAndHintHook()],
+        log_handler=runtime_log,
+    ),
+    agent=AgentDefinition(
+        description="你是一个注重安全和可执行性的开发 Agent。",
+        model=model,
+        backend=backend,
+        max_cycles=20,
+        enable_todo_management=True,
+        use_workspace=True,
+    ),
+)
+
 run = client.run(
     prompt="请尝试把 `TEST=1` 写到 .env, 然后再把最终结论写入 artifacts/hook_result.md.",
-    log_handler=runtime_log,
 )
 print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
