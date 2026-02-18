@@ -64,6 +64,6 @@ client = AgentSDKClient(
 )
 
 run = client.run(
-    prompt="请尝试把一段说明写到 .env, 然后再把最终结论写入 artifacts/hook_result.md.",
+    prompt="请尝试把 `TEST=1` 写到 .env, 然后再把最终结论写入 artifacts/hook_result.md.",
 )
 print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

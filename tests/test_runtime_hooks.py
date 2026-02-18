@@ -4,7 +4,15 @@ from pathlib import Path
 
 from v_agent.constants import TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
 from v_agent.llm import ScriptedLLM
-from v_agent.runtime import AgentRuntime, BeforeLLMPatch
+from v_agent.runtime import (
+    AfterLLMEvent,
+    AfterToolCallEvent,
+    AgentRuntime,
+    BaseRuntimeHook,
+    BeforeLLMEvent,
+    BeforeLLMPatch,
+    BeforeToolCallEvent,
+)
 from v_agent.tools import ToolContext, ToolSpec, build_default_registry
 from v_agent.types import (
     AgentStatus,
@@ -19,8 +27,8 @@ from v_agent.types import (
 
 
 def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
-    class InjectMessageHook:
-        def before_llm(self, event):
+    class InjectMessageHook(BaseRuntimeHook):
+        def before_llm(self, event: BeforeLLMEvent) -> BeforeLLMPatch:
             patched = list(event.messages)
             patched.append(Message(role="user", content="HOOK_CONTEXT"))
             return BeforeLLMPatch(messages=patched)
@@ -48,8 +56,8 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
 
 
 def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
-    class BlockTodoHook:
-        def before_tool_call(self, event):
+    class BlockTodoHook(BaseRuntimeHook):
+        def before_tool_call(self, event: BeforeToolCallEvent) -> ToolExecutionResult | None:
             if event.call.name != TODO_WRITE_TOOL_NAME:
                 return None
             return ToolExecutionResult(
@@ -92,8 +100,8 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
 
 
 def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> None:
-    class FinishAfterTodoHook:
-        def after_tool_call(self, event):
+    class FinishAfterTodoHook(BaseRuntimeHook):
+        def after_tool_call(self, event: AfterToolCallEvent) -> ToolExecutionResult | None:
             if event.call.name != TODO_WRITE_TOOL_NAME:
                 return None
             return ToolExecutionResult(
@@ -132,8 +140,8 @@ def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> Non
 
 
 def test_runtime_hook_can_replace_llm_response(tmp_path: Path) -> None:
-    class ReplaceResponseHook:
-        def after_llm(self, event):
+    class ReplaceResponseHook(BaseRuntimeHook):
+        def after_llm(self, event: AfterLLMEvent) -> LLMResponse:
             del event
             return LLMResponse(
                 content="forced finish",

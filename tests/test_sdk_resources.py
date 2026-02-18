@@ -52,8 +52,11 @@ body
         encoding="utf-8",
     )
     (resource_root / "hooks" / "noop.py").write_text(
-        """class NoopHook:
-    def before_llm(self, event):
+        """from v_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
+
+class NoopHook(BaseRuntimeHook):
+    def before_llm(self, event: BeforeLLMEvent):
+        del event
         return None
 
 HOOK = NoopHook()
@@ -125,10 +128,11 @@ def test_sdk_client_loads_runtime_hooks_from_resource_loader(tmp_path: Path) -> 
     (resource_root / "hooks").mkdir(parents=True)
     (resource_root / "hooks" / "force_finish.py").write_text(
         """from v_agent.constants import TASK_FINISH_TOOL_NAME
+from v_agent.runtime import AfterLLMEvent, BaseRuntimeHook
 from v_agent.types import LLMResponse, ToolCall
 
-class ForceFinishHook:
-    def after_llm(self, event):
+class ForceFinishHook(BaseRuntimeHook):
+    def after_llm(self, event: AfterLLMEvent):
         return LLMResponse(
             content=event.response.content,
             tool_calls=[ToolCall(id="h1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "hook-finish"})],
