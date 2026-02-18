@@ -80,6 +80,13 @@ class AgentRuntime:
         workspace_path = self._prepare_workspace(workspace)
         shared = dict(shared_state or {})
         shared.setdefault("todo_list", [])
+        if isinstance(task.metadata, dict):
+            if "available_skills" not in shared and task.metadata.get("available_skills") is not None:
+                shared["available_skills"] = task.metadata.get("available_skills")
+            if "bound_skills" not in shared and task.metadata.get("bound_skills") is not None:
+                shared["bound_skills"] = task.metadata.get("bound_skills")
+            if "active_skills" not in shared and task.metadata.get("active_skills") is not None:
+                shared["active_skills"] = list(task.metadata.get("active_skills") or [])
 
         messages: list[Message] = [
             Message(role="system", content=task.system_prompt),

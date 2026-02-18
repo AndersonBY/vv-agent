@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from v_agent.constants import ASK_USER_TOOL_NAME, READ_IMAGE_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
+from v_agent.constants import (
+    ACTIVATE_SKILL_TOOL_NAME,
+    ASK_USER_TOOL_NAME,
+    READ_IMAGE_TOOL_NAME,
+    TASK_FINISH_TOOL_NAME,
+    TODO_WRITE_TOOL_NAME,
+)
 from v_agent.llm import ScriptedLLM
 from v_agent.runtime import AgentRuntime
 from v_agent.tools import build_default_registry
@@ -237,3 +243,36 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "ok"
+
+
+def test_runtime_propagates_available_skills_into_tool_context(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="activate skill",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name=ACTIVATE_SKILL_TOOL_NAME,
+                        arguments={"skill_name": "demo"},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finish",
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            ),
+        ]
+    )
+    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    task = AgentTask(
+        task_id="task_skill",
+        model="m",
+        system_prompt="sys",
+        user_prompt="activate",
+        max_cycles=4,
+        metadata={"available_skills": [{"name": "demo", "instructions": "Use this"}]},
+    )
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+    assert result.shared_state["active_skills"] == ["demo"]

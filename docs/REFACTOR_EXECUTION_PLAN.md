@@ -50,6 +50,7 @@
 - 2026-02-18T06:44:56Z：新增 `examples/read_image_to_markdown.py` 示例：读取 workspace 图片并强制调用 `_read_image`，让 kimi-k2.5 生成中文 Markdown 报告并写入 `.md` 文件；同步更新 `examples/README.md` 启动命令。已用真实 moonshot/kimi-k2.5 在 `workspace/test_image.png` 回归运行并产出 `workspace/artifacts/image_read_report.md`。
 - 2026-02-18T07:08:20Z：修复 `_read_image` 多模态链路：workspace 图片会编码为 data URL 并通过消息列表注入下一轮 LLM（不再只追加文本提示），`Message.to_openai_message` 支持 user text+image content blocks；补充 runtime/protocol/image 工具测试并完成真实回归运行。
 - 2026-02-18T07:23:05Z：按 backend `tasks/memory.py` 思路升级 v-agent 记忆压缩策略：新增结构化压缩流水线（stale tool_calls 清理、orphan tool 清理、assistant 无工具消息折叠、旧 tool result artifact 化）、已处理图片 payload 压缩、阈值预警注入、JSON 化压缩摘要，并支持通过 `AgentTask.metadata` 调参；补齐 memory/runtime/image/protocol 测试，回归 `93 passed, 1 skipped`。
+- 2026-02-18T08:29:37Z：按 backend `tools/activate_skill.py` 语义落地 `_activate_skill`：从 `available_skills/bound_skills` 做白名单校验与激活，支持读取 `instructions` 或 `SKILL.md`，回写 `active_skills/skill_activation_log` 到 shared_state；runtime 新增 metadata->shared_state 的 skill 透传，并补齐 extension/runtime 测试，回归 `96 passed, 1 skipped`。
 
 ---
 
