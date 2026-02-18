@@ -73,6 +73,7 @@ uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonsho
 说明：
 - workflow 不再作为内建特殊能力；如需 workflow，请按自定义工具注册（见 `tests/test_custom_tools.py` 的方式）。
 - 子 Agent 已有内建工具支持：`_create_sub_task` / `_batch_sub_tasks`（基于 `AgentTask.sub_agents` 配置）。
+- 子 Agent 如需使用与父任务不同的模型/后端，请确保 runtime 提供 `settings_file` + `default_backend`（CLI/SDK 默认会提供）。
 
 快速查看：
 
