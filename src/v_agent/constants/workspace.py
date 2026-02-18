@@ -43,9 +43,11 @@ WORKSPACE_TOOLS_SCHEMAS: dict[str, ToolSchema] = {
             "description": """Read file contents from workspace.
 
 Supported behavior:
-- Reads UTF-8 text files and returns a content slice.
+- Reads plain UTF-8 text files and returns a content slice.
 - Uses 1-based line numbers for `start_line` and `end_line`.
-- Returns a structured JSON payload with path and selected content.
+- Can prepend line numbers with `show_line_numbers=true`.
+- Enforces read limits per request: max 2000 lines or 50000 characters.
+- Large reads return file info payload instead of full content.
 
 Guidance:
 - Prefer this tool instead of shell commands like cat/head/tail.
@@ -67,6 +69,10 @@ Guidance:
                         "type": "integer",
                         "minimum": 1,
                         "description": "Optional ending line number (1-based, inclusive).",
+                    },
+                    "show_line_numbers": {
+                        "type": "boolean",
+                        "description": "When true, prefixes each output line with its source line number.",
                     },
                 },
                 "required": ["path"],

@@ -8,6 +8,9 @@ from v_agent.tools.base import ToolContext
 from v_agent.tools.handlers.common import resolve_workspace_path, to_json
 from v_agent.types import ToolExecutionResult
 
+READ_FILE_MAX_LINES = 2_000
+READ_FILE_MAX_CHARS = 50_000
+
 
 def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     root = resolve_workspace_path(context, str(arguments.get("path", ".")))
@@ -40,16 +43,72 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             content=to_json({"error": f"file not found: {target.relative_to(context.workspace).as_posix()}"}),
         )
 
+    try:
+        start_line = max(int(arguments.get("start_line", 1)), 1)
+        end_line_raw = arguments.get("end_line")
+        end_line_int = int(end_line_raw) if end_line_raw is not None else None
+    except (TypeError, ValueError):
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="error",
+            content=to_json({"error": "`start_line`/`end_line` must be integers"}),
+        )
+
+    if end_line_int is not None:
+        end_line_int = max(end_line_int, start_line)
+
+    show_line_numbers = bool(arguments.get("show_line_numbers", False))
+
     text = target.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
 
-    start_line = int(arguments.get("start_line", 1))
-    end_line = arguments.get("end_line")
-    end_line_int = int(end_line) if end_line is not None else len(lines)
-
     start_idx = max(start_line - 1, 0)
-    end_idx = max(end_line_int, start_idx)
+    end_idx = len(lines) if end_line_int is None else max(end_line_int, start_idx)
     selected = lines[start_idx:end_idx]
+    selected_line_count = len(selected)
+    actual_start_line = start_idx + 1
+    actual_end_line = start_idx + selected_line_count
+
+    rendered_lines = selected
+    if show_line_numbers:
+        rendered_lines = [f"{start_idx + offset + 1}: {line}" for offset, line in enumerate(selected)]
+    content = "\n".join(rendered_lines)
+
+    if selected_line_count > READ_FILE_MAX_LINES or len(content) > READ_FILE_MAX_CHARS:
+        total_lines = len(lines)
+        total_chars = len(text)
+        suggested_start = min(start_line, total_lines)
+        suggested_end = min(suggested_start + READ_FILE_MAX_LINES - 1, total_lines)
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="success",
+            content=to_json(
+                {
+                    "path": target.relative_to(context.workspace).as_posix(),
+                    "start_line": actual_start_line,
+                    "end_line": actual_end_line,
+                    "show_line_numbers": show_line_numbers,
+                    "content": None,
+                    "file_info": {
+                        "total_lines": total_lines,
+                        "total_chars": total_chars,
+                    },
+                    "requested": {
+                        "line_count": selected_line_count,
+                        "char_count": len(content),
+                    },
+                    "limits": {
+                        "max_lines": READ_FILE_MAX_LINES,
+                        "max_chars": READ_FILE_MAX_CHARS,
+                    },
+                    "suggested_range": {
+                        "start_line": suggested_start,
+                        "end_line": suggested_end,
+                    },
+                    "message": "Requested read exceeds limits. Use start_line/end_line for a smaller range.",
+                }
+            ),
+        )
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -57,9 +116,10 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         content=to_json(
             {
                 "path": target.relative_to(context.workspace).as_posix(),
-                "start_line": start_idx + 1,
-                "end_line": start_idx + len(selected),
-                "content": "\n".join(selected),
+                "start_line": actual_start_line,
+                "end_line": actual_end_line,
+                "show_line_numbers": show_line_numbers,
+                "content": content,
             }
         ),
     )

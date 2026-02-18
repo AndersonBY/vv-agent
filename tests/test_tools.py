@@ -42,6 +42,66 @@ def test_workspace_write_and_read(registry, tool_context: ToolContext) -> None:
     assert payload["content"] == "hello"
 
 
+def test_read_file_can_show_line_numbers(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "notes.txt"
+    target.write_text("alpha\nbeta\ngamma", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_read",
+        name=READ_FILE_TOOL_NAME,
+        arguments={"path": "notes.txt", "start_line": 2, "show_line_numbers": True},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["show_line_numbers"] is True
+    assert payload["content"] == "2: beta\n3: gamma"
+
+
+def test_read_file_returns_file_info_when_line_limit_exceeded(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "long.txt"
+    target.write_text("\n".join(f"line-{index}" for index in range(1, 2002)), encoding="utf-8")
+
+    call = ToolCall(id="call_read", name=READ_FILE_TOOL_NAME, arguments={"path": "long.txt"})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["content"] is None
+    assert payload["limits"] == {"max_lines": 2000, "max_chars": 50000}
+    assert payload["file_info"]["total_lines"] == 2001
+    assert payload["requested"]["line_count"] == 2001
+
+
+def test_read_file_returns_file_info_when_char_limit_exceeded(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "chars.txt"
+    target.write_text("a" * 50001, encoding="utf-8")
+
+    call = ToolCall(id="call_read", name=READ_FILE_TOOL_NAME, arguments={"path": "chars.txt"})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["content"] is None
+    assert payload["requested"]["char_count"] > 50000
+    assert payload["file_info"]["total_chars"] == 50001
+
+
+def test_read_file_returns_file_info_when_requested_range_exceeds_limit(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "ranged.txt"
+    target.write_text("\n".join(f"row-{index}" for index in range(1, 3001)), encoding="utf-8")
+
+    call = ToolCall(
+        id="call_read",
+        name=READ_FILE_TOOL_NAME,
+        arguments={"path": "ranged.txt", "start_line": 1, "end_line": 2501},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["content"] is None
+    assert payload["requested"]["line_count"] == 2501
+    assert payload["suggested_range"] == {"start_line": 1, "end_line": 2000}
+
+
 def test_workspace_grep(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("hello world\nsecond line", encoding="utf-8")
     call = ToolCall(id="call1", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "hello"})
