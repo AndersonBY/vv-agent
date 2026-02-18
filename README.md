@@ -18,6 +18,7 @@
 - `v_agent.tools.dispatcher`: 统一处理参数解析/错误码/状态码映射。
 - `v_agent.tools.build_default_registry`: 默认工具集（workspace/todo/control/bash/background/image/sub-agent + skill extension stub）。
 - `v_agent.sdk.AgentSDKClient`: 代码式 SDK 封装（命名 Agent、复用配置、一次注册多 Agent，支持 `query(...)` one-shot 调用）。
+- `v_agent.skills`: Agent Skills 标准支持（`SKILL.md` frontmatter 解析/校验、`<available_skills>` prompt XML、标准化激活输入）。
 - `v_agent.memory.MemoryManager`: 历史压缩器。
 - `v_agent.llm.OpenAICompatibleLLM`: 统一 LLM 接口（端点轮询、重试、流式/非流式聚合、tool call 归一化）。
 - `v_agent.config`: 从本地 `local_settings.py` 解析模型+端点+key。
@@ -72,6 +73,7 @@ uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonsho
 
 说明：
 - workflow 不再作为内建特殊能力；如需 workflow，请按自定义工具注册（见 `tests/test_custom_tools.py` 的方式）。
+- skills 采用 Agent Skills 规范（https://github.com/agentskills/agentskills），`available_skills` 支持 `name/description/location` 或直接提供 skill 目录路径。
 - document 工具不再作为内建能力；如需 document 能力，请按自定义工具注册。
 - workspace 内建工具固定为：`_list_files`、`_file_info`、`_read_file`、`_write_file`、`_file_str_replace`、`_workspace_grep`、`_compress_memory`、`_todo_write`。
 - 子 Agent 已有内建工具支持：`_create_sub_task` / `_batch_sub_tasks`（基于 `AgentTask.sub_agents` 配置）。

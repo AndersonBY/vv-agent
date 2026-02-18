@@ -43,6 +43,12 @@ class AgentSDKClient:
         if definition.sub_agents:
             metadata.setdefault("sub_agent_names", sorted(definition.sub_agents.keys()))
 
+        available_skills = metadata.get("available_skills")
+        if not isinstance(available_skills, list):
+            available_skills = metadata.get("bound_skills")
+        if not isinstance(available_skills, list):
+            available_skills = None
+
         if definition.system_prompt:
             system_prompt = definition.system_prompt
         else:
@@ -58,6 +64,8 @@ class AgentSDKClient:
                 }
                 if definition.sub_agents
                 else None,
+                available_skills=available_skills,
+                workspace=self.options.workspace,
             )
 
         return AgentTask(

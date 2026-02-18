@@ -380,6 +380,7 @@ class AgentRuntime:
                 resolved_model_id=model_id,
                 request=request,
                 parent_shared_state=parent_shared_state,
+                workspace_path=workspace_path,
             )
             sub_runtime = AgentRuntime(
                 llm_client=llm_client,
@@ -458,8 +459,15 @@ class AgentRuntime:
         resolved_model_id: str,
         request: SubTaskRequest,
         parent_shared_state: dict[str, Any],
+        workspace_path: Path,
     ) -> AgentTask:
         language = str(parent_task.metadata.get("language", "zh-CN"))
+        available_skills = parent_task.metadata.get("available_skills")
+        if not isinstance(available_skills, list):
+            available_skills = parent_task.metadata.get("bound_skills")
+        if not isinstance(available_skills, list):
+            available_skills = None
+
         system_prompt = sub_agent.system_prompt or build_system_prompt(
             sub_agent.description,
             language=language,
@@ -467,6 +475,8 @@ class AgentRuntime:
             use_workspace=parent_task.use_workspace,
             enable_todo_management=True,
             agent_type=parent_task.agent_type,
+            available_skills=available_skills,
+            workspace=workspace_path,
         )
 
         user_prompt = request.task_description

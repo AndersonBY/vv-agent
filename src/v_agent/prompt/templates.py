@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 from v_agent.constants import (
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
@@ -13,6 +16,7 @@ from v_agent.constants import (
     WORKSPACE_TOOLS,
     WRITE_FILE_TOOL_NAME,
 )
+from v_agent.skills import SkillProperties, metadata_to_prompt_entries, skill_to_prompt_entry
 
 TASK_FINISH_PROMPT = {
     "en-US": (
@@ -90,6 +94,11 @@ SUB_AGENT_PROMPT = {
     ),
 }
 
+SKILL_PROMPT_HEADER = {
+    "en-US": "Available skills metadata (Agent Skills format):",
+    "zh-CN": "可用技能元数据 (Agent Skills 标准格式):",
+}
+
 
 def render_workspace_tools(language: str) -> str:
     template = WORKSPACE_PROMPT_TEMPLATE.get(language, WORKSPACE_PROMPT_TEMPLATE["en-US"])
@@ -101,4 +110,25 @@ def render_sub_agents(language: str, available_sub_agents: dict[str, str]) -> st
     lines = [header, "Available sub-agents:"]
     for name, description in sorted(available_sub_agents.items()):
         lines.append(f"- {name}: {description}")
+    return "\n".join(lines)
+
+
+def render_available_skills(
+    language: str,
+    available_skills: list[dict[str, Any] | str],
+    *,
+    workspace: Path | None = None,
+) -> str:
+    header = SKILL_PROMPT_HEADER.get(language, SKILL_PROMPT_HEADER["en-US"])
+    lines = [header, "<available_skills>"]
+
+    for entry in metadata_to_prompt_entries(available_skills, workspace=workspace):
+        lines.append(
+            skill_to_prompt_entry(
+                properties=SkillProperties(name=entry.name, description=entry.description),
+                location=entry.location,
+            )
+        )
+
+    lines.append("</available_skills>")
     return "\n".join(lines)

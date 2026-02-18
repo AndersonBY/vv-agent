@@ -43,7 +43,7 @@ Tool-level status code (`ToolResultStatus`):
   - workspace: `_list_files`, `_file_info`, `_read_file`, `_write_file`, `_file_str_replace`, `_workspace_grep`
   - computer: `_bash`, `_check_background_command`, `_read_image`
   - sub-agent delegation: `_create_sub_task`, `_batch_sub_tasks`（由 runtime 内建子任务执行链路驱动）
-  - skills: `_activate_skill`（从 `metadata.available_skills` / `shared_state.available_skills` 解析并激活）
+  - skills: `_activate_skill`（从 `metadata.available_skills` / `shared_state.available_skills` 解析并激活，优先按 Agent Skills 标准 `SKILL.md` frontmatter+正文加载）
 
 ## Prompt Layer
 
@@ -55,6 +55,7 @@ Tool-level status code (`ToolResultStatus`):
 - `<Current Time>`
 
 Prompt templates include tool-priority governance (prefer specialized tools over shell).
+When `available_skills` is provided, prompt builder injects Agent Skills XML metadata block (`<available_skills>`).
 
 ## Memory and LLM
 

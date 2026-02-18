@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from v_agent.constants import (
     ASK_USER_TOOL_NAME,
@@ -54,3 +55,28 @@ def test_prompt_can_include_sub_agent_guidance() -> None:
     assert BATCH_SUB_TASKS_TOOL_NAME in prompt
     assert "research-sub" in prompt
     assert "writer-sub" in prompt
+
+
+def test_prompt_can_include_available_skills_xml(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: demo
+description: Demo skill
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    prompt = build_system_prompt(
+        "Agent",
+        language="en-US",
+        available_skills=[{"location": "demo"}],
+        workspace=tmp_path,
+    )
+
+    assert "<available_skills>" in prompt
+    assert "<name>\ndemo\n</name>" in prompt
+    assert "<description>\nDemo skill\n</description>" in prompt

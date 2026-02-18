@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from v_agent.constants import (
+    ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
     BATCH_SUB_TASKS_TOOL_NAME,
@@ -84,6 +85,12 @@ def test_plan_tool_schemas_adds_sub_agent_tools_when_configured() -> None:
 def test_plan_tool_names_includes_extra_tool_names() -> None:
     names = plan_tool_names(_task(extra_tool_names=["_custom_workflow_tool"]))
     assert "_custom_workflow_tool" in names
+
+
+def test_plan_tool_names_includes_activate_skill_for_bound_skills() -> None:
+    names = plan_tool_names(_task(metadata={"bound_skills": [{"name": "demo"}]}))
+
+    assert ACTIVATE_SKILL_TOOL_NAME in names
 
 
 def test_plan_tool_schemas_only_returns_registered_tools() -> None:

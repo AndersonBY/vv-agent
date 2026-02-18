@@ -38,7 +38,7 @@ def test_skill_extension_handler_requires_bound_skills(tmp_path: Path) -> None:
     assert json.loads(result.content)["error_code"] == "no_bound_skills_configured"
 
 
-def test_skill_extension_handler_activates_named_skill(tmp_path: Path) -> None:
+def test_skill_extension_handler_activates_inline_skill(tmp_path: Path) -> None:
     registry = build_default_registry()
     context = ToolContext(
         workspace=tmp_path,
@@ -60,14 +60,26 @@ def test_skill_extension_handler_activates_named_skill(tmp_path: Path) -> None:
     assert context.shared_state["skill_activation_log"][0]["cycle_index"] == 3
 
 
-def test_skill_extension_handler_loads_skill_md_from_directory(tmp_path: Path) -> None:
+def test_skill_extension_handler_loads_standard_skill_md_from_directory(tmp_path: Path) -> None:
     registry = build_default_registry()
     skill_dir = tmp_path / "skills" / "demo"
     skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text("## Demo skill\nFollow this guide.", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: demo
+description: Demo skill for tests
+---
+## Demo skill
+Follow this guide.
+""",
+        encoding="utf-8",
+    )
     context = ToolContext(
         workspace=tmp_path,
-        shared_state={"todo_list": [], "available_skills": [{"name": "demo", "skill_directory": str(skill_dir)}]},
+        shared_state={
+            "todo_list": [],
+            "available_skills": [{"name": "demo", "skill_directory": str(skill_dir)}],
+        },
         cycle_index=1,
     )
 
@@ -79,7 +91,32 @@ def test_skill_extension_handler_loads_skill_md_from_directory(tmp_path: Path) -
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
     assert "Demo skill" in payload["instructions"]
-    assert payload["instruction_source"].endswith("/SKILL.md")
+    assert payload["location"].endswith("/SKILL.md")
+    assert payload["description"] == "Demo skill for tests"
+
+
+def test_skill_extension_handler_rejects_invalid_standard_skill(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("## missing frontmatter", encoding="utf-8")
+    context = ToolContext(
+        workspace=tmp_path,
+        shared_state={
+            "todo_list": [],
+            "available_skills": [{"name": "demo", "location": str(skill_dir)}],
+        },
+        cycle_index=1,
+    )
+
+    result = registry.execute(
+        ToolCall(id="c4", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
+        context,
+    )
+
+    assert result.status_code == ToolResultStatus.ERROR
+    payload = json.loads(result.content)
+    assert payload["error_code"] == "skill_invalid"
 
 
 def test_planner_can_inject_skill_extension_tool_schema() -> None:

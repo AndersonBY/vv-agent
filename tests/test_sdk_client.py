@@ -200,3 +200,37 @@ def test_sdk_query_can_return_wait_reason_when_not_strict(tmp_path: Path) -> Non
 
     text = client.query(agent_name="demo", prompt="say ok", require_completed=False)
     assert "pick one" in text
+
+
+def test_sdk_prepare_task_injects_available_skills_into_prompt(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: demo
+description: Demo skill
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(settings_file=Path("local_settings.py"), default_backend="moonshot", workspace=tmp_path),
+        agents={
+            "assistant": AgentDefinition(
+                description="assist",
+                model="kimi-k2.5",
+                metadata={"available_skills": [{"location": "demo"}]},
+            )
+        },
+    )
+
+    task = client.prepare_task(
+        agent_name="assistant",
+        prompt="hello",
+        resolved_model_id="kimi-k2.5",
+    )
+
+    assert "<available_skills>" in task.system_prompt
+    assert "<name>\ndemo\n</name>" in task.system_prompt

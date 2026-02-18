@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from v_agent.prompt.templates import (
     ASK_USER_PROMPT,
@@ -9,6 +11,7 @@ from v_agent.prompt.templates import (
     TASK_FINISH_PROMPT,
     TODO_PROMPT,
     TOOL_PRIORITY_PROMPT,
+    render_available_skills,
     render_sub_agents,
     render_workspace_tools,
 )
@@ -23,6 +26,8 @@ def build_system_prompt(
     enable_todo_management: bool = True,
     agent_type: str | None = None,
     available_sub_agents: dict[str, str] | None = None,
+    available_skills: list[dict[str, Any] | str] | None = None,
+    workspace: str | Path | None = None,
     current_time_utc: datetime | None = None,
 ) -> str:
     prompt_sections: list[str] = [f"<Agent Definition>\n{original_system_prompt}\n</Agent Definition>"]
@@ -41,6 +46,9 @@ def build_system_prompt(
         tools_lines.append(TODO_PROMPT.get(language, TODO_PROMPT["en-US"]))
     if available_sub_agents:
         tools_lines.append(render_sub_agents(language, available_sub_agents))
+    if available_skills:
+        workspace_path = Path(workspace).resolve() if workspace is not None else None
+        tools_lines.append(render_available_skills(language, available_skills, workspace=workspace_path))
     tools_lines.append(TASK_FINISH_PROMPT.get(language, TASK_FINISH_PROMPT["en-US"]))
     prompt_sections.append(f"<Tools>\n{'\n\n'.join(tools_lines)}\n</Tools>")
 

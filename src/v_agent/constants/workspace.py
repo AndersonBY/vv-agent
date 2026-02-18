@@ -585,7 +585,13 @@ ACTIVATE_SKILL_TOOL_SCHEMA: ToolSchema = {
     "type": "function",
     "function": {
         "name": ACTIVATE_SKILL_TOOL_NAME,
-        "description": "Activate a named skill and load its instructions into current task context.",
+        "description": """Activate a skill from the current task's available skill list.
+
+The skill metadata follows the Agent Skills specification (https://github.com/agentskills/agentskills):
+- name/description are exposed in <available_skills>
+- skill instructions are loaded from SKILL.md when location/path is provided
+
+Use this tool only for skills explicitly listed in available_skills/bound_skills.""",
         "parameters": {
             "type": "object",
             "properties": {

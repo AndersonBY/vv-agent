@@ -24,6 +24,7 @@
 | P13 子 Agent 链路与 SDK query | ✅ 已完成 | 2026-02-18T02:39:12Z | 内建 `_create_sub_task/_batch_sub_tasks` 实际执行链路，补齐 SDK `query()` one-shot 接口与测试 |
 | P14 移除 document 内建工具 | ✅ 已完成 | 2026-02-18T02:59:18Z | 删除 document constants/handlers/registry/planner 注入，document 改为纯自定义工具能力 |
 | P15 收敛 workspace 内建工具集 | ✅ 已完成 | 2026-02-18T03:13:05Z | workspace 内建仅保留 `list/info/read/write/str_replace/grep/compress/todo_write` 并补齐对应 handler/schema/test |
+| P16 Agent Skills 标准化 | ✅ 已完成 | 2026-02-18T08:54:55Z | 对齐 agentskills 规范：frontmatter 解析/校验、`<available_skills>` prompt 注入、`_activate_skill` 标准 SKILL.md 激活链路与测试 |
 
 ### 执行日志
 
@@ -51,6 +52,7 @@
 - 2026-02-18T07:08:20Z：修复 `_read_image` 多模态链路：workspace 图片会编码为 data URL 并通过消息列表注入下一轮 LLM（不再只追加文本提示），`Message.to_openai_message` 支持 user text+image content blocks；补充 runtime/protocol/image 工具测试并完成真实回归运行。
 - 2026-02-18T07:23:05Z：按 backend `tasks/memory.py` 思路升级 v-agent 记忆压缩策略：新增结构化压缩流水线（stale tool_calls 清理、orphan tool 清理、assistant 无工具消息折叠、旧 tool result artifact 化）、已处理图片 payload 压缩、阈值预警注入、JSON 化压缩摘要，并支持通过 `AgentTask.metadata` 调参；补齐 memory/runtime/image/protocol 测试，回归 `93 passed, 1 skipped`。
 - 2026-02-18T08:29:37Z：按 backend `tools/activate_skill.py` 语义落地 `_activate_skill`：从 `available_skills/bound_skills` 做白名单校验与激活，支持读取 `instructions` 或 `SKILL.md`，回写 `active_skills/skill_activation_log` 到 shared_state；runtime 新增 metadata->shared_state 的 skill 透传，并补齐 extension/runtime 测试，回归 `96 passed, 1 skipped`。
+- 2026-02-18T08:54:55Z：对齐 Agent Skills 官方规范（`agentskills/agentskills`）：新增 `v_agent.skills` 标准解析/校验/提示词模块（含 `read_properties`/`validate`/`metadata_to_prompt_entries`），`build_system_prompt` 支持注入 `<available_skills>` XML，`_activate_skill` 优先按 `location/path` 加载并验证 `SKILL.md` frontmatter；新增 skills parser/prompt/validator 测试与扩展链路测试，质量门禁回归 `ruff/ty/pytest` 全绿（`115 passed, 1 skipped`）。
 
 ---
 
@@ -112,6 +114,10 @@ uv run pytest -q
 | P10 | 文档与扩展接口 | 文档工具/工作流/skills 扩展点 |
 | P11 | 全量测试与验收 | 回归+真实联调+文档收口 |
 | P12 | LLM 统一接口对齐 | 对齐 backend LLM 参数策略与流式 tool call 聚合 |
+| P13 | 子 Agent 链路与 SDK query | 打通内建子任务委派工具和子 Agent 运行链路，并提供 SDK one-shot 查询接口 |
+| P14 | 移除 document 内建工具 | document 能力下沉为自定义工具，框架保持最小内建集 |
+| P15 | 收敛 workspace 内建工具集 | 仅保留核心 workspace 工具并对齐 backend 参数/语义 |
+| P16 | Agent Skills 标准化 | 对齐 agentskills 规范：frontmatter 校验、prompt 元数据注入、标准激活流程 |
 
 ---
 

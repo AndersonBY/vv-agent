@@ -33,7 +33,7 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
     if task.sub_agents_enabled:
         tool_names.extend([CREATE_SUB_TASK_TOOL_NAME, BATCH_SUB_TASKS_TOOL_NAME])
 
-    if task.metadata.get("available_skills"):
+    if task.metadata.get("available_skills") or task.metadata.get("bound_skills"):
         tool_names.append(ACTIVATE_SKILL_TOOL_NAME)
 
     if task.native_multimodal:

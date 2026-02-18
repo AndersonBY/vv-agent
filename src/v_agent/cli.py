@@ -108,6 +108,7 @@ def main() -> None:
         use_workspace=True,
         enable_todo_management=True,
         agent_type=args.agent_type,
+        workspace=Path(args.workspace),
     )
 
     task = AgentTask(
