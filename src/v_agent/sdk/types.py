@@ -3,12 +3,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from v_agent.config import ResolvedModelConfig
 from v_agent.llm.base import LLMClient
+from v_agent.runtime.hooks import RuntimeHook
 from v_agent.tools.registry import ToolRegistry
 from v_agent.types import AgentResult, NoToolPolicy, SubAgentConfig
+
+if TYPE_CHECKING:
+    from v_agent.sdk.resources import AgentResourceLoader
 
 RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
 ToolRegistryFactory = Callable[[], ToolRegistry]
@@ -46,6 +50,7 @@ class AgentDefinition:
     exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None
+    system_prompt_template: str | None = None
 
 
 @dataclass(slots=True)
@@ -57,6 +62,9 @@ class AgentSDKOptions:
     llm_builder: LLMBuilder | None = None
     tool_registry_factory: ToolRegistryFactory | None = None
     log_handler: RuntimeLogHandler | None = None
+    runtime_hooks: list[RuntimeHook] = field(default_factory=list)
+    resource_loader: AgentResourceLoader | None = None
+    auto_discover_resources: bool = True
 
 
 @dataclass(slots=True)

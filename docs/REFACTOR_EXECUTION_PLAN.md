@@ -26,6 +26,9 @@
 | P15 收敛 workspace 内建工具集 | ✅ 已完成 | 2026-02-18T03:13:05Z | workspace 内建仅保留 `list/info/read/write/str_replace/grep/compress/todo_write` 并补齐对应 handler/schema/test |
 | P16 Agent Skills 标准化 | ✅ 已完成 | 2026-02-18T09:34:33Z | 对齐 agentskills 规范，并新增 skills 目录自动发现与系统提示词自动注入，支持 Agent 自主选择激活技能 |
 | P17 示例嵌入式改造 | ✅ 已完成 | 2026-02-18T13:48:38Z | examples 全部改为非 argparse 模式，参数改为脚本内默认值 + 环境变量覆盖，便于直接嵌入 Python 项目 |
+| P18 Session-first SDK 改造 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 `AgentSession`（`prompt/continue_run/query/steer/follow_up/subscribe`），支持消息与 shared_state 的会话级持续化 |
+| P19 Runtime Hooks 与中断转向 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 before/after memory-llm-tool hooks，支持 tool 级事件回调与同轮剩余工具 `skipped_due_to_steering` 语义 |
+| P20 Resource Loader 自动发现 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 `AgentResourceLoader`，自动加载 `.v-agent/` 与 `~/.v-agent/` 下 profiles/prompts/skills/hooks 并注入 SDK |
 
 ### 执行日志
 
@@ -58,6 +61,7 @@
 - 2026-02-18T13:48:38Z：完成 P17：`examples/` 下全部示例移除 argparse CLI 入参，统一改为脚本内默认配置 + 环境变量覆盖（如 `V_AGENT_EXAMPLE_*`）；更新 `examples/README.md` 为嵌入式运行说明并给出 env override 示例。质量门禁回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 - 2026-02-18T14:44:02Z：继续优化 P17 示例易嵌入性：移除示例中的 `main()/if __name__ == "__main__"` 包装，统一改为脚本顶层平铺执行（保留最小必要日志函数）；回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 - 2026-02-18T14:58:11Z：基于 `claude-agent-sdk-python` 风格重构 SDK 入口：`AgentSDKClient` 新增默认单 Agent 模式与 `run/query` 直接调用（无需预注册 agents map），保留 `run_agent/query_agent` 兼容层；同时新增模块级 `v_agent.sdk.run/query` one-shot helper，示例脚本改为优先展示新接口；回归 `ruff/ty/pytest` 全绿（`130 passed, 1 skipped`）。
+- 2026-02-18T23:40:12Z：完成 P18/P19/P20：新增 `AgentSession` 会话 API、`RuntimeHookManager` 与 hook 事件/patch 协议、`AgentResourceLoader` 自动发现机制；runtime 支持 tool 级回调即时触发 `steer`，并在同轮跳过后续工具；新增 `tests/test_sdk_session.py`、`tests/test_runtime_hooks.py`、`tests/test_sdk_resources.py` 与 `examples/session_api_embed.py`、`examples/runtime_hooks_embed.py`、`examples/resource_loader_embed.py`；质量门禁回归 `ruff/ty/pytest` 全绿（`143 passed, 1 skipped`）。
 
 ---
 
@@ -123,6 +127,10 @@ uv run pytest -q
 | P14 | 移除 document 内建工具 | document 能力下沉为自定义工具，框架保持最小内建集 |
 | P15 | 收敛 workspace 内建工具集 | 仅保留核心 workspace 工具并对齐 backend 参数/语义 |
 | P16 | Agent Skills 标准化 | 对齐 agentskills 规范：frontmatter 校验、prompt 元数据注入、标准激活流程 |
+| P17 | 示例嵌入式改造 | 所有示例改为独立 Python 脚本（无 CLI argparse 包装） |
+| P18 | Session-first SDK 改造 | 引入会话对象，支持跨轮状态、steer/follow-up、事件订阅 |
+| P19 | Runtime Hooks 与中断转向 | 引入 before/after hooks 与 tool 级即时事件，支持运行时拦截与同轮转向 |
+| P20 | Resource Loader 自动发现 | 自动发现 profiles/prompts/skills/hooks 并合并到 SDK 运行上下文 |
 
 ---
 
@@ -536,6 +544,105 @@ uv run pytest -q
 - `openai_compatible.py` 的参数策略与 backend 参考实现一致（不再是自定义分叉实现）。
 - `tests/test_llm_interface.py` 对关键模型和流式工具聚合行为有回归覆盖。
 - 通过 `ruff` / `ty` / `pytest`，并能真实执行 CLI 命令。
+
+---
+
+## P18 Session-first SDK 改造（新增）
+
+### 目标
+- 提供可持续会话的 SDK 入口，避免用户每次手动拼接 message/history/shared_state。
+
+### 参考
+- `ref_repos/agent_framework/claude-agent-sdk-python/`：会话对象与事件订阅的交互风格。
+- `ref_repos/coding_agent/pi-mono/`：会话中断转向与运行态观察能力。
+
+### 改动文件
+- 新增：
+  - `v-agent/src/v_agent/sdk/session.py`
+  - `v-agent/tests/test_sdk_session.py`
+  - `v-agent/examples/session_api_embed.py`
+- 修改：
+  - `v-agent/src/v_agent/sdk/client.py`
+  - `v-agent/src/v_agent/sdk/__init__.py`
+  - `v-agent/src/v_agent/__init__.py`
+
+### 具体任务
+1. 增加 `AgentSession`：`prompt/continue_run/query/steer/follow_up/subscribe/clear_queues/state`。
+2. 将 `AgentSDKClient.create_session()` 接入统一 `_execute(...)` 运行路径。
+3. 保持旧 one-shot API（`run/query/run_agent/query_agent`）兼容。
+
+### DoD
+- 可以不暴露底层 runtime 即完成多轮会话。
+- session 内消息与 shared_state 可跨轮延续。
+- 新增测试覆盖 follow-up、steer、事件流转、失败态 query。
+
+---
+
+## P19 Runtime Hooks 与中断转向（新增）
+
+### 目标
+- 提供可插拔的 runtime 拦截点，允许业务在不 fork runtime 的前提下做策略注入/安全兜底。
+
+### 参考
+- `ref_repos/coding_agent/pi-mono/`：运行态可插桩与工具链路控制思路。
+- 现有 backend 运行循环中对 tool 结果后处理和中断插入的机制。
+
+### 改动文件
+- 新增：
+  - `v-agent/src/v_agent/runtime/hooks.py`
+  - `v-agent/tests/test_runtime_hooks.py`
+  - `v-agent/examples/runtime_hooks_embed.py`
+- 修改：
+  - `v-agent/src/v_agent/runtime/cycle_runner.py`
+  - `v-agent/src/v_agent/runtime/tool_call_runner.py`
+  - `v-agent/src/v_agent/runtime/engine.py`
+  - `v-agent/src/v_agent/runtime/__init__.py`
+
+### 具体任务
+1. 定义 hooks 事件模型：`before_memory_compact/before_llm/after_llm/before_tool_call/after_tool_call`。
+2. 支持 patch/short-circuit：可改写消息、工具 schema、tool call，或直接返回 tool result。
+3. tool 结果改为“执行即回调”，支持 session 在同轮内接收事件并触发 `steer`。
+4. 若出现 steer 中断，同轮剩余 tool calls 统一返回 `skipped_due_to_steering`。
+
+### DoD
+- hook 可注入上下文、替换 LLM 响应、拦截工具调用。
+- steer 可在同一轮生效并跳过后续工具。
+- 新增测试覆盖 patch、短路、after-hook、转向跳过语义。
+
+---
+
+## P20 Resource Loader 自动发现（新增）
+
+### 目标
+- 提供“零配置接入”的资源装载层，让项目可通过目录结构注册 agent profile/prompt/skills/hooks。
+
+### 参考
+- `claude-agent-sdk-python` 的资源组织思路。
+- 当前项目对 skills 与 prompt template 的配置需求。
+
+### 改动文件
+- 新增：
+  - `v-agent/src/v_agent/sdk/resources.py`
+  - `v-agent/tests/test_sdk_resources.py`
+  - `v-agent/examples/resource_loader_embed.py`
+- 修改：
+  - `v-agent/src/v_agent/sdk/types.py`
+  - `v-agent/src/v_agent/sdk/client.py`
+  - `v-agent/src/v_agent/sdk/__init__.py`
+
+### 具体任务
+1. 增加 `AgentResourceLoader`，扫描：
+   - `agents.json`
+   - `prompts/*.md`
+   - `skills/`
+   - `hooks/*.py` 与 `hooks/*/index.py`
+2. 支持 hook 装载入口：`create_hook` / `HOOK` / `HOOKS`。
+3. `AgentSDKClient` 初始化时自动合并资源并输出 `resource_diagnostics`。
+
+### DoD
+- 不手写代码也能从 `.v-agent/` 自动发现 profile 与 prompt 模板。
+- skills 目录与 hooks 能被自动注入到 SDK 运行上下文。
+- 新增测试覆盖资源发现、模板注入、hook 自动加载。
 
 ---
 

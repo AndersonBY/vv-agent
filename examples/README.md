@@ -119,3 +119,40 @@ uv run python examples/remotion_skill_demo.py
 - 自动构建系统提示词中的 `<available_skills>`
 - 由 Agent 根据技能简介自主选择并调用 `_activate_skill`
 - 输出 Remotion demo 到 `workspace/artifacts/remotion_demo/`
+
+## 7) Session API（会话式执行 + steer/follow-up）
+
+文件: `examples/session_api_embed.py`
+
+```bash
+uv run python examples/session_api_embed.py
+```
+
+这个示例会:
+- 演示 `client.create_session()` 的会话式调用
+- 演示 `session.steer(...)` 和 `session.follow_up(...)`
+- 实时订阅并打印 session + runtime 事件
+
+## 8) Runtime Hooks（运行时拦截与上下文注入）
+
+文件: `examples/runtime_hooks_embed.py`
+
+```bash
+uv run python examples/runtime_hooks_embed.py
+```
+
+这个示例会:
+- 使用 `before_llm` 注入额外上下文消息
+- 使用 `before_tool_call` 拦截敏感路径写入
+
+## 9) Resource Loader（自动发现 profiles/prompts/skills/hooks）
+
+文件: `examples/resource_loader_embed.py`
+
+```bash
+uv run python examples/resource_loader_embed.py
+```
+
+这个示例会:
+- 自动发现 `workspace/.v-agent/` 与 `~/.v-agent/` 资源
+- 自动加载 profile、prompt template、skills 目录和 runtime hooks

@@ -14,10 +14,13 @@
 - `v_agent.runtime.AgentRuntime`: 顶层任务状态机（completed/wait_user/max_cycles/failed）。
 - `v_agent.runtime.CycleRunner`: 单轮 LLM 调用与 cycle 记录构建。
 - `v_agent.runtime.ToolCallRunner`: 工具调用执行与 directive 收敛。
+- `v_agent.runtime.RuntimeHookManager`: 运行时 Hook 分发（before/after llm、tool_call、memory_compact）。
 - `v_agent.runtime.tool_planner`: 按 capability 动态规划可用工具 schema。
 - `v_agent.tools.dispatcher`: 统一处理参数解析/错误码/状态码映射。
 - `v_agent.tools.build_default_registry`: 默认工具集（workspace/todo/control/bash/background/image/sub-agent + skill extension stub）。
 - `v_agent.sdk.AgentSDKClient`: 代码式 SDK 封装（支持默认单 Agent 直接 `run/query`，也支持命名 profiles；并提供模块级 `v_agent.sdk.run/query` one-shot helper）。
+- `v_agent.sdk.AgentSession`: Session-first 会话 API（`prompt/continue_run/steer/follow_up/subscribe`）。
+- `v_agent.sdk.AgentResourceLoader`: 自动发现 `.v-agent/` 与 `~/.v-agent/` 的 profiles/prompts/skills/hooks。
 - `v_agent.skills`: Agent Skills 标准支持（`SKILL.md` frontmatter 解析/校验、`<available_skills>` prompt XML、标准化激活输入）。
 - `v_agent.memory.MemoryManager`: 历史压缩器。
 - `v_agent.llm.OpenAICompatibleLLM`: 统一 LLM 接口（端点轮询、重试、流式/非流式聚合、tool call 归一化）。

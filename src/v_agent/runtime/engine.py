@@ -12,6 +12,7 @@ from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
 from v_agent.prompt import build_system_prompt
 from v_agent.runtime.cycle_runner import CycleRunner
+from v_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
 from v_agent.runtime.tool_call_runner import ToolCallRunner
 from v_agent.tools import ToolContext, ToolRegistry
 from v_agent.types import (
@@ -23,11 +24,14 @@ from v_agent.types import (
     SubAgentConfig,
     SubTaskOutcome,
     SubTaskRequest,
+    ToolCall,
     ToolDirective,
     ToolExecutionResult,
 )
 
 RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
+BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
+InterruptionMessageProvider = Callable[[], list[Message]]
 
 
 class LLMBuilder(Protocol):
@@ -56,6 +60,7 @@ class AgentRuntime:
         llm_builder: LLMBuilder | None = None,
         tool_registry_factory: Callable[[], ToolRegistry] | None = None,
         sub_agent_timeout_seconds: float = 90.0,
+        hooks: list[RuntimeHook] | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -67,8 +72,16 @@ class AgentRuntime:
         self.llm_builder = llm_builder or build_openai_llm_from_local_settings
         self.tool_registry_factory = tool_registry_factory
         self.sub_agent_timeout_seconds = max(sub_agent_timeout_seconds, 1.0)
-        self.cycle_runner = CycleRunner(llm_client=llm_client, tool_registry=tool_registry)
-        self.tool_call_runner = ToolCallRunner(tool_registry=tool_registry)
+        self.hook_manager = RuntimeHookManager(hooks=list(hooks or []))
+        self.cycle_runner = CycleRunner(
+            llm_client=llm_client,
+            tool_registry=tool_registry,
+            hook_manager=self.hook_manager,
+        )
+        self.tool_call_runner = ToolCallRunner(
+            tool_registry=tool_registry,
+            hook_manager=self.hook_manager,
+        )
 
     def run(
         self,
@@ -76,6 +89,10 @@ class AgentRuntime:
         *,
         workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
+        initial_messages: list[Message] | None = None,
+        user_message: str | None = None,
+        before_cycle_messages: BeforeCycleMessageProvider | None = None,
+        interruption_messages: InterruptionMessageProvider | None = None,
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
         shared = dict(shared_state or {})
@@ -90,10 +107,11 @@ class AgentRuntime:
             if "active_skills" not in shared and task.metadata.get("active_skills") is not None:
                 shared["active_skills"] = list(task.metadata.get("active_skills") or [])
 
-        messages: list[Message] = [
-            Message(role="system", content=task.system_prompt),
-            Message(role="user", content=task.user_prompt),
-        ]
+        messages = self._build_initial_messages(
+            task=task,
+            initial_messages=initial_messages,
+            user_message=user_message,
+        )
         cycles: list[CycleRecord] = []
         self._emit_log(
             "run_started",
@@ -106,6 +124,15 @@ class AgentRuntime:
         memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
 
         for cycle_index in range(1, task.max_cycles + 1):
+            if before_cycle_messages is not None:
+                injected_messages = before_cycle_messages(cycle_index, messages, shared)
+                if injected_messages:
+                    messages.extend(injected_messages)
+                    self._emit_log(
+                        "cycle_injected_messages",
+                        cycle=cycle_index,
+                        count=len(injected_messages),
+                    )
             self._emit_log(
                 "cycle_started",
                 cycle=cycle_index,
@@ -118,6 +145,7 @@ class AgentRuntime:
                     messages=messages,
                     cycle_index=cycle_index,
                     memory_manager=memory_manager,
+                    shared_state=shared,
                 )
             except Exception as exc:
                 self._emit_log(
@@ -151,14 +179,36 @@ class AgentRuntime:
                         parent_shared_state=shared,
                     ),
                 )
-                tool_result = self.tool_call_runner.run(
+                def _on_tool_result(call: ToolCall, result: ToolExecutionResult, *, _cycle: int = cycle_index) -> None:
+                    self._emit_log(
+                        "tool_result",
+                        cycle=_cycle,
+                        tool_name=call.name,
+                        tool_call_id=result.tool_call_id,
+                        status=result.status_code.value if result.status_code else result.status,
+                        directive=result.directive.value,
+                        error_code=result.error_code,
+                        content_preview=self._preview_text(result.content),
+                    )
+
+                tool_outcome = self.tool_call_runner.run(
+                    task=task,
                     tool_calls=cycle_record.tool_calls,
                     context=context,
                     messages=messages,
                     cycle_record=cycle_record,
+                    interruption_provider=interruption_messages,
+                    on_tool_result=_on_tool_result,
                 )
-                self._emit_cycle_tool_results(cycle_record=cycle_record)
+                tool_result = tool_outcome.directive_result
                 cycles.append(cycle_record)
+                if tool_outcome.interruption_messages:
+                    messages.extend(tool_outcome.interruption_messages)
+                    self._emit_log(
+                        "run_steered",
+                        cycle=cycle_index,
+                        steering_count=len(tool_outcome.interruption_messages),
+                    )
 
                 if tool_result and tool_result.directive == ToolDirective.WAIT_USER:
                     wait_reason = tool_result.metadata.get("question") if isinstance(tool_result.metadata, dict) else None
@@ -259,6 +309,40 @@ class AgentRuntime:
         if self.log_handler is None:
             return
         self.log_handler(event, payload)
+
+    @staticmethod
+    def _copy_message(message: Message) -> Message:
+        return Message(
+            role=message.role,
+            content=message.content,
+            name=message.name,
+            tool_call_id=message.tool_call_id,
+            tool_calls=list(message.tool_calls) if message.tool_calls else None,
+            reasoning_content=message.reasoning_content,
+            image_url=message.image_url,
+        )
+
+    def _build_initial_messages(
+        self,
+        *,
+        task: AgentTask,
+        initial_messages: list[Message] | None,
+        user_message: str | None,
+    ) -> list[Message]:
+        if initial_messages:
+            prepared = [self._copy_message(message) for message in initial_messages]
+            if not prepared or prepared[0].role != "system":
+                prepared.insert(0, Message(role="system", content=task.system_prompt))
+            message_to_append = task.user_prompt if user_message is None else user_message
+            if message_to_append:
+                prepared.append(Message(role="user", content=message_to_append))
+            return prepared
+
+        first_user_message = task.user_prompt if user_message is None else user_message
+        return [
+            Message(role="system", content=task.system_prompt),
+            Message(role="user", content=first_user_message),
+        ]
 
     def _build_memory_manager(self, *, task: AgentTask, workspace_path: Path) -> MemoryManager:
         metadata = task.metadata if isinstance(task.metadata, dict) else {}

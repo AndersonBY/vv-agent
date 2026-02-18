@@ -5,15 +5,23 @@ from typing import Any
 
 from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
+from v_agent.runtime.hooks import RuntimeHookManager
 from v_agent.runtime.tool_planner import plan_tool_schemas
 from v_agent.tools import ToolRegistry
 from v_agent.types import AgentTask, CycleRecord, Message, ToolCall
 
 
 class CycleRunner:
-    def __init__(self, *, llm_client: LLMClient, tool_registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        *,
+        llm_client: LLMClient,
+        tool_registry: ToolRegistry,
+        hook_manager: RuntimeHookManager | None = None,
+    ) -> None:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
+        self.hook_manager = hook_manager or RuntimeHookManager()
 
     def run_cycle(
         self,
@@ -22,19 +30,42 @@ class CycleRunner:
         messages: list[Message],
         cycle_index: int,
         memory_manager: MemoryManager,
+        shared_state: dict[str, Any] | None = None,
     ) -> tuple[list[Message], CycleRecord]:
-        compacted_messages, memory_compacted = memory_manager.compact(messages, cycle_index=cycle_index)
+        shared = shared_state or {}
+        pre_compact_messages = self.hook_manager.apply_before_memory_compact(
+            task=task,
+            cycle_index=cycle_index,
+            messages=messages,
+            shared_state=shared,
+        )
+        compacted_messages, memory_compacted = memory_manager.compact(pre_compact_messages, cycle_index=cycle_index)
         memory_usage_percentage = self._estimate_memory_usage_percentage(compacted_messages, task.memory_threshold_chars)
         tool_schemas = plan_tool_schemas(
             registry=self.tool_registry,
             task=task,
             memory_usage_percentage=memory_usage_percentage,
         )
+        compacted_messages, tool_schemas = self.hook_manager.apply_before_llm(
+            task=task,
+            cycle_index=cycle_index,
+            messages=compacted_messages,
+            tool_schemas=tool_schemas,
+            shared_state=shared,
+        )
 
         llm_response = self.llm_client.complete(
             model=task.model,
             messages=compacted_messages,
             tools=tool_schemas,
+        )
+        llm_response = self.hook_manager.apply_after_llm(
+            task=task,
+            cycle_index=cycle_index,
+            messages=compacted_messages,
+            tool_schemas=tool_schemas,
+            response=llm_response,
+            shared_state=shared,
         )
 
         next_messages = list(compacted_messages)

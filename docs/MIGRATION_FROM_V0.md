@@ -72,3 +72,10 @@ run = client.run(prompt="执行任务")
 text = client.query(prompt="一句话总结进展")
 text = client.query(agent="planner", prompt="一句话总结进展")
 ```
+
+## 8) Session API, runtime hooks, and resource loader
+
+- 新增 `client.create_session()`：支持状态化多轮执行、`steer/follow_up` 队列、事件订阅。
+- 新增 runtime hooks：可在 `before_memory_compact/before_llm/after_llm/before_tool_call/after_tool_call` 拦截或改写流程。
+- 新增 `AgentResourceLoader`：自动发现 `workspace/.v-agent/` 与 `~/.v-agent/` 的
+  `agents.json`、`prompts/*.md`、`skills/`、`hooks/` 资源并注入 SDK。

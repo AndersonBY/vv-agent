@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from v_agent.config import build_openai_llm_from_local_settings
 from v_agent.prompt import build_system_prompt
 from v_agent.runtime import AgentRuntime
-from v_agent.sdk.types import AgentDefinition, AgentRun, AgentSDKOptions
+from v_agent.runtime.engine import BeforeCycleMessageProvider, InterruptionMessageProvider
+from v_agent.sdk.types import AgentDefinition, AgentRun, AgentSDKOptions, RuntimeLogHandler
 from v_agent.tools import build_default_registry
-from v_agent.types import AgentStatus, AgentTask
+from v_agent.types import AgentStatus, AgentTask, Message
+
+
+def _compose_log_handlers(*handlers: RuntimeLogHandler | None) -> RuntimeLogHandler | None:
+    valid_handlers = [handler for handler in handlers if handler is not None]
+    if not valid_handlers:
+        return None
+
+    def combined(event: str, payload: dict[str, Any]) -> None:
+        for handler in valid_handlers:
+            handler(event, payload)
+
+    return combined
 
 
 class AgentSDKClient:
@@ -25,6 +39,24 @@ class AgentSDKClient:
         self._default_agent = agent
         self._default_agent_name = "default"
         self._agents: dict[str, AgentDefinition] = dict(agents or {})
+        self._prompt_templates: dict[str, str] = {}
+        self._resource_skill_directories: list[str] = []
+        self._resource_diagnostics: list[str] = []
+        self._runtime_hooks = list(options.runtime_hooks)
+        self._resource_loader = options.resource_loader
+
+        if self._resource_loader is not None and self.options.auto_discover_resources:
+            discovered = self._resource_loader.discover()
+            for name, definition in discovered.agents.items():
+                self._agents.setdefault(name, definition)
+            self._prompt_templates.update(discovered.prompts)
+            self._resource_skill_directories = list(discovered.skill_directories)
+            self._runtime_hooks.extend(discovered.hooks)
+            self._resource_diagnostics = list(discovered.diagnostics)
+
+    @property
+    def resource_diagnostics(self) -> list[str]:
+        return list(self._resource_diagnostics)
 
     def register_agent(self, name: str, definition: AgentDefinition) -> None:
         if not name:
@@ -50,7 +82,8 @@ class AgentSDKClient:
         agent_name: str | None = None,
         task_name: str | None = None,
     ) -> AgentTask:
-        resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
+        resolved_name, raw_definition = self._resolve_agent(agent=agent, agent_name=agent_name)
+        definition = self._effective_definition(raw_definition)
         effective_task_name = task_name or resolved_name
         metadata = dict(definition.metadata)
         metadata.setdefault("language", definition.language)
@@ -90,11 +123,17 @@ class AgentSDKClient:
             if normalized_skills:
                 available_skills = normalized_skills
 
+        prompt_definition = definition.description
+        if definition.system_prompt_template:
+            template = self._prompt_templates.get(definition.system_prompt_template)
+            if isinstance(template, str) and template.strip():
+                prompt_definition = template
+
         if definition.system_prompt:
             system_prompt = definition.system_prompt
         else:
             system_prompt = build_system_prompt(
-                definition.description,
+                prompt_definition,
                 language=definition.language,
                 allow_interruption=definition.allow_interruption,
                 use_workspace=definition.use_workspace,
@@ -134,37 +173,24 @@ class AgentSDKClient:
         agent: str | AgentDefinition | None = None,
         agent_name: str | None = None,
         shared_state: dict[str, Any] | None = None,
+        log_handler: RuntimeLogHandler | None = None,
+        initial_messages: list[Message] | None = None,
+        before_cycle_messages: BeforeCycleMessageProvider | None = None,
+        interruption_messages: InterruptionMessageProvider | None = None,
+        task_name: str | None = None,
     ) -> AgentRun:
         resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
-        backend = definition.backend or self.options.default_backend
-        llm_builder = self.options.llm_builder or build_openai_llm_from_local_settings
-        llm, resolved = llm_builder(
-            self.options.settings_file,
-            backend=backend,
-            model=definition.model,
-            timeout_seconds=self.options.timeout_seconds,
-        )
-
-        tool_registry_factory = self.options.tool_registry_factory or build_default_registry
-        runtime = AgentRuntime(
-            llm_client=llm,
-            tool_registry=tool_registry_factory(),
-            default_workspace=self.options.workspace,
-            log_handler=self.options.log_handler,
-            settings_file=self.options.settings_file,
-            default_backend=backend,
-            llm_builder=llm_builder,
-            tool_registry_factory=tool_registry_factory,
-        )
-
-        task = self.prepare_task(
+        return self._execute(
             prompt=prompt,
-            resolved_model_id=resolved.model_id,
-            agent=definition,
-            task_name=resolved_name,
+            resolved_name=resolved_name,
+            definition=definition,
+            shared_state=shared_state,
+            log_handler=log_handler,
+            initial_messages=initial_messages,
+            before_cycle_messages=before_cycle_messages,
+            interruption_messages=interruption_messages,
+            task_name=task_name,
         )
-        result = runtime.run(task, shared_state=shared_state)
-        return AgentRun(agent_name=resolved_name, result=result, resolved=resolved)
 
     def run_agent(
         self,
@@ -218,6 +244,87 @@ class AgentSDKClient:
             shared_state=shared_state,
             require_completed=require_completed,
         )
+
+    def create_session(
+        self,
+        *,
+        agent: str | AgentDefinition | None = None,
+        agent_name: str | None = None,
+        shared_state: dict[str, Any] | None = None,
+    ):
+        resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
+
+        from v_agent.sdk.session import create_agent_session
+
+        return create_agent_session(
+            execute_run=self._execute,
+            agent_name=resolved_name,
+            definition=definition,
+            shared_state=shared_state,
+        )
+
+    def _execute(
+        self,
+        *,
+        prompt: str,
+        resolved_name: str | None = None,
+        definition: AgentDefinition | None = None,
+        agent: str | AgentDefinition | None = None,
+        agent_name: str | None = None,
+        shared_state: dict[str, Any] | None = None,
+        log_handler: RuntimeLogHandler | None = None,
+        initial_messages: list[Message] | None = None,
+        before_cycle_messages: BeforeCycleMessageProvider | None = None,
+        interruption_messages: InterruptionMessageProvider | None = None,
+        task_name: str | None = None,
+    ) -> AgentRun:
+        if definition is None or resolved_name is None:
+            resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
+        definition = self._effective_definition(definition)
+        run_name = task_name or resolved_name
+        backend = definition.backend or self.options.default_backend
+        llm_builder = self.options.llm_builder or build_openai_llm_from_local_settings
+        llm, resolved = llm_builder(
+            self.options.settings_file,
+            backend=backend,
+            model=definition.model,
+            timeout_seconds=self.options.timeout_seconds,
+        )
+
+        tool_registry_factory = self.options.tool_registry_factory or build_default_registry
+        runtime = AgentRuntime(
+            llm_client=llm,
+            tool_registry=tool_registry_factory(),
+            default_workspace=self.options.workspace,
+            log_handler=_compose_log_handlers(self.options.log_handler, log_handler),
+            settings_file=self.options.settings_file,
+            default_backend=backend,
+            llm_builder=llm_builder,
+            tool_registry_factory=tool_registry_factory,
+            hooks=list(self._runtime_hooks),
+        )
+
+        task = self.prepare_task(
+            prompt=prompt,
+            resolved_model_id=resolved.model_id,
+            agent=definition,
+            task_name=run_name,
+        )
+        result = runtime.run(
+            task,
+            shared_state=shared_state,
+            initial_messages=initial_messages,
+            user_message=prompt,
+            before_cycle_messages=before_cycle_messages,
+            interruption_messages=interruption_messages,
+        )
+        return AgentRun(agent_name=run_name, result=result, resolved=resolved)
+
+    def _effective_definition(self, definition: AgentDefinition) -> AgentDefinition:
+        effective = definition
+        if not effective.skill_directories and self._resource_skill_directories:
+            effective = replace(effective, skill_directories=list(self._resource_skill_directories))
+        return effective
 
     def _resolve_agent(
         self,
