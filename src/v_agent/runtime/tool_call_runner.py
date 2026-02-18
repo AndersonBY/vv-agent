@@ -68,6 +68,26 @@ class ToolCallRunner:
 
             if result.directive in (ToolDirective.WAIT_USER, ToolDirective.FINISH):
                 latest_directive_result = result
+                skip_code = (
+                    "skipped_due_to_wait_user"
+                    if result.directive == ToolDirective.WAIT_USER
+                    else "skipped_due_to_finish"
+                )
+                skip_message = (
+                    "Tool skipped because a previous tool requested user input."
+                    if result.directive == ToolDirective.WAIT_USER
+                    else "Tool skipped because a previous tool finished the task."
+                )
+                for skipped_call in tool_calls[index + 1 :]:
+                    skipped = self._build_skipped_result(
+                        skipped_call,
+                        error_code=skip_code,
+                        message=skip_message,
+                    )
+                    cycle_record.tool_results.append(skipped)
+                    messages.append(skipped.to_tool_message())
+                    if on_tool_result is not None:
+                        on_tool_result(skipped_call, skipped)
                 break
 
             if interruption_provider is not None:
@@ -75,7 +95,11 @@ class ToolCallRunner:
                 if pending_messages:
                     interruption_messages.extend(pending_messages)
                     for skipped_call in tool_calls[index + 1 :]:
-                        skipped = self._build_skipped_result(skipped_call)
+                        skipped = self._build_skipped_result(
+                            skipped_call,
+                            error_code="skipped_due_to_steering",
+                            message="Tool skipped due to queued steering message.",
+                        )
                         cycle_record.tool_results.append(skipped)
                         messages.append(skipped.to_tool_message())
                         if on_tool_result is not None:
@@ -102,17 +126,22 @@ class ToolCallRunner:
             messages.append(Message(role="user", content=f"[Image loaded] {result.image_path}"))
 
     @staticmethod
-    def _build_skipped_result(call: ToolCall) -> ToolExecutionResult:
+    def _build_skipped_result(
+        call: ToolCall,
+        *,
+        error_code: str,
+        message: str,
+    ) -> ToolExecutionResult:
         return ToolExecutionResult(
             tool_call_id=call.id,
             status="error",
             status_code=ToolResultStatus.ERROR,
-            error_code="skipped_due_to_steering",
+            error_code=error_code,
             content=json.dumps(
                 {
                     "ok": False,
-                    "error": "Tool skipped due to queued steering message.",
-                    "error_code": "skipped_due_to_steering",
+                    "error": message,
+                    "error_code": error_code,
                 },
                 ensure_ascii=False,
             ),

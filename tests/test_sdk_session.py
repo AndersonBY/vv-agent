@@ -125,6 +125,55 @@ def test_session_can_queue_steer_from_runtime_event(tmp_path: Path) -> None:
     assert run.result.cycles[0].tool_results[1].error_code == "skipped_due_to_steering"
 
 
+def test_session_continue_after_wait_user_with_multiple_tool_calls(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="need user input",
+                tool_calls=[
+                    ToolCall(id="u1", name=ASK_USER_TOOL_NAME, arguments={"question": "pick style"}),
+                    ToolCall(id="u2", name=ASK_USER_TOOL_NAME, arguments={"question": "pick output file"}),
+                ],
+            ),
+            LLMResponse(
+                content="finish",
+                tool_calls=[ToolCall(id="u3", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            ),
+        ]
+    )
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+    )
+    session = client.create_session()
+
+    first = session.prompt("start", auto_follow_up=False)
+    assert first.result.status == AgentStatus.WAIT_USER
+    assert len(first.result.cycles[0].tool_results) == 2
+    assert first.result.cycles[0].tool_results[1].error_code == "skipped_due_to_wait_user"
+
+    second = session.continue_run("formal style, write to artifacts/result.md")
+    assert second.result.status == AgentStatus.COMPLETED
+    assert second.result.final_answer == "done"
+
+
 def test_session_query_raises_when_not_completed(tmp_path: Path) -> None:
     def fake_llm_builder(
         settings_path: str | Path,
