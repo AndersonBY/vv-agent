@@ -65,6 +65,10 @@ class AgentSession:
             return self._running
 
     def subscribe(self, listener: SessionEventHandler) -> Callable[[], None]:
+        """Register an event listener for session lifecycle events.
+
+        Returns a callable that, when invoked, removes the listener (unsubscribe).
+        """
         with self._lock:
             self._listeners.append(listener)
 

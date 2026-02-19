@@ -50,7 +50,43 @@ def _register_custom_workflow_tool() -> ToolRegistry:
     return registry
 
 
-def test_custom_tool_can_be_injected_via_extra_tool_names() -> None:
+def test_register_tool_convenience_method() -> None:
+    """register_tool() should create both schema and handler in one call."""
+    registry = ToolRegistry()
+
+    def _echo(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
+        del context
+        return ToolExecutionResult(tool_call_id="", content=json.dumps(arguments))
+
+    registry.register_tool(
+        name="_echo",
+        handler=_echo,
+        description="Echo arguments back.",
+        parameters={
+            "type": "object",
+            "properties": {"msg": {"type": "string"}},
+            "required": ["msg"],
+        },
+    )
+
+    assert registry.has_tool("_echo")
+    assert registry.has_schema("_echo")
+    schema = registry.get_schema("_echo")
+    assert schema["function"]["name"] == "_echo"
+    assert schema["function"]["description"] == "Echo arguments back."
+
+
+def test_register_tool_default_parameters() -> None:
+    """register_tool() without explicit parameters should use empty object schema."""
+    registry = ToolRegistry()
+
+    def _noop(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
+        del context, arguments
+        return ToolExecutionResult(tool_call_id="", content="{}")
+
+    registry.register_tool(name="_noop", handler=_noop, description="No-op tool.")
+    schema = registry.get_schema("_noop")
+    assert schema["function"]["parameters"] == {"type": "object", "properties": {}, "required": []}
     registry = _register_custom_workflow_tool()
     task = AgentTask(
         task_id="custom_schema",

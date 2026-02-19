@@ -6,3 +6,5 @@ __pycache__/
 htmlcov/
 *.pyc
 local_settings.py
+.pdm-python
+workspace/

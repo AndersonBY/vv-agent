@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from v_agent.tools.base import ToolContext, ToolSpec
+from v_agent.tools.base import ToolContext, ToolHandler, ToolSpec
 from v_agent.types import ToolCall, ToolExecutionResult
 
 
@@ -54,6 +54,25 @@ class ToolRegistry:
     def list_openai_schemas(self, *, tool_names: list[str] | None = None) -> list[dict[str, Any]]:
         ordered_names = tool_names if tool_names is not None else list(self._tools.keys())
         return [self.get_schema(name) for name in ordered_names]
+
+    def register_tool(
+        self,
+        name: str,
+        handler: ToolHandler,
+        description: str,
+        parameters: dict[str, Any] | None = None,
+    ) -> None:
+        """Register a custom tool in one step (schema + handler)."""
+        schema: dict[str, Any] = {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters or {"type": "object", "properties": {}, "required": []},
+            },
+        }
+        self.register_schema(name, schema)
+        self.register(ToolSpec(name=name, handler=handler))
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
         tool = self.get(call.name)

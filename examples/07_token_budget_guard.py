@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -15,15 +16,6 @@ from v_agent.runtime.token_usage import normalize_token_usage
 from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 from v_agent.types import LLMResponse, Message, ToolCall
 
-settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
-max_token_budget = int(os.getenv("V_AGENT_EXAMPLE_TOKEN_BUDGET", "6000"))
-verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
-
-workspace.mkdir(parents=True, exist_ok=True)
-
 
 class TokenBudgetHook(BaseRuntimeHook):
     def __init__(self, token_budget: int) -> None:
@@ -31,6 +23,7 @@ class TokenBudgetHook(BaseRuntimeHook):
         self.consumed_tokens = 0
         self.finalize_mode = False
         self.finalize_prompt_injected = False
+        self.verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
     def before_llm(self, event: BeforeLLMEvent) -> BeforeLLMPatch | None:
         if not self.finalize_mode:
@@ -56,7 +49,7 @@ class TokenBudgetHook(BaseRuntimeHook):
                 )
             )
             self.finalize_prompt_injected = True
-            if verbose:
+            if self.verbose:
                 print("[hook.token_budget] enter finalization cycle", flush=True)
 
         return BeforeLLMPatch(messages=patched_messages, tool_schemas=restricted_schemas)
@@ -68,7 +61,7 @@ class TokenBudgetHook(BaseRuntimeHook):
             cycle_tokens = usage.prompt_tokens + usage.completion_tokens
         self.consumed_tokens += max(cycle_tokens, 0)
 
-        if verbose:
+        if self.verbose:
             print(
                 f"[hook.token_budget] cycle={event.cycle_index} "
                 f"cycle_tokens={cycle_tokens} total_tokens={self.consumed_tokens}/{self.token_budget}",
@@ -103,7 +96,7 @@ class TokenBudgetHook(BaseRuntimeHook):
             return None
 
         self.finalize_mode = True
-        if verbose:
+        if self.verbose:
             print(
                 f"[hook.token_budget] budget reached at cycle={event.cycle_index}, switch to finalization mode",
                 flush=True,
@@ -118,43 +111,64 @@ class TokenBudgetHook(BaseRuntimeHook):
 
 
 def runtime_log(event: str, payload: dict[str, Any]) -> None:
+    verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
     if not verbose:
         return
     if event in {
+        "run_started",
         "cycle_started",
         "cycle_llm_response",
         "tool_result",
         "run_completed",
+        "run_wait_user",
         "run_max_cycles",
         "cycle_failed",
     }:
         print(f"[{event}] {payload}", flush=True)
 
 
-client = AgentSDKClient(
-    options=AgentSDKOptions(
-        settings_file=settings_file,
-        default_backend=backend,
-        workspace=workspace,
-        runtime_hooks=[TokenBudgetHook(max_token_budget)],
-        log_handler=runtime_log,
-    ),
-    agent=AgentDefinition(
-        description=(
-            "你是迭代式执行 Agent. 先探索问题, 再给出可执行方案."
-            "如果信息不足, 优先给出下一轮需要补充的数据."
-        ),
-        model=model,
-        backend=backend,
-        max_cycles=24,
-        enable_todo_management=True,
-    ),
-)
+def main() -> None:
+    settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+    workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+    backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    max_token_budget = int(os.getenv("V_AGENT_EXAMPLE_TOKEN_BUDGET", "6000"))
 
-run = client.run(
-    prompt=(
-        "请梳理 workspace 下的任务上下文, 形成一个可执行计划."
-        "如果无法一次完成, 请给出明确的后续输入需求."
-    ),
-)
-print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=settings_file,
+            default_backend=backend,
+            workspace=workspace,
+            runtime_hooks=[TokenBudgetHook(max_token_budget)],
+            log_handler=runtime_log,
+        ),
+        agent=AgentDefinition(
+            description=(
+                "你是迭代式执行 Agent. 先探索问题, 再给出可执行方案."
+                "如果信息不足, 优先给出下一轮需要补充的数据."
+            ),
+            model=model,
+            backend=backend,
+            max_cycles=24,
+            enable_todo_management=True,
+        ),
+    )
+
+    try:
+        run = client.run(
+            prompt=(
+                "请梳理 workspace 下的任务上下文, 形成一个可执行计划."
+                "如果无法一次完成, 请给出明确的后续输入需求."
+            ),
+        )
+        print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"Error during execution: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+
