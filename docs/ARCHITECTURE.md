@@ -60,7 +60,8 @@ When `available_skills` is provided, prompt builder injects Agent Skills XML met
 ## Memory and LLM
 
 - `MemoryManager` performs context compaction by threshold.
-- `OpenAICompatibleLLM` implements:
+- `VVLlmClient` implements:
+  - vv-llm based backend client orchestration (`create_chat_client` + `format_messages`)
   - endpoint failover and retries
   - stream/non-stream routing
   - tool-call normalization

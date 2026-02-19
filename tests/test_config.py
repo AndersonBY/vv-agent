@@ -3,8 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from vv_llm.types import BackendType
 
-from v_agent.config import ConfigError, decode_api_key, load_llm_settings_from_file, resolve_model_endpoint
+from v_agent.config import (
+    ConfigError,
+    build_vv_llm_settings,
+    decode_api_key,
+    load_llm_settings_from_file,
+    resolve_model_endpoint,
+)
 
 
 @pytest.fixture
@@ -115,3 +122,18 @@ LLM_SETTINGS = {
     settings = load_llm_settings_from_file(settings_file)
     resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
     assert resolved.endpoint.endpoint_id == "moonshot-default"
+
+
+def test_build_vv_llm_settings_normalizes_provider_aliases_and_keys(sample_settings_file: Path) -> None:
+    settings = load_llm_settings_from_file(sample_settings_file)
+    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
+
+    vv_settings = build_vv_llm_settings(settings=settings, backend="moonshot", resolved=resolved)
+    backend_settings = vv_settings.get_backend(BackendType.Moonshot)
+    model_setting = backend_settings.get_model_setting("kimi-k2-thinking")
+    first_endpoint = model_setting.endpoints[0]
+    assert isinstance(first_endpoint, dict)
+
+    endpoint = vv_settings.get_endpoint("moonshot-default")
+    assert endpoint.api_key == "sk-test-123456789"
+    assert first_endpoint["endpoint_id"] == "moonshot-default"

@@ -29,6 +29,7 @@
 | P18 Session-first SDK 改造 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 `AgentSession`（`prompt/continue_run/query/steer/follow_up/subscribe`），支持消息与 shared_state 的会话级持续化 |
 | P19 Runtime Hooks 与中断转向 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 before/after memory-llm-tool hooks，支持 tool 级事件回调与同轮剩余工具 `skipped_due_to_steering` 语义 |
 | P20 Resource Loader 自动发现 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 `AgentResourceLoader`，自动加载 `.v-agent/` 与 `~/.v-agent/` 下 profiles/prompts/skills/hooks 并注入 SDK |
+| P21 vv-llm 后端统一改造 | ✅ 已完成 | 2026-02-18T18:48:52Z | LLM 调用层切换为 `vv-llm`（`create_chat_client/format_messages/get_token_counts/Settings`），保留端点回退、流式聚合与 usage 统计 |
 
 ### 执行日志
 
@@ -62,6 +63,7 @@
 - 2026-02-18T14:44:02Z：继续优化 P17 示例易嵌入性：移除示例中的 `main()/if __name__ == "__main__"` 包装，统一改为脚本顶层平铺执行（保留最小必要日志函数）；回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 - 2026-02-18T14:58:11Z：基于 `claude-agent-sdk-python` 风格重构 SDK 入口：`AgentSDKClient` 新增默认单 Agent 模式与 `run/query` 直接调用（无需预注册 agents map），保留 `run_agent/query_agent` 兼容层；同时新增模块级 `v_agent.sdk.run/query` one-shot helper，示例脚本改为优先展示新接口；回归 `ruff/ty/pytest` 全绿（`130 passed, 1 skipped`）。
 - 2026-02-18T23:40:12Z：完成 P18/P19/P20：新增 `AgentSession` 会话 API、`RuntimeHookManager` 与 hook 事件/patch 协议、`AgentResourceLoader` 自动发现机制；runtime 支持 tool 级回调即时触发 `steer`，并在同轮跳过后续工具；新增 `tests/test_sdk_session.py`、`tests/test_runtime_hooks.py`、`tests/test_sdk_resources.py` 与 `examples/session_api_embed.py`、`examples/runtime_hooks_embed.py`、`examples/resource_loader_embed.py`；质量门禁回归 `ruff/ty/pytest` 全绿（`143 passed, 1 skipped`）。
+- 2026-02-18T18:48:52Z：完成 P21：`src/v_agent/llm/openai_compatible.py` 底层切换为 `vv-llm`，统一使用 `create_chat_client/format_messages/get_token_counts` 与 `Settings`；`config.py` 新增 `build_vv_llm_settings` 做 `providers->backends` 归一化、endpoint key 解码与 endpoint/model 绑定；新增/改造 `tests/test_llm_interface.py`、`tests/test_config.py` 覆盖端点回退、流式 tool call 聚合、reasoning/usage 提取与配置转换；质量门禁回归 `ruff/ty/pytest` 全绿（`148 passed, 1 skipped`），并完成真实 `moonshot/minimax` CLI 回归。
 
 ---
 
@@ -131,6 +133,7 @@ uv run pytest -q
 | P18 | Session-first SDK 改造 | 引入会话对象，支持跨轮状态、steer/follow-up、事件订阅 |
 | P19 | Runtime Hooks 与中断转向 | 引入 before/after hooks 与 tool 级即时事件，支持运行时拦截与同轮转向 |
 | P20 | Resource Loader 自动发现 | 自动发现 profiles/prompts/skills/hooks 并合并到 SDK 运行上下文 |
+| P21 | vv-llm 后端统一改造 | 采用 vv-llm 作为 LLM 核心调用层并与 backend `llm.py` 行为对齐 |
 
 ---
 

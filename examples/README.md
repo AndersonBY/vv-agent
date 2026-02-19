@@ -190,23 +190,23 @@ uv run python examples/sub_agent_report_pipeline.py
 - 显式引导主 Agent 通过 `_create_sub_task` 做任务分派
 - 将最终报告写入 `workspace/artifacts/final_report.md`
 
-## 12) Cycle Budget Guard（运行轮次预算钩子）
+## 12) Token Budget Guard（token 预算钩子）
 
-文件: `examples/cycle_budget_guard_hook.py`
+文件: `examples/token_budget_guard_hook.py`
 
 ```bash
-uv run python examples/cycle_budget_guard_hook.py
+uv run python examples/token_budget_guard_hook.py
 ```
 
 可选覆盖示例:
 
 ```bash
-V_AGENT_EXAMPLE_CYCLE_BUDGET=4 \
-uv run python examples/cycle_budget_guard_hook.py
+V_AGENT_EXAMPLE_TOKEN_BUDGET=4000 \
+uv run python examples/token_budget_guard_hook.py
 ```
 
 这个示例会:
-- 通过 `after_llm` hook 实现“轮次预算保护”
+- 通过 `after_llm` hook 实现“token 预算保护”
 - 当达到预算时自动注入 `_task_finish`，避免无限探索
 - 适合长任务成本/时延控制场景
 

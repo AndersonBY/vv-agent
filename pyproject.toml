@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "openai>=1.109.1",
     "pyyaml>=6.0.3",
+    "vv-llm>=0.3.73",
 ]
 
 [dependency-groups]
@@ -26,6 +27,9 @@ v-agent = "v_agent.cli:main"
 [build-system]
 requires = ["uv_build>=0.9.13,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+vv-llm = { path = "../ref_repos/vv-llm" }
 
 [tool.pytest.ini_options]
 addopts = "-ra"

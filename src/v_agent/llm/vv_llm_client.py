@@ -4,11 +4,14 @@ import json
 import random
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, OpenAI, RateLimitError
 from openai.types.chat import ChatCompletionMessageParam
+from vv_llm.chat_clients import create_chat_client, format_messages, get_token_counts
+from vv_llm.settings import Settings
+from vv_llm.types import APIConnectionError, APIStatusError, BackendType
 
 from v_agent.llm.base import LLMClient
 from v_agent.types import LLMResponse, Message, ToolCall
@@ -42,6 +45,7 @@ _CLAUDE_THINKING_MODELS = (
     "claude-sonnet-4-5-20250929-thinking",
     "claude-opus-4-5-20251101-thinking",
     "claude-opus-4-6-thinking",
+    "claude-sonnet-4-6-thinking",
 )
 
 _QWEN_THINKING_KEEP_SUFFIX_MODELS = (
@@ -112,8 +116,11 @@ class EndpointTarget:
 
 
 @dataclass(slots=True)
-class OpenAICompatibleLLM(LLMClient):
+class VVLlmClient(LLMClient):
     endpoint_targets: list[EndpointTarget]
+    backend: str = "openai"
+    selected_model: str | None = None
+    settings: Settings | None = None
     timeout_seconds: float = 90.0
     max_retries_per_endpoint: int = 3
     backoff_seconds: float = 2.0
@@ -130,6 +137,9 @@ class OpenAICompatibleLLM(LLMClient):
         if not self.endpoint_targets:
             raise RuntimeError("No endpoint targets configured")
 
+        backend_type = self._resolve_backend_type(self.backend)
+        model_name = self._current_model_name(model)
+        settings = self._ensure_settings(model)
         message_payload = cast(list[ChatCompletionMessageParam], [msg.to_openai_message() for msg in messages])
         tool_payload = self._build_tool_payload(tools)
 
@@ -138,30 +148,46 @@ class OpenAICompatibleLLM(LLMClient):
         last_error: Exception | None = None
 
         for target in ordered_targets:
-            selected_model = target.model_id or model
-            should_stream = self._should_use_stream(selected_model)
+            selected_model_id = target.model_id or model
+            should_stream = self._should_use_stream(selected_model_id)
             request_options = self._resolve_request_options(
-                selected_model,
+                selected_model_id,
                 stream=should_stream,
                 endpoint_type=target.endpoint_type,
             )
             request_messages = self._prepare_messages_for_model(message_payload, request_options.model)
+            formatted_messages = self._format_messages_for_request(
+                settings=settings,
+                backend_type=backend_type,
+                endpoint_type=target.endpoint_type,
+                model_name=model_name,
+                messages=request_messages,
+            )
 
             for attempt in range(1, self.max_retries_per_endpoint + 1):
                 try:
-                    client = OpenAI(api_key=target.api_key, base_url=target.api_base, timeout=self.timeout_seconds)
+                    chat_client = create_chat_client(
+                        backend=backend_type,
+                        model=model_name,
+                        stream=should_stream,
+                        random_endpoint=False,
+                        endpoint_id=target.endpoint_id,
+                        settings=settings,
+                    )
                     if should_stream:
                         response = self._stream_completion(
-                            client=client,
+                            chat_client=chat_client,
                             options=request_options,
-                            messages=request_messages,
+                            messages=formatted_messages,
+                            model_name=model_name,
                             tool_payload=tool_payload,
                         )
                     else:
                         response = self._non_stream_completion(
-                            client=client,
+                            chat_client=chat_client,
                             options=request_options,
-                            messages=request_messages,
+                            messages=formatted_messages,
+                            model_name=model_name,
                             tool_payload=tool_payload,
                         )
 
@@ -170,17 +196,7 @@ class OpenAICompatibleLLM(LLMClient):
                     response.raw["stream_mode"] = should_stream
                     self._preferred_endpoint_id = target.endpoint_id
                     return response
-
-                except AuthenticationError as exc:
-                    last_error = exc
-                    errors.append(f"{target.endpoint_id}: authentication failed")
-                    break
-                except RateLimitError as exc:
-                    last_error = exc
-                    errors.append(f"{target.endpoint_id}: rate limited")
-                    self._sleep_backoff(attempt)
-                    break
-                except (APITimeoutError, APIConnectionError) as exc:
+                except APIConnectionError as exc:
                     last_error = exc
                     errors.append(f"{target.endpoint_id}: network timeout/connection error (attempt {attempt})")
                     if attempt < self.max_retries_per_endpoint:
@@ -206,6 +222,60 @@ class OpenAICompatibleLLM(LLMClient):
         details = "; ".join(errors) if errors else "no attempts made"
         raise RuntimeError(f"All endpoints failed: {details}") from last_error
 
+    def _ensure_settings(self, model: str) -> Settings:
+        if self.settings is not None:
+            return self.settings
+
+        backend = self.backend.strip().lower()
+        model_name = self._current_model_name(model)
+        endpoint_options = [
+            {
+                "endpoint_id": target.endpoint_id,
+                "model_id": target.model_id or model,
+            }
+            for target in self.endpoint_targets
+        ]
+        settings_data = {
+            "VERSION": "2",
+            "backends": {
+                backend: {
+                    "default_endpoint": self.endpoint_targets[0].endpoint_id,
+                    "models": {
+                        model_name: {
+                            "id": model,
+                            "endpoints": endpoint_options,
+                            "function_call_available": True,
+                            "native_multimodal": True,
+                        }
+                    },
+                }
+            },
+            "endpoints": [
+                {
+                    "id": target.endpoint_id,
+                    "api_key": target.api_key,
+                    "api_base": target.api_base,
+                    "endpoint_type": target.endpoint_type,
+                }
+                for target in self.endpoint_targets
+            ],
+        }
+        self.settings = Settings(**settings_data)
+        return self.settings
+
+    @staticmethod
+    def _resolve_backend_type(raw_backend: str) -> BackendType:
+        normalized = raw_backend.strip().lower()
+        try:
+            return BackendType(normalized)
+        except ValueError as exc:
+            raise RuntimeError(f"Unsupported backend for vv-llm: {raw_backend!r}") from exc
+
+    def _current_model_name(self, fallback: str) -> str:
+        if self.selected_model and self.selected_model.strip():
+            return self.selected_model.strip()
+        return fallback
+
     def _ordered_targets(self) -> list[EndpointTarget]:
         targets = list(self.endpoint_targets)
 
@@ -226,18 +296,42 @@ class OpenAICompatibleLLM(LLMClient):
             random.shuffle(targets)
         return targets
 
+    def _format_messages_for_request(
+        self,
+        *,
+        settings: Settings,
+        backend_type: BackendType,
+        endpoint_type: str,
+        model_name: str,
+        messages: list[ChatCompletionMessageParam],
+    ) -> list[dict[str, Any]]:
+        try:
+            backend_settings = settings.get_backend(backend_type)
+            model_settings = backend_settings.get_model_setting(model_name)
+            format_backend = BackendType.OpenAI if endpoint_type.startswith("openai") else backend_type
+            formatted = format_messages(
+                messages=messages,
+                backend=format_backend,
+                native_multimodal=model_settings.native_multimodal,
+                function_call_available=model_settings.function_call_available,
+            )
+            return cast(list[dict[str, Any]], formatted)
+        except Exception:
+            return [cast(dict[str, Any], dict(message)) for message in messages]
+
     @staticmethod
     def _build_tool_payload(tools: list[dict[str, object]]) -> list[dict[str, Any]]:
         if not tools:
             return []
+
         payload: list[dict[str, Any]] = []
         for schema in tools:
             schema_type = schema.get("type")
             schema_function = schema.get("function")
             if schema_type == "function" and isinstance(schema_function, dict):
                 payload.append(cast(dict[str, Any], schema))
-                continue
-            payload.append({"type": "function", "function": schema})
+            else:
+                payload.append({"type": "function", "function": schema})
         return payload
 
     @staticmethod
@@ -251,8 +345,7 @@ class OpenAICompatibleLLM(LLMClient):
         messages: list[ChatCompletionMessageParam],
         model: str,
     ) -> list[ChatCompletionMessageParam]:
-        # MiniMax OpenAI-compatible endpoint validates message roles strictly and
-        # rejects requests containing multiple system-role turns.
+        # MiniMax endpoints reject requests with multiple system-role turns.
         minimax_strict_system = model.startswith("MiniMax")
         prepared: list[ChatCompletionMessageParam] = []
         seen_system = False
@@ -376,25 +469,26 @@ class OpenAICompatibleLLM(LLMClient):
 
         return normalized_endpoint.startswith(_TOOL_CALL_INCREMENTAL_ENDPOINT_PREFIXES)
 
-    @staticmethod
     def _build_request_payload(
+        self,
         *,
         options: _RequestOptions,
-        messages: list[ChatCompletionMessageParam],
+        messages: list[dict[str, Any]],
+        model_name: str,
         tool_payload: list[dict[str, Any]],
         stream: bool,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "model": options.model,
             "messages": messages,
+            "model": model_name,
+            "stream": stream,
+            "skip_cutoff": True,
+            "timeout": self.timeout_seconds,
         }
-        if stream:
-            payload["stream"] = True
-            payload["stream_options"] = {"include_usage": True}
         if tool_payload:
             payload["tools"] = tool_payload
-            payload["tool_choice"] = "auto"
-
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
         if options.temperature is not None:
             payload["temperature"] = options.temperature
         if options.max_tokens is not None:
@@ -405,39 +499,49 @@ class OpenAICompatibleLLM(LLMClient):
             payload["reasoning_effort"] = options.reasoning_effort
         if options.extra_body is not None:
             payload["extra_body"] = options.extra_body
-
         return payload
 
     def _non_stream_completion(
         self,
         *,
-        client: OpenAI,
+        chat_client: Any,
         options: _RequestOptions,
-        messages: list[ChatCompletionMessageParam],
+        messages: list[dict[str, Any]],
+        model_name: str,
         tool_payload: list[dict[str, Any]],
     ) -> LLMResponse:
         payload = self._build_request_payload(
             options=options,
             messages=messages,
+            model_name=model_name,
             tool_payload=tool_payload,
             stream=False,
         )
 
-        response = cast(Any, client.chat.completions.create)(**payload)
-        choice = response.choices[0]
-        assistant_message = choice.message
-
-        parsed_tool_calls = self._parse_non_stream_tool_calls(assistant_message.tool_calls)
-        reasoning_content = self._extract_reasoning_content(getattr(assistant_message, "reasoning_content", None))
+        response = chat_client.create_completion(**payload)
+        parsed_tool_calls = self._parse_non_stream_tool_calls(self._read_field(response, "tool_calls"))
+        reasoning_content = self._extract_reasoning_content(self._read_field(response, "reasoning_content"))
         if not reasoning_content:
-            reasoning_content = self._extract_reasoning_content(getattr(assistant_message, "reasoning", None))
+            reasoning_content = self._extract_reasoning_content(self._read_field(response, "reasoning"))
 
-        raw_payload = response.model_dump(exclude_none=True)
+        content = self._extract_content(self._read_field(response, "content"))
+        usage_dump = self._usage_to_dict(self._read_field(response, "usage"))
+        if not usage_dump:
+            usage_dump = self._estimate_usage(messages=messages, content=content, model=options.model)
+
+        raw_payload: dict[str, Any] = {
+            "usage": usage_dump,
+            "stream_collected": False,
+        }
         if reasoning_content:
             raw_payload["reasoning_content"] = reasoning_content
 
+        raw_content = self._read_field(response, "raw_content")
+        if raw_content is not None:
+            raw_payload["raw_content"] = raw_content
+
         return LLMResponse(
-            content=self._extract_content(assistant_message.content),
+            content=content,
             tool_calls=parsed_tool_calls,
             raw=raw_payload,
         )
@@ -445,19 +549,21 @@ class OpenAICompatibleLLM(LLMClient):
     def _stream_completion(
         self,
         *,
-        client: OpenAI,
+        chat_client: Any,
         options: _RequestOptions,
-        messages: list[ChatCompletionMessageParam],
+        messages: list[dict[str, Any]],
+        model_name: str,
         tool_payload: list[dict[str, Any]],
     ) -> LLMResponse:
         payload = self._build_request_payload(
             options=options,
             messages=messages,
+            model_name=model_name,
             tool_payload=tool_payload,
             stream=True,
         )
 
-        stream = cast(Any, client.chat.completions.create)(**payload)
+        stream = cast(Iterable[Any], chat_client.create_completion(**payload))
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -466,42 +572,28 @@ class OpenAICompatibleLLM(LLMClient):
         usage_dump: dict[str, Any] | None = None
 
         for chunk in stream:
-            usage = getattr(chunk, "usage", None)
-            if usage is not None and hasattr(usage, "model_dump"):
-                usage_dump = usage.model_dump(exclude_none=True)
+            usage = self._read_field(chunk, "usage")
+            usage_candidate = self._usage_to_dict(usage)
+            if usage_candidate:
+                usage_dump = usage_candidate
 
-            chunk_reasoning = self._extract_reasoning_content(getattr(chunk, "reasoning_content", None))
+            chunk_reasoning = self._extract_reasoning_content(self._read_field(chunk, "reasoning_content"))
             if chunk_reasoning:
                 reasoning_parts.append(chunk_reasoning)
 
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                continue
+            text = self._extract_content(self._read_field(chunk, "content"))
+            if text:
+                content_parts.append(text)
 
-            for choice in choices:
-                delta = getattr(choice, "delta", None)
-                if delta is None:
-                    continue
-
-                text = self._extract_content(getattr(delta, "content", None))
-                if text:
-                    content_parts.append(text)
-
-                reasoning_text = self._extract_reasoning_content(getattr(delta, "reasoning_content", None))
-                if not reasoning_text:
-                    reasoning_text = self._extract_reasoning_content(getattr(delta, "reasoning", None))
-                if reasoning_text:
-                    reasoning_parts.append(reasoning_text)
-
-                for tool_call_index, tool_delta in enumerate(getattr(delta, "tool_calls", None) or []):
-                    last_active_tool_call_id = self._accumulate_tool_call_delta(
-                        tool_call_parts=tool_call_parts,
-                        tool_delta=tool_delta,
-                        default_index=tool_call_index,
-                        last_active_tool_call_id=last_active_tool_call_id,
-                        incremental=options.tool_call_incremental,
-                        keep_extra_content=options.is_gemini_3_model,
-                    )
+            for tool_call_index, tool_delta in enumerate(self._read_field(chunk, "tool_calls") or []):
+                last_active_tool_call_id = self._accumulate_tool_call_delta(
+                    tool_call_parts=tool_call_parts,
+                    tool_delta=tool_delta,
+                    default_index=tool_call_index,
+                    last_active_tool_call_id=last_active_tool_call_id,
+                    incremental=options.tool_call_incremental,
+                    keep_extra_content=options.is_gemini_3_model,
+                )
 
         parsed_tool_calls: list[ToolCall] = []
         tool_call_extra_content: dict[str, Any] = {}
@@ -522,7 +614,15 @@ class OpenAICompatibleLLM(LLMClient):
                 tool_call_extra_content[tool_id] = slot["extra_content"]
 
         normalized = self._normalize_tool_calls(parsed_tool_calls)
-        raw_payload: dict[str, Any] = {"usage": usage_dump or {}, "stream_collected": True}
+        final_usage = usage_dump or self._estimate_usage(
+            messages=messages,
+            content="".join(content_parts),
+            model=options.model,
+        )
+        raw_payload: dict[str, Any] = {
+            "usage": final_usage,
+            "stream_collected": True,
+        }
         if reasoning_parts:
             raw_payload["reasoning_content"] = "".join(reasoning_parts)
         if tool_call_extra_content:
@@ -554,22 +654,22 @@ class OpenAICompatibleLLM(LLMClient):
         incremental: bool,
         keep_extra_content: bool,
     ) -> str | None:
-        function = getattr(tool_delta, "function", None)
+        function = self._read_field(tool_delta, "function")
         if function is None:
             return last_active_tool_call_id
 
-        index_raw = getattr(tool_delta, "index", None)
+        index_raw = self._read_field(tool_delta, "index")
         index = index_raw if isinstance(index_raw, int) else default_index
 
-        name_raw = getattr(function, "name", None)
+        name_raw = self._read_field(function, "name")
         name = name_raw.strip() if isinstance(name_raw, str) else ""
-        arguments_raw = getattr(function, "arguments", None)
+        arguments_raw = self._read_field(function, "arguments")
         arguments = arguments_raw if isinstance(arguments_raw, str) else ""
 
-        delta_id_raw = getattr(tool_delta, "id", None)
+        delta_id_raw = self._read_field(tool_delta, "id")
         delta_id = delta_id_raw.strip() if isinstance(delta_id_raw, str) else ""
 
-        extra_content = getattr(tool_delta, "extra_content", None) if keep_extra_content else None
+        extra_content = self._read_field(tool_delta, "extra_content") if keep_extra_content else None
 
         if name:
             tool_id = delta_id or f"generated_{index}_{len(tool_call_parts)}"
@@ -627,19 +727,20 @@ class OpenAICompatibleLLM(LLMClient):
     def _parse_non_stream_tool_calls(self, tool_calls_raw: Any) -> list[ToolCall]:
         parsed_tool_calls: list[ToolCall] = []
         for call in tool_calls_raw or []:
-            function_call = getattr(call, "function", None)
+            function_call = self._read_field(call, "function")
             if function_call is None:
                 continue
 
-            name = getattr(function_call, "name", None)
-            if not isinstance(name, str) or not name.strip():
+            name_raw = self._read_field(function_call, "name")
+            if not isinstance(name_raw, str) or not name_raw.strip():
                 continue
 
-            arguments_raw = getattr(function_call, "arguments", None)
+            arguments_raw = self._read_field(function_call, "arguments")
+            call_id_raw = self._read_field(call, "id")
             parsed_tool_calls.append(
                 ToolCall(
-                    id=getattr(call, "id", None) or f"call_{uuid.uuid4().hex[:12]}",
-                    name=name,
+                    id=call_id_raw if isinstance(call_id_raw, str) and call_id_raw else f"call_{uuid.uuid4().hex[:12]}",
+                    name=name_raw,
                     arguments=self._parse_arguments(arguments_raw if isinstance(arguments_raw, str) else None),
                 )
             )
@@ -741,6 +842,49 @@ class OpenAICompatibleLLM(LLMClient):
                 return value
 
         return ""
+
+    @staticmethod
+    def _read_field(source: Any, key: str) -> Any:
+        if isinstance(source, dict):
+            return source.get(key)
+        return getattr(source, key, None)
+
+    @staticmethod
+    def _usage_to_dict(usage: Any) -> dict[str, Any]:
+        if usage is None:
+            return {}
+        if isinstance(usage, dict):
+            return dict(usage)
+        model_dump = getattr(usage, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump(exclude_none=True)
+            if isinstance(dumped, dict):
+                return dumped
+        return {}
+
+    def _estimate_usage(self, *, messages: list[dict[str, Any]], content: str, model: str) -> dict[str, Any]:
+        prompt_payload = json.dumps(messages, ensure_ascii=False, default=str)
+        prompt_tokens = self._estimate_token_count(prompt_payload, model)
+        completion_tokens = self._estimate_token_count(content, model)
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
+    @staticmethod
+    def _estimate_token_count(text: str, model: str) -> int:
+        if not text:
+            return 0
+        try:
+            count = get_token_counts(text, model=model, use_token_server_first=False)
+            if isinstance(count, int) and count >= 0:
+                return count
+        except Exception:
+            pass
+
+        # Heuristic fallback when tokenizer is unavailable for this model.
+        return max(len(text) // 4, 1)
 
     def _sleep_backoff(self, attempt: int) -> None:
         jitter = random.uniform(0.0, 0.5)

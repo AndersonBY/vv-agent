@@ -24,7 +24,7 @@
 - `v_agent.sdk.AgentResourceLoader`: 自动发现 `.v-agent/` 与 `~/.v-agent/` 的 profiles/prompts/skills/hooks。
 - `v_agent.skills`: Agent Skills 标准支持（`SKILL.md` frontmatter 解析/校验、`<available_skills>` prompt XML、标准化激活输入）。
 - `v_agent.memory.MemoryManager`: 历史压缩器。
-- `v_agent.llm.OpenAICompatibleLLM`: 统一 LLM 接口（端点轮询、重试、流式/非流式聚合、tool call 归一化）。
+- `v_agent.llm.VVLlmClient`: 统一 LLM 接口（基于 `vv-llm`，端点轮询、重试、流式/非流式聚合、tool call 归一化）。
 - `v_agent.config`: 从本地 `local_settings.py` 解析模型+端点+key。
 
 ## 配置
@@ -76,7 +76,7 @@ uv run v-agent --prompt "请概述一下这个框架的特点" --backend moonsho
 - `examples/sdk_style_client.py`：参考 `claude-agent-sdk-python` 设计风格的 SDK 式封装
 - `examples/custom_ticket_tool_embed.py`：自定义业务工具注入（custom schema + handler）
 - `examples/sub_agent_report_pipeline.py`：多子 Agent 委派流水线
-- `examples/cycle_budget_guard_hook.py`：运行轮次预算 guardrail hook
+- `examples/token_budget_guard_hook.py`：基于 token 消耗的预算 guardrail hook
 - `examples/ask_user_resume_session.py`：`WAIT_USER` -> `session.continue_run(...)` 恢复闭环
 
 说明：

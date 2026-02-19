@@ -3,9 +3,13 @@ from __future__ import annotations
 import ast
 import base64
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vv_llm.settings import Settings
 
 _ALIAS_MAP = {
     "kimi-k2.5": "kimi-k2-thinking",
@@ -181,11 +185,19 @@ def build_openai_llm_from_local_settings(
     model: str,
     timeout_seconds: float = 90.0,
 ):
-    from v_agent.llm.openai_compatible import EndpointTarget, OpenAICompatibleLLM
+    from v_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
 
     settings = load_llm_settings_from_file(settings_path)
     resolved = resolve_model_endpoint(settings, backend=backend, model=model)
-    llm = OpenAICompatibleLLM(
+    vv_settings = build_vv_llm_settings(
+        settings=settings,
+        backend=backend,
+        resolved=resolved,
+    )
+    llm = VVLlmClient(
+        backend=backend,
+        selected_model=resolved.selected_model,
+        settings=vv_settings,
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id=option.endpoint.endpoint_id,
@@ -199,6 +211,69 @@ def build_openai_llm_from_local_settings(
         timeout_seconds=timeout_seconds,
     )
     return llm, resolved
+
+
+def build_vv_llm_settings(
+    *,
+    settings: dict[str, Any],
+    backend: str,
+    resolved: ResolvedModelConfig,
+) -> Settings:
+    from vv_llm.settings import Settings
+
+    normalized = deepcopy(settings)
+    providers = normalized.pop("providers", None)
+    if "backends" not in normalized and isinstance(providers, dict):
+        normalized["backends"] = providers
+
+    if "VERSION" not in normalized:
+        normalized["VERSION"] = "2"
+
+    endpoints = normalized.get("endpoints")
+    if not isinstance(endpoints, list):
+        raise ConfigError("Invalid LLM_SETTINGS format: missing endpoints list")
+
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        raw_key = endpoint.get("api_key")
+        if isinstance(raw_key, str):
+            endpoint["api_key"] = decode_api_key(raw_key)
+
+    backends = normalized.get("backends")
+    if not isinstance(backends, dict):
+        raise ConfigError("Invalid LLM_SETTINGS format: missing backends mapping")
+
+    backend_config = backends.setdefault(backend, {})
+    if not isinstance(backend_config, dict):
+        raise ConfigError(f"Backend {backend!r} config is not a mapping")
+
+    models = backend_config.setdefault("models", {})
+    if not isinstance(models, dict):
+        raise ConfigError(f"Backend {backend!r} models is not a mapping")
+
+    model_config = models.get(resolved.selected_model)
+    if not isinstance(model_config, dict):
+        model_config = {}
+        models[resolved.selected_model] = model_config
+
+    model_config["id"] = str(model_config.get("id", resolved.model_id))
+    model_config["endpoints"] = [
+        {
+            "endpoint_id": option.endpoint.endpoint_id,
+            "model_id": option.model_id,
+        }
+        for option in resolved.endpoint_options
+    ]
+
+    default_endpoint = backend_config.get("default_endpoint")
+    if not isinstance(default_endpoint, str) or not default_endpoint:
+        backend_config["default_endpoint"] = resolved.endpoint.endpoint_id
+
+    try:
+        return Settings(**normalized)
+    except Exception as exc:  # pragma: no cover - defensive branch
+        raise ConfigError(f"Failed to build vv-llm Settings: {exc}") from exc
 
 
 def decode_api_key(raw_value: str) -> str:

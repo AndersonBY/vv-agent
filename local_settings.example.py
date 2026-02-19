@@ -18,11 +18,6 @@ LLM_SETTINGS = {
                         }
                     ],
                 },
-                # alias-friendly example:
-                # "kimi-k2.5": {
-                #     "id": "kimi-k2-thinking",
-                #     "endpoints": [{"endpoint_id": "moonshot-default", "model_id": "kimi-k2-thinking"}],
-                # },
             },
         },
         "openai": {
