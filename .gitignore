@@ -8,3 +8,4 @@ htmlcov/
 local_settings.py
 .pdm-python
 workspace/
+.v-agent-workspace/
