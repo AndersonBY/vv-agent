@@ -11,6 +11,9 @@ from v_agent.constants import BATCH_SUB_TASKS_TOOL_NAME, CREATE_SUB_TASK_TOOL_NA
 from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
 from v_agent.prompt import build_system_prompt
+from v_agent.runtime.backends.base import ExecutionBackend
+from v_agent.runtime.backends.inline import InlineBackend
+from v_agent.runtime.context import ExecutionContext
 from v_agent.runtime.cycle_runner import CycleRunner
 from v_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
 from v_agent.runtime.token_usage import summarize_task_token_usage
@@ -62,6 +65,7 @@ class AgentRuntime:
         tool_registry_factory: Callable[[], ToolRegistry] | None = None,
         sub_agent_timeout_seconds: float = 90.0,
         hooks: list[RuntimeHook] | None = None,
+        execution_backend: ExecutionBackend | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -74,6 +78,7 @@ class AgentRuntime:
         self.tool_registry_factory = tool_registry_factory
         self.sub_agent_timeout_seconds = max(sub_agent_timeout_seconds, 1.0)
         self.hook_manager = RuntimeHookManager(hooks=list(hooks or []))
+        self.execution_backend: ExecutionBackend = execution_backend or InlineBackend()
         self.cycle_runner = CycleRunner(
             llm_client=llm_client,
             tool_registry=tool_registry,
@@ -94,6 +99,7 @@ class AgentRuntime:
         user_message: str | None = None,
         before_cycle_messages: BeforeCycleMessageProvider | None = None,
         interruption_messages: InterruptionMessageProvider | None = None,
+        ctx: ExecutionContext | None = None,
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
         shared = dict(shared_state or {})
@@ -113,7 +119,6 @@ class AgentRuntime:
             initial_messages=initial_messages,
             user_message=user_message,
         )
-        cycles: list[CycleRecord] = []
         self._emit_log(
             "run_started",
             task_id=task.task_id,
@@ -124,15 +129,47 @@ class AgentRuntime:
 
         memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
 
-        for cycle_index in range(1, task.max_cycles + 1):
+        cycle_executor = self._build_cycle_executor(
+            task=task,
+            workspace_path=workspace_path,
+            memory_manager=memory_manager,
+            before_cycle_messages=before_cycle_messages,
+            interruption_messages=interruption_messages,
+        )
+
+        return self.execution_backend.execute(
+            task=task,
+            initial_messages=messages,
+            shared_state=shared,
+            cycle_executor=cycle_executor,
+            ctx=ctx,
+            max_cycles=task.max_cycles,
+        )
+
+    def _build_cycle_executor(
+        self,
+        *,
+        task: AgentTask,
+        workspace_path: Path,
+        memory_manager: MemoryManager,
+        before_cycle_messages: BeforeCycleMessageProvider | None,
+        interruption_messages: InterruptionMessageProvider | None,
+    ) -> Callable[[int, list[Message], list[CycleRecord], dict[str, Any], ExecutionContext | None], AgentResult | None]:
+        def executor(
+            cycle_index: int,
+            messages: list[Message],
+            cycles: list[CycleRecord],
+            shared: dict[str, Any],
+            ctx: ExecutionContext | None,
+        ) -> AgentResult | None:
             if before_cycle_messages is not None:
-                injected_messages = before_cycle_messages(cycle_index, messages, shared)
-                if injected_messages:
-                    messages.extend(injected_messages)
+                injected = before_cycle_messages(cycle_index, messages, shared)
+                if injected:
+                    messages.extend(injected)
                     self._emit_log(
                         "cycle_injected_messages",
                         cycle=cycle_index,
-                        count=len(injected_messages),
+                        count=len(injected),
                     )
             self._emit_log(
                 "cycle_started",
@@ -141,19 +178,16 @@ class AgentRuntime:
                 message_count=len(messages),
             )
             try:
-                messages, cycle_record = self.cycle_runner.run_cycle(
+                updated_messages, cycle_record = self.cycle_runner.run_cycle(
                     task=task,
                     messages=messages,
                     cycle_index=cycle_index,
                     memory_manager=memory_manager,
                     shared_state=shared,
+                    ctx=ctx,
                 )
             except Exception as exc:
-                self._emit_log(
-                    "cycle_failed",
-                    cycle=cycle_index,
-                    error=str(exc),
-                )
+                self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
                 return AgentResult(
                     status=AgentStatus.FAILED,
                     messages=messages,
@@ -162,6 +196,10 @@ class AgentRuntime:
                     shared_state=shared,
                     token_usage=summarize_task_token_usage(cycles),
                 )
+            # Replace messages list contents in-place so caller sees updates
+            messages.clear()
+            messages.extend(updated_messages)
+
             self._emit_log(
                 "cycle_llm_response",
                 cycle=cycle_index,
@@ -179,8 +217,11 @@ class AgentRuntime:
                         parent_task=task,
                         workspace_path=workspace_path,
                         parent_shared_state=shared,
+                        ctx=ctx,
                     ),
+                    ctx=ctx,
                 )
+
                 def _on_tool_result(call: ToolCall, result: ToolExecutionResult, *, _cycle: int = cycle_index) -> None:
                     self._emit_log(
                         "tool_result",
@@ -201,6 +242,7 @@ class AgentRuntime:
                     cycle_record=cycle_record,
                     interruption_provider=interruption_messages,
                     on_tool_result=_on_tool_result,
+                    ctx=ctx,
                 )
                 tool_result = tool_outcome.directive_result
                 cycles.append(cycle_record)
@@ -246,7 +288,7 @@ class AgentRuntime:
                         token_usage=summarize_task_token_usage(cycles),
                     )
 
-                continue
+                return None  # continue to next cycle
 
             cycles.append(cycle_record)
             if task.no_tool_policy == "finish":
@@ -282,19 +324,9 @@ class AgentRuntime:
             if cycle_index < task.max_cycles:
                 messages.append(Message(role="user", content=self._build_continue_hint()))
 
-        self._emit_log(
-            "run_max_cycles",
-            cycle=task.max_cycles,
-            final_answer="Reached max cycles without finish signal.",
-        )
-        return AgentResult(
-            status=AgentStatus.MAX_CYCLES,
-            messages=messages,
-            cycles=cycles,
-            final_answer="Reached max cycles without finish signal.",
-            shared_state=shared,
-            token_usage=summarize_task_token_usage(cycles),
-        )
+            return None  # continue to next cycle
+
+        return executor
 
     def _emit_cycle_tool_results(self, *, cycle_record: CycleRecord) -> None:
         for idx, result in enumerate(cycle_record.tool_results):
@@ -427,6 +459,7 @@ class AgentRuntime:
         parent_task: AgentTask,
         workspace_path: Path,
         parent_shared_state: dict[str, Any],
+        ctx: ExecutionContext | None = None,
     ) -> Callable[[SubTaskRequest], SubTaskOutcome] | None:
         if not parent_task.sub_agents:
             return None
@@ -437,6 +470,7 @@ class AgentRuntime:
                 workspace_path=workspace_path,
                 parent_shared_state=parent_shared_state,
                 request=request,
+                ctx=ctx,
             )
 
         return runner
@@ -448,6 +482,7 @@ class AgentRuntime:
         workspace_path: Path,
         parent_shared_state: dict[str, Any],
         request: SubTaskRequest,
+        ctx: ExecutionContext | None = None,
     ) -> SubTaskOutcome:
         sub_task_id = f"{parent_task.task_id}_sub_{request.agent_name}_{uuid.uuid4().hex[:8]}"
         sub_agent = parent_task.sub_agents.get(request.agent_name)
@@ -491,6 +526,7 @@ class AgentRuntime:
                 sub_task,
                 workspace=workspace_path,
                 shared_state={"todo_list": []},
+                ctx=self._build_child_ctx(ctx),
             )
         except Exception as exc:
             return SubTaskOutcome(
@@ -619,6 +655,18 @@ class AgentRuntime:
         if self.tool_registry_factory is not None:
             return self.tool_registry_factory()
         return self.tool_registry
+
+    @staticmethod
+    def _build_child_ctx(ctx: ExecutionContext | None) -> ExecutionContext | None:
+        if ctx is None:
+            return None
+        child_token = ctx.cancellation_token.child() if ctx.cancellation_token is not None else None
+        return ExecutionContext(
+            cancellation_token=child_token,
+            stream_callback=ctx.stream_callback,
+            state_store=ctx.state_store,
+            metadata=dict(ctx.metadata),
+        )
 
     def _build_sub_agent_log_handler(self, sub_agent_name: str) -> RuntimeLogHandler | None:
         if self.log_handler is None:

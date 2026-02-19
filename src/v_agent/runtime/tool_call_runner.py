@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from v_agent.runtime.hooks import RuntimeHookManager
 from v_agent.tools import ToolContext, ToolRegistry
 from v_agent.tools.dispatcher import dispatch_tool_call
 from v_agent.types import AgentTask, CycleRecord, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
+
+if TYPE_CHECKING:
+    from v_agent.runtime.context import ExecutionContext
 
 
 @dataclass(slots=True)
@@ -31,11 +35,14 @@ class ToolCallRunner:
         cycle_record: CycleRecord,
         interruption_provider: Callable[[], list[Message]] | None = None,
         on_tool_result: Callable[[ToolCall, ToolExecutionResult], None] | None = None,
+        ctx: ExecutionContext | None = None,
     ) -> ToolRunOutcome:
         latest_directive_result: ToolExecutionResult | None = None
         interruption_messages: list[Message] = []
 
         for index, call in enumerate(tool_calls):
+            if ctx is not None:
+                ctx.check_cancelled()
             patched_call, short_circuit_result = self.hook_manager.apply_before_tool_call(
                 task=task,
                 cycle_index=context.cycle_index,

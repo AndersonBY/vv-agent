@@ -121,3 +121,38 @@ uv run python examples/14_batch_sub_tasks.py
 ```bash
 V_AGENT_EXAMPLE_MAX_RETRIES=2 uv run python examples/17_error_recovery.py
 ```
+
+---
+
+## Execution Engine (v2)
+
+以下示例展示 v2 执行引擎的新能力: 取消、流式输出、线程后端、状态持久化.
+
+| # | 文件 | 说明 |
+|---|------|------|
+| 18 | `18_cancellation.py` | `CancellationToken` 超时自动取消运行中的 agent |
+| 19 | `19_streaming.py` | `stream_callback` 逐 token 流式输出 LLM 响应 |
+| 20 | `20_thread_backend.py` | `ThreadBackend` 非阻塞 submit + Future 模式 |
+| 21 | `21_state_checkpoint.py` | `SqliteStateStore` 持久化 checkpoint + 恢复 |
+| 22 | `22_sdk_advanced.py` | SDK 层集成: ThreadBackend + 流式输出一站式配置 |
+| 23 | `23_celery_backend.py` | `CeleryBackend` 分布式执行 + `celery.group` 并行 |
+
+```bash
+# 取消: 10 秒后自动取消
+V_AGENT_EXAMPLE_TIMEOUT=10 uv run python examples/18_cancellation.py
+
+# 流式输出
+uv run python examples/19_streaming.py
+
+# ThreadBackend 同步 + 非阻塞两种模式
+uv run python examples/20_thread_backend.py
+
+# SQLite checkpoint 持久化
+V_AGENT_EXAMPLE_DB=./workspace/agent.db uv run python examples/21_state_checkpoint.py
+
+# SDK 一站式: ThreadBackend + streaming
+uv run python examples/22_sdk_advanced.py
+
+# CeleryBackend 分布式 (需先启动 Redis + worker, 详见文件头注释)
+uv run python examples/23_celery_backend.py
+```

@@ -13,8 +13,12 @@ dependencies = [
     "vv-llm>=0.3.73",
 ]
 
+[project.optional-dependencies]
+celery = ["celery[redis]>=5.4"]
+
 [dependency-groups]
 dev = [
+    "celery[redis]>=5.4",
     "pytest>=8.4.0",
     "pytest-cov>=6.2.1",
     "ruff>=0.12.10",

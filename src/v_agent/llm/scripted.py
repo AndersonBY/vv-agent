@@ -19,6 +19,7 @@ class ScriptedLLM(LLMClient):
         model: str,
         messages: list[Message],
         tools: list[dict[str, object]],
+        stream_callback: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         del tools
         if not self.steps:

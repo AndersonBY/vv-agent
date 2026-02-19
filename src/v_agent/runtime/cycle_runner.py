@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from v_agent.llm.base import LLMClient
 from v_agent.memory import MemoryManager
@@ -10,6 +10,9 @@ from v_agent.runtime.token_usage import normalize_token_usage
 from v_agent.runtime.tool_planner import plan_tool_schemas
 from v_agent.tools import ToolRegistry
 from v_agent.types import AgentTask, CycleRecord, Message, ToolCall
+
+if TYPE_CHECKING:
+    from v_agent.runtime.context import ExecutionContext
 
 
 class CycleRunner:
@@ -32,8 +35,11 @@ class CycleRunner:
         cycle_index: int,
         memory_manager: MemoryManager,
         shared_state: dict[str, Any] | None = None,
+        ctx: ExecutionContext | None = None,
     ) -> tuple[list[Message], CycleRecord]:
         shared = shared_state or {}
+        if ctx is not None:
+            ctx.check_cancelled()
         pre_compact_messages = self.hook_manager.apply_before_memory_compact(
             task=task,
             cycle_index=cycle_index,
@@ -55,11 +61,19 @@ class CycleRunner:
             shared_state=shared,
         )
 
+        if ctx is not None:
+            ctx.check_cancelled()
+
+        stream_callback = ctx.stream_callback if ctx is not None else None
         llm_response = self.llm_client.complete(
             model=task.model,
             messages=compacted_messages,
             tools=tool_schemas,
+            stream_callback=stream_callback,
         )
+
+        if ctx is not None:
+            ctx.check_cancelled()
         llm_response = self.hook_manager.apply_after_llm(
             task=task,
             cycle_index=cycle_index,

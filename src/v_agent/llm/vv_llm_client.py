@@ -4,7 +4,7 @@ import json
 import random
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -133,6 +133,7 @@ class VVLlmClient(LLMClient):
         model: str,
         messages: list[Message],
         tools: list[dict[str, object]],
+        stream_callback: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         if not self.endpoint_targets:
             raise RuntimeError("No endpoint targets configured")
@@ -181,6 +182,7 @@ class VVLlmClient(LLMClient):
                             messages=formatted_messages,
                             model_name=model_name,
                             tool_payload=tool_payload,
+                            stream_callback=stream_callback,
                         )
                     else:
                         response = self._non_stream_completion(
@@ -554,6 +556,7 @@ class VVLlmClient(LLMClient):
         messages: list[dict[str, Any]],
         model_name: str,
         tool_payload: list[dict[str, Any]],
+        stream_callback: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         payload = self._build_request_payload(
             options=options,
@@ -584,6 +587,8 @@ class VVLlmClient(LLMClient):
             text = self._extract_content(self._read_field(chunk, "content"))
             if text:
                 content_parts.append(text)
+                if stream_callback is not None:
+                    stream_callback(text)
 
             for tool_call_index, tool_delta in enumerate(self._read_field(chunk, "tool_calls") or []):
                 last_active_tool_call_id = self._accumulate_tool_call_delta(

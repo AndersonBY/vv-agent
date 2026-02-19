@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from v_agent.config import ResolvedModelConfig
 from v_agent.llm.base import LLMClient
+from v_agent.runtime.backends.base import ExecutionBackend
+from v_agent.runtime.context import StreamCallback
 from v_agent.runtime.hooks import RuntimeHook
 from v_agent.tools.registry import ToolRegistry
 from v_agent.types import AgentResult, NoToolPolicy, SubAgentConfig
@@ -65,6 +67,8 @@ class AgentSDKOptions:
     runtime_hooks: list[RuntimeHook] = field(default_factory=list)
     resource_loader: AgentResourceLoader | None = None
     auto_discover_resources: bool = True
+    execution_backend: ExecutionBackend | None = None
+    stream_callback: StreamCallback | None = None
 
 
 @dataclass(slots=True)

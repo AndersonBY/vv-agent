@@ -91,34 +91,16 @@ def batch_sub_tasks(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
         str(arguments.get("exclude_files_pattern")).strip() if arguments.get("exclude_files_pattern") is not None else None
     )
 
-    results: list[dict[str, Any]] = []
-    completed = 0
-    failed = 0
-
+    # Build validated requests
+    requests: list[tuple[int, SubTaskRequest | None, str | None]] = []
     for index, item in enumerate(raw_tasks):
         if not isinstance(item, dict):
-            failed += 1
-            results.append(
-                {
-                    "index": index,
-                    "status": AgentStatus.FAILED.value,
-                    "error": "Task item must be an object",
-                }
-            )
+            requests.append((index, None, "Task item must be an object"))
             continue
-
         task_description = str(item.get("task_description", "")).strip()
         if not task_description:
-            failed += 1
-            results.append(
-                {
-                    "index": index,
-                    "status": AgentStatus.FAILED.value,
-                    "error": "`task_description` is required",
-                }
-            )
+            requests.append((index, None, "`task_description` is required"))
             continue
-
         request = SubTaskRequest(
             agent_name=agent_name,
             task_description=task_description,
@@ -127,12 +109,42 @@ def batch_sub_tasks(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             exclude_files_pattern=exclude_files_pattern,
             metadata={"batch_index": index},
         )
-        outcome = context.sub_task_runner(request)
+        requests.append((index, request, None))
+
+    # Try to use parallel_map from execution backend if available
+    execution_backend = None
+    if context.ctx is not None:
+        execution_backend = context.ctx.metadata.get("execution_backend")
+
+    valid_requests = [(idx, req) for idx, req, err in requests if req is not None]
+    sub_task_runner = context.sub_task_runner  # already checked not None at top
+
+    if execution_backend is not None and hasattr(execution_backend, "parallel_map") and valid_requests:
+        outcomes = execution_backend.parallel_map(
+            lambda item: (item[0], sub_task_runner(item[1])),
+            valid_requests,
+        )
+        outcome_map = dict(outcomes)
+    else:
+        outcome_map = {}
+        for idx, req in valid_requests:
+            outcome_map[idx] = sub_task_runner(req)
+
+    results: list[dict[str, Any]] = []
+    completed = 0
+    failed = 0
+
+    for index, _req, err in requests:
+        if err is not None:
+            failed += 1
+            results.append({"index": index, "status": AgentStatus.FAILED.value, "error": err})
+            continue
+
+        outcome = outcome_map[index]
         if outcome.status == AgentStatus.COMPLETED:
             completed += 1
         else:
             failed += 1
-
         item_payload = outcome.to_dict()
         item_payload["index"] = index
         results.append(item_payload)

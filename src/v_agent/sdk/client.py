@@ -7,6 +7,7 @@ from typing import Any
 from v_agent.config import build_openai_llm_from_local_settings
 from v_agent.prompt import build_system_prompt
 from v_agent.runtime import AgentRuntime
+from v_agent.runtime.context import ExecutionContext
 from v_agent.runtime.engine import BeforeCycleMessageProvider, InterruptionMessageProvider
 from v_agent.sdk.types import AgentDefinition, AgentRun, AgentSDKOptions, RuntimeLogHandler
 from v_agent.tools import build_default_registry
@@ -302,6 +303,7 @@ class AgentSDKClient:
             llm_builder=llm_builder,
             tool_registry_factory=tool_registry_factory,
             hooks=list(self._runtime_hooks),
+            execution_backend=self.options.execution_backend,
         )
 
         task = self.prepare_task(
@@ -310,6 +312,11 @@ class AgentSDKClient:
             agent=definition,
             task_name=run_name,
         )
+
+        ctx: ExecutionContext | None = None
+        if self.options.stream_callback is not None:
+            ctx = ExecutionContext(stream_callback=self.options.stream_callback)
+
         result = runtime.run(
             task,
             shared_state=shared_state,
@@ -317,6 +324,7 @@ class AgentSDKClient:
             user_message=prompt,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
+            ctx=ctx,
         )
         return AgentRun(agent_name=run_name, result=result, resolved=resolved)
 
