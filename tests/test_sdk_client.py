@@ -4,27 +4,27 @@ from pathlib import Path
 
 import pytest
 
-from v_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from v_agent.constants import (
+from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
     BATCH_SUB_TASKS_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
 )
-from v_agent.llm import ScriptedLLM
-from v_agent.sdk import (
+from vv_agent.llm import ScriptedLLM
+from vv_agent.sdk import (
     AgentDefinition,
     AgentSDKClient,
     AgentSDKOptions,
 )
-from v_agent.sdk import (
+from vv_agent.sdk import (
     query as sdk_query,
 )
-from v_agent.sdk import (
+from vv_agent.sdk import (
     run as sdk_run,
 )
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
 
 def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:

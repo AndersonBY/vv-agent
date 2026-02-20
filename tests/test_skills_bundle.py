@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from v_agent.skills.bundle import PreparedSkill, prepare_skill_bundle
+from vv_agent.skills.bundle import PreparedSkill, prepare_skill_bundle
 
 
 def _make_skill(root: Path, name: str) -> Path:
@@ -64,5 +64,5 @@ def test_prepare_skill_bundle_no_skills(tmp_path: Path) -> None:
     source.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    with pytest.raises(ValueError, match="No SKILL.md"):
+    with pytest.raises(ValueError, match=r"No SKILL\.md"):
         prepare_skill_bundle(source, workspace)

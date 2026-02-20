@@ -1,9 +1,9 @@
-# Tool Protocol (v-agent)
+# Tool Protocol (vv-agent)
 
 ## Tool Naming
 
 - Internal tools follow backend-style naming, e.g. `_task_finish`, `_ask_user`, `_read_file`.
-- Tool schemas are single-source in `src/v_agent/constants/`.
+- Tool schemas are single-source in `src/vv_agent/constants/`.
 
 ## Tool Call Input
 

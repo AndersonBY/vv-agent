@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from v_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from v_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
-from v_agent.llm import ScriptedLLM
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentStatus, LLMResponse, ToolCall
+from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
+from vv_agent.llm import ScriptedLLM
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 
 def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:

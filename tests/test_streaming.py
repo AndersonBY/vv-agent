@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import pytest
-
-from v_agent.llm.scripted import ScriptedLLM
-from v_agent.runtime import AgentRuntime
-from v_agent.runtime.context import ExecutionContext
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall
+from vv_agent.llm.scripted import ScriptedLLM
+from vv_agent.runtime import AgentRuntime
+from vv_agent.runtime.context import ExecutionContext
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall
 
 
 class StreamCapturingLLM:

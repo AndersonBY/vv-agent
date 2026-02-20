@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from v_agent.constants import (
+from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
     BATCH_SUB_TASKS_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
@@ -11,7 +11,7 @@ from v_agent.constants import (
     TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
-from v_agent.prompt import build_system_prompt
+from vv_agent.prompt import build_system_prompt
 
 
 def test_build_system_prompt_includes_required_sections() -> None:

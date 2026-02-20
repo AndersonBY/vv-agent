@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from v_agent.skills.prompt import metadata_to_prompt_entries, to_available_skills_xml
+from vv_agent.skills.prompt import metadata_to_prompt_entries, to_available_skills_xml
 
 
 def test_to_available_skills_xml_includes_location_and_escaping(tmp_path: Path) -> None:

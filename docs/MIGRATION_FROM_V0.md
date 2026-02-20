@@ -45,7 +45,7 @@ Old single-file engine logic is now split:
 Tool schemas are no longer hardcoded in handlers.
 Use constants modules as source of truth:
 
-- `src/v_agent/constants/workspace.py`
+- `src/vv_agent/constants/workspace.py`
 - workflow/document 建议作为自定义工具注册到 `ToolRegistry`（不再内建专项模块）
 
 ## 5) Prompt system changes
@@ -77,5 +77,5 @@ text = client.query(agent="planner", prompt="一句话总结进展")
 
 - 新增 `client.create_session()`：支持状态化多轮执行、`steer/follow_up` 队列、事件订阅。
 - 新增 runtime hooks：可在 `before_memory_compact/before_llm/after_llm/before_tool_call/after_tool_call` 拦截或改写流程。
-- 新增 `AgentResourceLoader`：自动发现 `workspace/.v-agent/` 与 `~/.v-agent/` 的
+- 新增 `AgentResourceLoader`：自动发现 `workspace/.vv-agent/` 与 `~/.vv-agent/` 的
   `agents.json`、`prompts/*.md`、`skills/`、`hooks/` 资源并注入 SDK。

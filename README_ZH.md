@@ -1,4 +1,4 @@
-# v-agent
+# vv-agent
 
 [English](README.md)
 
@@ -18,7 +18,7 @@ AgentRuntime
     └── CeleryBackend    # 分布式，每轮 cycle 作为独立 Celery task
 ```
 
-核心类型定义在 `v_agent.types`：`AgentTask`、`AgentResult`、`Message`、`CycleRecord`、`ToolCall`。
+核心类型定义在 `vv_agent.types`：`AgentTask`、`AgentResult`、`Message`、`CycleRecord`、`ToolCall`。
 
 任务完成由工具显式触发：agent 调用 `_task_finish` 或 `_ask_user` 来标记终态，不做"最后一条消息即答案"的隐式推断。
 
@@ -39,10 +39,10 @@ uv run pytest
 ### CLI
 
 ```bash
-uv run v-agent --prompt "概述一下这个框架" --backend moonshot --model kimi-k2.5
+uv run vv-agent --prompt "概述一下这个框架" --backend moonshot --model kimi-k2.5
 
 # 带每轮日志
-uv run v-agent --prompt "概述一下这个框架" --backend moonshot --model kimi-k2.5 --verbose
+uv run vv-agent --prompt "概述一下这个框架" --backend moonshot --model kimi-k2.5 --verbose
 ```
 
 参数：`--settings-file`、`--backend`、`--model`、`--verbose`。
@@ -50,10 +50,10 @@ uv run v-agent --prompt "概述一下这个框架" --backend moonshot --model ki
 ### 代码调用
 
 ```python
-from v_agent.config import build_openai_llm_from_local_settings
-from v_agent.runtime import AgentRuntime
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentTask
+from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.runtime import AgentRuntime
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentTask
 
 llm, resolved = build_openai_llm_from_local_settings("local_settings.py", backend="moonshot", model="kimi-k2.5")
 runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
@@ -70,7 +70,7 @@ print(result.status, result.final_answer)
 ### SDK
 
 ```python
-from v_agent.sdk import AgentSDKClient, AgentSDKOptions
+from vv_agent.sdk import AgentSDKClient, AgentSDKOptions
 
 client = AgentSDKClient(options=AgentSDKOptions(
     settings_file="local_settings.py",
@@ -99,7 +99,7 @@ cycle 循环由可插拔的 `ExecutionBackend` 调度。
 - **分布式**（传入 `RuntimeRecipe`）：每轮 cycle 是一个 Celery task。Worker 从 recipe 重建 `AgentRuntime`，从共享 `StateStore`（SQLite 或 Redis）加载状态。
 
 ```python
-from v_agent.runtime.backends.celery import CeleryBackend, RuntimeRecipe, register_cycle_task
+from vv_agent.runtime.backends.celery import CeleryBackend, RuntimeRecipe, register_cycle_task
 
 register_cycle_task(celery_app)
 
@@ -118,7 +118,7 @@ runtime = AgentRuntime(llm_client=llm, tool_registry=registry, execution_backend
 ### 取消与流式输出
 
 ```python
-from v_agent.runtime import CancellationToken, ExecutionContext
+from vv_agent.runtime import CancellationToken, ExecutionContext
 
 # 从另一个线程取消
 token = CancellationToken()
@@ -141,7 +141,7 @@ result = runtime.run(task, ctx=ctx)
 | `S3WorkspaceBackend` | S3 兼容对象存储（AWS S3、阿里云 OSS、MinIO、Cloudflare R2）。 |
 
 ```python
-from v_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
+from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
 # 显式指定本地后端
 runtime = AgentRuntime(
@@ -160,10 +160,10 @@ runtime = AgentRuntime(
 
 ### S3WorkspaceBackend
 
-安装可选 S3 依赖：`uv pip install 'v-agent[s3]'`。
+安装可选 S3 依赖：`uv pip install 'vv-agent[s3]'`。
 
 ```python
-from v_agent.workspace import S3WorkspaceBackend
+from vv_agent.workspace import S3WorkspaceBackend
 
 backend = S3WorkspaceBackend(
     bucket="my-bucket",
@@ -180,7 +180,7 @@ backend = S3WorkspaceBackend(
 实现 `WorkspaceBackend` 协议（8 个方法）即可接入任意存储：
 
 ```python
-from v_agent.workspace import WorkspaceBackend
+from vv_agent.workspace import WorkspaceBackend
 
 class MyBackend:
     def list_files(self, base: str, glob: str) -> list[str]: ...
@@ -197,18 +197,18 @@ class MyBackend:
 
 | 模块 | 说明 |
 |------|------|
-| `v_agent.runtime.AgentRuntime` | 顶层状态机（completed / wait_user / max_cycles / failed） |
-| `v_agent.runtime.CycleRunner` | 单轮 LLM 调用与 cycle 记录构建 |
-| `v_agent.runtime.ToolCallRunner` | 工具执行与 directive 收敛 |
-| `v_agent.runtime.RuntimeHookManager` | Hook 分发（before/after LLM、工具调用、上下文压缩） |
-| `v_agent.runtime.StateStore` | Checkpoint 持久化协议（`InMemoryStateStore` / `SqliteStateStore` / `RedisStateStore`） |
-| `v_agent.memory.MemoryManager` | 历史超阈值时自动压缩 |
-| `v_agent.workspace` | 可插拔文件存储：`LocalWorkspaceBackend`、`MemoryWorkspaceBackend`、`S3WorkspaceBackend` |
-| `v_agent.tools` | 内建工具：workspace I/O、todo、bash、image、sub-agent、skills |
-| `v_agent.sdk` | 高层 SDK：`AgentSDKClient`、`AgentSession`、`AgentResourceLoader` |
-| `v_agent.skills` | Agent Skills 支持（`SKILL.md` 解析、prompt 注入、激活） |
-| `v_agent.llm.VVLlmClient` | 统一 LLM 接口，基于 `vv-llm`（端点轮询、重试、流式） |
-| `v_agent.config` | 从 `local_settings.py` 解析模型/端点/Key |
+| `vv_agent.runtime.AgentRuntime` | 顶层状态机（completed / wait_user / max_cycles / failed） |
+| `vv_agent.runtime.CycleRunner` | 单轮 LLM 调用与 cycle 记录构建 |
+| `vv_agent.runtime.ToolCallRunner` | 工具执行与 directive 收敛 |
+| `vv_agent.runtime.RuntimeHookManager` | Hook 分发（before/after LLM、工具调用、上下文压缩） |
+| `vv_agent.runtime.StateStore` | Checkpoint 持久化协议（`InMemoryStateStore` / `SqliteStateStore` / `RedisStateStore`） |
+| `vv_agent.memory.MemoryManager` | 历史超阈值时自动压缩 |
+| `vv_agent.workspace` | 可插拔文件存储：`LocalWorkspaceBackend`、`MemoryWorkspaceBackend`、`S3WorkspaceBackend` |
+| `vv_agent.tools` | 内建工具：workspace I/O、todo、bash、image、sub-agent、skills |
+| `vv_agent.sdk` | 高层 SDK：`AgentSDKClient`、`AgentSession`、`AgentResourceLoader` |
+| `vv_agent.skills` | Agent Skills 支持（`SKILL.md` 解析、prompt 注入、激活） |
+| `vv_agent.llm.VVLlmClient` | 统一 LLM 接口，基于 `vv-llm`（端点轮询、重试、流式） |
+| `vv_agent.config` | 从 `local_settings.py` 解析模型/端点/Key |
 
 ## 内建工具
 

@@ -6,7 +6,7 @@
 分布式模式 (需要 Redis + worker):
   1. 安装 celery 可选依赖:  uv sync --extra celery  (或 uv sync --dev)
   2. 启动 Redis:            docker run -d -p 6379:6379 redis:7
-  3. 启动 Celery worker:    cd v-agent && uv run celery -A examples.23_celery_backend worker -l info
+  3. 启动 Celery worker:    cd vv-agent && uv run celery -A examples.23_celery_backend worker -l info
   4. 运行本示例:            V_AGENT_EXAMPLE_CELERY_DISTRIBUTED=1 uv run python examples/23_celery_backend.py
 """
 
@@ -19,17 +19,17 @@ from typing import Any
 
 from celery import Celery
 
-from v_agent.config import build_openai_llm_from_local_settings
-from v_agent.prompt import build_system_prompt
-from v_agent.runtime import AgentRuntime
-from v_agent.runtime.backends.celery import (
+from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.prompt import build_system_prompt
+from vv_agent.runtime import AgentRuntime
+from vv_agent.runtime.backends.celery import (
     CeleryBackend,
     RuntimeRecipe,
     register_cycle_task,
 )
-from v_agent.runtime.stores.sqlite import SqliteStateStore
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentTask
+from vv_agent.runtime.stores.sqlite import SqliteStateStore
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentTask
 
 # ---------------------------------------------------------------------------
 # 1. Celery app (Redis 作为 broker + result backend)
@@ -39,7 +39,7 @@ DISTRIBUTED = os.getenv(
     "V_AGENT_EXAMPLE_CELERY_DISTRIBUTED", "",
 ).strip().lower() in {"1", "true", "yes", "on"}
 
-app = Celery("v_agent_example", broker=REDIS_URL, backend=REDIS_URL)
+app = Celery("vv_agent_example", broker=REDIS_URL, backend=REDIS_URL)
 app.conf.task_serializer = "json"
 app.conf.result_serializer = "json"
 app.conf.accept_content = ["json"]
@@ -122,7 +122,7 @@ def main() -> None:
     )
 
     # Use SqliteStateStore for eager mode (shared within the same process).
-    db_path = workspace / ".v-agent-state" / "checkpoints.db"
+    db_path = workspace / ".vv-agent-state" / "checkpoints.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = SqliteStateStore(db_path=db_path)
 

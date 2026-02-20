@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from v_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from v_agent.llm import ScriptedLLM
-from v_agent.sdk import AgentDefinition, AgentResourceLoader, AgentSDKClient, AgentSDKOptions
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentStatus, LLMResponse
+from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.llm import ScriptedLLM
+from vv_agent.sdk import AgentDefinition, AgentResourceLoader, AgentSDKClient, AgentSDKOptions
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentStatus, LLMResponse
 
 
 def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:
@@ -22,7 +22,7 @@ def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:
 
 
 def test_resource_loader_discovers_agents_prompts_skills_and_hooks(tmp_path: Path) -> None:
-    resource_root = tmp_path / ".v-agent"
+    resource_root = tmp_path / ".vv-agent"
     (resource_root / "prompts").mkdir(parents=True)
     (resource_root / "skills" / "demo").mkdir(parents=True)
     (resource_root / "hooks").mkdir(parents=True)
@@ -52,7 +52,7 @@ body
         encoding="utf-8",
     )
     (resource_root / "hooks" / "noop.py").write_text(
-        """from v_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
+        """from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
 
 class NoopHook(BaseRuntimeHook):
     def before_llm(self, event: BeforeLLMEvent):
@@ -75,7 +75,7 @@ HOOK = NoopHook()
 
 
 def test_sdk_client_uses_discovered_agent_and_prompt_template(tmp_path: Path) -> None:
-    resource_root = tmp_path / ".v-agent"
+    resource_root = tmp_path / ".vv-agent"
     (resource_root / "prompts").mkdir(parents=True)
     (resource_root / "skills" / "demo").mkdir(parents=True)
 
@@ -124,12 +124,12 @@ body
 
 
 def test_sdk_client_loads_runtime_hooks_from_resource_loader(tmp_path: Path) -> None:
-    resource_root = tmp_path / ".v-agent"
+    resource_root = tmp_path / ".vv-agent"
     (resource_root / "hooks").mkdir(parents=True)
     (resource_root / "hooks" / "force_finish.py").write_text(
-        """from v_agent.constants import TASK_FINISH_TOOL_NAME
-from v_agent.runtime import AfterLLMEvent, BaseRuntimeHook
-from v_agent.types import LLMResponse, ToolCall
+        """from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.runtime import AfterLLMEvent, BaseRuntimeHook
+from vv_agent.types import LLMResponse, ToolCall
 
 class ForceFinishHook(BaseRuntimeHook):
     def after_llm(self, event: AfterLLMEvent):

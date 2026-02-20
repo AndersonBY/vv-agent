@@ -1,5 +1,5 @@
 [project]
-name = "v-agent"
+name = "vv-agent"
 version = "0.1.0"
 description = "Vector Vein inspired agent framework with cycle runtime, tools and memory management"
 readme = "README.md"
@@ -27,11 +27,14 @@ dev = [
 ]
 
 [project.scripts]
-v-agent = "v_agent.cli:main"
+vv-agent = "vv_agent.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.9.13,<0.10.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "vv_agent"
 
 [tool.uv.sources]
 vv-llm = { path = "../ref_repos/vv-llm" }

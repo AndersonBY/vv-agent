@@ -1,4 +1,4 @@
-# v-agent
+# vv-agent
 
 [中文文档](README_ZH.md)
 
@@ -18,7 +18,7 @@ AgentRuntime
     └── CeleryBackend    # distributed, per-cycle Celery task dispatch
 ```
 
-Core types live in `v_agent.types`: `AgentTask`, `AgentResult`, `Message`, `CycleRecord`, `ToolCall`.
+Core types live in `vv_agent.types`: `AgentTask`, `AgentResult`, `Message`, `CycleRecord`, `ToolCall`.
 
 Task completion is tool-driven: the agent calls `_task_finish` or `_ask_user` to signal terminal states. No implicit "last message = answer" heuristics.
 
@@ -39,10 +39,10 @@ uv run pytest
 ### CLI
 
 ```bash
-uv run v-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k2.5
+uv run vv-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k2.5
 
 # With per-cycle logging
-uv run v-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k2.5 --verbose
+uv run vv-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k2.5 --verbose
 ```
 
 CLI flags: `--settings-file`, `--backend`, `--model`, `--verbose`.
@@ -50,10 +50,10 @@ CLI flags: `--settings-file`, `--backend`, `--model`, `--verbose`.
 ### Programmatic
 
 ```python
-from v_agent.config import build_openai_llm_from_local_settings
-from v_agent.runtime import AgentRuntime
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentTask
+from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.runtime import AgentRuntime
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentTask
 
 llm, resolved = build_openai_llm_from_local_settings("local_settings.py", backend="moonshot", model="kimi-k2.5")
 runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
@@ -70,7 +70,7 @@ print(result.status, result.final_answer)
 ### SDK
 
 ```python
-from v_agent.sdk import AgentSDKClient, AgentSDKOptions
+from vv_agent.sdk import AgentSDKClient, AgentSDKOptions
 
 client = AgentSDKClient(options=AgentSDKOptions(
     settings_file="local_settings.py",
@@ -99,7 +99,7 @@ Two modes:
 - **Distributed** (with `RuntimeRecipe`): each cycle is a Celery task. Workers rebuild the `AgentRuntime` from the recipe and load state from a shared `StateStore` (SQLite or Redis).
 
 ```python
-from v_agent.runtime.backends.celery import CeleryBackend, RuntimeRecipe, register_cycle_task
+from vv_agent.runtime.backends.celery import CeleryBackend, RuntimeRecipe, register_cycle_task
 
 register_cycle_task(celery_app)
 
@@ -118,7 +118,7 @@ Install celery extras: `uv sync --extra celery`.
 ### Cancellation and Streaming
 
 ```python
-from v_agent.runtime import CancellationToken, ExecutionContext
+from vv_agent.runtime import CancellationToken, ExecutionContext
 
 # Cancel from another thread
 token = CancellationToken()
@@ -141,7 +141,7 @@ Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All 
 | `S3WorkspaceBackend` | S3-compatible object storage (AWS S3, Aliyun OSS, MinIO, Cloudflare R2). |
 
 ```python
-from v_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
+from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
 # Explicit local backend
 runtime = AgentRuntime(
@@ -160,10 +160,10 @@ runtime = AgentRuntime(
 
 ### S3WorkspaceBackend
 
-Install the optional S3 dependency: `uv pip install 'v-agent[s3]'`.
+Install the optional S3 dependency: `uv pip install 'vv-agent[s3]'`.
 
 ```python
-from v_agent.workspace import S3WorkspaceBackend
+from vv_agent.workspace import S3WorkspaceBackend
 
 backend = S3WorkspaceBackend(
     bucket="my-bucket",
@@ -180,7 +180,7 @@ backend = S3WorkspaceBackend(
 Implement the `WorkspaceBackend` protocol (8 methods) to plug in any storage:
 
 ```python
-from v_agent.workspace import WorkspaceBackend
+from vv_agent.workspace import WorkspaceBackend
 
 class MyBackend:
     def list_files(self, base: str, glob: str) -> list[str]: ...
@@ -197,18 +197,18 @@ class MyBackend:
 
 | Module | Description |
 |--------|-------------|
-| `v_agent.runtime.AgentRuntime` | Top-level state machine (completed / wait_user / max_cycles / failed) |
-| `v_agent.runtime.CycleRunner` | Single LLM turn and cycle record construction |
-| `v_agent.runtime.ToolCallRunner` | Tool execution with directive convergence |
-| `v_agent.runtime.RuntimeHookManager` | Hook dispatch (before/after LLM, tool call, memory compact) |
-| `v_agent.runtime.StateStore` | Checkpoint persistence protocol (`InMemoryStateStore` / `SqliteStateStore` / `RedisStateStore`) |
-| `v_agent.memory.MemoryManager` | Context compression when history exceeds threshold |
-| `v_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
-| `v_agent.tools` | Built-in tools: workspace I/O, todo, bash, image, sub-agents, skills |
-| `v_agent.sdk` | High-level SDK: `AgentSDKClient`, `AgentSession`, `AgentResourceLoader` |
-| `v_agent.skills` | Agent Skills support (`SKILL.md` parsing, prompt injection, activation) |
-| `v_agent.llm.VVLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
-| `v_agent.config` | Model/endpoint/key resolution from `local_settings.py` |
+| `vv_agent.runtime.AgentRuntime` | Top-level state machine (completed / wait_user / max_cycles / failed) |
+| `vv_agent.runtime.CycleRunner` | Single LLM turn and cycle record construction |
+| `vv_agent.runtime.ToolCallRunner` | Tool execution with directive convergence |
+| `vv_agent.runtime.RuntimeHookManager` | Hook dispatch (before/after LLM, tool call, memory compact) |
+| `vv_agent.runtime.StateStore` | Checkpoint persistence protocol (`InMemoryStateStore` / `SqliteStateStore` / `RedisStateStore`) |
+| `vv_agent.memory.MemoryManager` | Context compression when history exceeds threshold |
+| `vv_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
+| `vv_agent.tools` | Built-in tools: workspace I/O, todo, bash, image, sub-agents, skills |
+| `vv_agent.sdk` | High-level SDK: `AgentSDKClient`, `AgentSession`, `AgentResourceLoader` |
+| `vv_agent.skills` | Agent Skills support (`SKILL.md` parsing, prompt injection, activation) |
+| `vv_agent.llm.VVLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
+| `vv_agent.config` | Model/endpoint/key resolution from `local_settings.py` |
 
 ## Built-in Tools
 

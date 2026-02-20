@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from v_agent.memory import MemoryManager
-from v_agent.types import Message
+from vv_agent.memory import MemoryManager
+from vv_agent.types import Message
 
 
 def test_memory_compacts_when_threshold_exceeded() -> None:

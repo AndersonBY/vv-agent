@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
-from v_agent.tools.base import ToolContext, ToolSpec
-from v_agent.tools.dispatcher import dispatch_tool_call
-from v_agent.tools.registry import ToolRegistry
-from v_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
-from v_agent.workspace import LocalWorkspaceBackend
+from vv_agent.tools.base import ToolContext, ToolSpec
+from vv_agent.tools.dispatcher import dispatch_tool_call
+from vv_agent.tools.registry import ToolRegistry
+from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
+from vv_agent.workspace import LocalWorkspaceBackend
 
 
 def _build_registry() -> ToolRegistry:

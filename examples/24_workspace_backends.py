@@ -18,12 +18,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from v_agent.config import build_openai_llm_from_local_settings
-from v_agent.prompt import build_system_prompt
-from v_agent.runtime import AgentRuntime
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentTask
-from v_agent.workspace import (
+from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.prompt import build_system_prompt
+from vv_agent.runtime import AgentRuntime
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentTask
+from vv_agent.workspace import (
     FileInfo,
     LocalWorkspaceBackend,
     MemoryWorkspaceBackend,
@@ -221,7 +221,7 @@ def main() -> None:
                 sys.exit(1)
             print("\n[跳过] 方式 3: S3 — 未设置 S3_BUCKET, 跳过")
         else:
-            from v_agent.workspace import S3WorkspaceBackend
+            from vv_agent.workspace import S3WorkspaceBackend
 
             s3_backend = S3WorkspaceBackend(
                 bucket=s3_bucket,

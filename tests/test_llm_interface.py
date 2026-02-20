@@ -6,9 +6,9 @@ from typing import Any, ClassVar, cast
 
 from openai.types.chat import ChatCompletionMessageParam
 
-from v_agent.constants import TODO_WRITE_TOOL_NAME
-from v_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
-from v_agent.types import Message
+from vv_agent.constants import TODO_WRITE_TOOL_NAME
+from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
+from vv_agent.types import Message
 
 
 class _FakeUsage:
@@ -62,8 +62,8 @@ def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
     }
     _FakeChatClient.seen_calls = []
 
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
     llm = VVLlmClient(
         endpoint_targets=[
@@ -119,8 +119,8 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
     _FakeChatClient.behavior_by_endpoint = {"stream": stream_call}
     _FakeChatClient.seen_calls = []
 
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
     llm = VVLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="stream", api_key="k", api_base="https://stream.example/v1")],
@@ -161,8 +161,8 @@ def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
     _FakeChatClient.behavior_by_endpoint = {"stream-reasoning": stream_call}
     _FakeChatClient.seen_calls = []
 
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
     llm = VVLlmClient(
         endpoint_targets=[
@@ -227,8 +227,8 @@ def test_llm_stream_request_payload_aligns_qwen_thinking(monkeypatch) -> None:
     _FakeChatClient.behavior_by_endpoint = {"qwen": stream_call}
     _FakeChatClient.seen_calls = []
 
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
     llm = VVLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="qwen", api_key="k", api_base="https://qwen.example/v1")],
@@ -279,8 +279,8 @@ def test_llm_stream_aggregates_tool_calls_without_index(monkeypatch) -> None:
     _FakeChatClient.behavior_by_endpoint = {"missing-index": stream_call}
     _FakeChatClient.seen_calls = []
 
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
     llm = VVLlmClient(
         endpoint_targets=[
@@ -334,9 +334,9 @@ def test_llm_estimates_usage_when_backend_missing_usage(monkeypatch) -> None:
     _FakeChatClient.behavior_by_endpoint = {"usage-missing": response_without_usage}
     _FakeChatClient.seen_calls = []
 
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
-    monkeypatch.setattr("v_agent.llm.vv_llm_client.get_token_counts", lambda text, model, use_token_server_first=False: 10)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.get_token_counts", lambda text, model, use_token_server_first=False: 10)
 
     llm = VVLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="usage-missing", api_key="k", api_base="https://u.example/v1")],

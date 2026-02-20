@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import pytest
-
-from v_agent.runtime.state import Checkpoint, InMemoryStateStore
-from v_agent.runtime.stores.sqlite import SqliteStateStore
-from v_agent.types import (
+from vv_agent.runtime.state import Checkpoint, InMemoryStateStore
+from vv_agent.runtime.stores.sqlite import SqliteStateStore
+from vv_agent.types import (
     AgentStatus,
     CycleRecord,
     Message,

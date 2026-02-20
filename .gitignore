@@ -7,6 +7,6 @@ htmlcov/
 *.pyc
 local_settings.py
 .pdm-python
-.v-agent-workspace/
+.vv-agent-workspace/
 /workspace/
 .env

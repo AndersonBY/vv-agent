@@ -11,11 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from v_agent.constants import TASK_FINISH_TOOL_NAME
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from v_agent.tools import ToolContext, build_default_registry
-from v_agent.tools.registry import ToolRegistry
-from v_agent.types import ToolExecutionResult, ToolResultStatus
+from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.tools import ToolContext, build_default_registry
+from vv_agent.tools.registry import ToolRegistry
+from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 TICKET_STORE_TOOL_NAME = "_ticket_store"
 

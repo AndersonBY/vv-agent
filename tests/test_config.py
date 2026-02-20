@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from vv_llm.types import BackendType
 
-from v_agent.config import (
+from vv_agent.config import (
     ConfigError,
     build_vv_llm_settings,
     decode_api_key,

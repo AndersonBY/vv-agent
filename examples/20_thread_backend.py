@@ -8,12 +8,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from v_agent.config import build_openai_llm_from_local_settings
-from v_agent.prompt import build_system_prompt
-from v_agent.runtime import AgentRuntime, CancellationToken, ExecutionContext
-from v_agent.runtime.backends.thread import ThreadBackend
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentTask
+from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.prompt import build_system_prompt
+from vv_agent.runtime import AgentRuntime, CancellationToken, ExecutionContext
+from vv_agent.runtime.backends.thread import ThreadBackend
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentTask
 
 
 def log_handler(event: str, payload: dict[str, Any]) -> None:

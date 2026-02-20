@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SDK-style programmatic wrapper around v-agent runtime."""
+"""SDK-style programmatic wrapper around vv-agent runtime."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from v_agent.types import SubAgentConfig
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.types import SubAgentConfig
 
 
 def log_handler(event: str, payload: dict[str, Any]) -> None:

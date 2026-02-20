@@ -164,7 +164,7 @@ uv run python examples/24_workspace_backends.py
 V_AGENT_EXAMPLE_WS_MODE=memory uv run python examples/24_workspace_backends.py
 
 # 仅运行 S3 后端模式 (需先配置 .env, 参见 examples/.env.example)
-# uv pip install 'v-agent[s3]'
+# uv pip install 'vv-agent[s3]'
 V_AGENT_EXAMPLE_WS_MODE=s3 uv run python examples/24_workspace_backends.py
 
 # 仅运行自定义后端模式

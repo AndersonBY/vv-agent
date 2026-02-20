@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from v_agent.constants import TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
-from v_agent.llm import ScriptedLLM
-from v_agent.runtime import (
+from vv_agent.constants import TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
+from vv_agent.llm import ScriptedLLM
+from vv_agent.runtime import (
     AfterLLMEvent,
     AfterToolCallEvent,
     AgentRuntime,
@@ -13,8 +13,8 @@ from v_agent.runtime import (
     BeforeLLMPatch,
     BeforeToolCallEvent,
 )
-from v_agent.tools import ToolContext, ToolSpec, build_default_registry
-from v_agent.types import (
+from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
+from vv_agent.types import (
     AgentStatus,
     AgentTask,
     LLMResponse,

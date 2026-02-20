@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from v_agent.config import build_openai_llm_from_local_settings
-from v_agent.types import Message
+from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.types import Message
 
 pytestmark = pytest.mark.live
 

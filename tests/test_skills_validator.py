@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from v_agent.skills.validator import validate, validate_metadata
+from vv_agent.skills.validator import validate, validate_metadata
 
 
 def test_validate_skill_dir_success(tmp_path: Path) -> None:

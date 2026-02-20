@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 

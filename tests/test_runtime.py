@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from v_agent.constants import (
+from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
 )
-from v_agent.llm import ScriptedLLM
-from v_agent.runtime import AgentRuntime
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall
+from vv_agent.llm import ScriptedLLM
+from vv_agent.runtime import AgentRuntime
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall
 
 _PNG_1X1 = bytes.fromhex(
     "89504e470d0a1a0a"

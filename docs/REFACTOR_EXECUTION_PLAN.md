@@ -1,6 +1,6 @@
-# v-agent 重构执行计划（可直接按步骤实施）
+# vv-agent 重构执行计划（可直接按步骤实施）
 
-> 目标：把 `v-agent` 从“简化工具调用器”升级为“工具协议驱动的 Agent 运行时”，对齐 `backend/vector_vein_main/ai_agents/tasks/` 的工具定义、提示词治理、状态机执行逻辑。
+> 目标：把 `vv-agent` 从“简化工具调用器”升级为“工具协议驱动的 Agent 运行时”，对齐 `backend/vector_vein_main/ai_agents/tasks/` 的工具定义、提示词治理、状态机执行逻辑。
 
 ---
 
@@ -28,7 +28,7 @@
 | P17 示例嵌入式改造 | ✅ 已完成 | 2026-02-18T13:48:38Z | examples 全部改为非 argparse 模式，参数改为脚本内默认值 + 环境变量覆盖，便于直接嵌入 Python 项目 |
 | P18 Session-first SDK 改造 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 `AgentSession`（`prompt/continue_run/query/steer/follow_up/subscribe`），支持消息与 shared_state 的会话级持续化 |
 | P19 Runtime Hooks 与中断转向 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 before/after memory-llm-tool hooks，支持 tool 级事件回调与同轮剩余工具 `skipped_due_to_steering` 语义 |
-| P20 Resource Loader 自动发现 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 `AgentResourceLoader`，自动加载 `.v-agent/` 与 `~/.v-agent/` 下 profiles/prompts/skills/hooks 并注入 SDK |
+| P20 Resource Loader 自动发现 | ✅ 已完成 | 2026-02-18T23:40:12Z | 新增 `AgentResourceLoader`，自动加载 `.vv-agent/` 与 `~/.vv-agent/` 下 profiles/prompts/skills/hooks 并注入 SDK |
 | P21 vv-llm 后端统一改造 | ✅ 已完成 | 2026-02-18T18:48:52Z | LLM 调用层切换为 `vv-llm`（`create_chat_client/format_messages/get_token_counts/Settings`），保留端点回退、流式聚合与 usage 统计 |
 
 ### 执行日志
@@ -40,9 +40,9 @@
 - 2026-02-17T15:17:28Z：完成 P4 动态工具规划器与 P5 Dispatcher，runtime 已通过 planner + dispatcher 执行工具，回归结果 `39 passed, 1 skipped`。
 - 2026-02-17T15:26:23Z：完成 P6/P7/P8，工具 handler 已模块化且控制语义对齐 backend 风格，runtime 主循环拆分，回归结果 `42 passed, 1 skipped`。
 - 2026-02-17T15:41:52Z：完成 P9/P10/P11，新增 bash/background/image 与 extension stubs，文档收口；回归 `51 passed, 1 skipped`，live `1 passed`。
-- 2026-02-17T16:45:22Z：启动 P12，开始将 `src/v_agent/llm/openai_compatible.py` 请求参数映射与流式工具聚合逻辑对齐 `backend/vector_vein_main/utilities/llm.py`。
-- 2026-02-17T16:47:41Z：完成 P12，请求参数与流式聚合逻辑改造落地；回归 `57 passed, 1 skipped`，live `1 passed`，CLI 真实命令 `uv run v-agent --prompt \"请概述一下这个框架的特点\" --backend moonshot --model kimi-k2.5` 返回 `status=completed`。
-- 2026-02-17T17:29:06Z：完成 P12 兼容性补丁：修复 memory compaction 边界下 tool 对话结构破损风险，并对 MiniMax 端点在发送前将附加 `system` 摘要消息降级为 `user` 消息，解决 `invalid chat setting (2013)`；回归 `60 passed, 1 skipped`，`uv run v-agent --backend minimax --model MiniMax-M2.5` 不再出现 cycle 6 的 400 失败。
+- 2026-02-17T16:45:22Z：启动 P12，开始将 `src/vv_agent/llm/openai_compatible.py` 请求参数映射与流式工具聚合逻辑对齐 `backend/vector_vein_main/utilities/llm.py`。
+- 2026-02-17T16:47:41Z：完成 P12，请求参数与流式聚合逻辑改造落地；回归 `57 passed, 1 skipped`，live `1 passed`，CLI 真实命令 `uv run vv-agent --prompt \"请概述一下这个框架的特点\" --backend moonshot --model kimi-k2.5` 返回 `status=completed`。
+- 2026-02-17T17:29:06Z：完成 P12 兼容性补丁：修复 memory compaction 边界下 tool 对话结构破损风险，并对 MiniMax 端点在发送前将附加 `system` 摘要消息降级为 `user` 消息，解决 `invalid chat setting (2013)`；回归 `60 passed, 1 skipped`，`uv run vv-agent --backend minimax --model MiniMax-M2.5` 不再出现 cycle 6 的 400 失败。
 - 2026-02-17T17:55:09Z：新增 CLI 可观测性日志：`--verbose` 下实时输出 cycle 启动、LLM 响应摘要、tool 执行结果与结束状态；并补充 runtime 日志回调与测试覆盖。
 - 2026-02-17T18:17:45Z：新增 `examples/` 目录，补充代码式集成示例（quick start / agent profiles / SDK-style client），展示多 Agent 配置与可复用封装方式。
 - 2026-02-17T18:45:52Z：移除内建 workflow 特化代码（改为自定义工具注入），补充 SDK 核心类型与 `AgentSDKClient`，并新增 `sub_agents` 配置字段支持显式子 Agent 定义。
@@ -52,18 +52,18 @@
 - 2026-02-18T03:22:17Z：补齐 `_read_file` 行号与限流语义：支持 `show_line_numbers`，并在单次读取超过 `2000` 行或 `50000` 字符时返回结构化 `file_info/limits/suggested_range`（不直接回传大内容）；新增多场景测试覆盖（行号、行数超限、字符超限、区间超限），回归 `82 passed, 1 skipped`。
 - 2026-02-18T03:30:44Z：对齐 `_write_file` 参数与描述：新增 `leading_newline`/`trailing_newline`（仅 append 模式生效），强化 overwrite 警示文案与参数说明，并补充 append/overwrite 双场景测试；回归 `84 passed, 1 skipped`。
 - 2026-02-18T03:42:45Z：对齐 `_workspace_grep` 语义与 backend：新增 `output_mode`（content/files_with_matches/count）、`type` 文件类型过滤、`b/a/c` 上下文、`n` 行号、`i` 忽略大小写、`multiline`、`head_limit`（兼容 `max_results`）及结果截断摘要；补齐多场景测试（模式切换、上下文、多行、类型过滤、错误分支），回归 `89 passed, 1 skipped`。
-- 2026-02-18T04:19:58Z：新增 `examples/arxiv_agent_memory_pipeline.py` 代码式端到端示例（arXiv 最近 30 天检索 + PDF 下载 + 首图提取 + `_read_image` 图片解释 + 中文分段翻译），并更新 `examples/README.md` 使用说明；质量门禁回归 `ruff/ty/pytest` 全绿（`89 passed, 1 skipped`）。
+- 2026-02-18T04:19:58Z：新增 `examples/arxivv_agent_memory_pipeline.py` 代码式端到端示例（arXiv 最近 30 天检索 + PDF 下载 + 首图提取 + `_read_image` 图片解释 + 中文分段翻译），并更新 `examples/README.md` 使用说明；质量门禁回归 `ruff/ty/pytest` 全绿（`89 passed, 1 skipped`）。
 - 2026-02-18T06:44:56Z：新增 `examples/read_image_to_markdown.py` 示例：读取 workspace 图片并强制调用 `_read_image`，让 kimi-k2.5 生成中文 Markdown 报告并写入 `.md` 文件；同步更新 `examples/README.md` 启动命令。已用真实 moonshot/kimi-k2.5 在 `workspace/test_image.png` 回归运行并产出 `workspace/artifacts/image_read_report.md`。
 - 2026-02-18T07:08:20Z：修复 `_read_image` 多模态链路：workspace 图片会编码为 data URL 并通过消息列表注入下一轮 LLM（不再只追加文本提示），`Message.to_openai_message` 支持 user text+image content blocks；补充 runtime/protocol/image 工具测试并完成真实回归运行。
-- 2026-02-18T07:23:05Z：按 backend `tasks/memory.py` 思路升级 v-agent 记忆压缩策略：新增结构化压缩流水线（stale tool_calls 清理、orphan tool 清理、assistant 无工具消息折叠、旧 tool result artifact 化）、已处理图片 payload 压缩、阈值预警注入、JSON 化压缩摘要，并支持通过 `AgentTask.metadata` 调参；补齐 memory/runtime/image/protocol 测试，回归 `93 passed, 1 skipped`。
+- 2026-02-18T07:23:05Z：按 backend `tasks/memory.py` 思路升级 vv-agent 记忆压缩策略：新增结构化压缩流水线（stale tool_calls 清理、orphan tool 清理、assistant 无工具消息折叠、旧 tool result artifact 化）、已处理图片 payload 压缩、阈值预警注入、JSON 化压缩摘要，并支持通过 `AgentTask.metadata` 调参；补齐 memory/runtime/image/protocol 测试，回归 `93 passed, 1 skipped`。
 - 2026-02-18T08:29:37Z：按 backend `tools/activate_skill.py` 语义落地 `_activate_skill`：从 `available_skills/bound_skills` 做白名单校验与激活，支持读取 `instructions` 或 `SKILL.md`，回写 `active_skills/skill_activation_log` 到 shared_state；runtime 新增 metadata->shared_state 的 skill 透传，并补齐 extension/runtime 测试，回归 `96 passed, 1 skipped`。
-- 2026-02-18T08:54:55Z：对齐 Agent Skills 官方规范（`agentskills/agentskills`）：新增 `v_agent.skills` 标准解析/校验/提示词模块（含 `read_properties`/`validate`/`metadata_to_prompt_entries`），`build_system_prompt` 支持注入 `<available_skills>` XML，`_activate_skill` 优先按 `location/path` 加载并验证 `SKILL.md` frontmatter；新增 skills parser/prompt/validator 测试与扩展链路测试，质量门禁回归 `ruff/ty/pytest` 全绿（`115 passed, 1 skipped`）。
+- 2026-02-18T08:54:55Z：对齐 Agent Skills 官方规范（`agentskills/agentskills`）：新增 `vv_agent.skills` 标准解析/校验/提示词模块（含 `read_properties`/`validate`/`metadata_to_prompt_entries`），`build_system_prompt` 支持注入 `<available_skills>` XML，`_activate_skill` 优先按 `location/path` 加载并验证 `SKILL.md` frontmatter；新增 skills parser/prompt/validator 测试与扩展链路测试，质量门禁回归 `ruff/ty/pytest` 全绿（`115 passed, 1 skipped`）。
 - 2026-02-18T09:34:33Z：完成 P16 增强版：支持将 skills 根目录（如 `skills/`）直接注入 Agent，系统提示词自动扫描并构建 `<available_skills>`；`_activate_skill` 支持从 skill collection 解析多技能并按名称激活；SDK 新增 `AgentDefinition.skill_directories`，示例 `examples/remotion_skill_demo.py` 改为目录级自动技能发现并由 Agent 自主选择激活。实测命令 `uv run python examples/remotion_skill_demo.py --workspace ./workspace --skills-dir skills --backend moonshot --model kimi-k2.5 --verbose` 返回 `status=completed`。
 - 2026-02-18T13:48:38Z：完成 P17：`examples/` 下全部示例移除 argparse CLI 入参，统一改为脚本内默认配置 + 环境变量覆盖（如 `V_AGENT_EXAMPLE_*`）；更新 `examples/README.md` 为嵌入式运行说明并给出 env override 示例。质量门禁回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 - 2026-02-18T14:44:02Z：继续优化 P17 示例易嵌入性：移除示例中的 `main()/if __name__ == "__main__"` 包装，统一改为脚本顶层平铺执行（保留最小必要日志函数）；回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
-- 2026-02-18T14:58:11Z：基于 `claude-agent-sdk-python` 风格重构 SDK 入口：`AgentSDKClient` 新增默认单 Agent 模式与 `run/query` 直接调用（无需预注册 agents map），保留 `run_agent/query_agent` 兼容层；同时新增模块级 `v_agent.sdk.run/query` one-shot helper，示例脚本改为优先展示新接口；回归 `ruff/ty/pytest` 全绿（`130 passed, 1 skipped`）。
+- 2026-02-18T14:58:11Z：基于 `claude-agent-sdk-python` 风格重构 SDK 入口：`AgentSDKClient` 新增默认单 Agent 模式与 `run/query` 直接调用（无需预注册 agents map），保留 `run_agent/query_agent` 兼容层；同时新增模块级 `vv_agent.sdk.run/query` one-shot helper，示例脚本改为优先展示新接口；回归 `ruff/ty/pytest` 全绿（`130 passed, 1 skipped`）。
 - 2026-02-18T23:40:12Z：完成 P18/P19/P20：新增 `AgentSession` 会话 API、`RuntimeHookManager` 与 hook 事件/patch 协议、`AgentResourceLoader` 自动发现机制；runtime 支持 tool 级回调即时触发 `steer`，并在同轮跳过后续工具；新增 `tests/test_sdk_session.py`、`tests/test_runtime_hooks.py`、`tests/test_sdk_resources.py` 与 `examples/session_api_embed.py`、`examples/runtime_hooks_embed.py`、`examples/resource_loader_embed.py`；质量门禁回归 `ruff/ty/pytest` 全绿（`143 passed, 1 skipped`）。
-- 2026-02-18T18:48:52Z：完成 P21：`src/v_agent/llm/openai_compatible.py` 底层切换为 `vv-llm`，统一使用 `create_chat_client/format_messages/get_token_counts` 与 `Settings`；`config.py` 新增 `build_vv_llm_settings` 做 `providers->backends` 归一化、endpoint key 解码与 endpoint/model 绑定；新增/改造 `tests/test_llm_interface.py`、`tests/test_config.py` 覆盖端点回退、流式 tool call 聚合、reasoning/usage 提取与配置转换；质量门禁回归 `ruff/ty/pytest` 全绿（`148 passed, 1 skipped`），并完成真实 `moonshot/minimax` CLI 回归。
+- 2026-02-18T18:48:52Z：完成 P21：`src/vv_agent/llm/openai_compatible.py` 底层切换为 `vv-llm`，统一使用 `create_chat_client/format_messages/get_token_counts` 与 `Settings`；`config.py` 新增 `build_vv_llm_settings` 做 `providers->backends` 归一化、endpoint key 解码与 endpoint/model 绑定；新增/改造 `tests/test_llm_interface.py`、`tests/test_config.py` 覆盖端点回退、流式 tool call 聚合、reasoning/usage 提取与配置转换；质量门禁回归 `ruff/ty/pytest` 全绿（`148 passed, 1 skipped`），并完成真实 `moonshot/minimax` CLI 回归。
 
 ---
 
@@ -97,14 +97,14 @@ uv run pytest -q
 - TODO 提醒与辅助逻辑：`backend/vector_vein_main/ai_agents/tasks/task_helpers.py`
 - LLM 统一接口关键行为：`backend/vector_vein_main/utilities/llm.py`
 
-### 1.2 当前 v-agent 代码（重构目标）
+### 1.2 当前 vv-agent 代码（重构目标）
 
-- 类型协议：`v-agent/src/v_agent/types.py`
-- runtime：`v-agent/src/v_agent/runtime/engine.py`
-- 工具定义（当前集中版）：`v-agent/src/v_agent/tools/builtins.py`
-- 工具注册：`v-agent/src/v_agent/tools/registry.py`
-- LLM 接口：`v-agent/src/v_agent/llm/openai_compatible.py`
-- 配置解析：`v-agent/src/v_agent/config.py`
+- 类型协议：`vv-agent/src/vv_agent/types.py`
+- runtime：`vv-agent/src/vv_agent/runtime/engine.py`
+- 工具定义（当前集中版）：`vv-agent/src/vv_agent/tools/builtins.py`
+- 工具注册：`vv-agent/src/vv_agent/tools/registry.py`
+- LLM 接口：`vv-agent/src/vv_agent/llm/openai_compatible.py`
+- 配置解析：`vv-agent/src/vv_agent/config.py`
 
 ---
 
@@ -155,7 +155,7 @@ uv run pytest -q
    uv run ty check
    uv run pytest -q
    ```
-3. 新建文档：`v-agent/docs/REFACTOR_BASELINE.md`，记录：
+3. 新建文档：`vv-agent/docs/REFACTOR_BASELINE.md`，记录：
    - 当前测试数量
    - 当前核心行为（finish、ask_user、todo、read/write/grep）
    - 当前已知差距（与 backend 的差异）
@@ -176,8 +176,8 @@ uv run pytest -q
 - `backend/.../tool_calls.py` 的运行中轮询处理。
 
 ### 改动文件
-- 修改：`v-agent/src/v_agent/types.py`
-- 新增：`v-agent/tests/test_protocol_types.py`
+- 修改：`vv-agent/src/vv_agent/types.py`
+- 新增：`vv-agent/tests/test_protocol_types.py`
 
 ### 具体任务
 1. 在 `types.py` 增加：
@@ -213,14 +213,14 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/constants/tool_names.py`
-  - `v-agent/src/v_agent/constants/workspace.py`
-  - `v-agent/src/v_agent/constants/document.py`
-  - `v-agent/src/v_agent/constants/workflow.py`
-  - `v-agent/src/v_agent/constants/__init__.py`
+  - `vv-agent/src/vv_agent/constants/tool_names.py`
+  - `vv-agent/src/vv_agent/constants/workspace.py`
+  - `vv-agent/src/vv_agent/constants/document.py`
+  - `vv-agent/src/vv_agent/constants/workflow.py`
+  - `vv-agent/src/vv_agent/constants/__init__.py`
 - 修改：
-  - `v-agent/src/v_agent/tools/registry.py`
-  - `v-agent/src/v_agent/tools/builtins.py`（仅保留 handler，不再硬编码 schema）
+  - `vv-agent/src/vv_agent/tools/registry.py`
+  - `vv-agent/src/vv_agent/tools/builtins.py`（仅保留 handler，不再硬编码 schema）
 
 ### 具体任务
 1. 复制 backend 的命名策略（保留前缀风格，如 `_task_finish`），统一集中。
@@ -247,12 +247,12 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/prompt/templates.py`
-  - `v-agent/src/v_agent/prompt/builder.py`
-  - `v-agent/src/v_agent/prompt/__init__.py`
+  - `vv-agent/src/vv_agent/prompt/templates.py`
+  - `vv-agent/src/vv_agent/prompt/builder.py`
+  - `vv-agent/src/vv_agent/prompt/__init__.py`
 - 修改：
-  - `v-agent/src/v_agent/runtime/engine.py`
-  - `v-agent/src/v_agent/cli.py`
+  - `vv-agent/src/vv_agent/runtime/engine.py`
+  - `vv-agent/src/vv_agent/cli.py`
 
 ### 具体任务
 1. 实现 `build_system_prompt(...)`：
@@ -276,10 +276,10 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/runtime/tool_planner.py`
-  - `v-agent/tests/test_tool_planner.py`
+  - `vv-agent/src/vv_agent/runtime/tool_planner.py`
+  - `vv-agent/tests/test_tool_planner.py`
 - 修改：
-  - `v-agent/src/v_agent/runtime/engine.py`
+  - `vv-agent/src/vv_agent/runtime/engine.py`
 
 ### 具体任务
 1. 定义任务 capability（示例）：
@@ -308,11 +308,11 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/tools/dispatcher.py`
-  - `v-agent/tests/test_dispatcher_protocol.py`
+  - `vv-agent/src/vv_agent/tools/dispatcher.py`
+  - `vv-agent/tests/test_dispatcher_protocol.py`
 - 修改：
-  - `v-agent/src/v_agent/runtime/engine.py`
-  - `v-agent/src/v_agent/tools/registry.py`
+  - `vv-agent/src/vv_agent/runtime/engine.py`
+  - `vv-agent/src/vv_agent/tools/registry.py`
 
 ### 具体任务
 1. 处理 arguments 解析错误，返回标准 ERROR payload。
@@ -336,7 +336,7 @@ uv run pytest -q
 - workspace/read/write/edit/search 的 backend 各文件实现。
 
 ### 改动文件
-- 新增目录：`v-agent/src/v_agent/tools/handlers/`
+- 新增目录：`vv-agent/src/vv_agent/tools/handlers/`
   - `control.py`
   - `todo.py`
   - `workspace_io.py`
@@ -344,8 +344,8 @@ uv run pytest -q
   - `search.py`
   - `common.py`（路径规范化、错误封装）
 - 修改：
-  - `v-agent/src/v_agent/tools/builtins.py`
-  - `v-agent/src/v_agent/tools/__init__.py`
+  - `vv-agent/src/vv_agent/tools/builtins.py`
+  - `vv-agent/src/vv_agent/tools/__init__.py`
 
 ### 具体任务
 1. 抽公共 path normalize 与 path escape 防护。
@@ -370,11 +370,11 @@ uv run pytest -q
 
 ### 改动文件
 - 修改：
-  - `v-agent/src/v_agent/tools/handlers/control.py`
-  - `v-agent/src/v_agent/tools/handlers/todo.py`
-  - `v-agent/src/v_agent/constants/workspace.py`
+  - `vv-agent/src/vv_agent/tools/handlers/control.py`
+  - `vv-agent/src/vv_agent/tools/handlers/todo.py`
+  - `vv-agent/src/vv_agent/constants/workspace.py`
 - 新增：
-  - `v-agent/tests/test_control_semantics.py`
+  - `vv-agent/tests/test_control_semantics.py`
 
 ### 具体任务
 1. `todo_write` 改为完整列表写入模式（可更新/删除）。
@@ -399,11 +399,11 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/runtime/cycle_runner.py`
-  - `v-agent/src/v_agent/runtime/tool_call_runner.py`
+  - `vv-agent/src/vv_agent/runtime/cycle_runner.py`
+  - `vv-agent/src/vv_agent/runtime/tool_call_runner.py`
 - 修改：
-  - `v-agent/src/v_agent/runtime/engine.py`
-  - `v-agent/src/v_agent/runtime/__init__.py`
+  - `vv-agent/src/vv_agent/runtime/engine.py`
+  - `vv-agent/src/vv_agent/runtime/__init__.py`
 
 ### 具体任务
 1. 将 `engine.py` 拆分：
@@ -431,13 +431,13 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/tools/handlers/bash.py`
-  - `v-agent/src/v_agent/tools/handlers/background.py`
-  - `v-agent/src/v_agent/tools/handlers/image.py`
-  - `v-agent/src/v_agent/runtime/background_sessions.py`
+  - `vv-agent/src/vv_agent/tools/handlers/bash.py`
+  - `vv-agent/src/vv_agent/tools/handlers/background.py`
+  - `vv-agent/src/vv_agent/tools/handlers/image.py`
+  - `vv-agent/src/vv_agent/runtime/background_sessions.py`
 - 新增测试：
-  - `v-agent/tests/test_bash_tools.py`
-  - `v-agent/tests/test_image_tool.py`
+  - `vv-agent/tests/test_bash_tools.py`
+  - `vv-agent/tests/test_image_tool.py`
 
 ### 具体任务
 1. bash 工具加入危险命令拦截与超时控制。
@@ -462,12 +462,12 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/tools/handlers/document.py`
-  - `v-agent/src/v_agent/tools/handlers/workflow.py`
-  - `v-agent/src/v_agent/tools/handlers/skills.py`
-  - `v-agent/src/v_agent/integrations/`（预留适配层）
+  - `vv-agent/src/vv_agent/tools/handlers/document.py`
+  - `vv-agent/src/vv_agent/tools/handlers/workflow.py`
+  - `vv-agent/src/vv_agent/tools/handlers/skills.py`
+  - `vv-agent/src/vv_agent/integrations/`（预留适配层）
 - 测试：
-  - `v-agent/tests/test_extension_points.py`
+  - `vv-agent/tests/test_extension_points.py`
 
 ### 具体任务
 1. 先定义接口与 mock 行为，默认 capability 关闭。
@@ -496,11 +496,11 @@ uv run pytest -q
    V_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live -q
    ```
 3. 更新文档：
-   - `v-agent/README.md`
-   - `v-agent/docs/ARCHITECTURE.md`
-   - 新增 `v-agent/docs/TOOL_PROTOCOL.md`（状态与 payload 规范）
+   - `vv-agent/README.md`
+   - `vv-agent/docs/ARCHITECTURE.md`
+   - 新增 `vv-agent/docs/TOOL_PROTOCOL.md`（状态与 payload 规范）
 4. 产出迁移说明：
-   - `v-agent/docs/MIGRATION_FROM_V0.md`
+   - `vv-agent/docs/MIGRATION_FROM_V0.md`
 
 ### DoD
 - 全部检查通过。
@@ -511,7 +511,7 @@ uv run pytest -q
 ## P12 LLM 统一接口对齐（新增）
 
 ### 目标
-- 直接对齐 `backend/vector_vein_main/utilities/llm.py` 的统一请求策略，避免在 `v-agent` 维护一套偏离实现。
+- 直接对齐 `backend/vector_vein_main/utilities/llm.py` 的统一请求策略，避免在 `vv-agent` 维护一套偏离实现。
 
 ### 参考
 - `backend/vector_vein_main/utilities/llm.py`：
@@ -524,8 +524,8 @@ uv run pytest -q
 
 ### 改动文件
 - 修改：
-  - `v-agent/src/v_agent/llm/openai_compatible.py`
-  - `v-agent/tests/test_llm_interface.py`
+  - `vv-agent/src/vv_agent/llm/openai_compatible.py`
+  - `vv-agent/tests/test_llm_interface.py`
 
 ### 具体任务
 1. 新增请求选项解析层（`_RequestOptions` + `_resolve_request_options`）并对齐模型特化规则：
@@ -561,13 +561,13 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/sdk/session.py`
-  - `v-agent/tests/test_sdk_session.py`
-  - `v-agent/examples/session_api_embed.py`
+  - `vv-agent/src/vv_agent/sdk/session.py`
+  - `vv-agent/tests/test_sdk_session.py`
+  - `vv-agent/examples/session_api_embed.py`
 - 修改：
-  - `v-agent/src/v_agent/sdk/client.py`
-  - `v-agent/src/v_agent/sdk/__init__.py`
-  - `v-agent/src/v_agent/__init__.py`
+  - `vv-agent/src/vv_agent/sdk/client.py`
+  - `vv-agent/src/vv_agent/sdk/__init__.py`
+  - `vv-agent/src/vv_agent/__init__.py`
 
 ### 具体任务
 1. 增加 `AgentSession`：`prompt/continue_run/query/steer/follow_up/subscribe/clear_queues/state`。
@@ -592,14 +592,14 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/runtime/hooks.py`
-  - `v-agent/tests/test_runtime_hooks.py`
-  - `v-agent/examples/runtime_hooks_embed.py`
+  - `vv-agent/src/vv_agent/runtime/hooks.py`
+  - `vv-agent/tests/test_runtime_hooks.py`
+  - `vv-agent/examples/runtime_hooks_embed.py`
 - 修改：
-  - `v-agent/src/v_agent/runtime/cycle_runner.py`
-  - `v-agent/src/v_agent/runtime/tool_call_runner.py`
-  - `v-agent/src/v_agent/runtime/engine.py`
-  - `v-agent/src/v_agent/runtime/__init__.py`
+  - `vv-agent/src/vv_agent/runtime/cycle_runner.py`
+  - `vv-agent/src/vv_agent/runtime/tool_call_runner.py`
+  - `vv-agent/src/vv_agent/runtime/engine.py`
+  - `vv-agent/src/vv_agent/runtime/__init__.py`
 
 ### 具体任务
 1. 定义 hooks 事件模型：`before_memory_compact/before_llm/after_llm/before_tool_call/after_tool_call`。
@@ -625,13 +625,13 @@ uv run pytest -q
 
 ### 改动文件
 - 新增：
-  - `v-agent/src/v_agent/sdk/resources.py`
-  - `v-agent/tests/test_sdk_resources.py`
-  - `v-agent/examples/resource_loader_embed.py`
+  - `vv-agent/src/vv_agent/sdk/resources.py`
+  - `vv-agent/tests/test_sdk_resources.py`
+  - `vv-agent/examples/resource_loader_embed.py`
 - 修改：
-  - `v-agent/src/v_agent/sdk/types.py`
-  - `v-agent/src/v_agent/sdk/client.py`
-  - `v-agent/src/v_agent/sdk/__init__.py`
+  - `vv-agent/src/vv_agent/sdk/types.py`
+  - `vv-agent/src/vv_agent/sdk/client.py`
+  - `vv-agent/src/vv_agent/sdk/__init__.py`
 
 ### 具体任务
 1. 增加 `AgentResourceLoader`，扫描：
@@ -643,7 +643,7 @@ uv run pytest -q
 3. `AgentSDKClient` 初始化时自动合并资源并输出 `resource_diagnostics`。
 
 ### DoD
-- 不手写代码也能从 `.v-agent/` 自动发现 profile 与 prompt 模板。
+- 不手写代码也能从 `.vv-agent/` 自动发现 profile 与 prompt 模板。
 - skills 目录与 hooks 能被自动注入到 SDK 运行上下文。
 - 新增测试覆盖资源发现、模板注入、hook 自动加载。
 

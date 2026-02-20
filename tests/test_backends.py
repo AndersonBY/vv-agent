@@ -1,29 +1,40 @@
 from __future__ import annotations
 
+from typing import Any, Literal, TypedDict, Unpack
 from unittest.mock import MagicMock
 
 import pytest
 
-from v_agent.llm.scripted import ScriptedLLM
-from v_agent.runtime import AgentRuntime
-from v_agent.runtime.backends.inline import InlineBackend
-from v_agent.runtime.backends.thread import ThreadBackend
-from v_agent.runtime.cancellation import CancellationToken
-from v_agent.runtime.context import ExecutionContext
-from v_agent.runtime.state import InMemoryStateStore
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentStatus, AgentTask, LLMResponse
+from vv_agent.llm.scripted import ScriptedLLM
+from vv_agent.runtime import AgentRuntime
+from vv_agent.runtime.backends.inline import InlineBackend
+from vv_agent.runtime.backends.thread import ThreadBackend
+from vv_agent.runtime.cancellation import CancellationToken
+from vv_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.state import InMemoryStateStore
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 
 
-def _make_task(**overrides) -> AgentTask:
-    defaults = dict(
-        task_id="backend-test",
-        model="test",
-        system_prompt="sys",
-        user_prompt="hi",
-        max_cycles=2,
-        no_tool_policy="finish",
-    )
+class _TaskOverrides(TypedDict, total=False):
+    task_id: str
+    model: str
+    system_prompt: str
+    user_prompt: str
+    max_cycles: int
+    no_tool_policy: Literal["continue", "wait_user", "finish"]
+    metadata: dict[str, Any]
+
+
+def _make_task(**overrides: Unpack[_TaskOverrides]) -> AgentTask:
+    defaults: _TaskOverrides = {
+        "task_id": "backend-test",
+        "model": "test",
+        "system_prompt": "sys",
+        "user_prompt": "hi",
+        "max_cycles": 2,
+        "no_tool_policy": "finish",
+    }
     defaults.update(overrides)
     return AgentTask(**defaults)
 
@@ -84,13 +95,13 @@ class TestThreadBackend:
 class TestCeleryBackend:
     def test_import_without_celery(self):
         """CeleryBackend can be imported even without celery installed."""
-        from v_agent.runtime.backends.celery import CeleryBackend
+        from vv_agent.runtime.backends.celery import CeleryBackend
         # Just verify the class exists
         assert CeleryBackend is not None
 
     def test_mock_celery_backend(self):
         """Test CeleryBackend inline fallback with a mock celery app (no recipe)."""
-        from v_agent.runtime.backends.celery import CeleryBackend, _CELERY_AVAILABLE
+        from vv_agent.runtime.backends.celery import _CELERY_AVAILABLE, CeleryBackend
         if not _CELERY_AVAILABLE:
             pytest.skip("celery not installed")
 
@@ -110,10 +121,10 @@ class TestCeleryBackend:
 
     def test_distributed_mode_eager(self):
         """Test distributed mode using Celery eager (in-process) execution."""
-        from v_agent.runtime.backends.celery import (
+        from vv_agent.runtime.backends.celery import (
+            _CELERY_AVAILABLE,
             CeleryBackend,
             RuntimeRecipe,
-            _CELERY_AVAILABLE,
             register_cycle_task,
         )
         if not _CELERY_AVAILABLE:
@@ -121,14 +132,16 @@ class TestCeleryBackend:
 
         import tempfile
         from pathlib import Path
+
         from celery import Celery
-        from v_agent.runtime.stores.sqlite import SqliteStateStore
+
+        from vv_agent.runtime.stores.sqlite import SqliteStateStore
 
         # Create a temporary workspace and SQLite store.
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
             workspace.mkdir()
-            db_path = workspace / ".v-agent-state" / "checkpoints.db"
+            db_path = workspace / ".vv-agent-state" / "checkpoints.db"
             db_path.parent.mkdir(parents=True, exist_ok=True)
             store = SqliteStateStore(db_path=db_path)
 
@@ -180,7 +193,7 @@ class TestCeleryBackend:
 
     def test_runtime_recipe_serialization(self):
         """Test RuntimeRecipe round-trip serialization."""
-        from v_agent.runtime.backends.celery import RuntimeRecipe, _CELERY_AVAILABLE
+        from vv_agent.runtime.backends.celery import _CELERY_AVAILABLE, RuntimeRecipe
         if not _CELERY_AVAILABLE:
             pytest.skip("celery not installed")
 
@@ -218,7 +231,7 @@ class TestCeleryBackend:
 
     def test_agent_result_serialization(self):
         """Test AgentResult round-trip serialization."""
-        from v_agent.types import AgentResult, Message
+        from vv_agent.types import AgentResult, Message
         result = AgentResult(
             status=AgentStatus.COMPLETED,
             messages=[Message(role="user", content="hi")],

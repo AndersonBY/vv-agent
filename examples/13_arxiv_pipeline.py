@@ -10,11 +10,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from v_agent.constants import TASK_FINISH_TOOL_NAME, TASK_FINISH_TOOL_SCHEMA
-from v_agent.runtime import AfterLLMEvent, BaseRuntimeHook, BeforeLLMEvent, BeforeLLMPatch
-from v_agent.runtime.token_usage import normalize_token_usage
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from v_agent.types import LLMResponse, Message, ToolCall
+from vv_agent.constants import TASK_FINISH_TOOL_NAME, TASK_FINISH_TOOL_SCHEMA
+from vv_agent.runtime import AfterLLMEvent, BaseRuntimeHook, BeforeLLMEvent, BeforeLLMPatch
+from vv_agent.runtime.token_usage import normalize_token_usage
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.types import LLMResponse, Message, ToolCall
 
 
 class SimpleBudgetHook(BaseRuntimeHook):
@@ -52,10 +52,20 @@ class SimpleBudgetHook(BaseRuntimeHook):
         if not self.finalize_mode or self.finalize_injected:
             return None
         self.finalize_injected = True
-        restricted = [s for s in event.tool_schemas if isinstance(s.get("function"), dict) and s["function"].get("name") == TASK_FINISH_TOOL_NAME]
+        restricted = [
+            s
+            for s in event.tool_schemas
+            if isinstance(s.get("function"), dict) and s["function"].get("name") == TASK_FINISH_TOOL_NAME
+        ]
         if not restricted:
             restricted = [deepcopy(TASK_FINISH_TOOL_SCHEMA)]
-        msgs = list(event.messages) + [Message(role="user", content="Token budget 已达上限. 请立即调用 _task_finish 给出简洁总结.")]
+        msgs = [
+            *event.messages,
+            Message(
+                role="user",
+                content="Token budget 已达上限. 请立即调用 _task_finish 给出简洁总结.",
+            ),
+        ]
         return BeforeLLMPatch(messages=msgs, tool_schemas=restricted)
 
 

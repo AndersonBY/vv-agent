@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from v_agent.constants import (
+from vv_agent.constants import (
     BATCH_SUB_TASKS_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
-from v_agent.tools import build_default_registry
+from vv_agent.tools import build_default_registry
 
 
 def test_registry_exports_backend_style_tool_schemas() -> None:

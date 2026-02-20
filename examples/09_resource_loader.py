@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resource loader example: auto-discover profiles/prompts/skills/hooks from .v-agent/."""
+"""Resource loader example: auto-discover profiles/prompts/skills/hooks from .vv-agent/."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from v_agent.sdk import AgentDefinition, AgentResourceLoader, AgentSDKClient, AgentSDKOptions
+from vv_agent.sdk import AgentDefinition, AgentResourceLoader, AgentSDKClient, AgentSDKOptions
 
 
 def main() -> None:

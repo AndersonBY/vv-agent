@@ -4,10 +4,10 @@ import json
 import time
 from pathlib import Path
 
-from v_agent.constants import BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME
-from v_agent.tools import ToolContext, build_default_registry
-from v_agent.types import ToolCall, ToolResultStatus
-from v_agent.workspace import LocalWorkspaceBackend
+from vv_agent.constants import BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME
+from vv_agent.tools import ToolContext, build_default_registry
+from vv_agent.types import ToolCall, ToolResultStatus
+from vv_agent.workspace import LocalWorkspaceBackend
 
 
 def _context(tmp_path: Path) -> ToolContext:

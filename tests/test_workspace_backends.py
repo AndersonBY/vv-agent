@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from v_agent.workspace import (
+from vv_agent.workspace import (
     LocalWorkspaceBackend,
     MemoryWorkspaceBackend,
 )

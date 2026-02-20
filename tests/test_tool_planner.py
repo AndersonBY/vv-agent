@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from v_agent.constants import (
+from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
@@ -10,9 +10,9 @@ from v_agent.constants import (
     TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
-from v_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
-from v_agent.tools import build_default_registry
-from v_agent.types import AgentTask, SubAgentConfig
+from vv_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentTask, SubAgentConfig
 
 
 def _task(**overrides: object) -> AgentTask:

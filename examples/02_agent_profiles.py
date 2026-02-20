@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Programmatic profile examples built on v-agent SDK primitives."""
+"""Programmatic profile examples built on vv-agent SDK primitives."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 
 profiles: dict[str, AgentDefinition] = {
     "researcher": AgentDefinition(

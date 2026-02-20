@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from v_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolExecutionResult, ToolResultStatus
+from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolExecutionResult, ToolResultStatus
 
 
 def test_tool_result_keeps_tool_message_shape() -> None:

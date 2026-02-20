@@ -1,4 +1,4 @@
-"""Example settings file for v-agent.
+"""Example settings file for vv-agent.
 
 Copy this file to `local_settings.py` and fill in your real API keys.
 """

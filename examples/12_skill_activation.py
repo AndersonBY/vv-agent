@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from v_agent.skills import prepare_skill_bundle
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.skills import prepare_skill_bundle
 
 
 def log_handler(event: str, payload: dict[str, Any]) -> None:

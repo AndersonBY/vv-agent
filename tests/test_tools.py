@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from v_agent.constants import (
+from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
@@ -16,10 +16,10 @@ from v_agent.constants import (
     WORKSPACE_GREP_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
-from v_agent.tools import ToolContext, build_default_registry
-from v_agent.tools.registry import ToolNotFoundError
-from v_agent.types import ToolCall, ToolDirective
-from v_agent.workspace import LocalWorkspaceBackend
+from vv_agent.tools import ToolContext, build_default_registry
+from vv_agent.tools.registry import ToolNotFoundError
+from vv_agent.types import ToolCall, ToolDirective
+from vv_agent.workspace import LocalWorkspaceBackend
 
 
 @pytest.fixture

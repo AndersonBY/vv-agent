@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from v_agent.skills import SkillParseError, SkillValidationError
-from v_agent.skills.parser import find_skill_md, parse_frontmatter, read_properties, read_skill
+from vv_agent.skills import SkillParseError, SkillValidationError
+from vv_agent.skills.parser import find_skill_md, parse_frontmatter, read_properties, read_skill
 
 
 def test_parse_frontmatter_valid() -> None:
@@ -126,7 +126,7 @@ Body
         encoding="utf-8",
     )
 
-    from v_agent.skills.parser import discover_skill_dirs
+    from vv_agent.skills.parser import discover_skill_dirs
 
     discovered = discover_skill_dirs(root)
     names = {path.name for path in discovered}

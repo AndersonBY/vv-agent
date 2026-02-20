@@ -9,9 +9,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from v_agent.runtime import BaseRuntimeHook, BeforeMemoryCompactEvent
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from v_agent.types import Message
+from vv_agent.runtime import BaseRuntimeHook, BeforeMemoryCompactEvent
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.types import Message
 
 
 class MemoryAuditHook(BaseRuntimeHook):

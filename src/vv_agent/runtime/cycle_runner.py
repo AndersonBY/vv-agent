@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING, Any
+
+from vv_agent.llm.base import LLMClient
+from vv_agent.memory import MemoryManager
+from vv_agent.runtime.hooks import RuntimeHookManager
+from vv_agent.runtime.token_usage import normalize_token_usage
+from vv_agent.runtime.tool_planner import plan_tool_schemas
+from vv_agent.tools import ToolRegistry
+from vv_agent.types import AgentTask, CycleRecord, Message, ToolCall
+
+if TYPE_CHECKING:
+    from vv_agent.runtime.context import ExecutionContext
+
+
+class CycleRunner:
+    def __init__(
+        self,
+        *,
+        llm_client: LLMClient,
+        tool_registry: ToolRegistry,
+        hook_manager: RuntimeHookManager | None = None,
+    ) -> None:
+        self.llm_client = llm_client
+        self.tool_registry = tool_registry
+        self.hook_manager = hook_manager or RuntimeHookManager()
+
+    def run_cycle(
+        self,
+        *,
+        task: AgentTask,
+        messages: list[Message],
+        cycle_index: int,
+        memory_manager: MemoryManager,
+        shared_state: dict[str, Any] | None = None,
+        ctx: ExecutionContext | None = None,
+    ) -> tuple[list[Message], CycleRecord]:
+        shared = shared_state or {}
+        if ctx is not None:
+            ctx.check_cancelled()
+        pre_compact_messages = self.hook_manager.apply_before_memory_compact(
+            task=task,
+            cycle_index=cycle_index,
+            messages=messages,
+            shared_state=shared,
+        )
+        compacted_messages, memory_compacted = memory_manager.compact(pre_compact_messages, cycle_index=cycle_index)
+        memory_usage_percentage = self._estimate_memory_usage_percentage(compacted_messages, task.memory_threshold_chars)
+        tool_schemas = plan_tool_schemas(
+            registry=self.tool_registry,
+            task=task,
+            memory_usage_percentage=memory_usage_percentage,
+        )
+        compacted_messages, tool_schemas = self.hook_manager.apply_before_llm(
+            task=task,
+            cycle_index=cycle_index,
+            messages=compacted_messages,
+            tool_schemas=tool_schemas,
+            shared_state=shared,
+        )
+
+        if ctx is not None:
+            ctx.check_cancelled()
+
+        stream_callback = ctx.stream_callback if ctx is not None else None
+        llm_response = self.llm_client.complete(
+            model=task.model,
+            messages=compacted_messages,
+            tools=tool_schemas,
+            stream_callback=stream_callback,
+        )
+
+        if ctx is not None:
+            ctx.check_cancelled()
+        llm_response = self.hook_manager.apply_after_llm(
+            task=task,
+            cycle_index=cycle_index,
+            messages=compacted_messages,
+            tool_schemas=tool_schemas,
+            response=llm_response,
+            shared_state=shared,
+        )
+
+        next_messages = list(compacted_messages)
+        serialized_tool_calls = self._serialize_tool_calls(llm_response.tool_calls)
+        raw_reasoning = llm_response.raw.get("reasoning_content")
+        reasoning_content = raw_reasoning if isinstance(raw_reasoning, str) and raw_reasoning else None
+        next_messages.append(
+            Message(
+                role="assistant",
+                content=llm_response.content,
+                tool_calls=serialized_tool_calls or None,
+                reasoning_content=reasoning_content,
+            )
+        )
+
+        cycle_record = CycleRecord(
+            index=cycle_index,
+            assistant_message=llm_response.content,
+            tool_calls=llm_response.tool_calls,
+            memory_compacted=memory_compacted,
+            token_usage=normalize_token_usage(llm_response.raw.get("usage")),
+        )
+        return next_messages, cycle_record
+
+    @staticmethod
+    def _estimate_memory_usage_percentage(messages: list[Message], threshold_chars: int) -> int:
+        if threshold_chars <= 0:
+            return 0
+        used_chars = sum(len(message.content) for message in messages)
+        return int((used_chars / threshold_chars) * 100)
+
+    @staticmethod
+    def _serialize_tool_calls(tool_calls: list[ToolCall]) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            serialized.append(
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                    },
+                }
+            )
+        return serialized

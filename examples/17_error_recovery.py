@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from v_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from v_agent.types import AgentStatus
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.types import AgentStatus
 
 
 def runtime_log(event: str, payload: dict[str, Any]) -> None:

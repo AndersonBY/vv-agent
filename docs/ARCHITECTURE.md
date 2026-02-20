@@ -1,4 +1,4 @@
-# v-agent Architecture
+# vv-agent Architecture
 
 ## Design Inputs
 
@@ -35,8 +35,8 @@ Tool-level status code (`ToolResultStatus`):
 
 ## Tool System
 
-- Tool names and schemas are centralized in `src/v_agent/constants/`.
-- Built-in handlers are split by responsibility in `src/v_agent/tools/handlers/`.
+- Tool names and schemas are centralized in `src/vv_agent/constants/`.
+- Built-in handlers are split by responsibility in `src/vv_agent/tools/handlers/`.
 - Workflow 语义不做框架内置特殊处理；如需 workflow，按自定义工具注册到 `ToolRegistry`。
 - Default registry preloads:
   - control: `_task_finish`, `_ask_user`, `_todo_write`, `_compress_memory`

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from v_agent.runtime.cancellation import CancellationToken, CancelledError
-from v_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.cancellation import CancellationToken, CancelledError
+from vv_agent.runtime.context import ExecutionContext
 
 
 class TestCancellationToken:
@@ -81,10 +81,10 @@ class TestCancellationInRuntime:
     """Test cancellation integrated with AgentRuntime cycle loop."""
 
     def test_cancel_before_first_cycle(self):
-        from v_agent.llm.scripted import ScriptedLLM
-        from v_agent.runtime import AgentRuntime
-        from v_agent.tools import build_default_registry
-        from v_agent.types import AgentStatus, AgentTask, LLMResponse
+        from vv_agent.llm.scripted import ScriptedLLM
+        from vv_agent.runtime import AgentRuntime
+        from vv_agent.tools import build_default_registry
+        from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 
         llm = ScriptedLLM(steps=[LLMResponse(content="hello")])
         runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
@@ -104,10 +104,10 @@ class TestCancellationInRuntime:
         assert "cancelled" in (result.error or "").lower()
 
     def test_cancel_between_cycles(self):
-        from v_agent.llm.scripted import ScriptedLLM
-        from v_agent.runtime import AgentRuntime
-        from v_agent.tools import build_default_registry
-        from v_agent.types import AgentStatus, AgentTask, LLMResponse
+        from vv_agent.llm.scripted import ScriptedLLM
+        from vv_agent.runtime import AgentRuntime
+        from vv_agent.tools import build_default_registry
+        from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 
         # 3 cycles, cancel after first
         llm = ScriptedLLM(steps=[
