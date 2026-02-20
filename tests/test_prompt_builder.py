@@ -41,7 +41,7 @@ def test_prompt_can_include_computer_environment() -> None:
     prompt = build_system_prompt("Agent", language="zh-CN", agent_type="computer")
 
     assert "<Environment>" in prompt
-    assert "Linux" in prompt
+    assert "工作区环境中" in prompt
 
 
 def test_prompt_can_include_sub_agent_guidance() -> None:

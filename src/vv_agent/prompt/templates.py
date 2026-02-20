@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 from pathlib import Path
 from typing import Any
 
@@ -73,9 +74,28 @@ TOOL_PRIORITY_PROMPT = {
     ),
 }
 
+def _os_label() -> str:
+    system = platform.system()
+    if system == "Windows":
+        release = platform.release()
+        return f"Windows ({release})" if release else "Windows"
+    if system == "Darwin":
+        version = platform.mac_ver()[0]
+        return f"macOS ({version})" if version else "macOS"
+    if system == "Linux":
+        return "Linux"
+    return system or "Unknown OS"
+
+
+_COMPUTER_OS_LABEL = _os_label()
+
+
 COMPUTER_AGENT_ENV_PROMPT = {
-    "en-US": "You are running in a Linux workspace environment and can use tools to inspect and modify files.",
-    "zh-CN": "你运行在 Linux 工作区环境中, 可以用工具读取, 搜索, 修改文件.",
+    "en-US": (
+        f"You are running in a {_COMPUTER_OS_LABEL} workspace environment "
+        "and can use tools to inspect and modify files."
+    ),
+    "zh-CN": f"你运行在 {_COMPUTER_OS_LABEL} 工作区环境中, 可以用工具读取, 搜索, 修改文件.",
 }
 
 CURRENT_TIME_PROMPT = {
