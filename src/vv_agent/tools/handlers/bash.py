@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from vv_agent.runtime.background_sessions import background_session_manager
+from vv_agent.runtime.shell import prepare_shell_execution
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
@@ -82,15 +83,17 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             metadata=payload,
         )
 
-    wrapped_command = command
-    if auto_confirm:
-        wrapped_command = f"yes | ({command})"
+    shell_command, prepared_stdin = prepare_shell_execution(
+        command,
+        auto_confirm=auto_confirm,
+        stdin=stdin_text,
+    )
 
     try:
         completed = subprocess.run(
-            ["bash", "-lc", wrapped_command],
+            shell_command,
             cwd=str(exec_dir),
-            input=stdin_text,
+            input=prepared_stdin,
             capture_output=True,
             text=True,
             timeout=timeout,

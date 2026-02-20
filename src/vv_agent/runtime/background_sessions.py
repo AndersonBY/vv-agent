@@ -8,6 +8,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from vv_agent.runtime.shell import prepare_shell_execution
+
 _OUTPUT_LIMIT = 50_000
 
 
@@ -38,12 +40,14 @@ class BackgroundSessionManager:
         stdin: str | None = None,
         auto_confirm: bool = False,
     ) -> str:
-        wrapped_command = command
-        if auto_confirm:
-            wrapped_command = f"yes | ({command})"
+        shell_command, prepared_stdin = prepare_shell_execution(
+            command,
+            auto_confirm=auto_confirm,
+            stdin=stdin,
+        )
 
         process = subprocess.Popen(
-            ["bash", "-lc", wrapped_command],
+            shell_command,
             cwd=str(cwd),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -51,8 +55,8 @@ class BackgroundSessionManager:
             text=True,
         )
 
-        if stdin and process.stdin is not None:
-            process.stdin.write(stdin)
+        if prepared_stdin and process.stdin is not None:
+            process.stdin.write(prepared_stdin)
             process.stdin.close()
         elif process.stdin is not None:
             process.stdin.close()
