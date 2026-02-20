@@ -6,10 +6,14 @@ from pathlib import Path
 from v_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
 from v_agent.tools import ToolContext, build_default_registry
 from v_agent.types import ToolCall, ToolDirective
+from v_agent.workspace import LocalWorkspaceBackend
 
 
 def _context(tmp_path: Path) -> ToolContext:
-    return ToolContext(workspace=tmp_path, shared_state={"todo_list": []}, cycle_index=1)
+    return ToolContext(
+        workspace=tmp_path, shared_state={"todo_list": []},
+        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+    )
 
 
 def test_todo_write_enforces_single_in_progress(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from v_agent.constants import (
 from v_agent.tools import ToolContext, build_default_registry
 from v_agent.tools.registry import ToolNotFoundError
 from v_agent.types import ToolCall, ToolDirective
+from v_agent.workspace import LocalWorkspaceBackend
 
 
 @pytest.fixture
@@ -28,7 +29,12 @@ def registry():
 
 @pytest.fixture
 def tool_context(tmp_path: Path) -> ToolContext:
-    return ToolContext(workspace=tmp_path, shared_state={"todo_list": []}, cycle_index=1)
+    return ToolContext(
+        workspace=tmp_path,
+        shared_state={"todo_list": []},
+        cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
+    )
 
 
 def test_workspace_write_and_read(registry, tool_context: ToolContext) -> None:

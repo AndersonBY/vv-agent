@@ -21,6 +21,7 @@ from v_agent.runtime.state import Checkpoint
 from v_agent.runtime.stores.sqlite import SqliteStateStore
 from v_agent.tools import build_default_registry
 from v_agent.types import AgentResult, AgentStatus, AgentTask
+from v_agent.workspace import LocalWorkspaceBackend
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,7 @@ def run_single_cycle(
     cycle_executor = runtime._build_cycle_executor(
         task=task,
         workspace_path=workspace_path,
+        workspace_backend=runtime._workspace_backend or LocalWorkspaceBackend(workspace_path),
         memory_manager=memory_manager,
         before_cycle_messages=None,
         interruption_messages=None,

@@ -7,10 +7,14 @@ from v_agent.constants import ACTIVATE_SKILL_TOOL_NAME
 from v_agent.runtime.tool_planner import plan_tool_schemas
 from v_agent.tools import ToolContext, build_default_registry
 from v_agent.types import AgentTask, ToolCall, ToolResultStatus
+from v_agent.workspace import LocalWorkspaceBackend
 
 
 def _context(tmp_path: Path) -> ToolContext:
-    return ToolContext(workspace=tmp_path, shared_state={"todo_list": []}, cycle_index=1)
+    return ToolContext(
+        workspace=tmp_path, shared_state={"todo_list": []},
+        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+    )
 
 
 def _task(**overrides: object) -> AgentTask:
@@ -44,6 +48,7 @@ def test_skill_extension_handler_activates_inline_skill(tmp_path: Path) -> None:
         workspace=tmp_path,
         shared_state={"todo_list": [], "available_skills": [{"name": "demo", "instructions": "Do A then B"}]},
         cycle_index=3,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
     result = registry.execute(
@@ -81,6 +86,7 @@ Follow this guide.
             "available_skills": [{"name": "demo", "skill_directory": str(skill_dir)}],
         },
         cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
     result = registry.execute(
@@ -107,6 +113,7 @@ def test_skill_extension_handler_rejects_invalid_standard_skill(tmp_path: Path) 
             "available_skills": [{"name": "demo", "location": str(skill_dir)}],
         },
         cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
     result = registry.execute(
@@ -149,6 +156,7 @@ Follow this guide.
         workspace=tmp_path,
         shared_state={"todo_list": [], "available_skills": ["skills"]},
         cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
     result = registry.execute(

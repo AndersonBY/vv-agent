@@ -130,6 +130,69 @@ ctx = ExecutionContext(stream_callback=lambda text: print(text, end=""))
 result = runtime.run(task, ctx=ctx)
 ```
 
+## 工作区存储后端
+
+工作区文件 I/O 通过可插拔的 `WorkspaceBackend` 协议分发。所有内建文件工具（`_read_file`、`_write_file`、`_list_files` 等）均经过此抽象层。
+
+| 后端 | 场景 |
+|------|------|
+| `LocalWorkspaceBackend` | 默认。读写本地目录，带路径逃逸保护。 |
+| `MemoryWorkspaceBackend` | 纯内存 dict 存储。适合测试和沙箱运行。 |
+| `S3WorkspaceBackend` | S3 兼容对象存储（AWS S3、阿里云 OSS、MinIO、Cloudflare R2）。 |
+
+```python
+from v_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
+
+# 显式指定本地后端
+runtime = AgentRuntime(
+    llm_client=llm,
+    tool_registry=registry,
+    workspace_backend=LocalWorkspaceBackend(Path("./workspace")),
+)
+
+# 内存后端，适合测试
+runtime = AgentRuntime(
+    llm_client=llm,
+    tool_registry=registry,
+    workspace_backend=MemoryWorkspaceBackend(),
+)
+```
+
+### S3WorkspaceBackend
+
+安装可选 S3 依赖：`uv pip install 'v-agent[s3]'`。
+
+```python
+from v_agent.workspace import S3WorkspaceBackend
+
+backend = S3WorkspaceBackend(
+    bucket="my-bucket",
+    prefix="agent-workspace",
+    endpoint_url="https://oss-cn-hangzhou.aliyuncs.com",  # AWS 留 None
+    aws_access_key_id="...",
+    aws_secret_access_key="...",
+    addressing_style="virtual",  # MinIO 用 "path"
+)
+```
+
+### 自定义后端
+
+实现 `WorkspaceBackend` 协议（8 个方法）即可接入任意存储：
+
+```python
+from v_agent.workspace import WorkspaceBackend
+
+class MyBackend:
+    def list_files(self, base: str, glob: str) -> list[str]: ...
+    def read_text(self, path: str) -> str: ...
+    def read_bytes(self, path: str) -> bytes: ...
+    def write_text(self, path: str, content: str, *, append: bool = False) -> int: ...
+    def file_info(self, path: str) -> FileInfo | None: ...
+    def exists(self, path: str) -> bool: ...
+    def is_file(self, path: str) -> bool: ...
+    def mkdir(self, path: str) -> None: ...
+```
+
 ## 模块一览
 
 | 模块 | 说明 |
@@ -140,6 +203,7 @@ result = runtime.run(task, ctx=ctx)
 | `v_agent.runtime.RuntimeHookManager` | Hook 分发（before/after LLM、工具调用、上下文压缩） |
 | `v_agent.runtime.StateStore` | Checkpoint 持久化协议（`InMemoryStateStore` / `SqliteStateStore` / `RedisStateStore`） |
 | `v_agent.memory.MemoryManager` | 历史超阈值时自动压缩 |
+| `v_agent.workspace` | 可插拔文件存储：`LocalWorkspaceBackend`、`MemoryWorkspaceBackend`、`S3WorkspaceBackend` |
 | `v_agent.tools` | 内建工具：workspace I/O、todo、bash、image、sub-agent、skills |
 | `v_agent.sdk` | 高层 SDK：`AgentSDKClient`、`AgentSession`、`AgentResourceLoader` |
 | `v_agent.skills` | Agent Skills 支持（`SKILL.md` 解析、prompt 注入、激活） |
@@ -160,11 +224,11 @@ result = runtime.run(task, ctx=ctx)
 
 ## 示例
 
-`examples/` 下有 23 个编号示例。完整列表见 [`examples/README.md`](examples/README.md)。
+`examples/` 下有 24 个编号示例。完整列表见 [`examples/README.md`](examples/README.md)。
 
 ```bash
 uv run python examples/01_quick_start.py
-uv run python examples/23_celery_backend.py
+uv run python examples/24_workspace_backends.py
 ```
 
 ## 测试

@@ -9,6 +9,7 @@ from v_agent.types import SubTaskOutcome, SubTaskRequest, ToolExecutionResult
 
 if TYPE_CHECKING:
     from v_agent.runtime.context import ExecutionContext
+    from v_agent.workspace.base import WorkspaceBackend
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], ToolExecutionResult]
 SubTaskRunner = Callable[[SubTaskRequest], SubTaskOutcome]
@@ -19,6 +20,7 @@ class ToolContext:
     workspace: Path
     shared_state: dict[str, Any]
     cycle_index: int
+    workspace_backend: WorkspaceBackend
     sub_task_runner: SubTaskRunner | None = None
     ctx: ExecutionContext | None = None
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 from v_agent.tools.base import ToolContext
-from v_agent.tools.handlers.common import resolve_workspace_path, to_json
+from v_agent.tools.handlers.common import to_json
 from v_agent.types import ToolExecutionResult
 
 FILE_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
@@ -84,16 +84,17 @@ def _result_error(message: str) -> ToolExecutionResult:
     )
 
 
-def _matches_file_type(candidate: Path, file_type: str | None) -> bool:
+def _matches_file_type(rel_path: str, file_type: str | None) -> bool:
+    p = PurePosixPath(rel_path)
+    suffix = p.suffix.lower()
     if file_type is None:
-        return candidate.suffix.lower() not in _BINARY_SUFFIXES
+        return suffix not in _BINARY_SUFFIXES
 
     normalized = file_type.strip().lower()
     if normalized not in FILE_TYPE_EXTENSIONS:
         return False
 
-    filename = candidate.name.lower()
-    suffix = candidate.suffix.lower()
+    filename = p.name.lower()
     allowed = FILE_TYPE_EXTENSIONS[normalized]
     return filename in allowed or suffix in allowed
 
@@ -151,7 +152,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
 
     path = str(arguments.get("path", "."))
     glob_pattern = str(arguments.get("glob", "**/*"))
-    root = resolve_workspace_path(context, path)
+    backend = context.workspace_backend
 
     case_insensitive = bool(arguments.get("i", False))
     if "case_sensitive" in arguments:
@@ -177,16 +178,12 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     file_counts: dict[str, int] = {}
     content_rows: list[dict[str, Any]] = []
 
-    for candidate in sorted(root.glob(glob_pattern)):
-        if not candidate.is_file():
-            continue
-
-        rel_path = candidate.relative_to(context.workspace).as_posix()
-        if not _matches_file_type(candidate, file_type):
+    for rel_path in backend.list_files(path, glob_pattern):
+        if not _matches_file_type(rel_path, file_type):
             continue
 
         try:
-            text = candidate.read_text(encoding="utf-8", errors="replace")
+            text = backend.read_text(rel_path)
         except OSError:
             continue
 

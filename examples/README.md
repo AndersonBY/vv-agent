@@ -136,6 +136,7 @@ V_AGENT_EXAMPLE_MAX_RETRIES=2 uv run python examples/17_error_recovery.py
 | 21 | `21_state_checkpoint.py` | `SqliteStateStore` 持久化 checkpoint + 恢复 |
 | 22 | `22_sdk_advanced.py` | SDK 层集成: ThreadBackend + 流式输出一站式配置 |
 | 23 | `23_celery_backend.py` | `CeleryBackend` 分布式执行 + `celery.group` 并行 |
+| 24 | `24_workspace_backends.py` | `WorkspaceBackend` 可插拔文件存储: Local / Memory / S3 / 自定义 |
 
 ```bash
 # 取消: 10 秒后自动取消
@@ -155,4 +156,17 @@ uv run python examples/22_sdk_advanced.py
 
 # CeleryBackend 分布式 (需先启动 Redis + worker, 详见文件头注释)
 uv run python examples/23_celery_backend.py
+
+# WorkspaceBackend 可插拔存储 (默认运行全部模式, S3 需配置环境变量)
+uv run python examples/24_workspace_backends.py
+
+# 仅运行内存后端模式
+V_AGENT_EXAMPLE_WS_MODE=memory uv run python examples/24_workspace_backends.py
+
+# 仅运行 S3 后端模式 (需先配置 .env, 参见 examples/.env.example)
+# uv pip install 'v-agent[s3]'
+V_AGENT_EXAMPLE_WS_MODE=s3 uv run python examples/24_workspace_backends.py
+
+# 仅运行自定义后端模式
+V_AGENT_EXAMPLE_WS_MODE=custom uv run python examples/24_workspace_backends.py
 ```

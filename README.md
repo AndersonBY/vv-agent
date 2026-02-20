@@ -130,6 +130,69 @@ ctx = ExecutionContext(stream_callback=lambda text: print(text, end=""))
 result = runtime.run(task, ctx=ctx)
 ```
 
+## Workspace Backends
+
+Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All built-in file tools (`_read_file`, `_write_file`, `_list_files`, etc.) go through this abstraction.
+
+| Backend | Use case |
+|---------|----------|
+| `LocalWorkspaceBackend` | Default. Reads/writes to a local directory with path-escape protection. |
+| `MemoryWorkspaceBackend` | Pure in-memory dict storage. Great for testing and sandboxed runs. |
+| `S3WorkspaceBackend` | S3-compatible object storage (AWS S3, Aliyun OSS, MinIO, Cloudflare R2). |
+
+```python
+from v_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
+
+# Explicit local backend
+runtime = AgentRuntime(
+    llm_client=llm,
+    tool_registry=registry,
+    workspace_backend=LocalWorkspaceBackend(Path("./workspace")),
+)
+
+# In-memory backend for testing
+runtime = AgentRuntime(
+    llm_client=llm,
+    tool_registry=registry,
+    workspace_backend=MemoryWorkspaceBackend(),
+)
+```
+
+### S3WorkspaceBackend
+
+Install the optional S3 dependency: `uv pip install 'v-agent[s3]'`.
+
+```python
+from v_agent.workspace import S3WorkspaceBackend
+
+backend = S3WorkspaceBackend(
+    bucket="my-bucket",
+    prefix="agent-workspace",
+    endpoint_url="https://oss-cn-hangzhou.aliyuncs.com",  # or None for AWS
+    aws_access_key_id="...",
+    aws_secret_access_key="...",
+    addressing_style="virtual",  # "path" for MinIO
+)
+```
+
+### Custom Backend
+
+Implement the `WorkspaceBackend` protocol (8 methods) to plug in any storage:
+
+```python
+from v_agent.workspace import WorkspaceBackend
+
+class MyBackend:
+    def list_files(self, base: str, glob: str) -> list[str]: ...
+    def read_text(self, path: str) -> str: ...
+    def read_bytes(self, path: str) -> bytes: ...
+    def write_text(self, path: str, content: str, *, append: bool = False) -> int: ...
+    def file_info(self, path: str) -> FileInfo | None: ...
+    def exists(self, path: str) -> bool: ...
+    def is_file(self, path: str) -> bool: ...
+    def mkdir(self, path: str) -> None: ...
+```
+
 ## Modules
 
 | Module | Description |
@@ -140,6 +203,7 @@ result = runtime.run(task, ctx=ctx)
 | `v_agent.runtime.RuntimeHookManager` | Hook dispatch (before/after LLM, tool call, memory compact) |
 | `v_agent.runtime.StateStore` | Checkpoint persistence protocol (`InMemoryStateStore` / `SqliteStateStore` / `RedisStateStore`) |
 | `v_agent.memory.MemoryManager` | Context compression when history exceeds threshold |
+| `v_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
 | `v_agent.tools` | Built-in tools: workspace I/O, todo, bash, image, sub-agents, skills |
 | `v_agent.sdk` | High-level SDK: `AgentSDKClient`, `AgentSession`, `AgentResourceLoader` |
 | `v_agent.skills` | Agent Skills support (`SKILL.md` parsing, prompt injection, activation) |
@@ -160,11 +224,11 @@ When a sub-agent uses a different model from the parent, the runtime needs `sett
 
 ## Examples
 
-23 numbered examples in `examples/`. See [`examples/README.md`](examples/README.md) for the full list.
+24 numbered examples in `examples/`. See [`examples/README.md`](examples/README.md) for the full list.
 
 ```bash
 uv run python examples/01_quick_start.py
-uv run python examples/23_celery_backend.py
+uv run python examples/24_workspace_backends.py
 ```
 
 ## Testing

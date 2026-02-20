@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from v_agent.tools.base import ToolContext
-from v_agent.tools.handlers.common import resolve_workspace_path, to_json
+from v_agent.tools.handlers.common import to_json
 from v_agent.types import ToolExecutionResult
 
 READ_FILE_MAX_LINES = 2_000
@@ -13,34 +12,34 @@ READ_FILE_MAX_CHARS = 50_000
 
 
 def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    root = resolve_workspace_path(context, str(arguments.get("path", ".")))
+    backend = context.workspace_backend
+    path = str(arguments.get("path", "."))
     glob_pattern = str(arguments.get("glob", "**/*"))
     include_hidden = bool(arguments.get("include_hidden", False))
 
-    files: list[str] = []
-    for candidate in root.glob(glob_pattern):
-        if not candidate.is_file():
-            continue
-        rel = candidate.relative_to(context.workspace).as_posix()
-        if not include_hidden and any(part.startswith(".") for part in Path(rel).parts):
-            continue
-        files.append(rel)
+    all_files = backend.list_files(path, glob_pattern)
+    if not include_hidden:
+        all_files = [
+            f for f in all_files
+            if not any(part.startswith(".") for part in Path(f).parts)
+        ]
 
-    files.sort()
     return ToolExecutionResult(
         tool_call_id="",
         status="success",
-        content=to_json({"files": files, "count": len(files)}),
+        content=to_json({"files": all_files, "count": len(all_files)}),
     )
 
 
 def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    target = resolve_workspace_path(context, str(arguments["path"]))
-    if not target.exists() or not target.is_file():
+    backend = context.workspace_backend
+    path = str(arguments["path"])
+
+    if not backend.is_file(path):
         return ToolExecutionResult(
             tool_call_id="",
             status="error",
-            content=to_json({"error": f"file not found: {target.relative_to(context.workspace).as_posix()}"}),
+            content=to_json({"error": f"file not found: {path}"}),
         )
 
     try:
@@ -59,7 +58,7 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
     show_line_numbers = bool(arguments.get("show_line_numbers", False))
 
-    text = target.read_text(encoding="utf-8", errors="replace")
+    text = backend.read_text(path)
     lines = text.splitlines()
 
     start_idx = max(start_line - 1, 0)
@@ -84,7 +83,7 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             status="success",
             content=to_json(
                 {
-                    "path": target.relative_to(context.workspace).as_posix(),
+                    "path": path,
                     "start_line": actual_start_line,
                     "end_line": actual_end_line,
                     "show_line_numbers": show_line_numbers,
@@ -115,7 +114,7 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         status="success",
         content=to_json(
             {
-                "path": target.relative_to(context.workspace).as_posix(),
+                "path": path,
                 "start_line": actual_start_line,
                 "end_line": actual_end_line,
                 "show_line_numbers": show_line_numbers,
@@ -126,8 +125,8 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
 
 def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    target = resolve_workspace_path(context, str(arguments["path"]))
-    target.parent.mkdir(parents=True, exist_ok=True)
+    backend = context.workspace_backend
+    path = str(arguments["path"])
 
     content = str(arguments.get("content", ""))
     append = bool(arguments.get("append", False))
@@ -140,9 +139,7 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         suffix = "\n" if trailing_newline else ""
         write_content = f"{prefix}{content}{suffix}"
 
-    mode = "a" if append else "w"
-    with target.open(mode, encoding="utf-8") as file_obj:
-        file_obj.write(write_content)
+    backend.write_text(path, write_content, append=append)
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -150,7 +147,7 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         content=to_json(
             {
                 "ok": True,
-                "path": target.relative_to(context.workspace).as_posix(),
+                "path": path,
                 "append": append,
                 "leading_newline": leading_newline if append else False,
                 "trailing_newline": trailing_newline if append else False,
@@ -161,25 +158,27 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
 
 
 def file_info(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    target = resolve_workspace_path(context, str(arguments["path"]))
-    if not target.exists():
+    backend = context.workspace_backend
+    path = str(arguments["path"])
+    info = backend.file_info(path)
+
+    if info is None:
         return ToolExecutionResult(
             tool_call_id="",
             status="error",
-            content=to_json({"error": f"path not found: {target.relative_to(context.workspace).as_posix()}"}),
+            content=to_json({"error": f"path not found: {path}"}),
         )
 
-    stat = target.stat()
     payload: dict[str, Any] = {
-        "path": target.relative_to(context.workspace).as_posix(),
+        "path": info.path,
         "exists": True,
-        "is_file": target.is_file(),
-        "is_dir": target.is_dir(),
-        "size": stat.st_size,
-        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+        "is_file": info.is_file,
+        "is_dir": info.is_dir,
+        "size": info.size,
+        "modified_at": info.modified_at,
     }
-    if target.is_file():
-        payload["suffix"] = target.suffix
+    if info.is_file:
+        payload["suffix"] = info.suffix
     return ToolExecutionResult(
         tool_call_id="",
         status="success",
@@ -188,12 +187,14 @@ def file_info(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
 
 def file_str_replace(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    target = resolve_workspace_path(context, str(arguments["path"]))
-    if not target.exists() or not target.is_file():
+    backend = context.workspace_backend
+    path = str(arguments["path"])
+
+    if not backend.is_file(path):
         return ToolExecutionResult(
             tool_call_id="",
             status="error",
-            content=to_json({"error": f"file not found: {target.relative_to(context.workspace).as_posix()}"}),
+            content=to_json({"error": f"file not found: {path}"}),
         )
 
     old_str = str(arguments.get("old_str", ""))
@@ -208,7 +209,7 @@ def file_str_replace(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
     max_replacements = int(arguments.get("max_replacements", 1))
     max_replacements = max(max_replacements, 1)
 
-    text = target.read_text(encoding="utf-8", errors="replace")
+    text = backend.read_text(path)
     occurrence_count = text.count(old_str)
     if occurrence_count == 0:
         return ToolExecutionResult(
@@ -224,7 +225,7 @@ def file_str_replace(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
         replaced_text = text.replace(old_str, new_str, max_replacements)
         replaced_count = min(occurrence_count, max_replacements)
 
-    target.write_text(replaced_text, encoding="utf-8")
+    backend.write_text(path, replaced_text)
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -232,7 +233,7 @@ def file_str_replace(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
         content=to_json(
             {
                 "ok": True,
-                "path": target.relative_to(context.workspace).as_posix(),
+                "path": path,
                 "replaced_count": replaced_count,
             }
         ),

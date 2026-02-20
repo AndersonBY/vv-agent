@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 celery = ["celery[redis]>=5.4"]
+s3 = ["boto3>=1.35"]
 
 [dependency-groups]
 dev = [

@@ -6,6 +6,7 @@ from pathlib import Path
 from v_agent.constants import READ_IMAGE_TOOL_NAME
 from v_agent.tools import ToolContext, build_default_registry
 from v_agent.types import ToolCall, ToolResultStatus
+from v_agent.workspace import LocalWorkspaceBackend
 
 _PNG_1X1 = bytes.fromhex(
     "89504e470d0a1a0a"
@@ -15,7 +16,10 @@ _PNG_1X1 = bytes.fromhex(
 
 
 def _context(tmp_path: Path) -> ToolContext:
-    return ToolContext(workspace=tmp_path, shared_state={"todo_list": []}, cycle_index=1)
+    return ToolContext(
+        workspace=tmp_path, shared_state={"todo_list": []},
+        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+    )
 
 
 def test_read_image_from_workspace_file(tmp_path: Path) -> None:

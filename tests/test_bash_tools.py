@@ -7,10 +7,14 @@ from pathlib import Path
 from v_agent.constants import BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME
 from v_agent.tools import ToolContext, build_default_registry
 from v_agent.types import ToolCall, ToolResultStatus
+from v_agent.workspace import LocalWorkspaceBackend
 
 
 def _context(tmp_path: Path) -> ToolContext:
-    return ToolContext(workspace=tmp_path, shared_state={"todo_list": []}, cycle_index=1)
+    return ToolContext(
+        workspace=tmp_path, shared_state={"todo_list": []},
+        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+    )
 
 
 def test_bash_tool_executes_command(tmp_path: Path) -> None:

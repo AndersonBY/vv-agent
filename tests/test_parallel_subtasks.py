@@ -10,6 +10,7 @@ from v_agent.runtime.context import ExecutionContext
 from v_agent.tools.base import ToolContext
 from v_agent.tools.handlers.sub_agents import batch_sub_tasks
 from v_agent.types import AgentStatus, SubTaskOutcome, SubTaskRequest, ToolResultStatus
+from v_agent.workspace import LocalWorkspaceBackend
 
 
 class TestParallelSubTasks:
@@ -34,6 +35,7 @@ class TestParallelSubTasks:
             workspace=tmp_path,
             shared_state={},
             cycle_index=1,
+            workspace_backend=LocalWorkspaceBackend(tmp_path),
             sub_task_runner=mock_runner,
             ctx=ctx,
         )
@@ -67,6 +69,7 @@ class TestParallelSubTasks:
             workspace=tmp_path,
             shared_state={},
             cycle_index=1,
+            workspace_backend=LocalWorkspaceBackend(tmp_path),
             sub_task_runner=mock_runner,
         )
 

@@ -32,6 +32,7 @@ from v_agent.types import (
     ToolDirective,
     ToolExecutionResult,
 )
+from v_agent.workspace import LocalWorkspaceBackend, WorkspaceBackend
 
 RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
 BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
@@ -66,6 +67,7 @@ class AgentRuntime:
         sub_agent_timeout_seconds: float = 90.0,
         hooks: list[RuntimeHook] | None = None,
         execution_backend: ExecutionBackend | None = None,
+        workspace_backend: WorkspaceBackend | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
@@ -79,6 +81,7 @@ class AgentRuntime:
         self.sub_agent_timeout_seconds = max(sub_agent_timeout_seconds, 1.0)
         self.hook_manager = RuntimeHookManager(hooks=list(hooks or []))
         self.execution_backend: ExecutionBackend = execution_backend or InlineBackend()
+        self._workspace_backend = workspace_backend
         self.cycle_runner = CycleRunner(
             llm_client=llm_client,
             tool_registry=tool_registry,
@@ -132,6 +135,7 @@ class AgentRuntime:
         cycle_executor = self._build_cycle_executor(
             task=task,
             workspace_path=workspace_path,
+            workspace_backend=self._workspace_backend or LocalWorkspaceBackend(workspace_path),
             memory_manager=memory_manager,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
@@ -151,6 +155,7 @@ class AgentRuntime:
         *,
         task: AgentTask,
         workspace_path: Path,
+        workspace_backend: WorkspaceBackend,
         memory_manager: MemoryManager,
         before_cycle_messages: BeforeCycleMessageProvider | None,
         interruption_messages: InterruptionMessageProvider | None,
@@ -213,6 +218,7 @@ class AgentRuntime:
                     workspace=workspace_path,
                     shared_state=shared,
                     cycle_index=cycle_index,
+                    workspace_backend=workspace_backend,
                     sub_task_runner=self._build_sub_task_runner(
                         parent_task=task,
                         workspace_path=workspace_path,

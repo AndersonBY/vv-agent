@@ -7,6 +7,7 @@ from v_agent.tools.base import ToolContext, ToolSpec
 from v_agent.tools.dispatcher import dispatch_tool_call
 from v_agent.tools.registry import ToolRegistry
 from v_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
+from v_agent.workspace import LocalWorkspaceBackend
 
 
 def _build_registry() -> ToolRegistry:
@@ -31,7 +32,10 @@ def _build_registry() -> ToolRegistry:
 
 
 def _context(tmp_path: Path) -> ToolContext:
-    return ToolContext(workspace=tmp_path, shared_state={"todo_list": []}, cycle_index=1)
+    return ToolContext(
+        workspace=tmp_path, shared_state={"todo_list": []},
+        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+    )
 
 
 def test_dispatch_tool_call_success_sets_tool_call_id(tmp_path: Path) -> None:
