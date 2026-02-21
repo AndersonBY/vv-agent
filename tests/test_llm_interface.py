@@ -328,21 +328,38 @@ def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
     assert prepared[1]["role"] == "system"
 
 
-def test_build_message_payload_keeps_reasoning_only_for_last_assistant() -> None:
-    payload = VVLlmClient._build_message_payload(
+def test_build_message_payload_keeps_reasoning_only_for_last_assistant_by_default() -> None:
+    llm = VVLlmClient(endpoint_targets=[], backend="openai", selected_model="gpt-4o")
+    payload = llm._build_message_payload(
         [
             Message(role="system", content="sys"),
             Message(role="assistant", content="first", reasoning_content="old-thought"),
             Message(role="tool", content="result", tool_call_id="call_1"),
             Message(role="assistant", content="second", reasoning_content="latest-thought"),
             Message(role="user", content="continue"),
-        ]
+        ],
+        preserve_reasoning_chain=False,
     )
     assert "reasoning_content" not in payload[1]
     assert payload[3]["reasoning_content"] == "latest-thought"
 
 
-def test_moonshot_request_keeps_reasoning_only_for_last_assistant(monkeypatch) -> None:
+def test_build_message_payload_preserves_reasoning_chain_for_reasoning_models() -> None:
+    llm = VVLlmClient(endpoint_targets=[], backend="moonshot", selected_model="kimi-k2.5")
+    payload = llm._build_message_payload(
+        [
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="", tool_calls=[], reasoning_content="old-thought"),
+            Message(role="tool", content="result", tool_call_id="call_1"),
+            Message(role="assistant", content="", tool_calls=[], reasoning_content=None),
+        ],
+        preserve_reasoning_chain=True,
+    )
+    assert payload[1]["reasoning_content"] == "old-thought"
+    assert payload[3]["reasoning_content"] == ""
+
+
+def test_moonshot_request_preserves_reasoning_for_all_assistant_turns(monkeypatch) -> None:
     chunk = SimpleNamespace(
         usage=_FakeUsage(),
         content="done",
@@ -353,7 +370,7 @@ def test_moonshot_request_keeps_reasoning_only_for_last_assistant(monkeypatch) -
     def stream_call(kwargs: dict[str, Any]) -> Any:
         assistant_messages = [msg for msg in kwargs["messages"] if msg.get("role") == "assistant"]
         assert len(assistant_messages) == 2
-        assert "reasoning_content" not in assistant_messages[0]
+        assert assistant_messages[0]["reasoning_content"] == "old-thought"
         assert assistant_messages[1]["reasoning_content"] == "latest-thought"
         return [chunk]
 

@@ -37,6 +37,30 @@ _DEEPSEEK_REASONING_MODELS = (
     "deepseek-r1-tools",
 )
 
+_MINIMAX_REASONING_MODELS = (
+    "minimax-m2.1",
+    "minimax-m2.1-lightning",
+    "minimax-m2.1-highspeed",
+    "minimax-m2.5",
+    "minimax-m2.5-highspeed",
+)
+
+_MOONSHOT_REASONING_MODELS = (
+    "kimi-k2-thinking",
+    "kimi-k2.5",
+)
+
+_REASONING_CHAIN_MODELS = {
+    *_DEEPSEEK_REASONING_MODELS,
+    *_MINIMAX_REASONING_MODELS,
+    *_MOONSHOT_REASONING_MODELS,
+}
+
+_REASONING_CHAIN_PREFIXES = (
+    "deepseek-",
+    "minimax-m2.",
+)
+
 _CLAUDE_THINKING_MODELS = (
     "claude-3-7-sonnet-thinking",
     "claude-opus-4-20250514-thinking",
@@ -141,7 +165,10 @@ class VVLlmClient(LLMClient):
         backend_type = self._resolve_backend_type(self.backend)
         model_name = self._current_model_name(model)
         settings = self._ensure_settings(model)
-        message_payload = self._build_message_payload(messages)
+        message_payload = self._build_message_payload(
+            messages,
+            preserve_reasoning_chain=self._should_preserve_reasoning_chain(model),
+        )
         tool_payload = self._build_tool_payload(tools)
 
         ordered_targets = self._ordered_targets()
@@ -266,19 +293,51 @@ class VVLlmClient(LLMClient):
         self.settings = Settings(**settings_data)
         return self.settings
 
-    @staticmethod
-    def _build_message_payload(messages: list[Message]) -> list[ChatCompletionMessageParam]:
+    def _build_message_payload(
+        self,
+        messages: list[Message],
+        *,
+        preserve_reasoning_chain: bool = False,
+    ) -> list[ChatCompletionMessageParam]:
         last_assistant_index = max(
             (index for index, message in enumerate(messages) if message.role == "assistant"),
             default=-1,
         )
-        payload = [
-            message.to_openai_message(
-                include_reasoning_content=message.role == "assistant" and index == last_assistant_index
+
+        payload: list[ChatCompletionMessageParam] = []
+        for index, message in enumerate(messages):
+            include_reasoning = message.role == "assistant" and (
+                preserve_reasoning_chain or index == last_assistant_index
             )
-            for index, message in enumerate(messages)
-        ]
-        return cast(list[ChatCompletionMessageParam], payload)
+            item = cast(
+                ChatCompletionMessageParam,
+                message.to_openai_message(include_reasoning_content=include_reasoning),
+            )
+            if preserve_reasoning_chain and message.role == "assistant" and "reasoning_content" not in item:
+                # Moonshot/DeepSeek/MiniMax reasoning tool-call flows require this field.
+                item["reasoning_content"] = message.reasoning_content or ""
+            payload.append(item)
+        return payload
+
+    def _should_preserve_reasoning_chain(self, requested_model: str) -> bool:
+        for candidate in self._iter_reasoning_model_candidates(requested_model):
+            normalized = candidate.strip().lower()
+            if not normalized:
+                continue
+            if normalized in _REASONING_CHAIN_MODELS:
+                return True
+            if normalized.startswith(_REASONING_CHAIN_PREFIXES):
+                return True
+        return False
+
+    def _iter_reasoning_model_candidates(self, requested_model: str) -> list[str]:
+        candidates: list[str] = [requested_model]
+        if self.selected_model:
+            candidates.append(self.selected_model)
+        for target in self.endpoint_targets:
+            if target.model_id:
+                candidates.append(target.model_id)
+        return candidates
 
     @staticmethod
     def _resolve_backend_type(raw_backend: str) -> BackendType:
