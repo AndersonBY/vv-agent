@@ -141,7 +141,7 @@ class VVLlmClient(LLMClient):
         backend_type = self._resolve_backend_type(self.backend)
         model_name = self._current_model_name(model)
         settings = self._ensure_settings(model)
-        message_payload = cast(list[ChatCompletionMessageParam], [msg.to_openai_message() for msg in messages])
+        message_payload = self._build_message_payload(messages)
         tool_payload = self._build_tool_payload(tools)
 
         ordered_targets = self._ordered_targets()
@@ -264,6 +264,20 @@ class VVLlmClient(LLMClient):
         }
         self.settings = Settings(**settings_data)
         return self.settings
+
+    @staticmethod
+    def _build_message_payload(messages: list[Message]) -> list[ChatCompletionMessageParam]:
+        last_assistant_index = max(
+            (index for index, message in enumerate(messages) if message.role == "assistant"),
+            default=-1,
+        )
+        payload = [
+            message.to_openai_message(
+                include_reasoning_content=message.role == "assistant" and index == last_assistant_index
+            )
+            for index, message in enumerate(messages)
+        ]
+        return cast(list[ChatCompletionMessageParam], payload)
 
     @staticmethod
     def _resolve_backend_type(raw_backend: str) -> BackendType:

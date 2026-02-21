@@ -65,7 +65,7 @@ class Message:
     reasoning_content: str | None = None
     image_url: str | None = None
 
-    def to_openai_message(self) -> dict[str, Any]:
+    def to_openai_message(self, *, include_reasoning_content: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {"role": self.role, "content": self.content}
         if self.name:
             payload["name"] = self.name
@@ -75,7 +75,7 @@ class Message:
             payload["tool_calls"] = self.tool_calls
             if not self.content:
                 payload["content"] = None
-        if self.role == "assistant" and self.reasoning_content:
+        if include_reasoning_content and self.role == "assistant" and self.reasoning_content:
             payload["reasoning_content"] = self.reasoning_content
         if self.role == "user" and self.image_url:
             content_blocks: list[dict[str, Any]] = []

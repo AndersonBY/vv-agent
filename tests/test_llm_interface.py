@@ -125,13 +125,13 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
     llm = VVLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="stream", api_key="k", api_base="https://stream.example/v1")],
         backend="moonshot",
-        selected_model="kimi-k2-thinking",
+        selected_model="kimi-k2.5",
         randomize_endpoints=False,
         max_retries_per_endpoint=1,
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="kimi-k2-thinking", messages=[Message(role="user", content="hi")], tools=[])
+    response = llm.complete(model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
 
     assert response.content == "hello world"
     assert response.raw["stream_collected"] is True
@@ -173,13 +173,13 @@ def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
             )
         ],
         backend="moonshot",
-        selected_model="kimi-k2-thinking",
+        selected_model="kimi-k2.5",
         randomize_endpoints=False,
         max_retries_per_endpoint=1,
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="kimi-k2-thinking", messages=[Message(role="user", content="hi")], tools=[])
+    response = llm.complete(model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
     assert response.content == "final"
     assert response.raw["reasoning_content"] == "step-1|step-2"
 
@@ -291,13 +291,13 @@ def test_llm_stream_aggregates_tool_calls_without_index(monkeypatch) -> None:
             )
         ],
         backend="moonshot",
-        selected_model="kimi-k2-thinking",
+        selected_model="kimi-k2.5",
         randomize_endpoints=False,
         max_retries_per_endpoint=1,
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="kimi-k2-thinking", messages=[Message(role="user", content="hi")], tools=[])
+    response = llm.complete(model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
     assert response.tool_calls[0].arguments["todos"][0]["title"] == "x"
 
 
@@ -322,10 +322,74 @@ def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
     ]
     prepared = VVLlmClient._prepare_messages_for_model(
         cast(list[ChatCompletionMessageParam], messages),
-        "kimi-k2-thinking",
+        "kimi-k2.5",
     )
     assert prepared[0]["role"] == "system"
     assert prepared[1]["role"] == "system"
+
+
+def test_build_message_payload_keeps_reasoning_only_for_last_assistant() -> None:
+    payload = VVLlmClient._build_message_payload(
+        [
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="first", reasoning_content="old-thought"),
+            Message(role="tool", content="result", tool_call_id="call_1"),
+            Message(role="assistant", content="second", reasoning_content="latest-thought"),
+            Message(role="user", content="continue"),
+        ]
+    )
+    assert "reasoning_content" not in payload[1]
+    assert payload[3]["reasoning_content"] == "latest-thought"
+
+
+def test_moonshot_request_keeps_reasoning_only_for_last_assistant(monkeypatch) -> None:
+    chunk = SimpleNamespace(
+        usage=_FakeUsage(),
+        content="done",
+        reasoning_content=None,
+        tool_calls=[],
+    )
+
+    def stream_call(kwargs: dict[str, Any]) -> Any:
+        assistant_messages = [msg for msg in kwargs["messages"] if msg.get("role") == "assistant"]
+        assert len(assistant_messages) == 2
+        assert "reasoning_content" not in assistant_messages[0]
+        assert assistant_messages[1]["reasoning_content"] == "latest-thought"
+        return [chunk]
+
+    _FakeChatClient.behavior_by_endpoint = {"moonshot-reasoning": stream_call}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="moonshot-reasoning",
+                api_key="k",
+                api_base="https://moonshot.example/v1",
+            )
+        ],
+        backend="moonshot",
+        selected_model="kimi-k2.5",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    response = llm.complete(
+        model="kimi-k2.5",
+        messages=[
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="first", reasoning_content="old-thought"),
+            Message(role="user", content="continue"),
+            Message(role="assistant", content="second", reasoning_content="latest-thought"),
+            Message(role="user", content="next turn"),
+        ],
+        tools=[],
+    )
+    assert response.content == "done"
 
 
 def test_llm_estimates_usage_when_backend_missing_usage(monkeypatch) -> None:

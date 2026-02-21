@@ -56,6 +56,12 @@ def test_assistant_message_keeps_tool_calls_in_openai_payload() -> None:
     assert payload["tool_calls"][0]["function"]["name"] == "_todo_read"
 
 
+def test_assistant_message_can_skip_reasoning_content() -> None:
+    message = Message(role="assistant", content="answer", reasoning_content="analysis")
+    payload = message.to_openai_message(include_reasoning_content=False)
+    assert "reasoning_content" not in payload
+
+
 def test_user_message_with_image_url_uses_multimodal_content() -> None:
     message = Message(
         role="user",
