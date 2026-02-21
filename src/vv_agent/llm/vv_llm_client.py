@@ -208,7 +208,8 @@ class VVLlmClient(LLMClient):
                 except APIStatusError as exc:
                     last_error = exc
                     status = exc.status_code
-                    errors.append(f"{target.endpoint_id}: status {status} (attempt {attempt})")
+                    detail = getattr(exc, 'message', '') or str(getattr(exc, 'body', ''))
+                    errors.append(f"{target.endpoint_id}: status {status} - {detail} (attempt {attempt})")
                     if status in {429, 500, 502, 503, 504, 408} and attempt < self.max_retries_per_endpoint:
                         self._sleep_backoff(attempt)
                         continue
