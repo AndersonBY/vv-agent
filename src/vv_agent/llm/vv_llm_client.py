@@ -32,6 +32,9 @@ _STREAM_MODEL_EXACT = {
     "deepseek-r1-tools",
 }
 
+_STREAM_MODEL_PREFIXES_LOWER = tuple(prefix.lower() for prefix in _STREAM_MODEL_PREFIXES)
+_STREAM_MODEL_EXACT_LOWER = {item.lower() for item in _STREAM_MODEL_EXACT}
+
 _DEEPSEEK_REASONING_MODELS = (
     "deepseek-reasoner",
     "deepseek-r1-tools",
@@ -71,6 +74,7 @@ _CLAUDE_THINKING_MODELS = (
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6-thinking",
 )
+_CLAUDE_THINKING_MODELS_LOWER = {item.lower() for item in _CLAUDE_THINKING_MODELS}
 
 _QWEN_THINKING_KEEP_SUFFIX_MODELS = (
     "qwen3-next-80b-a3b-thinking",
@@ -79,6 +83,7 @@ _QWEN_THINKING_KEEP_SUFFIX_MODELS = (
     "qwen3-vl-30b-a3b-thinking",
     "qwen3-vl-8b-thinking",
 )
+_QWEN_THINKING_KEEP_SUFFIX_MODELS_LOWER = {item.lower() for item in _QWEN_THINKING_KEEP_SUFFIX_MODELS}
 
 _TOOL_CALL_INCREMENTAL_MODELS = {
     "qwen3-coder-plus",
@@ -107,6 +112,7 @@ _TOOL_CALL_INCREMENTAL_MODELS = {
     "qwen3-0.6b-thinking",
     "mixtral-8x7b",
 }
+_TOOL_CALL_INCREMENTAL_MODELS_LOWER = {item.lower() for item in _TOOL_CALL_INCREMENTAL_MODELS}
 
 _TOOL_CALL_INCREMENTAL_ENDPOINT_PREFIXES = (
     "openai",
@@ -412,9 +418,10 @@ class VVLlmClient(LLMClient):
 
     @staticmethod
     def _should_use_stream(model: str) -> bool:
-        if model in _STREAM_MODEL_EXACT:
+        normalized = model.lower()
+        if normalized in _STREAM_MODEL_EXACT_LOWER:
             return True
-        return model.startswith(_STREAM_MODEL_PREFIXES)
+        return normalized.startswith(_STREAM_MODEL_PREFIXES_LOWER)
 
     @staticmethod
     def _prepare_messages_for_model(
@@ -422,7 +429,7 @@ class VVLlmClient(LLMClient):
         model: str,
     ) -> list[ChatCompletionMessageParam]:
         # MiniMax endpoints reject requests with multiple system-role turns.
-        minimax_strict_system = model.startswith("MiniMax")
+        minimax_strict_system = model.lower().startswith("minimax")
         prepared: list[ChatCompletionMessageParam] = []
         seen_system = False
 
@@ -455,41 +462,47 @@ class VVLlmClient(LLMClient):
 
     def _resolve_request_options(self, model: str, *, stream: bool, endpoint_type: str | None) -> _RequestOptions:
         resolved_model = model
+        normalized_model = resolved_model.lower()
         temperature: float | None = None
         max_tokens: int | None = None
         thinking: dict[str, Any] | None = None
         reasoning_effort: str | None = None
         extra_body: dict[str, Any] | None = None
 
-        if resolved_model in _DEEPSEEK_REASONING_MODELS:
+        if normalized_model in _DEEPSEEK_REASONING_MODELS:
             temperature = 0.6
-        elif resolved_model in _CLAUDE_THINKING_MODELS:
-            resolved_model = resolved_model.removesuffix("-thinking")
+        elif normalized_model in _CLAUDE_THINKING_MODELS_LOWER:
+            resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-thinking")
+            normalized_model = resolved_model.lower()
             thinking = {"type": "enabled", "budget_tokens": 16000}
             temperature = 1.0
             max_tokens = 20000
 
-        if resolved_model in ("o3-mini-high", "o4-mini-high"):
+        if normalized_model in ("o3-mini-high", "o4-mini-high"):
             reasoning_effort = "high"
-            resolved_model = resolved_model.removesuffix("-high")
+            resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-high")
+            normalized_model = resolved_model.lower()
 
-        if resolved_model.startswith("gpt-5") and resolved_model.endswith("-high"):
+        if normalized_model.startswith("gpt-5") and normalized_model.endswith("-high"):
             reasoning_effort = "high"
-            resolved_model = resolved_model.removesuffix("-high")
+            resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-high")
+            normalized_model = resolved_model.lower()
 
-        if stream and resolved_model.startswith("qwen3"):
-            if resolved_model.endswith("-thinking"):
-                if resolved_model not in _QWEN_THINKING_KEEP_SUFFIX_MODELS:
-                    resolved_model = resolved_model.removesuffix("-thinking")
+        if stream and normalized_model.startswith("qwen3"):
+            if normalized_model.endswith("-thinking"):
+                if normalized_model not in _QWEN_THINKING_KEEP_SUFFIX_MODELS_LOWER:
+                    resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-thinking")
+                    normalized_model = resolved_model.lower()
                 extra_body = {"enable_thinking": True}
             else:
                 extra_body = {"enable_thinking": False}
 
-        if resolved_model.startswith(("glm-4.", "glm-5")) and resolved_model.endswith("-thinking"):
-            resolved_model = resolved_model.removesuffix("-thinking")
+        if normalized_model.startswith(("glm-4.", "glm-5")) and normalized_model.endswith("-thinking"):
+            resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-thinking")
+            normalized_model = resolved_model.lower()
             extra_body = {"thinking": {"type": "enabled"}, "tool_stream": True} if stream else {"thinking": {"type": "enabled"}}
 
-        if resolved_model.startswith("gemini-2.5"):
+        if normalized_model.startswith("gemini-2.5"):
             reasoning_effort = None
             extra_body = {
                 "extra_body": {
@@ -502,12 +515,13 @@ class VVLlmClient(LLMClient):
                 }
             }
 
-        is_gemini_3_model = resolved_model.startswith("gemini-3")
+        is_gemini_3_model = normalized_model.startswith("gemini-3")
         if is_gemini_3_model:
             if temperature is None:
                 temperature = 1.0
-            if resolved_model in {"gemini-3-pro", "gemini-3-flash"}:
+            if normalized_model in {"gemini-3-pro", "gemini-3-flash"}:
                 resolved_model = f"{resolved_model}-preview"
+                normalized_model = resolved_model.lower()
             reasoning_effort = None
             extra_body = {
                 "extra_body": {
@@ -536,7 +550,8 @@ class VVLlmClient(LLMClient):
 
     @staticmethod
     def _tool_call_incremental_enabled(*, model: str, endpoint_type: str | None) -> bool:
-        if model in _TOOL_CALL_INCREMENTAL_MODELS or model.startswith("qwen3"):
+        normalized_model = model.lower()
+        if normalized_model in _TOOL_CALL_INCREMENTAL_MODELS_LOWER or normalized_model.startswith("qwen3"):
             return True
 
         normalized_endpoint = (endpoint_type or "").strip().lower()
@@ -544,6 +559,12 @@ class VVLlmClient(LLMClient):
             return True
 
         return normalized_endpoint.startswith(_TOOL_CALL_INCREMENTAL_ENDPOINT_PREFIXES)
+
+    @staticmethod
+    def _remove_suffix_case_insensitive(value: str, suffix: str) -> str:
+        if value.lower().endswith(suffix.lower()):
+            return value[: -len(suffix)]
+        return value
 
     def _build_request_payload(
         self,
@@ -644,6 +665,7 @@ class VVLlmClient(LLMClient):
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        complete_raw_content: list[dict[str, Any]] = []
         tool_call_parts: dict[str, dict[str, Any]] = {}
         last_active_tool_call_id: str | None = None
         usage_dump: dict[str, Any] | None = None
@@ -657,6 +679,10 @@ class VVLlmClient(LLMClient):
             chunk_reasoning = self._extract_reasoning_content(self._read_field(chunk, "reasoning_content"))
             if chunk_reasoning:
                 reasoning_parts.append(chunk_reasoning)
+
+            raw_content = self._read_field(chunk, "raw_content")
+            if raw_content is not None:
+                self._collect_raw_content(complete_raw_content, raw_content)
 
             text = self._extract_content(self._read_field(chunk, "content"))
             if text:
@@ -704,6 +730,8 @@ class VVLlmClient(LLMClient):
         }
         if reasoning_parts:
             raw_payload["reasoning_content"] = "".join(reasoning_parts)
+        if complete_raw_content:
+            raw_payload["raw_content"] = complete_raw_content
         if tool_call_extra_content:
             raw_payload["tool_call_extra_content"] = tool_call_extra_content
 
@@ -722,6 +750,86 @@ class VVLlmClient(LLMClient):
         except ValueError:
             index = 10**9
         return index, call_id
+
+    @classmethod
+    def _collect_raw_content(cls, complete_raw_content: list[dict[str, Any]], chunk_raw_content: Any) -> None:
+        if isinstance(chunk_raw_content, list):
+            for item in chunk_raw_content:
+                cls._collect_raw_content(complete_raw_content, item)
+            return
+
+        if not isinstance(chunk_raw_content, dict):
+            return
+
+        chunk_type_raw = chunk_raw_content.get("type")
+        chunk_type = chunk_type_raw if isinstance(chunk_type_raw, str) else ""
+
+        if chunk_type == "thinking_delta":
+            thinking_block = cls._find_or_create_raw_block(
+                complete_raw_content,
+                block_type="thinking",
+                defaults={"thinking": "", "signature": ""},
+            )
+            thinking_block["thinking"] = f"{thinking_block.get('thinking', '')}{chunk_raw_content.get('thinking', '')}"
+            return
+
+        if chunk_type == "signature_delta":
+            thinking_block = cls._find_or_create_raw_block(
+                complete_raw_content,
+                block_type="thinking",
+                defaults={"thinking": "", "signature": ""},
+            )
+            thinking_block["signature"] = f"{thinking_block.get('signature', '')}{chunk_raw_content.get('signature', '')}"
+            return
+
+        if chunk_type == "text_delta":
+            text_block = cls._find_or_create_raw_block(
+                complete_raw_content,
+                block_type="text",
+                defaults={"text": ""},
+            )
+            text_block["text"] = f"{text_block.get('text', '')}{chunk_raw_content.get('text', '')}"
+            return
+
+        if chunk_type == "input_json_delta":
+            # input_json_delta is already aggregated via tool call deltas.
+            return
+
+        if chunk_type in {"thinking", "text", "tool_use"}:
+            if not cls._raw_block_exists(complete_raw_content, chunk_raw_content):
+                complete_raw_content.append(dict(chunk_raw_content))
+            return
+
+        complete_raw_content.append(dict(chunk_raw_content))
+
+    @staticmethod
+    def _find_or_create_raw_block(
+        blocks: list[dict[str, Any]],
+        *,
+        block_type: str,
+        defaults: dict[str, Any],
+    ) -> dict[str, Any]:
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == block_type:
+                return block
+        new_block = {"type": block_type, **defaults}
+        blocks.append(new_block)
+        return new_block
+
+    @staticmethod
+    def _raw_block_exists(blocks: list[dict[str, Any]], candidate: dict[str, Any]) -> bool:
+        candidate_type = candidate.get("type")
+        candidate_id = candidate.get("id")
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != candidate_type:
+                continue
+            if candidate_id is not None and block.get("id") == candidate_id:
+                return True
+            if candidate_id is None and block == candidate:
+                return True
+        return False
 
     def _accumulate_tool_call_delta(
         self,
@@ -762,6 +870,8 @@ class VVLlmClient(LLMClient):
                         incoming=arguments,
                         incremental=incremental,
                     )
+                if delta_id and (not slot.get("id") or str(slot["id"]).startswith("generated_")):
+                    slot["id"] = delta_id
                 if keep_extra_content and extra_content:
                     slot["extra_content"] = extra_content
             else:
@@ -775,7 +885,7 @@ class VVLlmClient(LLMClient):
 
             return unique_id
 
-        if not arguments:
+        if not arguments and not delta_id:
             return last_active_tool_call_id
 
         target_id = last_active_tool_call_id
@@ -787,11 +897,14 @@ class VVLlmClient(LLMClient):
 
         if target_id and target_id in tool_call_parts:
             slot = tool_call_parts[target_id]
-            slot["arguments"] = self._merge_tool_arguments(
-                existing=str(slot.get("arguments", "")),
-                incoming=arguments,
-                incremental=incremental,
-            )
+            if arguments:
+                slot["arguments"] = self._merge_tool_arguments(
+                    existing=str(slot.get("arguments", "")),
+                    incoming=arguments,
+                    incremental=incremental,
+                )
+            if delta_id and (not slot.get("id") or str(slot["id"]).startswith("generated_")):
+                slot["id"] = delta_id
 
         return target_id
 

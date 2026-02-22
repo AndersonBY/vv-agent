@@ -315,6 +315,21 @@ def test_prepare_messages_for_minimax_converts_extra_system_messages() -> None:
     assert prepared[2]["role"] == "assistant"
 
 
+def test_prepare_messages_for_lowercase_minimax_converts_extra_system_messages() -> None:
+    messages = [
+        {"role": "system", "content": "base system"},
+        {"role": "system", "name": "memory_summary", "content": "summary"},
+    ]
+
+    prepared = VVLlmClient._prepare_messages_for_model(
+        cast(list[ChatCompletionMessageParam], messages),
+        "minimax-m2.5",
+    )
+    assert prepared[0]["role"] == "system"
+    assert prepared[1]["role"] == "user"
+    assert prepared[1]["content"] == "[memory_summary]\nsummary"
+
+
 def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
     messages = [
         {"role": "system", "content": "base system"},
@@ -326,6 +341,11 @@ def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
     )
     assert prepared[0]["role"] == "system"
     assert prepared[1]["role"] == "system"
+
+
+def test_should_use_stream_is_case_insensitive_for_minimax() -> None:
+    assert VVLlmClient._should_use_stream("MiniMax-M2.5") is True
+    assert VVLlmClient._should_use_stream("minimax-m2.5") is True
 
 
 def test_build_message_payload_keeps_reasoning_only_for_last_assistant_by_default() -> None:
@@ -432,3 +452,62 @@ def test_llm_estimates_usage_when_backend_missing_usage(monkeypatch) -> None:
     assert result.raw["usage"]["prompt_tokens"] == 10
     assert result.raw["usage"]["completion_tokens"] == 10
     assert result.raw["usage"]["total_tokens"] == 20
+
+
+def test_llm_stream_collects_raw_content_blocks(monkeypatch) -> None:
+    chunk_1 = SimpleNamespace(
+        usage=None,
+        content="",
+        reasoning_content=None,
+        raw_content={"type": "thinking_delta", "thinking": "step-1"},
+        tool_calls=[],
+    )
+    chunk_2 = SimpleNamespace(
+        usage=None,
+        content="",
+        reasoning_content=None,
+        raw_content={"type": "signature_delta", "signature": "sig-1"},
+        tool_calls=[],
+    )
+    chunk_3 = SimpleNamespace(
+        usage=_FakeUsage(),
+        content="done",
+        reasoning_content=None,
+        raw_content={"type": "text_delta", "text": "visible text"},
+        tool_calls=[],
+    )
+
+    def stream_call(kwargs: dict[str, Any]) -> Any:
+        assert kwargs["stream"] is True
+        return [chunk_1, chunk_2, chunk_3]
+
+    _FakeChatClient.behavior_by_endpoint = {"stream-raw-content": stream_call}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="stream-raw-content",
+                api_key="k",
+                api_base="https://stream-raw-content.example/v1",
+            )
+        ],
+        backend="moonshot",
+        selected_model="kimi-k2.5",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    result = llm.complete(model="kimi-k2.5", messages=[Message(role="user", content="hello")], tools=[])
+    raw_content = result.raw["raw_content"]
+    assert result.content == "done"
+    assert isinstance(raw_content, list)
+    assert raw_content[0]["type"] == "thinking"
+    assert raw_content[0]["thinking"] == "step-1"
+    assert raw_content[0]["signature"] == "sig-1"
+    assert raw_content[1]["type"] == "text"
+    assert raw_content[1]["text"] == "visible text"

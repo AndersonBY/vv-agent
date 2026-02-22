@@ -139,6 +139,48 @@ def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> Non
     assert result.final_answer == "finished-by-hook"
 
 
+def test_runtime_hook_after_tool_call_with_blank_id_is_normalized(tmp_path: Path) -> None:
+    class BlankIdAfterHook(BaseRuntimeHook):
+        def after_tool_call(self, event: AfterToolCallEvent) -> ToolExecutionResult | None:
+            if event.call.name != TODO_WRITE_TOOL_NAME:
+                return None
+            return ToolExecutionResult(
+                tool_call_id=" ",
+                content=event.result.content,
+                status_code=ToolResultStatus.SUCCESS,
+            )
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="todo",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name=TODO_WRITE_TOOL_NAME,
+                        arguments={"todos": [{"title": "a", "status": "completed", "priority": "medium"}]},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finish",
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        llm_client=llm,
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        hooks=[BlankIdAfterHook()],
+    )
+    task = AgentTask(task_id="hook_after_tool_blank_id", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+    assert result.cycles[0].tool_results[0].tool_call_id == "c1"
+
+
 def test_runtime_hook_can_replace_llm_response(tmp_path: Path) -> None:
     class ReplaceResponseHook(BaseRuntimeHook):
         def after_llm(self, event: AfterLLMEvent) -> LLMResponse:

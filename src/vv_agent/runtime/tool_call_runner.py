@@ -66,6 +66,8 @@ class ToolCallRunner:
                 context=context,
                 result=result,
             )
+            if self._needs_tool_call_id(result.tool_call_id):
+                result.tool_call_id = patched_call.id
 
             cycle_record.tool_results.append(result)
             messages.append(result.to_tool_message())
@@ -117,6 +119,13 @@ class ToolCallRunner:
             directive_result=latest_directive_result,
             interruption_messages=interruption_messages,
         )
+
+    @staticmethod
+    def _needs_tool_call_id(value: str | None) -> bool:
+        if value is None:
+            return True
+        stripped = value.strip()
+        return stripped == "" or stripped == "pending"
 
     @staticmethod
     def _append_image_notification(*, result: ToolExecutionResult, messages: list[Message]) -> None:

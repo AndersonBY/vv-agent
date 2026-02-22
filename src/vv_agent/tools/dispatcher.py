@@ -8,6 +8,13 @@ from vv_agent.tools.registry import ToolNotFoundError, ToolRegistry
 from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 
+def _needs_tool_call_id(value: str | None) -> bool:
+    if value is None:
+        return True
+    stripped = value.strip()
+    return stripped == "" or stripped == "pending"
+
+
 def _error_result(tool_call_id: str, message: str, *, error_code: str | None = None) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_call_id=tool_call_id,
@@ -71,7 +78,7 @@ def dispatch_tool_call(
     except Exception as exc:
         return _error_result(call.id, f"Tool execution failed ({call.name}): {exc}", error_code="tool_execution_failed")
 
-    if not result.tool_call_id or result.tool_call_id == "pending":
+    if _needs_tool_call_id(result.tool_call_id):
         result.tool_call_id = call.id
 
     if result.directive == ToolDirective.WAIT_USER and result.status_code == ToolResultStatus.SUCCESS:

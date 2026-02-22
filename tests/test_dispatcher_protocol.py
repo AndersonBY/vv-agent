@@ -26,8 +26,13 @@ def _build_registry() -> ToolRegistry:
             directive=ToolDirective.WAIT_USER,
         )
 
+    def blank_id_handler(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
+        del context, arguments
+        return ToolExecutionResult(tool_call_id="   ", status="success", content="ok")
+
     registry.register(ToolSpec(name="_ok", handler=ok_handler))
     registry.register(ToolSpec(name="_wait", handler=wait_handler))
+    registry.register(ToolSpec(name="_blank", handler=blank_id_handler))
     return registry
 
 
@@ -80,3 +85,14 @@ def test_dispatch_tool_call_invalid_arguments_returns_error(tmp_path: Path) -> N
 
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "invalid_arguments_json"
+
+
+def test_dispatch_tool_call_blank_tool_call_id_gets_normalized(tmp_path: Path) -> None:
+    result = dispatch_tool_call(
+        registry=_build_registry(),
+        context=_context(tmp_path),
+        call=ToolCall(id="c5", name="_blank", arguments={}),
+    )
+
+    assert result.status_code == ToolResultStatus.SUCCESS
+    assert result.tool_call_id == "c5"
