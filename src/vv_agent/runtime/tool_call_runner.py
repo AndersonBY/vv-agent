@@ -39,6 +39,7 @@ class ToolCallRunner:
     ) -> ToolRunOutcome:
         latest_directive_result: ToolExecutionResult | None = None
         interruption_messages: list[Message] = []
+        image_notifications: list[Message] = []
 
         for index, call in enumerate(tool_calls):
             if ctx is not None:
@@ -71,7 +72,12 @@ class ToolCallRunner:
 
             cycle_record.tool_results.append(result)
             messages.append(result.to_tool_message())
-            self._append_image_notification(result=result, messages=messages)
+            image_notification = self._build_image_notification(
+                result=result,
+                include_image=task.native_multimodal,
+            )
+            if image_notification is not None:
+                image_notifications.append(image_notification)
             if on_tool_result is not None:
                 on_tool_result(call, result)
 
@@ -115,6 +121,9 @@ class ToolCallRunner:
                             on_tool_result(skipped_call, skipped)
                     break
 
+        if image_notifications:
+            messages.extend(image_notifications)
+
         return ToolRunOutcome(
             directive_result=latest_directive_result,
             interruption_messages=interruption_messages,
@@ -128,18 +137,20 @@ class ToolCallRunner:
         return stripped == "" or stripped == "pending"
 
     @staticmethod
-    def _append_image_notification(*, result: ToolExecutionResult, messages: list[Message]) -> None:
+    def _build_image_notification(*, result: ToolExecutionResult, include_image: bool) -> Message | None:
+        if not include_image:
+            return None
         if result.image_url:
-            image_ref = result.image_path or result.image_url
-            messages.append(
-                Message(
-                    role="user",
-                    content=f"[Image loaded] {image_ref}",
-                    image_url=result.image_url,
-                )
+            # For data URLs keep text empty to avoid duplicating base64 payload as plain text.
+            content = f"[Image loaded] {result.image_path}" if result.image_path else ""
+            return Message(
+                role="user",
+                content=content,
+                image_url=result.image_url,
             )
-        elif result.image_path:
-            messages.append(Message(role="user", content=f"[Image loaded] {result.image_path}"))
+        if result.image_path:
+            return Message(role="user", content=f"[Image loaded] {result.image_path}")
+        return None
 
     @staticmethod
     def _build_skipped_result(

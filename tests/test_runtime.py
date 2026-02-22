@@ -11,8 +11,8 @@ from vv_agent.constants import (
 )
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import AgentRuntime
-from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall
+from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall, ToolExecutionResult
 
 _PNG_1X1 = bytes.fromhex(
     "89504e470d0a1a0a"
@@ -238,6 +238,114 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
         user_prompt="read image",
         max_cycles=4,
         native_multimodal=True,
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+    assert result.final_answer == "ok"
+
+
+def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path: Path) -> None:
+    def _demo_image(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
+        del context, arguments
+        return ToolExecutionResult(
+            tool_call_id="",
+            content='{"ok": true}',
+            image_url="data:image/png;base64,AAAA",
+        )
+
+    def assert_order(model: str, messages: list[Message]) -> LLMResponse:
+        del model
+        assistant_index = next(
+            index
+            for index, message in enumerate(messages)
+            if message.role == "assistant" and message.tool_calls
+        )
+        first_tool = messages[assistant_index + 1]
+        second_tool = messages[assistant_index + 2]
+        assert first_tool.role == "tool"
+        assert first_tool.tool_call_id == "img1"
+        assert second_tool.role == "tool"
+        assert second_tool.tool_call_id == "todo1"
+
+        image_messages = [msg for msg in messages[assistant_index + 3 :] if msg.role == "user" and msg.image_url]
+        assert image_messages
+        assert image_messages[0].content == ""
+        return LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+        )
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="run tools",
+                tool_calls=[
+                    ToolCall(id="img1", name="_demo_image", arguments={}),
+                    ToolCall(
+                        id="todo1",
+                        name=TODO_WRITE_TOOL_NAME,
+                        arguments={"todos": [{"title": "done", "status": "completed", "priority": "medium"}]},
+                    ),
+                ],
+            ),
+            assert_order,
+        ]
+    )
+    registry = build_default_registry()
+    registry.register(ToolSpec(name="_demo_image", handler=_demo_image))
+    runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
+    task = AgentTask(
+        task_id="task_image_order",
+        model="m",
+        system_prompt="sys",
+        user_prompt="go",
+        max_cycles=4,
+        native_multimodal=True,
+        extra_tool_names=["_demo_image"],
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+    assert result.final_answer == "ok"
+
+
+def test_runtime_skips_image_notifications_when_multimodal_disabled(tmp_path: Path) -> None:
+    def _demo_image(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
+        del context, arguments
+        return ToolExecutionResult(
+            tool_call_id="",
+            content='{"ok": true}',
+            image_url="data:image/png;base64,AAAA",
+        )
+
+    def assert_no_image_message(model: str, messages: list[Message]) -> LLMResponse:
+        del model
+        assert not any(message.role == "user" and message.image_url for message in messages)
+        return LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+        )
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="capture",
+                tool_calls=[ToolCall(id="img1", name="_demo_image", arguments={})],
+            ),
+            assert_no_image_message,
+        ]
+    )
+    registry = build_default_registry()
+    registry.register(ToolSpec(name="_demo_image", handler=_demo_image))
+    runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
+    task = AgentTask(
+        task_id="task_no_multimodal",
+        model="m",
+        system_prompt="sys",
+        user_prompt="go",
+        max_cycles=4,
+        extra_tool_names=["_demo_image"],
     )
 
     result = runtime.run(task)
