@@ -84,6 +84,59 @@ def test_sdk_client_runs_named_agent(tmp_path: Path) -> None:
     assert builder_calls == [("local_settings.py", "moonshot", "kimi-k2.5")]
 
 
+def test_sdk_client_passes_debug_dump_dir_to_llm(tmp_path: Path) -> None:
+    class DebugAwareLLM:
+        def __init__(self) -> None:
+            self.debug_dump_dir: str | None = None
+
+        def complete(
+            self,
+            *,
+            model: str,
+            messages: list,
+            tools: list[dict[str, object]],
+            stream_callback=None,
+        ) -> LLMResponse:
+            del model, messages, tools, stream_callback
+            return LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+            )
+
+    built_llms: list[DebugAwareLLM] = []
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[DebugAwareLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = DebugAwareLLM()
+        built_llms.append(llm)
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    dump_dir = tmp_path / "llm_dumps"
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+            debug_dump_dir=str(dump_dir),
+        ),
+        agent=AgentDefinition(description="you are helper", model="kimi-k2.5"),
+    )
+
+    run = client.run(prompt="say ok")
+    assert run.result.status == AgentStatus.COMPLETED
+    assert run.result.final_answer == "ok"
+    assert len(built_llms) == 1
+    assert built_llms[0].debug_dump_dir == str(dump_dir)
+
+
 def test_sdk_client_runs_default_agent_without_name(tmp_path: Path) -> None:
     def fake_llm_builder(
         settings_path: str | Path,

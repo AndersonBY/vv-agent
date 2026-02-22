@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
+import re
 import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, cast
 
 from openai.types.chat import ChatCompletionMessageParam
@@ -155,7 +158,9 @@ class VVLlmClient(LLMClient):
     max_retries_per_endpoint: int = 3
     backoff_seconds: float = 2.0
     randomize_endpoints: bool = True
+    debug_dump_dir: str | None = None
     _preferred_endpoint_id: str | None = field(default=None, init=False, repr=False)
+    _request_counter: int = field(default=0, init=False, repr=False)
 
     def complete(
         self,
@@ -197,6 +202,7 @@ class VVLlmClient(LLMClient):
                 model_name=model_name,
                 messages=request_messages,
             )
+            self._dump_request_messages(formatted_messages, model_name=model_name)
 
             for attempt in range(1, self.max_retries_per_endpoint + 1):
                 try:
@@ -1082,3 +1088,22 @@ class VVLlmClient(LLMClient):
         jitter = random.uniform(0.0, 0.5)
         sleep_seconds = self.backoff_seconds * attempt + jitter
         time.sleep(sleep_seconds)
+
+    def _dump_request_messages(self, messages: list[dict[str, Any]], *, model_name: str) -> None:
+        if not self.debug_dump_dir:
+            return
+        self._request_counter += 1
+        dump_dir = Path(self.debug_dump_dir)
+        try:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            safe_model_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", model_name).strip("_") or "model"
+            filename = f"request_{self._request_counter:03d}_{safe_model_name}.json"
+            payload = {
+                "request_index": self._request_counter,
+                "model": model_name,
+                "message_count": len(messages),
+                "messages": messages,
+            }
+            (dump_dir / filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            logging.getLogger(__name__).debug("Failed to dump request messages", exc_info=True)

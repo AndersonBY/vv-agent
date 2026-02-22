@@ -291,6 +291,8 @@ class AgentSDKClient:
             model=definition.model,
             timeout_seconds=self.options.timeout_seconds,
         )
+        if self.options.debug_dump_dir and hasattr(llm, "debug_dump_dir"):
+            llm.debug_dump_dir = self.options.debug_dump_dir
 
         tool_registry_factory = self.options.tool_registry_factory or build_default_registry
         runtime = AgentRuntime(

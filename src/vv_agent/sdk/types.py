@@ -69,6 +69,7 @@ class AgentSDKOptions:
     auto_discover_resources: bool = True
     execution_backend: ExecutionBackend | None = None
     stream_callback: StreamCallback | None = None
+    debug_dump_dir: str | None = None
 
 
 @dataclass(slots=True)

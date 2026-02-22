@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
@@ -511,3 +512,39 @@ def test_llm_stream_collects_raw_content_blocks(monkeypatch) -> None:
     assert raw_content[0]["signature"] == "sig-1"
     assert raw_content[1]["type"] == "text"
     assert raw_content[1]["text"] == "visible text"
+
+
+def test_llm_debug_dump_writes_request_messages(monkeypatch, tmp_path: Path) -> None:
+    response = SimpleNamespace(content="ok", tool_calls=[], reasoning_content=None, usage=_FakeUsage())
+    _FakeChatClient.behavior_by_endpoint = {"dump-endpoint": response}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="dump-endpoint",
+                api_key="k",
+                api_base="https://dump.example/v1",
+                model_id="gpt/4o-mini",
+            )
+        ],
+        backend="openai",
+        selected_model="gpt/4o-mini",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+        debug_dump_dir=str(tmp_path / "dumps"),
+    )
+
+    result = llm.complete(model="gpt/4o-mini", messages=[Message(role="user", content="hello")], tools=[])
+    assert result.content == "ok"
+
+    dump_files = sorted((tmp_path / "dumps").glob("request_*.json"))
+    assert len(dump_files) == 1
+    assert dump_files[0].name == "request_001_gpt_4o-mini.json"
+    payload = dump_files[0].read_text(encoding="utf-8")
+    assert '"request_index": 1' in payload
+    assert '"message_count": 1' in payload
