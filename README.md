@@ -81,6 +81,41 @@ result = client.run("Explain Python's GIL in one sentence.")
 print(result.final_answer)
 ```
 
+### SDK Workspace Override (Session/Task)
+
+`AgentSDKOptions.workspace` is the SDK default workspace. You can override it per one-shot run, or bind a fixed workspace to a session.
+
+Priority for workspace resolution is:
+
+1. Explicit `workspace` passed to `run(...)` / `query(...)` / `create_session(...)`
+2. `AgentSDKOptions.workspace`
+
+```python
+from vv_agent.sdk import AgentSDKClient, AgentSDKOptions
+
+client = AgentSDKClient(options=AgentSDKOptions(
+    settings_file="local_settings.py",
+    default_backend="moonshot",
+    default_model="kimi-k2.5",
+    workspace="./workspace/default",
+))
+
+# One-shot override: this run uses ./workspace/task-a
+run = client.run(prompt="Create notes.md", workspace="./workspace/task-a")
+
+# Session override: all turns in this session stay in ./workspace/session-b
+session = client.create_session(workspace="./workspace/session-b")
+session.prompt("Create todo.md")
+session.follow_up("Append one more todo item")
+session.continue_run()
+```
+
+Notes:
+
+- `AgentSession.workspace` is fixed at session creation time.
+- `prompt()/continue_run()/follow_up()` all execute in that same session workspace.
+- Top-level SDK helpers `vv_agent.sdk.run(...)` and `vv_agent.sdk.query(...)` also accept `workspace=...`.
+
 ## Execution Backends
 
 The cycle loop is delegated to a pluggable `ExecutionBackend`.

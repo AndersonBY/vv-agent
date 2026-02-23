@@ -81,6 +81,41 @@ result = client.run("用一句话解释 Python 的 GIL。")
 print(result.final_answer)
 ```
 
+### SDK 工作区覆盖（会话/任务级）
+
+`AgentSDKOptions.workspace` 是 SDK 默认工作区。你可以在单次调用时覆盖它，也可以在创建会话时绑定固定工作区。
+
+工作区优先级：
+
+1. `run(...)` / `query(...)` / `create_session(...)` 显式传入的 `workspace`
+2. `AgentSDKOptions.workspace`
+
+```python
+from vv_agent.sdk import AgentSDKClient, AgentSDKOptions
+
+client = AgentSDKClient(options=AgentSDKOptions(
+    settings_file="local_settings.py",
+    default_backend="moonshot",
+    default_model="kimi-k2.5",
+    workspace="./workspace/default",
+))
+
+# 单次覆盖：本轮运行使用 ./workspace/task-a
+run = client.run(prompt="创建 notes.md", workspace="./workspace/task-a")
+
+# 会话覆盖：这个 session 的所有轮次固定在 ./workspace/session-b
+session = client.create_session(workspace="./workspace/session-b")
+session.prompt("创建 todo.md")
+session.follow_up("再追加一条待办")
+session.continue_run()
+```
+
+说明：
+
+- `AgentSession.workspace` 在会话创建后固定。
+- `prompt()/continue_run()/follow_up()` 都在同一个会话工作区执行。
+- 顶层 SDK 辅助函数 `vv_agent.sdk.run(...)` 和 `vv_agent.sdk.query(...)` 也支持 `workspace=...`。
+
 ## 执行后端
 
 cycle 循环由可插拔的 `ExecutionBackend` 调度。
