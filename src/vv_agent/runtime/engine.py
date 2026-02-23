@@ -233,6 +233,7 @@ class AgentRuntime:
                 assistant_preview=self._preview_text(cycle_record.assistant_message),
                 tool_calls=[call.name for call in cycle_record.tool_calls],
                 tool_call_count=len(cycle_record.tool_calls),
+                token_usage=cycle_record.token_usage.to_dict(),
             )
 
             if cycle_record.tool_calls:

@@ -203,6 +203,9 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert "cycle_llm_response" in event_names
     assert "tool_result" in event_names
     assert "run_completed" in event_names
+    cycle_payload = next(payload for name, payload in events if name == "cycle_llm_response")
+    assert "token_usage" in cycle_payload
+    assert isinstance(cycle_payload["token_usage"], dict)
 
 
 def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
