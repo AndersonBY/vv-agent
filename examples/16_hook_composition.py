@@ -136,7 +136,7 @@ def main() -> None:
             prompt=(
                 "请读取 workspace 下所有文件并输出摘要. "
                 "注意: 不要尝试读取 .env 或 credentials 相关文件. "
-                "完成后调用 `_task_finish` 输出结论。"
+                "完成后调用 `task_finish` 输出结论。"
             ),
         )
         print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

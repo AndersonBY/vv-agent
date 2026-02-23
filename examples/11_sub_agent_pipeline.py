@@ -94,8 +94,8 @@ def main() -> None:
     try:
         run = client.run(
             prompt=(
-                "请先调用 `_create_sub_task` 给 `research-sub`, 读取 inputs/ 下文档并产出结构化要点."
-                "然后调用 `_create_sub_task` 给 `writer-sub`, 基于要点输出 `artifacts/final_report.md` 的正文草稿."
+                "请先调用 `create_sub_task` 给 `research-sub`, 读取 inputs/ 下文档并产出结构化要点."
+                "然后调用 `create_sub_task` 给 `writer-sub`, 基于要点输出 `artifacts/final_report.md` 的正文草稿."
                 "最后由你整合并确认结果。"
             ),
         )

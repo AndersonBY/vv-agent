@@ -20,7 +20,7 @@ AgentRuntime
 
 Core types live in `vv_agent.types`: `AgentTask`, `AgentResult`, `Message`, `CycleRecord`, `ToolCall`.
 
-Task completion is tool-driven: the agent calls `_task_finish` or `_ask_user` to signal terminal states. No implicit "last message = answer" heuristics.
+Task completion is tool-driven: the agent calls `task_finish` or `ask_user` to signal terminal states. No implicit "last message = answer" heuristics.
 
 ## Setup
 
@@ -167,7 +167,7 @@ result = runtime.run(task, ctx=ctx)
 
 ## Workspace Backends
 
-Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All built-in file tools (`_read_file`, `_write_file`, `_list_files`, etc.) go through this abstraction.
+Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All built-in file tools (`read_file`, `write_file`, `list_files`, etc.) go through this abstraction.
 
 | Backend | Use case |
 |---------|----------|
@@ -293,13 +293,13 @@ Priority is strict:
 
 ## Built-in Tools
 
-`_list_files`, `_file_info`, `_read_file`, `_write_file`, `_file_str_replace`, `_workspace_grep`, `_compress_memory`, `_todo_write`, `_task_finish`, `_ask_user`, `_bash`, `_read_image`, `_create_sub_task`, `_batch_sub_tasks`.
+`list_files`, `file_info`, `read_file`, `write_file`, `file_str_replace`, `workspace_grep`, `compress_memory`, `todo_write`, `task_finish`, `ask_user`, `bash`, `read_image`, `create_sub_task`, `batch_sub_tasks`.
 
 Custom tools can be registered via `ToolRegistry.register()`.
 
 ## Sub-agents
 
-Configure named sub-agents on `AgentTask.sub_agents`. The parent agent delegates work via `_create_sub_task` / `_batch_sub_tasks`. Each sub-agent gets its own runtime, model, and tool set.
+Configure named sub-agents on `AgentTask.sub_agents`. The parent agent delegates work via `create_sub_task` / `batch_sub_tasks`. Each sub-agent gets its own runtime, model, and tool set.
 
 When a sub-agent uses a different model from the parent, the runtime needs `settings_file` and `default_backend` to resolve the LLM client.
 

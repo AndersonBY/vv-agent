@@ -2,20 +2,20 @@
 
 ## 1) Tool name changes
 
-Old names (no prefix) were replaced by backend-style names:
+Old underscore-prefixed names were replaced by plain names:
 
-- `task_finish` -> `_task_finish`
-- `ask_user` -> `_ask_user`
-- `todo_write` -> `_todo_write`
-- `todo_read` -> `_todo_read`
-- `read_file` -> `_read_file`
-- `write_file` -> `_write_file`
-- `list_files` -> `_list_files`
-- `workspace_grep` -> `_workspace_grep`
+- `_task_finish` -> `task_finish`
+- `_ask_user` -> `ask_user`
+- `_todo_write` -> `todo_write`
+- `_todo_read` -> `todo_read`
+- `_read_file` -> `read_file`
+- `_write_file` -> `write_file`
+- `_list_files` -> `list_files`
+- `_workspace_grep` -> `workspace_grep`
 
 ## 2) TODO protocol changes
 
-`_todo_write` now expects full-list payload:
+`todo_write` now expects full-list payload:
 
 ```json
 {
@@ -29,7 +29,7 @@ Rules:
 
 - Omitted previous items are removed.
 - At most one `in_progress` item is allowed.
-- `_todo_read` 不再作为默认内建工具暴露（如需可作为自定义工具注册）。
+- `todo_read` 不再作为默认内建工具暴露（如需可作为自定义工具注册）。
 
 ## 3) Runtime structure changes
 
@@ -64,7 +64,7 @@ By default, handlers return structured `not_enabled` errors until adapters are w
 
 ## 7) Sub-agent delegation and SDK query
 
-- `_create_sub_task` / `_batch_sub_tasks` are now built-in and execute configured `AgentTask.sub_agents`.
+- `create_sub_task` / `batch_sub_tasks` are now built-in and execute configured `AgentTask.sub_agents`.
 - `AgentSDKClient` now supports both default single-agent and named-agent one-shot APIs:
 
 ```python

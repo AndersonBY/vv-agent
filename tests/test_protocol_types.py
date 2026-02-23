@@ -42,7 +42,7 @@ def test_assistant_message_keeps_tool_calls_in_openai_payload() -> None:
                 "id": "call_1",
                 "type": "function",
                 "function": {
-                    "name": "_todo_read",
+                    "name": "todo_read",
                     "arguments": "{}",
                 },
             }
@@ -53,7 +53,7 @@ def test_assistant_message_keeps_tool_calls_in_openai_payload() -> None:
     assert "tool_calls" in payload
     assert payload["content"] is None
     assert payload["reasoning_content"] == "analysis"
-    assert payload["tool_calls"][0]["function"]["name"] == "_todo_read"
+    assert payload["tool_calls"][0]["function"]["name"] == "todo_read"
 
 
 def test_assistant_message_can_skip_reasoning_content() -> None:

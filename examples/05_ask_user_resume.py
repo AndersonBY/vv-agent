@@ -49,7 +49,7 @@ def main() -> None:
         ),
         agent=AgentDefinition(
             description=(
-                "你是交互式写作 Agent. 在开始执行前, 必须先调用 `_ask_user` 收集关键偏好;"
+                "你是交互式写作 Agent. 在开始执行前, 必须先调用 `ask_user` 收集关键偏好;"
                 "拿到用户回复后再继续执行。"
             ),
             model=model,

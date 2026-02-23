@@ -39,11 +39,11 @@ Tool-level status code (`ToolResultStatus`):
 - Built-in handlers are split by responsibility in `src/vv_agent/tools/handlers/`.
 - Workflow 语义不做框架内置特殊处理；如需 workflow，按自定义工具注册到 `ToolRegistry`。
 - Default registry preloads:
-  - control: `_task_finish`, `_ask_user`, `_todo_write`, `_compress_memory`
-  - workspace: `_list_files`, `_file_info`, `_read_file`, `_write_file`, `_file_str_replace`, `_workspace_grep`
-  - computer: `_bash`, `_check_background_command`, `_read_image`
-  - sub-agent delegation: `_create_sub_task`, `_batch_sub_tasks`（由 runtime 内建子任务执行链路驱动）
-  - skills: `_activate_skill`（从 `metadata.available_skills` / `metadata.skill_directories` / `shared_state.available_skills` 解析并激活；支持传入 skills 根目录并自动发现多个 `SKILL.md`）
+  - control: `task_finish`, `ask_user`, `todo_write`, `compress_memory`
+  - workspace: `list_files`, `file_info`, `read_file`, `write_file`, `file_str_replace`, `workspace_grep`
+  - computer: `bash`, `check_background_command`, `read_image`
+  - sub-agent delegation: `create_sub_task`, `batch_sub_tasks`（由 runtime 内建子任务执行链路驱动）
+  - skills: `activate_skill`（从 `metadata.available_skills` / `metadata.skill_directories` / `shared_state.available_skills` 解析并激活；支持传入 skills 根目录并自动发现多个 `SKILL.md`）
 
 ## Prompt Layer
 

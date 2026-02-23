@@ -17,11 +17,11 @@
 | P6 工具实现拆分 | ✅ 已完成 | 2026-02-17T15:26:23Z | `builtins.py` 已精简为注册层，workspace/control/todo/search 拆分到 `tools/handlers/` |
 | P7 控制工具语义对齐 | ✅ 已完成 | 2026-02-17T15:26:23Z | `todo_write` 升级为完整列表写入语义，加入单 `in_progress` 约束与结构化错误码 |
 | P8 runtime 状态机重构 | ✅ 已完成 | 2026-02-17T15:26:23Z | runtime 拆为 `cycle_runner` + `tool_call_runner`，状态迁移路径清晰化 |
-| P9 高级工具接入 | ✅ 已完成 | 2026-02-17T15:41:52Z | 接入 `_bash`/`_check_background_command`/`_read_image`，支持后台会话生命周期与图像通知 |
+| P9 高级工具接入 | ✅ 已完成 | 2026-02-17T15:41:52Z | 接入 `bash`/`check_background_command`/`read_image`，支持后台会话生命周期与图像通知 |
 | P10 文档/工作流/skills 扩展 | ✅ 已完成 | 2026-02-17T15:41:52Z | 增加文档/工作流/技能扩展工具骨架，默认返回标准化未启用错误 |
 | P11 全量验收与收口 | ✅ 已完成 | 2026-02-17T15:41:52Z | 通过 ruff/ty/pytest/live；补齐 `TOOL_PROTOCOL` 与 `MIGRATION_FROM_V0` 文档 |
 | P12 LLM 统一接口对齐 | ✅ 已完成 | 2026-02-17T16:47:41Z | 按 `backend/.../utilities/llm.py` 对齐请求选项和流式 tool call 聚合语义，并通过真实命令验证 |
-| P13 子 Agent 链路与 SDK query | ✅ 已完成 | 2026-02-18T02:39:12Z | 内建 `_create_sub_task/_batch_sub_tasks` 实际执行链路，补齐 SDK `query()` one-shot 接口与测试 |
+| P13 子 Agent 链路与 SDK query | ✅ 已完成 | 2026-02-18T02:39:12Z | 内建 `create_sub_task/batch_sub_tasks` 实际执行链路，补齐 SDK `query()` one-shot 接口与测试 |
 | P14 移除 document 内建工具 | ✅ 已完成 | 2026-02-18T02:59:18Z | 删除 document constants/handlers/registry/planner 注入，document 改为纯自定义工具能力 |
 | P15 收敛 workspace 内建工具集 | ✅ 已完成 | 2026-02-18T03:13:05Z | workspace 内建仅保留 `list/info/read/write/str_replace/grep/compress/todo_write` 并补齐对应 handler/schema/test |
 | P16 Agent Skills 标准化 | ✅ 已完成 | 2026-02-18T09:34:33Z | 对齐 agentskills 规范，并新增 skills 目录自动发现与系统提示词自动注入，支持 Agent 自主选择激活技能 |
@@ -46,19 +46,19 @@
 - 2026-02-17T17:55:09Z：新增 CLI 可观测性日志：`--verbose` 下实时输出 cycle 启动、LLM 响应摘要、tool 执行结果与结束状态；并补充 runtime 日志回调与测试覆盖。
 - 2026-02-17T18:17:45Z：新增 `examples/` 目录，补充代码式集成示例（quick start / agent profiles / SDK-style client），展示多 Agent 配置与可复用封装方式。
 - 2026-02-17T18:45:52Z：移除内建 workflow 特化代码（改为自定义工具注入），补充 SDK 核心类型与 `AgentSDKClient`，并新增 `sub_agents` 配置字段支持显式子 Agent 定义。
-- 2026-02-18T02:39:12Z：完成 P13：新增 `_create_sub_task/_batch_sub_tasks` 内建 schema + handler + runtime 子任务执行链路；`AgentSDKClient` 新增 `query()` one-shot 文本接口；新增 `tests/test_sub_agent_runtime.py` 等测试并通过全量回归。
+- 2026-02-18T02:39:12Z：完成 P13：新增 `create_sub_task/batch_sub_tasks` 内建 schema + handler + runtime 子任务执行链路；`AgentSDKClient` 新增 `query()` one-shot 文本接口；新增 `tests/test_sub_agent_runtime.py` 等测试并通过全量回归。
 - 2026-02-18T02:59:18Z：完成 P14：移除 document 内建工具（`constants/document.py`、`tools/handlers/document.py`、registry/planner 注入与相关字段），仅保留 skill 扩展桩；回归 `77 passed, 1 skipped`。
 - 2026-02-18T03:13:05Z：完成 P15：workspace 内建工具收敛为 `WORKSPACE_TOOLS = [list_files, file_info, read_file, write_file, file_str_replace, workspace_grep, compress_memory, todo_write]`，移除 `todo_read` 默认暴露，并新增 `file_info/file_str_replace/compress_memory` 实现与测试；回归 `78 passed, 1 skipped`。
-- 2026-02-18T03:22:17Z：补齐 `_read_file` 行号与限流语义：支持 `show_line_numbers`，并在单次读取超过 `2000` 行或 `50000` 字符时返回结构化 `file_info/limits/suggested_range`（不直接回传大内容）；新增多场景测试覆盖（行号、行数超限、字符超限、区间超限），回归 `82 passed, 1 skipped`。
-- 2026-02-18T03:30:44Z：对齐 `_write_file` 参数与描述：新增 `leading_newline`/`trailing_newline`（仅 append 模式生效），强化 overwrite 警示文案与参数说明，并补充 append/overwrite 双场景测试；回归 `84 passed, 1 skipped`。
-- 2026-02-18T03:42:45Z：对齐 `_workspace_grep` 语义与 backend：新增 `output_mode`（content/files_with_matches/count）、`type` 文件类型过滤、`b/a/c` 上下文、`n` 行号、`i` 忽略大小写、`multiline`、`head_limit`（兼容 `max_results`）及结果截断摘要；补齐多场景测试（模式切换、上下文、多行、类型过滤、错误分支），回归 `89 passed, 1 skipped`。
-- 2026-02-18T04:19:58Z：新增 `examples/arxivv_agent_memory_pipeline.py` 代码式端到端示例（arXiv 最近 30 天检索 + PDF 下载 + 首图提取 + `_read_image` 图片解释 + 中文分段翻译），并更新 `examples/README.md` 使用说明；质量门禁回归 `ruff/ty/pytest` 全绿（`89 passed, 1 skipped`）。
-- 2026-02-18T06:44:56Z：新增 `examples/read_image_to_markdown.py` 示例：读取 workspace 图片并强制调用 `_read_image`，让 kimi-k2.5 生成中文 Markdown 报告并写入 `.md` 文件；同步更新 `examples/README.md` 启动命令。已用真实 moonshot/kimi-k2.5 在 `workspace/test_image.png` 回归运行并产出 `workspace/artifacts/image_read_report.md`。
-- 2026-02-18T07:08:20Z：修复 `_read_image` 多模态链路：workspace 图片会编码为 data URL 并通过消息列表注入下一轮 LLM（不再只追加文本提示），`Message.to_openai_message` 支持 user text+image content blocks；补充 runtime/protocol/image 工具测试并完成真实回归运行。
+- 2026-02-18T03:22:17Z：补齐 `read_file` 行号与限流语义：支持 `show_line_numbers`，并在单次读取超过 `2000` 行或 `50000` 字符时返回结构化 `file_info/limits/suggested_range`（不直接回传大内容）；新增多场景测试覆盖（行号、行数超限、字符超限、区间超限），回归 `82 passed, 1 skipped`。
+- 2026-02-18T03:30:44Z：对齐 `write_file` 参数与描述：新增 `leading_newline`/`trailing_newline`（仅 append 模式生效），强化 overwrite 警示文案与参数说明，并补充 append/overwrite 双场景测试；回归 `84 passed, 1 skipped`。
+- 2026-02-18T03:42:45Z：对齐 `workspace_grep` 语义与 backend：新增 `output_mode`（content/files_with_matches/count）、`type` 文件类型过滤、`b/a/c` 上下文、`n` 行号、`i` 忽略大小写、`multiline`、`head_limit`（兼容 `max_results`）及结果截断摘要；补齐多场景测试（模式切换、上下文、多行、类型过滤、错误分支），回归 `89 passed, 1 skipped`。
+- 2026-02-18T04:19:58Z：新增 `examples/arxivv_agent_memory_pipeline.py` 代码式端到端示例（arXiv 最近 30 天检索 + PDF 下载 + 首图提取 + `read_image` 图片解释 + 中文分段翻译），并更新 `examples/README.md` 使用说明；质量门禁回归 `ruff/ty/pytest` 全绿（`89 passed, 1 skipped`）。
+- 2026-02-18T06:44:56Z：新增 `examples/read_image_to_markdown.py` 示例：读取 workspace 图片并强制调用 `read_image`，让 kimi-k2.5 生成中文 Markdown 报告并写入 `.md` 文件；同步更新 `examples/README.md` 启动命令。已用真实 moonshot/kimi-k2.5 在 `workspace/test_image.png` 回归运行并产出 `workspace/artifacts/image_read_report.md`。
+- 2026-02-18T07:08:20Z：修复 `read_image` 多模态链路：workspace 图片会编码为 data URL 并通过消息列表注入下一轮 LLM（不再只追加文本提示），`Message.to_openai_message` 支持 user text+image content blocks；补充 runtime/protocol/image 工具测试并完成真实回归运行。
 - 2026-02-18T07:23:05Z：按 backend `tasks/memory.py` 思路升级 vv-agent 记忆压缩策略：新增结构化压缩流水线（stale tool_calls 清理、orphan tool 清理、assistant 无工具消息折叠、旧 tool result artifact 化）、已处理图片 payload 压缩、阈值预警注入、JSON 化压缩摘要，并支持通过 `AgentTask.metadata` 调参；补齐 memory/runtime/image/protocol 测试，回归 `93 passed, 1 skipped`。
-- 2026-02-18T08:29:37Z：按 backend `tools/activate_skill.py` 语义落地 `_activate_skill`：从 `available_skills/bound_skills` 做白名单校验与激活，支持读取 `instructions` 或 `SKILL.md`，回写 `active_skills/skill_activation_log` 到 shared_state；runtime 新增 metadata->shared_state 的 skill 透传，并补齐 extension/runtime 测试，回归 `96 passed, 1 skipped`。
-- 2026-02-18T08:54:55Z：对齐 Agent Skills 官方规范（`agentskills/agentskills`）：新增 `vv_agent.skills` 标准解析/校验/提示词模块（含 `read_properties`/`validate`/`metadata_to_prompt_entries`），`build_system_prompt` 支持注入 `<available_skills>` XML，`_activate_skill` 优先按 `location/path` 加载并验证 `SKILL.md` frontmatter；新增 skills parser/prompt/validator 测试与扩展链路测试，质量门禁回归 `ruff/ty/pytest` 全绿（`115 passed, 1 skipped`）。
-- 2026-02-18T09:34:33Z：完成 P16 增强版：支持将 skills 根目录（如 `skills/`）直接注入 Agent，系统提示词自动扫描并构建 `<available_skills>`；`_activate_skill` 支持从 skill collection 解析多技能并按名称激活；SDK 新增 `AgentDefinition.skill_directories`，示例 `examples/remotion_skill_demo.py` 改为目录级自动技能发现并由 Agent 自主选择激活。实测命令 `uv run python examples/remotion_skill_demo.py --workspace ./workspace --skills-dir skills --backend moonshot --model kimi-k2.5 --verbose` 返回 `status=completed`。
+- 2026-02-18T08:29:37Z：按 backend `tools/activate_skill.py` 语义落地 `activate_skill`：从 `available_skills/bound_skills` 做白名单校验与激活，支持读取 `instructions` 或 `SKILL.md`，回写 `active_skills/skill_activation_log` 到 shared_state；runtime 新增 metadata->shared_state 的 skill 透传，并补齐 extension/runtime 测试，回归 `96 passed, 1 skipped`。
+- 2026-02-18T08:54:55Z：对齐 Agent Skills 官方规范（`agentskills/agentskills`）：新增 `vv_agent.skills` 标准解析/校验/提示词模块（含 `read_properties`/`validate`/`metadata_to_prompt_entries`），`build_system_prompt` 支持注入 `<available_skills>` XML，`activate_skill` 优先按 `location/path` 加载并验证 `SKILL.md` frontmatter；新增 skills parser/prompt/validator 测试与扩展链路测试，质量门禁回归 `ruff/ty/pytest` 全绿（`115 passed, 1 skipped`）。
+- 2026-02-18T09:34:33Z：完成 P16 增强版：支持将 skills 根目录（如 `skills/`）直接注入 Agent，系统提示词自动扫描并构建 `<available_skills>`；`activate_skill` 支持从 skill collection 解析多技能并按名称激活；SDK 新增 `AgentDefinition.skill_directories`，示例 `examples/remotion_skill_demo.py` 改为目录级自动技能发现并由 Agent 自主选择激活。实测命令 `uv run python examples/remotion_skill_demo.py --workspace ./workspace --skills-dir skills --backend moonshot --model kimi-k2.5 --verbose` 返回 `status=completed`。
 - 2026-02-18T13:48:38Z：完成 P17：`examples/` 下全部示例移除 argparse CLI 入参，统一改为脚本内默认配置 + 环境变量覆盖（如 `V_AGENT_EXAMPLE_*`）；更新 `examples/README.md` 为嵌入式运行说明并给出 env override 示例。质量门禁回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 - 2026-02-18T14:44:02Z：继续优化 P17 示例易嵌入性：移除示例中的 `main()/if __name__ == "__main__"` 包装，统一改为脚本顶层平铺执行（保留最小必要日志函数）；回归 `ruff/ty/pytest` 全绿（`122 passed, 1 skipped`）。
 - 2026-02-18T14:58:11Z：基于 `claude-agent-sdk-python` 风格重构 SDK 入口：`AgentSDKClient` 新增默认单 Agent 模式与 `run/query` 直接调用（无需预注册 agents map），保留 `run_agent/query_agent` 兼容层；同时新增模块级 `vv_agent.sdk.run/query` one-shot helper，示例脚本改为优先展示新接口；回归 `ruff/ty/pytest` 全绿（`130 passed, 1 skipped`）。
@@ -223,7 +223,7 @@ uv run pytest -q
   - `vv-agent/src/vv_agent/tools/builtins.py`（仅保留 handler，不再硬编码 schema）
 
 ### 具体任务
-1. 复制 backend 的命名策略（保留前缀风格，如 `_task_finish`），统一集中。
+1. 复制 backend 的命名策略（保留前缀风格，如 `task_finish`），统一集中。
 2. 将 schema 文案改为“操作手册式描述”，不能简化成一句话。
 3. `ToolRegistry.list_openai_schemas()` 改为读取 constants 提供的 schema。
 

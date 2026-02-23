@@ -93,7 +93,7 @@ def main() -> None:
             prompt=(
                 "请逐步生成一份详细的技术方案文档, 包含背景、目标、方案设计、风险评估、"
                 "实施计划等章节. 每个章节至少 200 字. 标记 priority 和 critical 的内容"
-                "会在 memory compaction 时被保留. 完成后调用 `_task_finish`。"
+                "会在 memory compaction 时被保留. 完成后调用 `task_finish`。"
             ),
         )
         print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

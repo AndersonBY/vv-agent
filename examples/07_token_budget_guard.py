@@ -44,7 +44,7 @@ class TokenBudgetHook(BaseRuntimeHook):
                     role="user",
                     content=(
                         "Token budget 已达上限. 请基于现有信息给出最终简洁总结, "
-                        "并调用 _task_finish, 把总结写入 message 字段."
+                        "并调用 task_finish, 把总结写入 message 字段."
                     ),
                 )
             )

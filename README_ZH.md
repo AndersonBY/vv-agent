@@ -20,7 +20,7 @@ AgentRuntime
 
 核心类型定义在 `vv_agent.types`：`AgentTask`、`AgentResult`、`Message`、`CycleRecord`、`ToolCall`。
 
-任务完成由工具显式触发：agent 调用 `_task_finish` 或 `_ask_user` 来标记终态，不做"最后一条消息即答案"的隐式推断。
+任务完成由工具显式触发：agent 调用 `task_finish` 或 `ask_user` 来标记终态，不做"最后一条消息即答案"的隐式推断。
 
 ## 配置
 
@@ -167,7 +167,7 @@ result = runtime.run(task, ctx=ctx)
 
 ## 工作区存储后端
 
-工作区文件 I/O 通过可插拔的 `WorkspaceBackend` 协议分发。所有内建文件工具（`_read_file`、`_write_file`、`_list_files` 等）均经过此抽象层。
+工作区文件 I/O 通过可插拔的 `WorkspaceBackend` 协议分发。所有内建文件工具（`read_file`、`write_file`、`list_files` 等）均经过此抽象层。
 
 | 后端 | 场景 |
 |------|------|
@@ -293,13 +293,13 @@ class MyBackend:
 
 ## 内建工具
 
-`_list_files`、`_file_info`、`_read_file`、`_write_file`、`_file_str_replace`、`_workspace_grep`、`_compress_memory`、`_todo_write`、`_task_finish`、`_ask_user`、`_bash`、`_read_image`、`_create_sub_task`、`_batch_sub_tasks`。
+`list_files`、`file_info`、`read_file`、`write_file`、`file_str_replace`、`workspace_grep`、`compress_memory`、`todo_write`、`task_finish`、`ask_user`、`bash`、`read_image`、`create_sub_task`、`batch_sub_tasks`。
 
 通过 `ToolRegistry.register()` 注册自定义工具。
 
 ## 子 Agent
 
-在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `_create_sub_task` / `_batch_sub_tasks` 委派任务。每个子 Agent 有独立的 runtime、模型和工具集。
+在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` / `batch_sub_tasks` 委派任务。每个子 Agent 有独立的 runtime、模型和工具集。
 
 子 Agent 使用与父任务不同的模型时，runtime 需要提供 `settings_file` 和 `default_backend` 来解析 LLM 客户端。
 

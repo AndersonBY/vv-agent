@@ -42,7 +42,7 @@ V_AGENT_EXAMPLE_MODE=query uv run python examples/03_sdk_client.py
 | # | 文件 | 说明 |
 |---|------|------|
 | 04 | `04_session_api.py` | 会话式执行: `create_session` + steer / follow_up |
-| 05 | `05_ask_user_resume.py` | WAIT_USER 恢复: `_ask_user` → `continue_run` 闭环 |
+| 05 | `05_ask_user_resume.py` | WAIT_USER 恢复: `ask_user` → `continue_run` 闭环 |
 
 ```bash
 uv run python examples/04_session_api.py
@@ -57,7 +57,7 @@ V_AGENT_EXAMPLE_USER_REPLY="请使用口语化风格" uv run python examples/05_
 | # | 文件 | 说明 |
 |---|------|------|
 | 06 | `06_runtime_hooks.py` | 基础 hook: `before_llm` 注入上下文 + `before_tool_call` 拦截敏感路径 |
-| 07 | `07_token_budget_guard.py` | Token 预算保护: 超限自动注入 `_task_finish` |
+| 07 | `07_token_budget_guard.py` | Token 预算保护: 超限自动注入 `task_finish` |
 | 15 | `15_memory_compact_hook.py` | Memory compaction hook: 压缩前审计 + 关键消息保留 |
 | 16 | `16_hook_composition.py` | 多 hook 组合: TimingHook + SafetyHook + AuditHook |
 
@@ -98,7 +98,7 @@ V_AGENT_EXAMPLE_SKILLS_DIR=skills uv run python examples/12_skill_activation.py
 | 10 | `10_read_image.py` | 图片读取 + Markdown 报告输出 |
 | 11 | `11_sub_agent_pipeline.py` | Sub-agent 流水线: research → writer → 最终报告 |
 | 13 | `13_arxiv_pipeline.py` | arXiv 论文检索 + PDF 下载 + 图片解释 + 中文翻译 |
-| 14 | `14_batch_sub_tasks.py` | `_batch_sub_tasks` 并行多文档处理 |
+| 14 | `14_batch_sub_tasks.py` | `batch_sub_tasks` 并行多文档处理 |
 
 ```bash
 uv run python examples/10_read_image.py

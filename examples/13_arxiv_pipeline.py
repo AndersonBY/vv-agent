@@ -63,7 +63,7 @@ class SimpleBudgetHook(BaseRuntimeHook):
             *event.messages,
             Message(
                 role="user",
-                content="Token budget 已达上限. 请立即调用 _task_finish 给出简洁总结.",
+                content="Token budget 已达上限. 请立即调用 task_finish 给出简洁总结.",
             ),
         ]
         return BeforeLLMPatch(messages=msgs, tool_schemas=restricted)
@@ -101,12 +101,12 @@ def main() -> None:
         "   元数据需包含: 标题, 作者, 发布日期, arXiv 链接, 选择理由.\n"
         "3) 从论文中提取第一张图片并保存为 `artifacts/figure1.png`.\n"
         "   优先从 PDF 抽取, 若失败可从论文页面获取首图.\n"
-        "4) 必须调用 `_read_image` 读取 `artifacts/figure1.png`, 并解释图片主要内容与其在论文中的作用.\n"
+        "4) 必须调用 `read_image` 读取 `artifacts/figure1.png`, 并解释图片主要内容与其在论文中的作用.\n"
         "5) 将论文内容翻译为中文并输出到 `artifacts/paper_zh.md`:\n"
         "   - 按段落逐步翻译并持续写入(不要一次性整篇输出);\n"
         "   - 保留公式, 引用编号, 图表编号;\n"
         "   - 术语翻译前后一致.\n"
-        "6) 完成后调用 `_task_finish`, 最终汇报中必须包含:\n"
+        "6) 完成后调用 `task_finish`, 最终汇报中必须包含:\n"
         "   - 论文标题, arXiv URL, 发布日期(UTC);\n"
         "   - 下载文件路径, 图片路径, 翻译文件路径;\n"
         "   - 图片解释摘要;\n"

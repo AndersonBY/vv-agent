@@ -11,7 +11,7 @@ from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
-WRITE_FILE_TOOL_NAME = "_write_file"
+WRITE_FILE_TOOL_NAME = "write_file"
 
 
 def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:

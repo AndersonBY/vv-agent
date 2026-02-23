@@ -84,7 +84,7 @@ def test_memory_compaction_keeps_tool_boundary_consistent() -> None:
                 {
                     "id": "call_1",
                     "type": "function",
-                    "function": {"name": "_read_file", "arguments": "{}"},
+                    "function": {"name": "read_file", "arguments": "{}"},
                 }
             ],
         ),
@@ -117,7 +117,7 @@ def test_memory_compacts_large_tool_result_to_workspace_artifact(tmp_path: Path)
         Message(
             role="assistant",
             content="",
-            tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "_read_file", "arguments": "{}"}}],
+            tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
         ),
         Message(role="tool", content=large_tool_result, tool_call_id="call_1"),
         Message(role="assistant", content="continue"),
@@ -131,7 +131,7 @@ def test_memory_compacts_large_tool_result_to_workspace_artifact(tmp_path: Path)
     assert artifact_file.read_text(encoding="utf-8") == large_tool_result
     assert "<Persisted Artifacts>" in compacted[1].content
     assert "call_1.txt" in compacted[1].content
-    assert "tool: _read_file" in compacted[1].content
+    assert "tool: read_file" in compacted[1].content
 
 
 def test_memory_compacts_processed_image_payload() -> None:
@@ -165,7 +165,7 @@ def test_memory_uses_token_based_length_with_recent_tool_ids() -> None:
                 {
                     "id": "call_1",
                     "type": "function",
-                    "function": {"name": "_bash", "arguments": "{}"},
+                    "function": {"name": "bash", "arguments": "{}"},
                 }
             ],
         ),

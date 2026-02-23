@@ -96,7 +96,7 @@ def main() -> None:
             log_handler=runtime_log,
         ),
         agent=AgentDefinition(
-            description="你是可靠执行 Agent. 完成任务后必须调用 `_task_finish`.",
+            description="你是可靠执行 Agent. 完成任务后必须调用 `task_finish`.",
             model=model,
             backend=backend,
             max_cycles=8,
@@ -107,7 +107,7 @@ def main() -> None:
     try:
         result = run_with_recovery(
             client,
-            "请列出 workspace 下的文件并输出简要说明, 然后调用 `_task_finish`。",
+            "请列出 workspace 下的文件并输出简要说明, 然后调用 `task_finish`。",
             max_retries=max_retries,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))

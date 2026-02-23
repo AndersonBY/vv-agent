@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example: call _read_image with kimi-k2.5 and write Markdown report."""
+"""Example: call read_image with kimi-k2.5 and write Markdown report."""
 
 from __future__ import annotations
 
@@ -51,18 +51,18 @@ def main() -> None:
 
     prompt = (
         "请完成以下任务并严格执行:\n"
-        f"1) 调用 `_read_image` 读取 `{image_path}`.\n"
+        f"1) 调用 `read_image` 读取 `{image_path}`.\n"
         "2) 基于图片内容生成中文 Markdown, 内容至少包含:\n"
         "   - 标题\n"
         "   - 场景概述\n"
         "   - 关键元素(分点)\n"
         "   - 可见文字识别(若无则写明)\n"
         "   - 你对图片用途或上下文的推断(标注不确定性)\n"
-        "3) 调用 `_write_file` 将 Markdown 写入目标文件(覆盖写入): "
+        "3) 调用 `write_file` 将 Markdown 写入目标文件(覆盖写入): "
         f"`{output_path}`.\n"
-        "4) 调用 `_task_finish`, 并在最终 message 中包含输出文件路径.\n"
+        "4) 调用 `task_finish`, 并在最终 message 中包含输出文件路径.\n"
         "要求:\n"
-        "- 不要假装读图, 必须先调用 `_read_image`.\n"
+        "- 不要假装读图, 必须先调用 `read_image`.\n"
         "- 输出必须是 Markdown 格式.\n"
     )
 

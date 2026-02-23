@@ -59,7 +59,7 @@ def main() -> None:
         ),
         agent=AgentDefinition(
             description=(
-                "你是文档处理总控 Agent. 使用 `_batch_sub_tasks` 将多个文档的摘要任务"
+                "你是文档处理总控 Agent. 使用 `batch_sub_tasks` 将多个文档的摘要任务"
                 "并行分派给子 Agent, 最后汇总结果写入 artifacts/summary.md。"
             ),
             model=model,
@@ -87,10 +87,10 @@ def main() -> None:
     try:
         run = client.run(
             prompt=(
-                "docs/ 目录下有 3 篇文档. 请使用 `_batch_sub_tasks` 并行分派给子 Agent, "
+                "docs/ 目录下有 3 篇文档. 请使用 `batch_sub_tasks` 并行分派给子 Agent, "
                 "每个子任务负责读取一篇文档并输出中文摘要. "
                 "所有子任务完成后, 将摘要汇总写入 artifacts/summary.md, "
-                "然后调用 `_task_finish` 输出结论。"
+                "然后调用 `task_finish` 输出结论。"
             ),
         )
         print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
