@@ -210,6 +210,52 @@ class MyBackend:
 | `vv_agent.llm.VVLlmClient` | 统一 LLM 接口，基于 `vv-llm`（端点轮询、重试、流式） |
 | `vv_agent.config` | 从 `local_settings.py` 解析模型/端点/Key |
 
+## Memory 压缩与配置
+
+`MemoryManager` 会在 `AgentTask.memory_compact_threshold` 超限时触发压缩。
+
+- 任务级参数：
+  - `memory_compact_threshold`（默认 `128000`）
+  - `memory_threshold_percentage`（内存预警百分比，默认 `90`）
+- 有效长度策略（与 backend 对齐）：
+  - 如果有上一轮 token 用量：
+    - `effective_length = previous_total_tokens + len(json.dumps(recent_tool_messages))`
+  - 否则兜底：
+    - `len(json.dumps(messages[2:]))`
+- 压缩流程：
+  1. 结构化清理（陈旧 tool_calls、孤儿 tool 消息、assistant 无工具消息折叠、旧 tool 结果 artifact 化）
+  2. 若仍超阈值，再生成压缩记忆总结
+
+### Runtime metadata 参数
+
+通过 `AgentTask.metadata` 传入：
+
+- `memory_keep_recent_messages`
+- `include_memory_warning`
+- `tool_result_compact_threshold`
+- `tool_result_keep_last`
+- `tool_result_excerpt_head`
+- `tool_result_excerpt_tail`
+- `tool_calls_keep_last`
+- `assistant_no_tool_keep_last`
+- `tool_result_artifact_dir`
+- `summary_event_limit`
+
+### 记忆总结模型选择优先级
+
+优先级严格如下：
+
+1. `AgentTask.metadata`
+   - `memory_summary_backend` / `memory_summary_model`
+   - 别名：`compress_memory_summary_backend` / `compress_memory_summary_model`
+   - 别名：`memory_compress_backend` / `memory_compress_model`
+2. `local_settings.py` 常量
+   - `DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND` / `DEFAULT_USER_MEMORY_SUMMARIZE_MODEL`
+   - 别名：`DEFAULT_MEMORY_SUMMARIZE_BACKEND` / `DEFAULT_MEMORY_SUMMARIZE_MODEL`
+   - 别名：`VV_AGENT_MEMORY_SUMMARY_BACKEND` / `VV_AGENT_MEMORY_SUMMARY_MODEL`
+3. 兜底
+   - runtime 的 `default_backend` + 当前任务 `model`
+
 ## 内建工具
 
 `_list_files`、`_file_info`、`_read_file`、`_write_file`、`_file_str_replace`、`_workspace_grep`、`_compress_memory`、`_todo_write`、`_task_finish`、`_ask_user`、`_bash`、`_read_image`、`_create_sub_task`、`_batch_sub_tasks`。

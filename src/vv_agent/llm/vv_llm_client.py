@@ -321,14 +321,11 @@ class VVLlmClient(LLMClient):
             include_reasoning = message.role == "assistant" and (
                 preserve_reasoning_chain or index == last_assistant_index
             )
-            item = cast(
-                ChatCompletionMessageParam,
-                message.to_openai_message(include_reasoning_content=include_reasoning),
-            )
+            item = message.to_openai_message(include_reasoning_content=include_reasoning)
             if preserve_reasoning_chain and message.role == "assistant" and "reasoning_content" not in item:
                 # Moonshot/DeepSeek/MiniMax reasoning tool-call flows require this field.
                 item["reasoning_content"] = message.reasoning_content or ""
-            payload.append(item)
+            payload.append(cast(ChatCompletionMessageParam, item))
         return payload
 
     def _should_preserve_reasoning_chain(self, requested_model: str) -> bool:

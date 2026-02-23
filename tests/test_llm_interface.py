@@ -361,8 +361,10 @@ def test_build_message_payload_keeps_reasoning_only_for_last_assistant_by_defaul
         ],
         preserve_reasoning_chain=False,
     )
-    assert "reasoning_content" not in payload[1]
-    assert payload[3]["reasoning_content"] == "latest-thought"
+    first_assistant = cast(dict[str, Any], payload[1])
+    second_assistant = cast(dict[str, Any], payload[3])
+    assert "reasoning_content" not in first_assistant
+    assert second_assistant["reasoning_content"] == "latest-thought"
 
 
 def test_build_message_payload_preserves_reasoning_chain_for_reasoning_models() -> None:
@@ -376,8 +378,10 @@ def test_build_message_payload_preserves_reasoning_chain_for_reasoning_models() 
         ],
         preserve_reasoning_chain=True,
     )
-    assert payload[1]["reasoning_content"] == "old-thought"
-    assert payload[3]["reasoning_content"] == ""
+    first_assistant = cast(dict[str, Any], payload[1])
+    second_assistant = cast(dict[str, Any], payload[3])
+    assert first_assistant["reasoning_content"] == "old-thought"
+    assert second_assistant["reasoning_content"] == ""
 
 
 def test_moonshot_request_preserves_reasoning_for_all_assistant_turns(monkeypatch) -> None:

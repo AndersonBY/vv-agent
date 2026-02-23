@@ -336,7 +336,7 @@ class AgentTask:
     system_prompt: str
     user_prompt: str
     max_cycles: int = 8
-    memory_threshold_chars: int = 24_000
+    memory_compact_threshold: int = 128_000
     memory_threshold_percentage: int = 90
     no_tool_policy: NoToolPolicy = "continue"
     allow_interruption: bool = True
@@ -361,7 +361,7 @@ class AgentTask:
             "system_prompt": self.system_prompt,
             "user_prompt": self.user_prompt,
             "max_cycles": self.max_cycles,
-            "memory_threshold_chars": self.memory_threshold_chars,
+            "memory_compact_threshold": self.memory_compact_threshold,
             "memory_threshold_percentage": self.memory_threshold_percentage,
             "no_tool_policy": self.no_tool_policy,
             "allow_interruption": self.allow_interruption,
@@ -382,7 +382,7 @@ class AgentTask:
             system_prompt=data["system_prompt"],
             user_prompt=data["user_prompt"],
             max_cycles=data.get("max_cycles", 8),
-            memory_threshold_chars=data.get("memory_threshold_chars", 24_000),
+            memory_compact_threshold=data.get("memory_compact_threshold", 128_000),
             memory_threshold_percentage=data.get("memory_threshold_percentage", 90),
             no_tool_policy=data.get("no_tool_policy", "continue"),
             allow_interruption=data.get("allow_interruption", True),

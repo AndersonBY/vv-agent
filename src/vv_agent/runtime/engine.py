@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import json
+import logging
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -82,6 +84,8 @@ class AgentRuntime:
         self.hook_manager = RuntimeHookManager(hooks=list(hooks or []))
         self.execution_backend: ExecutionBackend = execution_backend or InlineBackend()
         self._workspace_backend = workspace_backend
+        self._memory_summary_clients: dict[tuple[str, str], LLMClient] = {}
+        self._memory_summary_defaults: tuple[str | None, str | None] | None = None
         self.cycle_runner = CycleRunner(
             llm_client=llm_client,
             tool_registry=tool_registry,
@@ -182,12 +186,30 @@ class AgentRuntime:
                 max_cycles=task.max_cycles,
                 message_count=len(messages),
             )
+            previous_total_tokens: int | None = None
+            recent_tool_call_ids: set[str] | None = None
+            if cycles:
+                last_cycle = cycles[-1]
+                usage = last_cycle.token_usage
+                total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+                if total_tokens <= 0:
+                    total_tokens = int(getattr(usage, "prompt_tokens", 0) or 0) + int(
+                        getattr(usage, "completion_tokens", 0) or 0
+                    )
+                if total_tokens > 0:
+                    previous_total_tokens = total_tokens
+
+                candidate_ids = {call.id for call in last_cycle.tool_calls if getattr(call, "id", "")}
+                if candidate_ids:
+                    recent_tool_call_ids = candidate_ids
             try:
                 updated_messages, cycle_record = self.cycle_runner.run_cycle(
                     task=task,
                     messages=messages,
                     cycle_index=cycle_index,
                     memory_manager=memory_manager,
+                    previous_total_tokens=previous_total_tokens,
+                    recent_tool_call_ids=recent_tool_call_ids,
                     shared_state=shared,
                     ctx=ctx,
                 )
@@ -401,8 +423,23 @@ class AgentRuntime:
             return max(value, minimum)
 
         warning_threshold = max(1, min(task.memory_threshold_percentage, 100))
+        local_summary_backend, local_summary_model = self._load_local_memory_summary_defaults()
+        metadata_summary_backend = self._read_optional_str(
+            metadata,
+            "memory_summary_backend",
+            "compress_memory_summary_backend",
+            "memory_compress_backend",
+        )
+        metadata_summary_model = self._read_optional_str(
+            metadata,
+            "memory_summary_model",
+            "compress_memory_summary_model",
+            "memory_compress_model",
+        )
+        summary_backend = metadata_summary_backend or local_summary_backend or self.default_backend
+        summary_model = metadata_summary_model or local_summary_model or task.model
         return MemoryManager(
-            threshold_chars=max(task.memory_threshold_chars, 0),
+            compact_threshold=max(task.memory_compact_threshold, 0),
             keep_recent_messages=read_int("memory_keep_recent_messages", 10, minimum=1),
             language=str(metadata.get("language", "zh-CN")),
             warning_threshold_percentage=warning_threshold,
@@ -416,7 +453,114 @@ class AgentRuntime:
             tool_result_artifact_dir=str(metadata.get("tool_result_artifact_dir", ".memory/tool_results")),
             workspace=workspace_path if task.use_workspace else None,
             summary_event_limit=read_int("summary_event_limit", 40, minimum=1),
+            summary_backend=summary_backend,
+            summary_model=summary_model,
+            summary_callback=self._summarize_memory_prompt,
         )
+
+    @staticmethod
+    def _read_optional_str(metadata: dict[str, Any], *keys: str) -> str | None:
+        for key in keys:
+            raw = metadata.get(key)
+            if isinstance(raw, str):
+                value = raw.strip()
+                if value:
+                    return value
+        return None
+
+    def _load_local_memory_summary_defaults(self) -> tuple[str | None, str | None]:
+        if self._memory_summary_defaults is not None:
+            return self._memory_summary_defaults
+
+        backend: str | None = None
+        model: str | None = None
+        settings_file = self.settings_file
+        if settings_file is None or not settings_file.exists():
+            self._memory_summary_defaults = (None, None)
+            return self._memory_summary_defaults
+
+        try:
+            module = ast.parse(settings_file.read_text(encoding="utf-8"), filename=str(settings_file))
+            backend = self._read_literal_setting(
+                module,
+                "DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND",
+                "DEFAULT_MEMORY_SUMMARIZE_BACKEND",
+                "VV_AGENT_MEMORY_SUMMARY_BACKEND",
+            )
+            model = self._read_literal_setting(
+                module,
+                "DEFAULT_USER_MEMORY_SUMMARIZE_MODEL",
+                "DEFAULT_MEMORY_SUMMARIZE_MODEL",
+                "VV_AGENT_MEMORY_SUMMARY_MODEL",
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Failed to load memory summary defaults from settings file",
+                exc_info=True,
+            )
+
+        self._memory_summary_defaults = (backend, model)
+        return self._memory_summary_defaults
+
+    @staticmethod
+    def _read_literal_setting(module: ast.Module, *names: str) -> str | None:
+        if not names:
+            return None
+        name_set = set(names)
+
+        for node in module.body:
+            target_name: str | None = None
+            value_node: ast.expr | None = None
+
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                target_name = node.target.id
+                value_node = node.value
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        target_name = target.id
+                        value_node = node.value
+                        break
+
+            if target_name not in name_set or value_node is None:
+                continue
+
+            try:
+                literal = ast.literal_eval(value_node)
+            except Exception:
+                continue
+            if isinstance(literal, str):
+                value = literal.strip()
+                if value:
+                    return value
+        return None
+
+    def _summarize_memory_prompt(self, prompt: str, backend: str | None, model: str | None) -> str | None:
+        backend_name = (backend or self.default_backend or "").strip()
+        model_name = (model or "").strip()
+        if not backend_name or not model_name:
+            return None
+        if self.settings_file is None:
+            return None
+
+        cache_key = (backend_name, model_name)
+        client = self._memory_summary_clients.get(cache_key)
+        if client is None:
+            client, _ = self.llm_builder(
+                self.settings_file,
+                backend=backend_name,
+                model=model_name,
+                timeout_seconds=self.sub_agent_timeout_seconds,
+            )
+            self._memory_summary_clients[cache_key] = client
+
+        response = client.complete(
+            model=model_name,
+            messages=[Message(role="user", content=prompt)],
+            tools=[],
+        )
+        content = (response.content or "").strip()
+        return content or None
 
     def _preview_text(self, text: str) -> str:
         cleaned = text.replace("\n", " ").strip()
@@ -643,7 +787,7 @@ class AgentRuntime:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_cycles=max(sub_agent.max_cycles, 1),
-            memory_threshold_chars=parent_task.memory_threshold_chars,
+            memory_compact_threshold=parent_task.memory_compact_threshold,
             memory_threshold_percentage=parent_task.memory_threshold_percentage,
             no_tool_policy="continue",
             allow_interruption=False,

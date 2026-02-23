@@ -488,3 +488,88 @@ Body
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.shared_state["active_skills"] == ["demo"]
+
+
+def test_memory_summary_model_priority_uses_metadata_over_local_settings(tmp_path: Path) -> None:
+    settings_file = tmp_path / "local_settings.py"
+    settings_file.write_text(
+        '\n'.join(
+            (
+                'DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND = "settings-backend"',
+                'DEFAULT_USER_MEMORY_SUMMARIZE_MODEL = "settings-model"',
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        settings_file=settings_file,
+        default_backend="fallback-backend",
+    )
+    task = AgentTask(
+        task_id="task_memory_priority_metadata",
+        model="task-model",
+        system_prompt="sys",
+        user_prompt="go",
+        metadata={
+            "memory_summary_backend": "metadata-backend",
+            "memory_summary_model": "metadata-model",
+        },
+    )
+
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    assert manager.summary_backend == "metadata-backend"
+    assert manager.summary_model == "metadata-model"
+
+
+def test_memory_summary_model_priority_uses_local_settings_over_fallback(tmp_path: Path) -> None:
+    settings_file = tmp_path / "local_settings.py"
+    settings_file.write_text(
+        '\n'.join(
+            (
+                'DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND = "settings-backend"',
+                'DEFAULT_USER_MEMORY_SUMMARIZE_MODEL = "settings-model"',
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        settings_file=settings_file,
+        default_backend="fallback-backend",
+    )
+    task = AgentTask(
+        task_id="task_memory_priority_settings",
+        model="task-model",
+        system_prompt="sys",
+        user_prompt="go",
+    )
+
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    assert manager.summary_backend == "settings-backend"
+    assert manager.summary_model == "settings-model"
+
+
+def test_memory_summary_model_priority_uses_fallback_when_missing(tmp_path: Path) -> None:
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        default_backend="fallback-backend",
+    )
+    task = AgentTask(
+        task_id="task_memory_priority_fallback",
+        model="task-model",
+        system_prompt="sys",
+        user_prompt="go",
+    )
+
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+    assert manager.summary_backend == "fallback-backend"
+    assert manager.summary_model == "task-model"

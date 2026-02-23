@@ -34,6 +34,8 @@ class CycleRunner:
         messages: list[Message],
         cycle_index: int,
         memory_manager: MemoryManager,
+        previous_total_tokens: int | None = None,
+        recent_tool_call_ids: set[str] | None = None,
         shared_state: dict[str, Any] | None = None,
         ctx: ExecutionContext | None = None,
     ) -> tuple[list[Message], CycleRecord]:
@@ -46,8 +48,13 @@ class CycleRunner:
             messages=messages,
             shared_state=shared,
         )
-        compacted_messages, memory_compacted = memory_manager.compact(pre_compact_messages, cycle_index=cycle_index)
-        memory_usage_percentage = self._estimate_memory_usage_percentage(compacted_messages, task.memory_threshold_chars)
+        compacted_messages, memory_compacted = memory_manager.compact(
+            pre_compact_messages,
+            cycle_index=cycle_index,
+            total_tokens=previous_total_tokens,
+            recent_tool_call_ids=recent_tool_call_ids,
+        )
+        memory_usage_percentage = self._estimate_memory_usage_percentage(compacted_messages, task.memory_compact_threshold)
         tool_schemas = plan_tool_schemas(
             registry=self.tool_registry,
             task=task,
@@ -106,11 +113,11 @@ class CycleRunner:
         return next_messages, cycle_record
 
     @staticmethod
-    def _estimate_memory_usage_percentage(messages: list[Message], threshold_chars: int) -> int:
-        if threshold_chars <= 0:
+    def _estimate_memory_usage_percentage(messages: list[Message], compact_threshold: int) -> int:
+        if compact_threshold <= 0:
             return 0
         used_chars = sum(len(message.content) for message in messages)
-        return int((used_chars / threshold_chars) * 100)
+        return int((used_chars / compact_threshold) * 100)
 
     @staticmethod
     def _serialize_tool_calls(tool_calls: list[ToolCall]) -> list[dict[str, Any]]:

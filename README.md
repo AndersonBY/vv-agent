@@ -210,6 +210,52 @@ class MyBackend:
 | `vv_agent.llm.VVLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
 | `vv_agent.config` | Model/endpoint/key resolution from `local_settings.py` |
 
+## Memory Compaction
+
+`MemoryManager` compacts history when `AgentTask.memory_compact_threshold` is exceeded.
+
+- Task-level knobs:
+  - `memory_compact_threshold` (default `128000`)
+  - `memory_threshold_percentage` (warning threshold percentage, default `90`)
+- Effective-length strategy (backend-aligned):
+  - If previous cycle token usage exists:
+    - `effective_length = previous_total_tokens + len(json.dumps(recent_tool_messages))`
+  - Otherwise fallback to:
+    - `len(json.dumps(messages[2:]))`
+- Compaction pipeline:
+  1. Structural cleanup (stale tool calls, orphan tool messages, assistant-no-tool collapse, old tool result artifactization)
+  2. If still over threshold, generate compressed memory summary
+
+### Runtime metadata keys
+
+Pass these via `AgentTask.metadata`:
+
+- `memory_keep_recent_messages`
+- `include_memory_warning`
+- `tool_result_compact_threshold`
+- `tool_result_keep_last`
+- `tool_result_excerpt_head`
+- `tool_result_excerpt_tail`
+- `tool_calls_keep_last`
+- `assistant_no_tool_keep_last`
+- `tool_result_artifact_dir`
+- `summary_event_limit`
+
+### Memory summary model selection priority
+
+Priority is strict:
+
+1. `AgentTask.metadata`
+   - `memory_summary_backend` / `memory_summary_model`
+   - aliases: `compress_memory_summary_backend` / `compress_memory_summary_model`
+   - aliases: `memory_compress_backend` / `memory_compress_model`
+2. `local_settings.py` constants
+   - `DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND` / `DEFAULT_USER_MEMORY_SUMMARIZE_MODEL`
+   - aliases: `DEFAULT_MEMORY_SUMMARIZE_BACKEND` / `DEFAULT_MEMORY_SUMMARIZE_MODEL`
+   - aliases: `VV_AGENT_MEMORY_SUMMARY_BACKEND` / `VV_AGENT_MEMORY_SUMMARY_MODEL`
+3. Fallback
+   - runtime `default_backend` + current task `model`
+
 ## Built-in Tools
 
 `_list_files`, `_file_info`, `_read_file`, `_write_file`, `_file_str_replace`, `_workspace_grep`, `_compress_memory`, `_todo_write`, `_task_finish`, `_ask_user`, `_bash`, `_read_image`, `_create_sub_task`, `_batch_sub_tasks`.
