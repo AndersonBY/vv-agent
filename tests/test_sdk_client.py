@@ -26,6 +26,8 @@ from vv_agent.sdk import (
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
+WRITE_FILE_TOOL_NAME = "_write_file"
+
 
 def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:
     endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
@@ -82,6 +84,58 @@ def test_sdk_client_runs_named_agent(tmp_path: Path) -> None:
     assert run.result.final_answer == "ok"
     assert run.resolved.backend == "moonshot"
     assert builder_calls == [("local_settings.py", "moonshot", "kimi-k2.5")]
+
+
+def test_sdk_client_run_uses_workspace_override(tmp_path: Path) -> None:
+    default_workspace = tmp_path / "default-workspace"
+    override_workspace = tmp_path / "override-workspace"
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="write marker",
+                    tool_calls=[
+                        ToolCall(
+                            id="w1",
+                            name=WRITE_FILE_TOOL_NAME,
+                            arguments={"path": "marker.txt", "content": "run override"},
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    content="finish",
+                    tool_calls=[ToolCall(id="w2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                ),
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=default_workspace,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(
+            description="you are helper",
+            model="kimi-k2.5",
+        ),
+    )
+
+    run = client.run(prompt="write file", workspace=override_workspace)
+    assert run.result.status == AgentStatus.COMPLETED
+    assert (override_workspace / "marker.txt").read_text(encoding="utf-8") == "run override"
+    assert not (default_workspace / "marker.txt").exists()
 
 
 def test_sdk_client_passes_debug_dump_dir_to_llm(tmp_path: Path) -> None:

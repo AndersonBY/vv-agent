@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import RLock
 from typing import Any
 
@@ -15,6 +16,7 @@ SessionEventHandler = Callable[[str, dict[str, Any]], None]
 @dataclass(slots=True)
 class AgentSessionState:
     running: bool
+    workspace: Path
     messages: list[Message] = field(default_factory=list)
     shared_state: dict[str, Any] = field(default_factory=dict)
     latest_run: AgentRun | None = None
@@ -29,11 +31,13 @@ class AgentSession:
         execute_run: Callable[..., AgentRun],
         agent_name: str,
         definition: AgentDefinition,
+        workspace: Path,
         shared_state: dict[str, Any] | None = None,
     ) -> None:
         self._execute_run = execute_run
         self.agent_name = agent_name
         self.definition = definition
+        self.workspace = Path(workspace).resolve()
         self._messages: list[Message] = []
         self._shared_state: dict[str, Any] = dict(shared_state or {})
         self._shared_state.setdefault("todo_list", [])
@@ -141,6 +145,7 @@ class AgentSession:
         with self._lock:
             return AgentSessionState(
                 running=self._running,
+                workspace=self.workspace,
                 messages=list(self._messages),
                 shared_state=dict(self._shared_state),
                 latest_run=self._latest_run,
@@ -160,6 +165,7 @@ class AgentSession:
                 prompt=prompt,
                 agent=self.definition,
                 task_name=self.agent_name,
+                workspace=self.workspace,
                 shared_state=current_shared_state,
                 initial_messages=initial_messages,
                 before_cycle_messages=self._before_cycle_messages,
@@ -225,11 +231,13 @@ def create_agent_session(
     execute_run: Callable[..., AgentRun],
     agent_name: str,
     definition: AgentDefinition,
+    workspace: Path,
     shared_state: dict[str, Any] | None = None,
 ) -> AgentSession:
     return AgentSession(
         execute_run=execute_run,
         agent_name=agent_name,
         definition=definition,
+        workspace=workspace,
         shared_state=shared_state,
     )

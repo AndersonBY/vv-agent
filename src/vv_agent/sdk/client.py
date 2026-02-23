@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from vv_agent.config import build_openai_llm_from_local_settings
@@ -82,7 +83,9 @@ class AgentSDKClient:
         agent: str | AgentDefinition | None = None,
         agent_name: str | None = None,
         task_name: str | None = None,
+        workspace: str | Path | None = None,
     ) -> AgentTask:
+        effective_workspace = self._resolve_workspace(workspace)
         resolved_name, raw_definition = self._resolve_agent(agent=agent, agent_name=agent_name)
         definition = self._effective_definition(raw_definition)
         effective_task_name = task_name or resolved_name
@@ -146,7 +149,7 @@ class AgentSDKClient:
                 if definition.sub_agents
                 else None,
                 available_skills=available_skills,
-                workspace=self.options.workspace,
+                workspace=effective_workspace,
             )
 
         return AgentTask(
@@ -173,6 +176,7 @@ class AgentSDKClient:
         prompt: str,
         agent: str | AgentDefinition | None = None,
         agent_name: str | None = None,
+        workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
         log_handler: RuntimeLogHandler | None = None,
         initial_messages: list[Message] | None = None,
@@ -185,6 +189,7 @@ class AgentSDKClient:
             prompt=prompt,
             resolved_name=resolved_name,
             definition=definition,
+            workspace=workspace,
             shared_state=shared_state,
             log_handler=log_handler,
             initial_messages=initial_messages,
@@ -198,9 +203,10 @@ class AgentSDKClient:
         *,
         agent_name: str,
         prompt: str,
+        workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
     ) -> AgentRun:
-        return self.run(prompt=prompt, agent=agent_name, shared_state=shared_state)
+        return self.run(prompt=prompt, agent=agent_name, workspace=workspace, shared_state=shared_state)
 
     def query(
         self,
@@ -208,6 +214,7 @@ class AgentSDKClient:
         prompt: str,
         agent: str | AgentDefinition | None = None,
         agent_name: str | None = None,
+        workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
         require_completed: bool = True,
     ) -> str:
@@ -215,6 +222,7 @@ class AgentSDKClient:
             prompt=prompt,
             agent=agent,
             agent_name=agent_name,
+            workspace=workspace,
             shared_state=shared_state,
         )
         if run.result.status == AgentStatus.COMPLETED:
@@ -236,12 +244,14 @@ class AgentSDKClient:
         *,
         agent_name: str,
         prompt: str,
+        workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
         require_completed: bool = True,
     ) -> str:
         return self.query(
             prompt=prompt,
             agent=agent_name,
+            workspace=workspace,
             shared_state=shared_state,
             require_completed=require_completed,
         )
@@ -251,9 +261,11 @@ class AgentSDKClient:
         *,
         agent: str | AgentDefinition | None = None,
         agent_name: str | None = None,
+        workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
     ):
         resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
+        effective_workspace = self._resolve_workspace(workspace)
 
         from vv_agent.sdk.session import create_agent_session
 
@@ -261,6 +273,7 @@ class AgentSDKClient:
             execute_run=self._execute,
             agent_name=resolved_name,
             definition=definition,
+            workspace=effective_workspace,
             shared_state=shared_state,
         )
 
@@ -272,6 +285,7 @@ class AgentSDKClient:
         definition: AgentDefinition | None = None,
         agent: str | AgentDefinition | None = None,
         agent_name: str | None = None,
+        workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
         log_handler: RuntimeLogHandler | None = None,
         initial_messages: list[Message] | None = None,
@@ -282,6 +296,7 @@ class AgentSDKClient:
         if definition is None or resolved_name is None:
             resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
         definition = self._effective_definition(definition)
+        effective_workspace = self._resolve_workspace(workspace)
         run_name = task_name or resolved_name
         backend = definition.backend or self.options.default_backend
         llm_builder = self.options.llm_builder or build_openai_llm_from_local_settings
@@ -298,7 +313,7 @@ class AgentSDKClient:
         runtime = AgentRuntime(
             llm_client=llm,
             tool_registry=tool_registry_factory(),
-            default_workspace=self.options.workspace,
+            default_workspace=effective_workspace,
             log_handler=_compose_log_handlers(self.options.log_handler, log_handler),
             settings_file=self.options.settings_file,
             default_backend=backend,
@@ -313,6 +328,7 @@ class AgentSDKClient:
             resolved_model_id=resolved.model_id,
             agent=definition,
             task_name=run_name,
+            workspace=effective_workspace,
         )
 
         ctx: ExecutionContext | None = None
@@ -321,6 +337,7 @@ class AgentSDKClient:
 
         result = runtime.run(
             task,
+            workspace=effective_workspace,
             shared_state=shared_state,
             initial_messages=initial_messages,
             user_message=prompt,
@@ -376,18 +393,28 @@ class AgentSDKClient:
             raise ValueError(f"Unknown agent: {agent_name}. Available: {available}")
         return definition
 
+    def _resolve_workspace(self, workspace: str | Path | None = None) -> Path:
+        raw = workspace
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                raw = None
+        target = Path(raw) if raw is not None else self.options.workspace
+        return Path(target).expanduser().resolve()
+
 
 def run(
     *,
     prompt: str,
     agent: AgentDefinition,
     options: AgentSDKOptions,
+    workspace: str | Path | None = None,
     shared_state: dict[str, Any] | None = None,
 ) -> AgentRun:
     """One-shot helper aligned with SDK-style simple invocation."""
 
     client = AgentSDKClient(options=options, agent=agent)
-    return client.run(prompt=prompt, shared_state=shared_state)
+    return client.run(prompt=prompt, workspace=workspace, shared_state=shared_state)
 
 
 def query(
@@ -395,6 +422,7 @@ def query(
     prompt: str,
     agent: AgentDefinition,
     options: AgentSDKOptions,
+    workspace: str | Path | None = None,
     shared_state: dict[str, Any] | None = None,
     require_completed: bool = True,
 ) -> str:
@@ -403,6 +431,7 @@ def query(
     client = AgentSDKClient(options=options, agent=agent)
     return client.query(
         prompt=prompt,
+        workspace=workspace,
         shared_state=shared_state,
         require_completed=require_completed,
     )

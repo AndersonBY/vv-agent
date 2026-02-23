@@ -11,6 +11,8 @@ from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
+WRITE_FILE_TOOL_NAME = "_write_file"
+
 
 def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:
     endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
@@ -22,6 +24,165 @@ def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:
         model_id=model,
         endpoint_options=[option],
     )
+
+
+def test_session_uses_workspace_override_over_default_workspace(tmp_path: Path) -> None:
+    default_workspace = tmp_path / "default-workspace"
+    override_workspace = tmp_path / "override-workspace"
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="write marker",
+                tool_calls=[
+                    ToolCall(
+                        id="w1",
+                        name=WRITE_FILE_TOOL_NAME,
+                        arguments={"path": "marker.txt", "content": "from override"},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finish",
+                tool_calls=[ToolCall(id="w2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+            ),
+        ]
+    )
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=default_workspace,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+    )
+
+    session = client.create_session(workspace=override_workspace)
+    run = session.prompt("write file")
+
+    assert run.result.status == AgentStatus.COMPLETED
+    assert (override_workspace / "marker.txt").read_text(encoding="utf-8") == "from override"
+    assert not (default_workspace / "marker.txt").exists()
+
+
+def test_session_uses_default_workspace_when_override_missing(tmp_path: Path) -> None:
+    default_workspace = tmp_path / "default-workspace"
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="write marker",
+                tool_calls=[
+                    ToolCall(
+                        id="d1",
+                        name=WRITE_FILE_TOOL_NAME,
+                        arguments={"path": "marker.txt", "content": "from default"},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finish",
+                tool_calls=[ToolCall(id="d2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+            ),
+        ]
+    )
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=default_workspace,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+    )
+
+    session = client.create_session()
+    run = session.prompt("write file")
+
+    assert run.result.status == AgentStatus.COMPLETED
+    assert (default_workspace / "marker.txt").read_text(encoding="utf-8") == "from default"
+
+
+def test_sessions_keep_workspace_isolated(tmp_path: Path) -> None:
+    default_workspace = tmp_path / "default-workspace"
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="write marker",
+                    tool_calls=[
+                        ToolCall(
+                            id="i1",
+                            name=WRITE_FILE_TOOL_NAME,
+                            arguments={"path": "marker.txt", "content": "isolated"},
+                        )
+                    ],
+                ),
+                LLMResponse(
+                    content="finish",
+                    tool_calls=[ToolCall(id="i2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                ),
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=default_workspace,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+    )
+
+    session_a = client.create_session(workspace=workspace_a)
+    session_b = client.create_session(workspace=workspace_b)
+
+    run_a = session_a.prompt("write file A")
+    run_b = session_b.prompt("write file B")
+
+    assert run_a.result.status == AgentStatus.COMPLETED
+    assert run_b.result.status == AgentStatus.COMPLETED
+    assert (workspace_a / "marker.txt").read_text(encoding="utf-8") == "isolated"
+    assert (workspace_b / "marker.txt").read_text(encoding="utf-8") == "isolated"
+    assert not (default_workspace / "marker.txt").exists()
 
 
 def test_session_prompt_supports_follow_up_queue(tmp_path: Path) -> None:
