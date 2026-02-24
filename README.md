@@ -165,6 +165,23 @@ ctx = ExecutionContext(stream_callback=lambda text: print(text, end=""))
 result = runtime.run(task, ctx=ctx)
 ```
 
+### Runtime Log Payloads
+
+`tool_result` runtime events now carry full tool output in `result`/`content` by default (no implicit truncation).
+`content_preview` and `assistant_preview` are still emitted for UI convenience.
+
+If you need shorter previews for logs/transport, configure an explicit preview limit:
+
+```python
+from vv_agent.sdk import AgentSDKOptions
+
+options = AgentSDKOptions(
+    settings_file="local_settings.py",
+    default_backend="moonshot",
+    log_preview_chars=220,  # optional: enable preview truncation explicitly
+)
+```
+
 ## Workspace Backends
 
 Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All built-in file tools (`read_file`, `write_file`, `list_files`, etc.) go through this abstraction.

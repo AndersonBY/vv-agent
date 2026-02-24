@@ -61,7 +61,7 @@ class AgentRuntime:
         tool_registry: ToolRegistry,
         default_workspace: str | Path | None = None,
         log_handler: RuntimeLogHandler | None = None,
-        log_preview_chars: int = 220,
+        log_preview_chars: int | None = None,
         settings_file: str | Path | None = None,
         default_backend: str | None = None,
         llm_builder: LLMBuilder | None = None,
@@ -75,7 +75,10 @@ class AgentRuntime:
         self.tool_registry = tool_registry
         self.default_workspace = Path(default_workspace).resolve() if default_workspace else None
         self.log_handler = log_handler
-        self.log_preview_chars = max(log_preview_chars, 40)
+        if log_preview_chars is None:
+            self.log_preview_chars: int | None = None
+        else:
+            self.log_preview_chars = max(int(log_preview_chars), 40)
         self.settings_file = Path(settings_file).resolve() if settings_file else None
         self.default_backend = default_backend
         self.llm_builder = llm_builder or build_openai_llm_from_local_settings
@@ -230,6 +233,7 @@ class AgentRuntime:
             self._emit_log(
                 "cycle_llm_response",
                 cycle=cycle_index,
+                assistant_message=cycle_record.assistant_message,
                 assistant_preview=self._preview_text(cycle_record.assistant_message),
                 tool_calls=[call.name for call in cycle_record.tool_calls],
                 tool_call_count=len(cycle_record.tool_calls),
@@ -260,6 +264,8 @@ class AgentRuntime:
                         status=result.status_code.value if result.status_code else result.status,
                         directive=result.directive.value,
                         error_code=result.error_code,
+                        content=result.content,
+                        result=result.content,
                         content_preview=self._preview_text(result.content),
                     )
 
@@ -370,6 +376,8 @@ class AgentRuntime:
                 status=result.status_code.value if result.status_code else result.status,
                 directive=result.directive.value,
                 error_code=result.error_code,
+                content=result.content,
+                result=result.content,
                 content_preview=self._preview_text(result.content),
             )
 
@@ -565,6 +573,8 @@ class AgentRuntime:
 
     def _preview_text(self, text: str) -> str:
         cleaned = text.replace("\n", " ").strip()
+        if self.log_preview_chars is None or self.log_preview_chars <= 0:
+            return cleaned
         if len(cleaned) <= self.log_preview_chars:
             return cleaned
         return f"{cleaned[: self.log_preview_chars - 3]}..."

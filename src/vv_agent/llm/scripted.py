@@ -25,6 +25,6 @@ class ScriptedLLM(LLMClient):
         if not self.steps:
             raise RuntimeError("No scripted LLM steps left.")
         step = self.steps.pop(0)
-        if callable(step):
-            return step(model, messages)
-        return step
+        if isinstance(step, LLMResponse):
+            return step
+        return step(model, messages)

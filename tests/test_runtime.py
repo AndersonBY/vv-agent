@@ -206,6 +206,11 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     cycle_payload = next(payload for name, payload in events if name == "cycle_llm_response")
     assert "token_usage" in cycle_payload
     assert isinstance(cycle_payload["token_usage"], dict)
+    assert isinstance(cycle_payload.get("assistant_message"), str)
+
+    tool_payload = next(payload for name, payload in events if name == "tool_result")
+    assert isinstance(tool_payload.get("result"), str)
+    assert tool_payload.get("result") == tool_payload.get("content")
 
 
 def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
@@ -245,6 +250,105 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
+
+
+def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path) -> None:
+    long_title = "x" * 500
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="write todo",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name=TODO_WRITE_TOOL_NAME,
+                        arguments={
+                            "todos": [{"title": long_title, "status": "completed", "priority": "medium"}]
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+            ),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+
+    runtime = AgentRuntime(
+        llm_client=llm,
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        log_handler=lambda event, payload: events.append((event, payload)),
+    )
+    task = AgentTask(
+        task_id="task_long_tool_result",
+        model="dummy-model",
+        system_prompt="sys",
+        user_prompt="go",
+        max_cycles=4,
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+
+    tool_payload = next(payload for name, payload in events if name == "tool_result")
+    full_result = str(tool_payload.get("result") or "")
+    assert long_title in full_result
+    assert len(full_result) > 220
+    assert str(tool_payload.get("content_preview") or "") == full_result
+
+
+def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path: Path) -> None:
+    long_title = "y" * 500
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="write todo",
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name=TODO_WRITE_TOOL_NAME,
+                        arguments={
+                            "todos": [{"title": long_title, "status": "completed", "priority": "medium"}]
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+            ),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+
+    runtime = AgentRuntime(
+        llm_client=llm,
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        log_handler=lambda event, payload: events.append((event, payload)),
+        log_preview_chars=120,
+    )
+    task = AgentTask(
+        task_id="task_long_tool_result_truncated",
+        model="dummy-model",
+        system_prompt="sys",
+        user_prompt="go",
+        max_cycles=4,
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+
+    tool_payload = next(payload for name, payload in events if name == "tool_result")
+    full_result = str(tool_payload.get("result") or "")
+    preview = str(tool_payload.get("content_preview") or "")
+    assert long_title in full_result
+    assert full_result != preview
+    assert preview.endswith("...")
+    assert len(preview) <= 120
     assert result.final_answer == "ok"
 
 

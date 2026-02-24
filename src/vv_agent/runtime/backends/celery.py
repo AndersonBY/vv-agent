@@ -48,7 +48,7 @@ class RuntimeRecipe:
     workspace: str
     timeout_seconds: float = 90.0
     hook_class_paths: list[str] = field(default_factory=list)
-    log_preview_chars: int = 220
+    log_preview_chars: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,7 +70,7 @@ class RuntimeRecipe:
             workspace=data["workspace"],
             timeout_seconds=data.get("timeout_seconds", 90.0),
             hook_class_paths=list(data.get("hook_class_paths", [])),
-            log_preview_chars=data.get("log_preview_chars", 220),
+            log_preview_chars=data.get("log_preview_chars"),
         )
 
 

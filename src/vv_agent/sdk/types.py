@@ -61,6 +61,7 @@ class AgentSDKOptions:
     default_backend: str
     workspace: Path = field(default_factory=lambda: Path("./workspace"))
     timeout_seconds: float = 90.0
+    log_preview_chars: int | None = None
     llm_builder: LLMBuilder | None = None
     tool_registry_factory: ToolRegistryFactory | None = None
     log_handler: RuntimeLogHandler | None = None

@@ -165,6 +165,23 @@ ctx = ExecutionContext(stream_callback=lambda text: print(text, end=""))
 result = runtime.run(task, ctx=ctx)
 ```
 
+### Runtime 日志载荷
+
+`tool_result` 事件现在默认携带完整工具输出（`result`/`content`），不再隐式截断。
+同时保留 `content_preview`、`assistant_preview` 供前端轻量展示。
+
+如果你希望限制预览长度（例如节省传输），可以显式配置：
+
+```python
+from vv_agent.sdk import AgentSDKOptions
+
+options = AgentSDKOptions(
+    settings_file="local_settings.py",
+    default_backend="moonshot",
+    log_preview_chars=220,  # 可选：显式开启预览截断
+)
+```
+
 ## 工作区存储后端
 
 工作区文件 I/O 通过可插拔的 `WorkspaceBackend` 协议分发。所有内建文件工具（`read_file`、`write_file`、`list_files` 等）均经过此抽象层。

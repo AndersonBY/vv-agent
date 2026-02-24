@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.prompt import build_system_prompt
@@ -122,7 +122,7 @@ class AgentSDKClient:
         if isinstance(raw_available_skills, list):
             normalized_skills: list[dict[str, Any] | str] = []
             for item in raw_available_skills:
-                if isinstance(item, (str, dict)):
+                if isinstance(item, str | dict):
                     normalized_skills.append(item)
             if normalized_skills:
                 available_skills = normalized_skills
@@ -307,7 +307,7 @@ class AgentSDKClient:
             timeout_seconds=self.options.timeout_seconds,
         )
         if self.options.debug_dump_dir and hasattr(llm, "debug_dump_dir"):
-            llm.debug_dump_dir = self.options.debug_dump_dir
+            cast(Any, llm).debug_dump_dir = self.options.debug_dump_dir
 
         tool_registry_factory = self.options.tool_registry_factory or build_default_registry
         runtime = AgentRuntime(
@@ -315,6 +315,7 @@ class AgentSDKClient:
             tool_registry=tool_registry_factory(),
             default_workspace=effective_workspace,
             log_handler=_compose_log_handlers(self.options.log_handler, log_handler),
+            log_preview_chars=self.options.log_preview_chars,
             settings_file=self.options.settings_file,
             default_backend=backend,
             llm_builder=llm_builder,
