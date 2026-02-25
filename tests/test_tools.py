@@ -125,7 +125,7 @@ def test_list_files_summarizes_common_roots_by_default(registry, tool_context: T
 
     assert payload["files"] == ["src/main.ts"]
     ignored = payload.get("ignored_roots") or []
-    assert ignored == [{"path": "node_modules", "count": 2}]
+    assert ignored == [{"path": "node_modules"}]
     assert "summarized" in str(payload.get("message", "")).lower()
 
 
@@ -143,6 +143,24 @@ def test_list_files_include_ignored_roots_when_requested(registry, tool_context:
 
     assert payload["files"] == ["node_modules/pkg/a.js"]
     assert payload.get("ignored_roots") is None
+
+
+def test_list_files_reports_estimated_count_when_scan_limit_reached(registry, tool_context: ToolContext) -> None:
+    for idx in range(40):
+        (tool_context.workspace / f"scan_{idx:03d}.txt").write_text("x", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_list",
+        name=LIST_FILES_TOOL_NAME,
+        arguments={"max_results": 10, "scan_limit": 12},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["returned_count"] == 10
+    assert payload["truncated"] is True
+    assert payload["count_is_estimate"] is True
+    assert payload["scan_limit"] == 12
 
 
 def test_list_files_can_list_inside_ignored_root(registry, tool_context: ToolContext) -> None:

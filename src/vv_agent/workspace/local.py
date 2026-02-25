@@ -1,9 +1,35 @@
 from __future__ import annotations
 
+import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from vv_agent.workspace.base import FileInfo
+
+
+def _glob_match(path: str, pattern: str) -> bool:
+    """Match a posix path against a glob pattern supporting ``**``."""
+    parts: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern[i:i + 3] == "**/":
+            parts.append("(?:.+/)?")
+            i += 3
+        elif pattern[i:i + 2] == "**":
+            parts.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            parts.append("[^/]")
+            i += 1
+        else:
+            parts.append(re.escape(pattern[i]))
+            i += 1
+    regex = "^" + "".join(parts) + "$"
+    return re.match(regex, path) is not None
 
 
 class LocalWorkspaceBackend:
@@ -24,12 +50,25 @@ class LocalWorkspaceBackend:
 
     def list_files(self, base: str, glob: str) -> list[str]:
         root = self._resolve(base)
+        if not root.exists() or not root.is_dir():
+            return []
+
+        pattern = str(glob or "**/*")
         files: list[str] = []
-        for candidate in root.glob(glob):
-            if not candidate.is_file():
-                continue
-            rel = candidate.relative_to(self._root).as_posix()
-            files.append(rel)
+        for current_root, dirs, filenames in os.walk(root, topdown=True, onerror=lambda _e: None, followlinks=False):
+            dirs.sort(key=str.lower)
+            filenames.sort(key=str.lower)
+            current = Path(current_root)
+            for filename in filenames:
+                candidate = current / filename
+                try:
+                    rel_from_base = candidate.relative_to(root).as_posix()
+                    if not _glob_match(rel_from_base, pattern):
+                        continue
+                    rel = candidate.relative_to(self._root).as_posix()
+                except (OSError, ValueError):
+                    continue
+                files.append(rel)
         files.sort()
         return files
 

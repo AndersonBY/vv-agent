@@ -164,6 +164,13 @@ PARAMETERS:
                             "Default 500; larger values are capped."
                         ),
                     },
+                    "scan_limit": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum files scanned before stopping early to keep listing fast. "
+                            "If reached, response includes `count_is_estimate=true`."
+                        ),
+                    },
                 },
                 "required": [],
             },

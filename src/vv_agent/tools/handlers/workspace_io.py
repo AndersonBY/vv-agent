@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,7 @@ READ_FILE_MAX_LINES = 2_000
 READ_FILE_MAX_CHARS = 50_000
 LIST_FILES_DEFAULT_MAX_RESULTS = 500
 LIST_FILES_HARD_MAX_RESULTS = 5_000
+LIST_FILES_DEFAULT_SCAN_LIMIT = 50_000
 LIST_FILES_IGNORED_ROOTS = frozenset(
     {
         ".venv",
@@ -41,11 +44,114 @@ def _is_workspace_root(path: str) -> bool:
     return Path(normalized).as_posix() in {".", ""}
 
 
-def _top_level_segment(rel_path: str) -> str:
-    parts = Path(rel_path).parts
-    if not parts:
-        return ""
-    return str(parts[0]).strip().lower()
+def _glob_match(path: str, pattern: str) -> bool:
+    """Match a posix path against a glob pattern supporting ``**``."""
+    parts: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern[i:i + 3] == "**/":
+            parts.append("(?:.+/)?")
+            i += 3
+        elif pattern[i:i + 2] == "**":
+            parts.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            parts.append("[^/]")
+            i += 1
+        else:
+            parts.append(re.escape(pattern[i]))
+            i += 1
+    regex = "^" + "".join(parts) + "$"
+    return re.match(regex, path) is not None
+
+
+def _list_files_local_fast(
+    context: ToolContext,
+    *,
+    path: str,
+    glob_pattern: str,
+    include_hidden: bool,
+    include_ignored: bool,
+    max_results: int,
+    scan_limit: int,
+) -> tuple[list[str], int, bool, bool, list[dict[str, Any]]]:
+    workspace_root = context.workspace.resolve()
+    base_path = context.resolve_workspace_path(path)
+    if not base_path.exists():
+        raise ValueError(f"path not found: {path}")
+    if not base_path.is_dir():
+        raise ValueError(f"not a directory: {path}")
+
+    root_listing = _is_workspace_root(path)
+    ignored_roots_summary: list[dict[str, Any]] = []
+    ignored_roots_set: set[str] = set()
+    if root_listing and not include_ignored:
+        try:
+            with os.scandir(base_path) as iterator:
+                for entry in iterator:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    token = entry.name.lower()
+                    if token in LIST_FILES_IGNORED_ROOTS:
+                        ignored_roots_set.add(token)
+                        ignored_roots_summary.append({"path": entry.name})
+        except OSError:
+            # Ignore listing errors from inaccessible roots.
+            pass
+
+    matched_files: list[str] = []
+    matched_count = 0
+    scanned_count = 0
+    scan_limited = False
+    for current_root, dirs, filenames in os.walk(
+        base_path,
+        topdown=True,
+        onerror=lambda _e: None,
+        followlinks=False,
+    ):
+        dirs.sort(key=str.lower)
+        filenames.sort(key=str.lower)
+
+        if not include_hidden:
+            dirs[:] = [name for name in dirs if not name.startswith(".")]
+            filenames = [name for name in filenames if not name.startswith(".")]
+
+        current_path = Path(current_root)
+        if root_listing and not include_ignored and current_path == base_path:
+            dirs[:] = [name for name in dirs if name.lower() not in ignored_roots_set]
+
+        rel_dir = current_path.relative_to(base_path).as_posix()
+        if rel_dir == ".":
+            rel_dir = ""
+
+        for filename in filenames:
+            scanned_count += 1
+            if scanned_count > scan_limit:
+                scan_limited = True
+                break
+
+            rel_from_base = f"{rel_dir}/{filename}" if rel_dir else filename
+            if not _glob_match(rel_from_base, glob_pattern):
+                continue
+
+            try:
+                rel_workspace = (current_path / filename).relative_to(workspace_root).as_posix()
+            except (OSError, ValueError):
+                continue
+
+            matched_count += 1
+            if len(matched_files) < max_results:
+                matched_files.append(rel_workspace)
+
+        if scan_limited:
+            break
+
+    matched_files.sort()
+    truncated = matched_count > len(matched_files) or scan_limited
+    return matched_files, matched_count, truncated, scan_limited, ignored_roots_summary
 
 
 def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -55,57 +161,69 @@ def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
     include_hidden = bool(arguments.get("include_hidden", False))
     include_ignored = bool(arguments.get("include_ignored", False))
     max_results_raw = arguments.get("max_results", LIST_FILES_DEFAULT_MAX_RESULTS)
+    scan_limit_raw = arguments.get("scan_limit", LIST_FILES_DEFAULT_SCAN_LIMIT)
     try:
         max_results = int(max_results_raw)
+        scan_limit = int(scan_limit_raw)
     except (TypeError, ValueError):
         return ToolExecutionResult(
             tool_call_id="",
             status="error",
-            content=to_json({"error": "`max_results` must be an integer"}),
+            content=to_json({"error": "`max_results` and `scan_limit` must be integers"}),
         )
     max_results = min(max(max_results, 1), LIST_FILES_HARD_MAX_RESULTS)
-
-    all_files = backend.list_files(path, glob_pattern)
-    if not include_hidden:
-        all_files = [
-            f for f in all_files
-            if not any(part.startswith(".") for part in Path(f).parts)
-        ]
+    scan_limit = max(scan_limit, max_results)
 
     ignored_roots_summary: list[dict[str, Any]] = []
-    if _is_workspace_root(path) and not include_ignored:
-        visible_files: list[str] = []
-        ignored_counts: dict[str, int] = {}
-        for rel_path in all_files:
-            top = _top_level_segment(rel_path)
-            if top in LIST_FILES_IGNORED_ROOTS:
-                ignored_counts[top] = ignored_counts.get(top, 0) + 1
-                continue
-            visible_files.append(rel_path)
-        if ignored_counts:
-            ignored_roots_summary = [
-                {"path": key, "count": ignored_counts[key]}
-                for key in sorted(ignored_counts.keys())
+    scan_limited = False
+    local_root = getattr(backend, "root", None)
+    if isinstance(local_root, Path):
+        files, total_count, truncated, scan_limited, ignored_roots_summary = _list_files_local_fast(
+            context,
+            path=path,
+            glob_pattern=glob_pattern,
+            include_hidden=include_hidden,
+            include_ignored=include_ignored,
+            max_results=max_results,
+            scan_limit=scan_limit,
+        )
+    else:
+        all_files = backend.list_files(path, glob_pattern)
+        if not include_hidden:
+            all_files = [
+                f for f in all_files
+                if not any(part.startswith(".") for part in Path(f).parts)
             ]
-        all_files = visible_files
+        total_count = len(all_files)
+        files = all_files[:max_results]
+        truncated = total_count > len(files)
 
-    total_count = len(all_files)
-    files = all_files[:max_results]
     payload: dict[str, Any] = {
         "files": files,
         "count": total_count,
         "returned_count": len(files),
-        "truncated": total_count > len(files),
+        "truncated": truncated,
         "max_results": max_results,
     }
     if total_count > len(files):
         payload["remaining_count"] = total_count - len(files)
+    if scan_limited:
+        payload["count_is_estimate"] = True
+        payload["scan_limit"] = scan_limit
+        payload["message"] = (
+            "Listing stopped early due to scan limit. Narrow `path`/`glob` "
+            "or increase `scan_limit` for more complete results."
+        )
     if ignored_roots_summary:
         payload["ignored_roots"] = ignored_roots_summary
-        payload["message"] = (
+        ignored_message = (
             "Common dependency/cache directories are summarized by default. "
             "List those directories explicitly when needed."
         )
+        if payload.get("message"):
+            payload["message"] = f"{payload['message']} {ignored_message}"
+        else:
+            payload["message"] = ignored_message
 
     return ToolExecutionResult(
         tool_call_id="",
