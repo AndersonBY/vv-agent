@@ -9,6 +9,43 @@ from vv_agent.types import ToolExecutionResult
 
 READ_FILE_MAX_LINES = 2_000
 READ_FILE_MAX_CHARS = 50_000
+LIST_FILES_DEFAULT_MAX_RESULTS = 500
+LIST_FILES_HARD_MAX_RESULTS = 5_000
+LIST_FILES_IGNORED_ROOTS = frozenset(
+    {
+        ".venv",
+        "venv",
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".idea",
+        ".vscode",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        ".cache",
+        "target",
+        "vendor",
+    }
+)
+
+
+def _is_workspace_root(path: str) -> bool:
+    normalized = path.strip()
+    if not normalized:
+        return True
+    return Path(normalized).as_posix() in {".", ""}
+
+
+def _top_level_segment(rel_path: str) -> str:
+    parts = Path(rel_path).parts
+    if not parts:
+        return ""
+    return str(parts[0]).strip().lower()
 
 
 def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -16,6 +53,17 @@ def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
     path = str(arguments.get("path", "."))
     glob_pattern = str(arguments.get("glob", "**/*"))
     include_hidden = bool(arguments.get("include_hidden", False))
+    include_ignored = bool(arguments.get("include_ignored", False))
+    max_results_raw = arguments.get("max_results", LIST_FILES_DEFAULT_MAX_RESULTS)
+    try:
+        max_results = int(max_results_raw)
+    except (TypeError, ValueError):
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="error",
+            content=to_json({"error": "`max_results` must be an integer"}),
+        )
+    max_results = min(max(max_results, 1), LIST_FILES_HARD_MAX_RESULTS)
 
     all_files = backend.list_files(path, glob_pattern)
     if not include_hidden:
@@ -24,10 +72,45 @@ def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
             if not any(part.startswith(".") for part in Path(f).parts)
         ]
 
+    ignored_roots_summary: list[dict[str, Any]] = []
+    if _is_workspace_root(path) and not include_ignored:
+        visible_files: list[str] = []
+        ignored_counts: dict[str, int] = {}
+        for rel_path in all_files:
+            top = _top_level_segment(rel_path)
+            if top in LIST_FILES_IGNORED_ROOTS:
+                ignored_counts[top] = ignored_counts.get(top, 0) + 1
+                continue
+            visible_files.append(rel_path)
+        if ignored_counts:
+            ignored_roots_summary = [
+                {"path": key, "count": ignored_counts[key]}
+                for key in sorted(ignored_counts.keys())
+            ]
+        all_files = visible_files
+
+    total_count = len(all_files)
+    files = all_files[:max_results]
+    payload: dict[str, Any] = {
+        "files": files,
+        "count": total_count,
+        "returned_count": len(files),
+        "truncated": total_count > len(files),
+        "max_results": max_results,
+    }
+    if total_count > len(files):
+        payload["remaining_count"] = total_count - len(files)
+    if ignored_roots_summary:
+        payload["ignored_roots"] = ignored_roots_summary
+        payload["message"] = (
+            "Common dependency/cache directories are summarized by default. "
+            "List those directories explicitly when needed."
+        )
+
     return ToolExecutionResult(
         tool_call_id="",
         status="success",
-        content=to_json({"files": all_files, "count": len(all_files)}),
+        content=to_json(payload),
     )
 
 

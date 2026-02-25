@@ -10,6 +10,7 @@ from vv_agent.constants import (
     COMPRESS_MEMORY_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
     FILE_STR_REPLACE_TOOL_NAME,
+    LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
@@ -93,6 +94,67 @@ def test_write_file_ignores_newline_flags_when_overwriting(registry, tool_contex
     assert payload["trailing_newline"] is False
     assert payload["written_chars"] == 5
     assert (tool_context.workspace / "notes/overwrite.txt").read_text(encoding="utf-8") == "final"
+
+
+def test_list_files_truncates_large_response(registry, tool_context: ToolContext) -> None:
+    for idx in range(620):
+        (tool_context.workspace / f"f_{idx:04d}.txt").write_text("x", encoding="utf-8")
+
+    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["count"] == 620
+    assert payload["truncated"] is True
+    assert payload["max_results"] == 500
+    assert payload["returned_count"] == 500
+    assert len(payload["files"]) == 500
+    assert payload["remaining_count"] == 120
+
+
+def test_list_files_summarizes_common_roots_by_default(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "src").mkdir(parents=True, exist_ok=True)
+    (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    (tool_context.workspace / "src" / "main.ts").write_text("export {}", encoding="utf-8")
+    (tool_context.workspace / "node_modules" / "pkg" / "a.js").write_text("a", encoding="utf-8")
+    (tool_context.workspace / "node_modules" / "pkg" / "b.js").write_text("b", encoding="utf-8")
+
+    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": "."})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["src/main.ts"]
+    ignored = payload.get("ignored_roots") or []
+    assert ignored == [{"path": "node_modules", "count": 2}]
+    assert "summarized" in str(payload.get("message", "")).lower()
+
+
+def test_list_files_include_ignored_roots_when_requested(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    (tool_context.workspace / "node_modules" / "pkg" / "a.js").write_text("a", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_list",
+        name=LIST_FILES_TOOL_NAME,
+        arguments={"path": ".", "include_ignored": True},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["node_modules/pkg/a.js"]
+    assert payload.get("ignored_roots") is None
+
+
+def test_list_files_can_list_inside_ignored_root(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    (tool_context.workspace / "node_modules" / "pkg" / "a.js").write_text("a", encoding="utf-8")
+
+    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": "node_modules"})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["node_modules/pkg/a.js"]
+    assert payload.get("ignored_roots") is None
 
 
 def test_read_file_can_show_line_numbers(registry, tool_context: ToolContext) -> None:

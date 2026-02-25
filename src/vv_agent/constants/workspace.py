@@ -130,7 +130,11 @@ PARAMETERS:
         "type": "function",
         "function": {
             "name": LIST_FILES_TOOL_NAME,
-            "description": "List files in workspace with optional path and glob filtering.",
+            "description": (
+                "List files in workspace with optional path and glob filtering. "
+                "Large results are truncated, and common dependency/cache directories "
+                "(like node_modules/.venv) are summarized by default when listing from workspace root."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -145,6 +149,20 @@ PARAMETERS:
                     "include_hidden": {
                         "type": "boolean",
                         "description": "Whether hidden files are included. Default false.",
+                    },
+                    "include_ignored": {
+                        "type": "boolean",
+                        "description": (
+                            "When listing workspace root, include files under common "
+                            "dependency/cache directories. Default false."
+                        ),
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum number of file paths returned in one call. "
+                            "Default 500; larger values are capped."
+                        ),
                     },
                 },
                 "required": [],

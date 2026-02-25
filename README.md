@@ -186,6 +186,12 @@ options = AgentSDKOptions(
 
 Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All built-in file tools (`read_file`, `write_file`, `list_files`, etc.) go through this abstraction.
 
+`list_files` includes built-in safety defaults for large workspaces:
+
+- Returns at most `500` paths per call by default (`max_results` can tune this, with hard cap).
+- When listing from workspace root, common dependency/cache roots (for example `node_modules`, `.venv`, `.git`) are summarized instead of expanded.
+- You can still inspect those paths explicitly by setting `path` to that directory (or by setting `include_ignored=true`).
+
 | Backend | Use case |
 |---------|----------|
 | `LocalWorkspaceBackend` | Default. Reads/writes to a local directory with path-escape protection. |
