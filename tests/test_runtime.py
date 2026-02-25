@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
@@ -207,6 +208,15 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert "token_usage" in cycle_payload
     assert isinstance(cycle_payload["token_usage"], dict)
     assert isinstance(cycle_payload.get("assistant_message"), str)
+    assert isinstance(cycle_payload.get("tool_calls"), list)
+    tool_calls = cycle_payload["tool_calls"]
+    assert tool_calls
+    first_tool_call = tool_calls[0] if isinstance(tool_calls, list) else None
+    assert isinstance(first_tool_call, dict)
+    first_tool_call_map = cast(dict[str, Any], first_tool_call)
+    assert first_tool_call_map.get("name") == TODO_WRITE_TOOL_NAME
+    assert isinstance(first_tool_call_map.get("arguments"), dict)
+    assert cycle_payload.get("tool_call_names") == [TODO_WRITE_TOOL_NAME]
 
     tool_payload = next(payload for name, payload in events if name == "tool_result")
     assert isinstance(tool_payload.get("result"), str)

@@ -36,9 +36,10 @@ def _build_cli_log_handler(*, enabled: bool):
             )
             return
         if event == "cycle_llm_response":
+            tool_names = payload.get("tool_call_names") or payload.get("tool_calls")
             print(
                 f"[{now}] [cycle {payload.get('cycle')}] llm "
-                f"tool_calls={payload.get('tool_calls')} "
+                f"tool_calls={tool_names} "
                 f"assistant={payload.get('assistant_preview')}",
                 flush=True,
             )
