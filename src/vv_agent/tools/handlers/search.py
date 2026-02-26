@@ -471,6 +471,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     include_hidden = bool(arguments.get("include_hidden", False))
     include_ignored = bool(arguments.get("include_ignored", False))
     root_listing = _is_workspace_root(path)
+    explicit_file_target = backend.is_file(path)
 
     case_insensitive = bool(arguments.get("i", False))
     if "case_sensitive" in arguments:
@@ -498,7 +499,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
 
     rg_result: tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None = None
     local_root = getattr(backend, "root", None)
-    if isinstance(local_root, Path):
+    if isinstance(local_root, Path) and not explicit_file_target:
         rg_result = _workspace_grep_local_rg(
             context,
             path=path,
@@ -517,16 +518,18 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     if rg_result is not None:
         files_searched, total_matches, files_with_matches, file_counts, content_rows = rg_result
     else:
-        for rel_path in backend.list_files(path, glob_pattern):
+        raw_paths = [path] if explicit_file_target else backend.list_files(path, glob_pattern)
+        for raw_rel_path in raw_paths:
+            rel_path = raw_rel_path.replace("\\", "/")
             if not _matches_file_type(rel_path, file_type):
                 continue
-            if not include_hidden and _is_hidden_path(rel_path):
+            if not explicit_file_target and not include_hidden and _is_hidden_path(rel_path):
                 continue
-            if root_listing and not include_ignored and _is_in_common_ignored_root(rel_path):
+            if not explicit_file_target and root_listing and not include_ignored and _is_in_common_ignored_root(rel_path):
                 continue
 
             try:
-                text = backend.read_text(rel_path)
+                text = backend.read_text(raw_rel_path)
             except OSError:
                 continue
 

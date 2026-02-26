@@ -234,7 +234,7 @@ Guidance:
                     },
                     "path": {
                         "type": "string",
-                        "description": "Optional search root relative to workspace root. Default '.'.",
+                        "description": "Optional search root or single file path relative to workspace root. Default '.'.",
                     },
                     "glob": {
                         "type": "string",

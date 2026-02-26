@@ -425,6 +425,42 @@ def test_workspace_grep_can_include_common_ignored_roots(registry, tool_context:
     assert payload["matches"][0]["path"] == "node_modules/pkg/x.js"
 
 
+def test_workspace_grep_supports_file_path_target(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "articles").mkdir(parents=True, exist_ok=True)
+    file_path = "articles/essay.md"
+    (tool_context.workspace / file_path).write_text("intro\nabout Agent design\noutro", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_file_target",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "Agent", "path": file_path, "output_mode": "content", "c": 1},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["files_searched"] == 1
+    assert payload["summary"]["files_with_matches"] == 1
+    assert payload["summary"]["total_matches"] == 1
+    assert any(row["path"] == file_path and row["is_match"] for row in payload["matches"])
+
+
+def test_workspace_grep_file_path_works_inside_ignored_root(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    file_path = "node_modules/pkg/x.js"
+    (tool_context.workspace / file_path).write_text("const token = 'Agent';", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_file_ignored",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "Agent", "path": file_path, "output_mode": "files_with_matches"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == [file_path]
+    assert payload["summary"]["total_matches"] == 1
+
+
 def test_workspace_grep_prefers_ripgrep_when_available(
     registry,
     tool_context: ToolContext,
