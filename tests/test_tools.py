@@ -19,6 +19,7 @@ from vv_agent.constants import (
     WRITE_FILE_TOOL_NAME,
 )
 from vv_agent.tools import ToolContext, build_default_registry
+from vv_agent.tools.handlers import search as search_handler
 from vv_agent.tools.handlers import workspace_io
 from vv_agent.tools.registry import ToolNotFoundError
 from vv_agent.types import ToolCall, ToolDirective
@@ -370,6 +371,98 @@ def test_workspace_grep_supports_multiline_and_head_limit(registry, tool_context
     assert len(payload["matches"]) == 1
     assert payload["head_limit"] == 1
     assert payload["summary"]["total_matches"] == 1
+
+
+def test_workspace_grep_prefers_ripgrep_when_available(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tool_context.workspace / "a.py").write_text("token = 1\n", encoding="utf-8")
+    (tool_context.workspace / "b.py").write_text("token = 2\n", encoding="utf-8")
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = io.StringIO(
+                "\n".join(
+                    [
+                        '{"type":"begin","data":{"path":{"text":"a.py"}}}',
+                        (
+                            '{"type":"match","data":{"path":{"text":"a.py"},'
+                            '"lines":{"text":"token = 1\\n"},"line_number":1,'
+                            '"submatches":[{"start":0,"end":5}]}}'
+                        ),
+                        '{"type":"end","data":{"path":{"text":"a.py"}}}',
+                        '{"type":"begin","data":{"path":{"text":"b.py"}}}',
+                        (
+                            '{"type":"match","data":{"path":{"text":"b.py"},'
+                            '"lines":{"text":"token = 2\\n"},"line_number":1,'
+                            '"submatches":[{"start":0,"end":5}]}}'
+                        ),
+                        '{"type":"end","data":{"path":{"text":"b.py"}}}',
+                        '{"type":"summary","data":{}}',
+                    ]
+                )
+                + "\n"
+            )
+            self.stderr = io.StringIO("")
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    def _fake_popen(*args, **kwargs):
+        assert args[0][0] == "rg"
+        assert "--json" in args[0]
+        return _FakeProcess()
+
+    monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(search_handler.subprocess, "Popen", _fake_popen)
+
+    call = ToolCall(
+        id="call_rg_files",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "token", "output_mode": "files_with_matches", "type": "py"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["a.py", "b.py"]
+    assert payload["summary"]["total_matches"] == 2
+    assert payload["summary"]["files_with_matches"] == 2
+
+
+def test_workspace_grep_falls_back_when_ripgrep_errors(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tool_context.workspace / "fallback.txt").write_text("hello fallback", encoding="utf-8")
+
+    class _FailingProcess:
+        def __init__(self) -> None:
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("ripgrep failed")
+            self.returncode = 2
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(search_handler.subprocess, "Popen", lambda *args, **kwargs: _FailingProcess())
+
+    call = ToolCall(id="call_rg_fallback", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "hello"})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["total_matches"] == 1
+    assert payload["matches"][0]["path"] == "fallback.txt"
 
 
 def test_workspace_grep_rejects_unknown_file_type(registry, tool_context: ToolContext) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "vv-agent"
-version = "0.1.20"
+version = "0.1.21"
 description = "Vector Vein inspired agent framework with cycle runtime, tools and memory management"
 readme = "README.md"
 authors = [
