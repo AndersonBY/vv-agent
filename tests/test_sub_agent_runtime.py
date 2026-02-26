@@ -197,6 +197,102 @@ def test_batch_sub_tasks_aggregates_sub_agent_results(tmp_path: Path) -> None:
     assert batch_payload["results"][1]["final_answer"] == "sub-B"
 
 
+def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: Path) -> None:
+    captured_events: list[tuple[str, dict[str, object]]] = []
+
+    parent_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="delegate",
+                tool_calls=[
+                    ToolCall(
+                        id="p1",
+                        name=CREATE_SUB_TASK_TOOL_NAME,
+                        arguments={
+                            "agent_name": "research-sub",
+                            "task_description": "Collect one fact",
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finish parent",
+                tool_calls=[ToolCall(id="p2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            ),
+        ]
+    )
+
+    settings_file = tmp_path / "local_settings.py"
+    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        sub_llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="sub finish",
+                    tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
+                )
+            ]
+        )
+        return sub_llm, _fake_resolved(backend=backend, model=model)
+
+    runtime = AgentRuntime(
+        llm_client=parent_llm,
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        settings_file=settings_file,
+        default_backend="moonshot",
+        llm_builder=fake_llm_builder,
+        tool_registry_factory=build_default_registry,
+        log_handler=lambda event, payload: captured_events.append((event, dict(payload))),
+    )
+    task = AgentTask(
+        task_id="parent_session_events",
+        model="parent-model",
+        system_prompt="sys",
+        user_prompt="run parent task",
+        max_cycles=4,
+        sub_agents={
+            "research-sub": SubAgentConfig(
+                model="kimi-k2.5",
+                backend="moonshot",
+                description="collect facts",
+            )
+        },
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+
+    payload = json.loads(result.cycles[0].tool_results[0].content)
+    task_id = payload["task_id"]
+    session_id = payload["session_id"]
+    assert task_id
+    assert session_id == task_id
+
+    session_created = [item for item in captured_events if item[0] == "sub_agent_session_created"]
+    assert session_created
+    assert session_created[0][1]["task_id"] == task_id
+    assert session_created[0][1]["session_id"] == session_id
+
+    cycle_events = [event for event in captured_events if event[0] == "sub_agent_cycle_started"]
+    assert cycle_events
+    assert all(event_payload.get("task_id") == task_id for _, event_payload in cycle_events)
+    assert all(event_payload.get("session_id") == session_id for _, event_payload in cycle_events)
+
+    session_run_events = [event for event in captured_events if event[0] == "sub_agent_session_run_start"]
+    assert session_run_events
+    assert session_run_events[0][1]["task_id"] == task_id
+    assert session_run_events[0][1]["session_id"] == session_id
+
+
 def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_path: Path) -> None:
     parent_llm = ScriptedLLM(
         steps=[

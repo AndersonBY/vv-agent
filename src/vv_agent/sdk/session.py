@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -29,12 +30,16 @@ class AgentSession:
         self,
         *,
         execute_run: Callable[..., AgentRun],
+        session_id: str | None = None,
         agent_name: str,
         definition: AgentDefinition,
         workspace: Path,
         shared_state: dict[str, Any] | None = None,
     ) -> None:
         self._execute_run = execute_run
+        self.session_id = str(session_id or uuid.uuid4().hex[:12]).strip()
+        if not self.session_id:
+            self.session_id = uuid.uuid4().hex[:12]
         self.agent_name = agent_name
         self.definition = definition
         self.workspace = Path(workspace).resolve()
@@ -229,6 +234,7 @@ class AgentSession:
 def create_agent_session(
     *,
     execute_run: Callable[..., AgentRun],
+    session_id: str | None = None,
     agent_name: str,
     definition: AgentDefinition,
     workspace: Path,
@@ -236,6 +242,7 @@ def create_agent_session(
 ) -> AgentSession:
     return AgentSession(
         execute_run=execute_run,
+        session_id=session_id,
         agent_name=agent_name,
         definition=definition,
         workspace=workspace,

@@ -411,6 +411,7 @@ class SubTaskOutcome:
     task_id: str
     agent_name: str
     status: AgentStatus
+    session_id: str | None = None
     final_answer: str | None = None
     wait_reason: str | None = None
     error: str | None = None
@@ -423,6 +424,7 @@ class SubTaskOutcome:
             "task_id": self.task_id,
             "agent_name": self.agent_name,
             "status": self.status.value,
+            "session_id": self.session_id,
             "final_answer": self.final_answer,
             "wait_reason": self.wait_reason,
             "error": self.error,

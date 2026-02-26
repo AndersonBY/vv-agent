@@ -346,6 +346,8 @@ class MyBackend:
 
 在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` / `batch_sub_tasks` 委派任务。每个子 Agent 有独立的 runtime、模型和工具集。
 
+现在每个子任务都会创建真实 `AgentSession`（默认 `session_id == task_id`）。工具返回结果会包含 `session_id`，运行事件会携带稳定标识（`task_id` / `session_id`），宿主应用可以按子任务独立订阅、持久化与流式展示进度（含 `sub_agent_stream_delta` token 增量）。
+
 子 Agent 使用与父任务不同的模型时，runtime 需要提供 `settings_file` 和 `default_backend` 来解析 LLM 客户端。
 
 ## 示例

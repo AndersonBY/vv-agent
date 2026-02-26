@@ -5,10 +5,11 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from vv_agent.config import ResolvedModelConfig, build_openai_llm_from_local_settings
+from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
 from vv_agent.constants import BATCH_SUB_TASKS_TOOL_NAME, CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm.base import LLMClient
 from vv_agent.memory import MemoryManager
@@ -647,19 +648,33 @@ class AgentRuntime:
         request: SubTaskRequest,
         ctx: ExecutionContext | None = None,
     ) -> SubTaskOutcome:
+        from vv_agent.sdk.session import create_agent_session
+        from vv_agent.sdk.types import AgentDefinition, AgentRun
+
         sub_task_id = f"{parent_task.task_id}_sub_{request.agent_name}_{uuid.uuid4().hex[:8]}"
+        sub_session_id = sub_task_id
         sub_agent = parent_task.sub_agents.get(request.agent_name)
         if sub_agent is None:
             available = ", ".join(sorted(parent_task.sub_agents))
             return SubTaskOutcome(
                 task_id=sub_task_id,
+                session_id=sub_session_id,
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
                 error=f"Unknown sub-agent {request.agent_name!r}. Available: {available}",
             )
 
+        def _emit_sub_session_event(event: str, payload: dict[str, Any]) -> None:
+            if self.log_handler is None:
+                return
+            enriched = dict(payload)
+            enriched.setdefault("task_id", sub_task_id)
+            enriched.setdefault("session_id", sub_session_id)
+            enriched.setdefault("sub_agent_name", request.agent_name)
+            self.log_handler(f"sub_agent_{event}", enriched)
+
         try:
-            llm_client, model_id, resolved = self._resolve_sub_agent_client(
+            llm_client, model_id, resolved_payload, resolved_config = self._resolve_sub_agent_client(
                 parent_task=parent_task,
                 sub_agent=sub_agent,
             )
@@ -677,7 +692,6 @@ class AgentRuntime:
                 llm_client=llm_client,
                 tool_registry=self._build_sub_agent_registry(),
                 default_workspace=workspace_path,
-                log_handler=self._build_sub_agent_log_handler(request.agent_name),
                 log_preview_chars=self.log_preview_chars,
                 settings_file=self.settings_file,
                 default_backend=self.default_backend,
@@ -685,15 +699,117 @@ class AgentRuntime:
                 tool_registry_factory=self.tool_registry_factory,
                 sub_agent_timeout_seconds=self.sub_agent_timeout_seconds,
             )
-            sub_result = sub_runtime.run(
-                sub_task,
+
+            sub_agent_definition = AgentDefinition(
+                description=sub_agent.description,
+                model=sub_task.model,
+                backend=sub_agent.backend or self.default_backend,
+                language=str(parent_task.metadata.get("language", "zh-CN")),
+                max_cycles=sub_task.max_cycles,
+                no_tool_policy=sub_task.no_tool_policy,
+                allow_interruption=sub_task.allow_interruption,
+                use_workspace=sub_task.use_workspace,
+                enable_todo_management=True,
+                agent_type=sub_task.agent_type,
+                native_multimodal=sub_task.native_multimodal,
+                enable_sub_agents=False,
+                sub_agents={},
+                extra_tool_names=list(sub_task.extra_tool_names),
+                exclude_tools=list(sub_task.exclude_tools),
+                metadata=dict(sub_task.metadata),
+                system_prompt=sub_task.system_prompt,
+            )
+
+            def _execute_sub_run(
+                *,
+                prompt: str,
+                task_name: str,
+                workspace: str | Path,
+                shared_state: dict[str, Any] | None = None,
+                initial_messages: list[Message] | None = None,
+                before_cycle_messages: BeforeCycleMessageProvider | None = None,
+                interruption_messages: InterruptionMessageProvider | None = None,
+                log_handler: RuntimeLogHandler | None = None,
+                **_: Any,
+            ) -> AgentRun:
+                run_task = replace(
+                    sub_task,
+                    task_id=sub_task_id,
+                    user_prompt=prompt,
+                )
+                run_shared_state = dict(shared_state or {})
+                run_shared_state.setdefault("todo_list", [])
+
+                child_ctx = self._build_child_ctx(ctx)
+                if log_handler is not None:
+                    parent_stream_callback = child_ctx.stream_callback if child_ctx is not None else None
+
+                    def _sub_stream_callback(text: str) -> None:
+                        log_handler(
+                            "stream_delta",
+                            {
+                                "delta": text,
+                                "task_id": sub_task_id,
+                                "session_id": sub_session_id,
+                                "sub_agent_name": request.agent_name,
+                            },
+                        )
+                        if parent_stream_callback is not None:
+                            parent_stream_callback(text)
+
+                    if child_ctx is None:
+                        child_ctx = ExecutionContext(stream_callback=_sub_stream_callback)
+                    else:
+                        child_ctx.stream_callback = _sub_stream_callback
+
+                previous_log_handler = sub_runtime.log_handler
+                sub_runtime.log_handler = log_handler
+                try:
+                    sub_result = sub_runtime.run(
+                        run_task,
+                        workspace=workspace,
+                        shared_state=run_shared_state,
+                        initial_messages=initial_messages,
+                        user_message=prompt,
+                        before_cycle_messages=before_cycle_messages,
+                        interruption_messages=interruption_messages,
+                        ctx=child_ctx,
+                    )
+                finally:
+                    sub_runtime.log_handler = previous_log_handler
+                return AgentRun(
+                    agent_name=task_name,
+                    result=sub_result,
+                    resolved=resolved_config,
+                )
+
+            sub_session = create_agent_session(
+                execute_run=_execute_sub_run,
+                session_id=sub_session_id,
+                agent_name=request.agent_name,
+                definition=sub_agent_definition,
                 workspace=workspace_path,
                 shared_state={"todo_list": []},
-                ctx=self._build_child_ctx(ctx),
             )
+
+            unsub = sub_session.subscribe(_emit_sub_session_event)
+            _emit_sub_session_event(
+                "session_created",
+                {
+                    "agent_name": request.agent_name,
+                    "model": sub_task.model,
+                    "workspace": str(workspace_path),
+                    "max_cycles": sub_task.max_cycles,
+                },
+            )
+            try:
+                sub_run = sub_session.prompt(sub_task.user_prompt, auto_follow_up=False)
+            finally:
+                unsub()
         except Exception as exc:
             return SubTaskOutcome(
                 task_id=sub_task_id,
+                session_id=sub_session_id,
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
                 error=str(exc),
@@ -701,14 +817,15 @@ class AgentRuntime:
 
         return SubTaskOutcome(
             task_id=sub_task_id,
+            session_id=sub_session_id,
             agent_name=request.agent_name,
-            status=sub_result.status,
-            final_answer=sub_result.final_answer,
-            wait_reason=sub_result.wait_reason,
-            error=sub_result.error,
-            cycles=len(sub_result.cycles),
-            todo_list=sub_result.todo_list,
-            resolved=resolved,
+            status=sub_run.result.status,
+            final_answer=sub_run.result.final_answer,
+            wait_reason=sub_run.result.wait_reason,
+            error=sub_run.result.error,
+            cycles=len(sub_run.result.cycles),
+            todo_list=sub_run.result.todo_list,
+            resolved=resolved_payload,
         )
 
     def _resolve_sub_agent_client(
@@ -716,15 +833,27 @@ class AgentRuntime:
         *,
         parent_task: AgentTask,
         sub_agent: SubAgentConfig,
-    ) -> tuple[LLMClient, str, dict[str, str]]:
+    ) -> tuple[LLMClient, str, dict[str, str], ResolvedModelConfig]:
+        backend = sub_agent.backend or self.default_backend or "inline"
         if self.settings_file is None:
             if sub_agent.model != parent_task.model:
                 raise ValueError(
                     "Sub-agent model resolution requires runtime settings_file when sub-agent model differs from parent model."
                 )
-            return self.llm_client, parent_task.model, {}
+            fallback_endpoint = EndpointConfig(
+                endpoint_id="inline-session",
+                api_key="",
+                api_base="",
+            )
+            fallback_resolved = ResolvedModelConfig(
+                backend=backend,
+                requested_model=parent_task.model,
+                selected_model=parent_task.model,
+                model_id=parent_task.model,
+                endpoint_options=[EndpointOption(endpoint=fallback_endpoint, model_id=parent_task.model)],
+            )
+            return self.llm_client, parent_task.model, {}, fallback_resolved
 
-        backend = sub_agent.backend or self.default_backend
         if not backend:
             raise ValueError("Sub-agent backend is required when settings_file is configured.")
 
@@ -734,12 +863,17 @@ class AgentRuntime:
             model=sub_agent.model,
             timeout_seconds=self.sub_agent_timeout_seconds,
         )
-        return llm_client, resolved.model_id, {
-            "backend": resolved.backend,
-            "selected_model": resolved.selected_model,
-            "model_id": resolved.model_id,
-            "endpoint": resolved.endpoint.endpoint_id,
-        }
+        return (
+            llm_client,
+            resolved.model_id,
+            {
+                "backend": resolved.backend,
+                "selected_model": resolved.selected_model,
+                "model_id": resolved.model_id,
+                "endpoint": resolved.endpoint.endpoint_id,
+            },
+            resolved,
+        )
 
     def _build_sub_agent_task(
         self,
@@ -824,28 +958,23 @@ class AgentRuntime:
         return self.tool_registry
 
     @staticmethod
-    def _build_child_ctx(ctx: ExecutionContext | None) -> ExecutionContext | None:
+    def _build_child_ctx(
+        ctx: ExecutionContext | None,
+        *,
+        stream_callback: Callable[[str], None] | None = None,
+    ) -> ExecutionContext | None:
         if ctx is None:
-            return None
+            if stream_callback is None:
+                return None
+            return ExecutionContext(stream_callback=stream_callback)
+        child_stream_callback = stream_callback if stream_callback is not None else ctx.stream_callback
         child_token = ctx.cancellation_token.child() if ctx.cancellation_token is not None else None
         return ExecutionContext(
             cancellation_token=child_token,
-            stream_callback=ctx.stream_callback,
+            stream_callback=child_stream_callback,
             state_store=ctx.state_store,
             metadata=dict(ctx.metadata),
         )
-
-    def _build_sub_agent_log_handler(self, sub_agent_name: str) -> RuntimeLogHandler | None:
-        if self.log_handler is None:
-            return None
-        parent_handler = self.log_handler
-
-        def handler(event: str, payload: dict[str, Any]) -> None:
-            enriched = dict(payload)
-            enriched["sub_agent_name"] = sub_agent_name
-            parent_handler(f"sub_agent_{event}", enriched)
-
-        return handler
 
     @staticmethod
     def _build_parent_summary(*, parent_task: AgentTask, parent_shared_state: dict[str, Any]) -> str:
