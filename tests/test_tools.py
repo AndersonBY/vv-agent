@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from vv_agent.constants import (
     WRITE_FILE_TOOL_NAME,
 )
 from vv_agent.tools import ToolContext, build_default_registry
+from vv_agent.tools.handlers import workspace_io
 from vv_agent.tools.registry import ToolNotFoundError
 from vv_agent.types import ToolCall, ToolDirective
 from vv_agent.workspace import LocalWorkspaceBackend
@@ -173,6 +175,67 @@ def test_list_files_can_list_inside_ignored_root(registry, tool_context: ToolCon
 
     assert payload["files"] == ["node_modules/pkg/a.js"]
     assert payload.get("ignored_roots") is None
+
+
+def test_list_files_prefers_ripgrep_when_available(registry, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"sub/b.txt\x00a.txt\x00")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    def _fake_popen(*args, **kwargs):
+        assert args[0][0] == "rg"
+        return _FakeProcess()
+
+    monkeypatch.setattr(workspace_io, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(workspace_io.subprocess, "Popen", _fake_popen)
+
+    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": "."})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["a.txt", "sub/b.txt"]
+    assert payload["count"] == 2
+    assert payload["truncated"] is False
+
+
+def test_list_files_falls_back_when_ripgrep_errors(registry, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tool_context.workspace / "fallback.txt").write_text("x", encoding="utf-8")
+
+    class _FailingProcess:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"permission denied")
+            self.returncode = 2
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(workspace_io, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(workspace_io.subprocess, "Popen", lambda *args, **kwargs: _FailingProcess())
+
+    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": "."})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["fallback.txt"]
+    assert payload["count"] == 1
 
 
 def test_read_file_can_show_line_numbers(registry, tool_context: ToolContext) -> None:

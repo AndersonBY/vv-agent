@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
+import sysconfig
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +38,7 @@ LIST_FILES_IGNORED_ROOTS = frozenset(
         "vendor",
     }
 )
+_RG_EXECUTABLE_CACHE: str | None | bool = None
 
 
 def _is_workspace_root(path: str) -> bool:
@@ -44,8 +48,8 @@ def _is_workspace_root(path: str) -> bool:
     return Path(normalized).as_posix() in {".", ""}
 
 
-def _glob_match(path: str, pattern: str) -> bool:
-    """Match a posix path against a glob pattern supporting ``**``."""
+def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile glob once; callers can reuse the regex across many paths."""
     parts: list[str] = []
     i = 0
     while i < len(pattern):
@@ -65,7 +69,158 @@ def _glob_match(path: str, pattern: str) -> bool:
             parts.append(re.escape(pattern[i]))
             i += 1
     regex = "^" + "".join(parts) + "$"
-    return re.match(regex, path) is not None
+    return re.compile(regex)
+
+
+def _resolve_rg_executable() -> str | None:
+    """Locate ripgrep executable shipped by environment or available in PATH."""
+    global _RG_EXECUTABLE_CACHE
+
+    cached = _RG_EXECUTABLE_CACHE
+    if isinstance(cached, str):
+        return cached
+    if cached is False:
+        return None
+
+    script_names = ("rg.exe", "rg.cmd", "rg") if os.name == "nt" else ("rg",)
+    scripts_dir = sysconfig.get_path("scripts")
+    if scripts_dir:
+        scripts_root = Path(scripts_dir)
+        for script_name in script_names:
+            candidate = scripts_root / script_name
+            if candidate.exists():
+                _RG_EXECUTABLE_CACHE = str(candidate)
+                return _RG_EXECUTABLE_CACHE
+
+    resolved = shutil.which("rg")
+    if resolved:
+        _RG_EXECUTABLE_CACHE = resolved
+        return resolved
+
+    _RG_EXECUTABLE_CACHE = False
+    return None
+
+
+def _list_files_local_rg(
+    *,
+    workspace_root: Path,
+    base_path: Path,
+    base_is_workspace_root: bool,
+    glob_pattern: str,
+    include_hidden: bool,
+    include_ignored: bool,
+    ignored_root_names: list[str],
+    max_results: int,
+    scan_limit: int,
+    glob_regex: re.Pattern[str],
+) -> tuple[list[str], int, bool, bool] | None:
+    rg_executable = _resolve_rg_executable()
+    if not rg_executable:
+        return None
+
+    command = [
+        rg_executable,
+        "--files",
+        "--null",
+        "--no-messages",
+        "--no-ignore",
+        "--no-ignore-vcs",
+    ]
+    if include_hidden:
+        command.append("--hidden")
+    if glob_pattern and glob_pattern != "**/*":
+        command.extend(["--glob", glob_pattern])
+    if base_is_workspace_root and not include_ignored:
+        for ignored_name in ignored_root_names:
+            command.extend(["--glob", f"!{ignored_name}/**"])
+    command.append(".")
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=base_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError:
+        return None
+
+    assert process.stdout is not None
+
+    matched_files: list[str] = []
+    matched_count = 0
+    scanned_count = 0
+    scan_limited = False
+    should_stop = False
+    remainder = b""
+
+    while True:
+        chunk = process.stdout.read(64 * 1024)
+        if not chunk:
+            break
+
+        payload = remainder + chunk
+        entries = payload.split(b"\x00")
+        remainder = entries.pop()
+
+        for raw_entry in entries:
+            if not raw_entry:
+                continue
+
+            scanned_count += 1
+            if scanned_count > scan_limit:
+                scan_limited = True
+                should_stop = True
+                break
+
+            rel_from_base = raw_entry.decode("utf-8", errors="replace").replace("\\", "/")
+            if not glob_regex.match(rel_from_base):
+                continue
+
+            candidate_path = base_path / rel_from_base
+            try:
+                rel_workspace = candidate_path.relative_to(workspace_root).as_posix()
+            except (OSError, ValueError):
+                continue
+
+            matched_count += 1
+            if len(matched_files) < max_results:
+                matched_files.append(rel_workspace)
+
+        if should_stop:
+            break
+
+    if should_stop:
+        process.terminate()
+
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=1)
+
+    if not scan_limited and process.returncode not in (0, 1):
+        return None
+
+    if remainder and not scan_limited:
+        rel_from_base = remainder.decode("utf-8", errors="replace").replace("\\", "/")
+        scanned_count += 1
+        if scanned_count <= scan_limit and glob_regex.match(rel_from_base):
+            candidate_path = base_path / rel_from_base
+            try:
+                rel_workspace = candidate_path.relative_to(workspace_root).as_posix()
+            except (OSError, ValueError):
+                rel_workspace = ""
+            if rel_workspace:
+                matched_count += 1
+                if len(matched_files) < max_results:
+                    matched_files.append(rel_workspace)
+        elif scanned_count > scan_limit:
+            scan_limited = True
+
+    matched_files.sort()
+    truncated = matched_count > len(matched_files) or scan_limited
+    return matched_files, matched_count, truncated, scan_limited
 
 
 def _list_files_local_fast(
@@ -88,6 +243,7 @@ def _list_files_local_fast(
     root_listing = _is_workspace_root(path)
     ignored_roots_summary: list[dict[str, Any]] = []
     ignored_roots_set: set[str] = set()
+    ignored_root_names: list[str] = []
     if root_listing and not include_ignored:
         try:
             with os.scandir(base_path) as iterator:
@@ -97,10 +253,28 @@ def _list_files_local_fast(
                     token = entry.name.lower()
                     if token in LIST_FILES_IGNORED_ROOTS:
                         ignored_roots_set.add(token)
+                        ignored_root_names.append(entry.name)
                         ignored_roots_summary.append({"path": entry.name})
         except OSError:
             # Ignore listing errors from inaccessible roots.
             pass
+
+    glob_regex = _compile_glob_pattern(glob_pattern)
+    rg_result = _list_files_local_rg(
+        workspace_root=workspace_root,
+        base_path=base_path,
+        base_is_workspace_root=root_listing,
+        glob_pattern=glob_pattern,
+        include_hidden=include_hidden,
+        include_ignored=include_ignored,
+        ignored_root_names=ignored_root_names,
+        max_results=max_results,
+        scan_limit=scan_limit,
+        glob_regex=glob_regex,
+    )
+    if rg_result is not None:
+        files, total_count, truncated, scan_limited = rg_result
+        return files, total_count, truncated, scan_limited, ignored_roots_summary
 
     matched_files: list[str] = []
     matched_count = 0
@@ -134,7 +308,7 @@ def _list_files_local_fast(
                 break
 
             rel_from_base = f"{rel_dir}/{filename}" if rel_dir else filename
-            if not _glob_match(rel_from_base, glob_pattern):
+            if not glob_regex.match(rel_from_base):
                 continue
 
             try:

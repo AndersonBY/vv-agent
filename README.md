@@ -189,6 +189,7 @@ Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All 
 `list_files` includes built-in safety defaults for large workspaces:
 
 - Returns at most `500` paths per call by default (`max_results` can tune this, with hard cap).
+- Uses `ripgrep` (`rg`) for fast local traversal when available, with automatic fallback to Python walk.
 - When listing from workspace root, common dependency/cache roots (for example `node_modules`, `.venv`, `.git`) are summarized instead of expanded.
 - You can still inspect those paths explicitly by setting `path` to that directory (or by setting `include_ignored=true`).
 - Supports `scan_limit` to stop early on very large trees; when triggered, response sets `count_is_estimate=true`.
