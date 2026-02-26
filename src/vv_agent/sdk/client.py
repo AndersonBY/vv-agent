@@ -91,6 +91,10 @@ class AgentSDKClient:
         effective_task_name = task_name or resolved_name
         metadata = dict(definition.metadata)
         metadata.setdefault("language", definition.language)
+        if definition.bash_shell:
+            metadata.setdefault("bash_shell", definition.bash_shell)
+        if definition.windows_shell_priority:
+            metadata.setdefault("windows_shell_priority", list(definition.windows_shell_priority))
         if definition.sub_agents:
             metadata.setdefault("sub_agent_names", sorted(definition.sub_agents.keys()))
 
@@ -185,10 +189,18 @@ class AgentSDKClient:
         task_name: str | None = None,
     ) -> AgentRun:
         resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
+        effective_definition = definition
+        if self.options.bash_shell and not effective_definition.bash_shell:
+            effective_definition = replace(effective_definition, bash_shell=self.options.bash_shell)
+        if self.options.windows_shell_priority and not effective_definition.windows_shell_priority:
+            effective_definition = replace(
+                effective_definition,
+                windows_shell_priority=list(self.options.windows_shell_priority),
+            )
         return self._execute(
             prompt=prompt,
             resolved_name=resolved_name,
-            definition=definition,
+            definition=effective_definition,
             workspace=workspace,
             shared_state=shared_state,
             log_handler=log_handler,

@@ -181,6 +181,12 @@ class AgentResourceLoader:
                 else []
             ),
             exclude_tools=list(payload.get("exclude_tools", [])) if isinstance(payload.get("exclude_tools"), list) else [],
+            bash_shell=payload.get("bash_shell") if isinstance(payload.get("bash_shell"), str) else None,
+            windows_shell_priority=(
+                [str(item).strip() for item in payload.get("windows_shell_priority", []) if str(item).strip()]
+                if isinstance(payload.get("windows_shell_priority"), list)
+                else []
+            ),
             metadata=dict(payload.get("metadata", {})) if isinstance(payload.get("metadata"), dict) else {},
             system_prompt=payload.get("system_prompt") if isinstance(payload.get("system_prompt"), str) else None,
             system_prompt_template=payload.get("system_prompt_template")

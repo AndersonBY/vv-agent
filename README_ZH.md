@@ -116,6 +116,34 @@ session.continue_run()
 - `prompt()/continue_run()/follow_up()` 都在同一个会话工作区执行。
 - 顶层 SDK 辅助函数 `vv_agent.sdk.run(...)` 和 `vv_agent.sdk.query(...)` 也支持 `workspace=...`。
 
+### Windows Shell 运行时配置
+
+`bash` 工具使用哪个 shell，属于**运行时启动/会话配置**，不是工具参数。
+
+- 全局默认：`AgentSDKOptions.bash_shell`、`AgentSDKOptions.windows_shell_priority`
+- Agent 级覆盖：`AgentDefinition.bash_shell`、`AgentDefinition.windows_shell_priority`
+- Windows 推荐优先级：`["git-bash", "powershell", "cmd"]`
+
+```python
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+
+client = AgentSDKClient(
+    options=AgentSDKOptions(
+        settings_file="local_settings.py",
+        default_backend="moonshot",
+        windows_shell_priority=["git-bash", "powershell", "cmd"],
+    ),
+    agents={
+        "desktop": AgentDefinition(
+            description="桌面助手",
+            model="kimi-k2.5",
+            # 仅对该 Agent 强制指定 shell（可选）
+            bash_shell=None,
+        )
+    },
+)
+```
+
 ## 执行后端
 
 cycle 循环由可插拔的 `ExecutionBackend` 调度。

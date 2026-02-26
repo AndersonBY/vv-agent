@@ -24,6 +24,7 @@ from vv_agent.sdk import (
     run as sdk_run,
 )
 from vv_agent.tools import build_default_registry
+from vv_agent.tools.handlers import bash as bash_handler
 from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
 WRITE_FILE_TOOL_NAME = "write_file"
@@ -352,6 +353,66 @@ def test_sdk_prepare_task_supports_sub_agent_configs(tmp_path: Path) -> None:
     assert task.metadata["sub_agent_names"] == ["research-sub"]
     assert CREATE_SUB_TASK_TOOL_NAME in task.system_prompt
     assert BATCH_SUB_TASKS_TOOL_NAME in task.system_prompt
+
+
+def test_sdk_client_applies_bash_shell_from_startup_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_prepare(
+        command: str,
+        *,
+        auto_confirm: bool,
+        stdin: str | None,
+        shell: str | None = None,
+        windows_shell_priority: list[str] | None = None,
+    ) -> tuple[list[str], str | None]:
+        del auto_confirm, stdin
+        captured["command"] = command
+        captured["shell"] = shell
+        captured["windows_shell_priority"] = windows_shell_priority
+        return ["bash", "-lc", command], None
+
+    monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="run shell",
+                    tool_calls=[ToolCall(id="b1", name="bash", arguments={"command": "echo startup-shell"})],
+                ),
+                LLMResponse(
+                    content="finish",
+                    tool_calls=[ToolCall(id="f1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                ),
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+            bash_shell="powershell",
+            windows_shell_priority=["git-bash", "powershell", "cmd"],
+        ),
+        agents={"demo": AgentDefinition(description="helper", model="kimi-k2.5")},
+    )
+
+    run = client.run_agent(agent_name="demo", prompt="test shell")
+    assert run.result.status == AgentStatus.COMPLETED
+    assert captured["shell"] == "powershell"
+    assert captured["windows_shell_priority"] == ["git-bash", "powershell", "cmd"]
 
 
 def test_sdk_client_unknown_agent_raises_clear_error(tmp_path: Path) -> None:

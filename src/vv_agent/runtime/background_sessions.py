@@ -17,6 +17,7 @@ _OUTPUT_LIMIT = 50_000
 class _SessionState:
     session_id: str
     command: str
+    shell: str | None
     cwd: str
     started_at: float
     timeout_seconds: int
@@ -39,11 +40,15 @@ class BackgroundSessionManager:
         timeout_seconds: int,
         stdin: str | None = None,
         auto_confirm: bool = False,
+        shell: str | None = None,
+        windows_shell_priority: list[str] | None = None,
     ) -> str:
         shell_command, prepared_stdin = prepare_shell_execution(
             command,
             auto_confirm=auto_confirm,
             stdin=stdin,
+            shell=shell,
+            windows_shell_priority=windows_shell_priority,
         )
 
         process = subprocess.Popen(
@@ -66,6 +71,7 @@ class BackgroundSessionManager:
         session = _SessionState(
             session_id=session_id,
             command=command,
+            shell=shell,
             cwd=str(cwd),
             started_at=time.time(),
             timeout_seconds=timeout_seconds,
@@ -104,6 +110,7 @@ class BackgroundSessionManager:
                 "session_id": session.session_id,
                 "command": session.command,
                 "elapsed_seconds": round(elapsed, 2),
+                "shell": session.shell,
             }
 
         output, _ = session.process.communicate(timeout=1)
@@ -118,6 +125,7 @@ class BackgroundSessionManager:
             "status": session.status,
             "session_id": session.session_id,
             "command": session.command,
+            "shell": session.shell,
             "exit_code": session.exit_code,
             "output": session.output,
         }

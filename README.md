@@ -116,6 +116,34 @@ Notes:
 - `prompt()/continue_run()/follow_up()` all execute in that same session workspace.
 - Top-level SDK helpers `vv_agent.sdk.run(...)` and `vv_agent.sdk.query(...)` also accept `workspace=...`.
 
+### Shell Runtime Configuration (Windows)
+
+`bash` tool shell selection is a **runtime startup/session configuration**, not a tool-call argument.
+
+- Global defaults: `AgentSDKOptions.bash_shell` and `AgentSDKOptions.windows_shell_priority`
+- Per-agent override: `AgentDefinition.bash_shell` and `AgentDefinition.windows_shell_priority`
+- Recommended Windows priority: `["git-bash", "powershell", "cmd"]`
+
+```python
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+
+client = AgentSDKClient(
+    options=AgentSDKOptions(
+        settings_file="local_settings.py",
+        default_backend="moonshot",
+        windows_shell_priority=["git-bash", "powershell", "cmd"],
+    ),
+    agents={
+        "desktop": AgentDefinition(
+            description="Desktop helper",
+            model="kimi-k2.5",
+            # Optional hard override for this agent only:
+            bash_shell=None,
+        )
+    },
+)
+```
+
 ## Execution Backends
 
 The cycle loop is delegated to a pluggable `ExecutionBackend`.

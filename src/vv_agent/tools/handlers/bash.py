@@ -21,6 +21,57 @@ _DANGEROUS_SNIPPETS = (
 _OUTPUT_LIMIT = 50_000
 
 
+def _normalize_shell_value(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
+
+
+def _normalize_windows_shell_priority(raw: Any, *, strict: bool) -> list[str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        if strict:
+            raise ValueError("`windows_shell_priority` must be a list of shell names")
+        return None
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _read_shell_defaults(context: ToolContext) -> tuple[str | None, list[str] | None]:
+    default_shell: str | None = None
+    default_priority: list[str] | None = None
+
+    metadata_sources: list[dict[str, Any]] = []
+    runtime_metadata = getattr(context.ctx, "metadata", None)
+    if isinstance(runtime_metadata, dict):
+        metadata_sources.append(runtime_metadata)
+
+    task_metadata = getattr(context, "task_metadata", None)
+    if isinstance(task_metadata, dict):
+        metadata_sources.append(task_metadata)
+
+    for metadata in metadata_sources:
+        if default_shell is None:
+            default_shell = _normalize_shell_value(metadata.get("bash_shell"))
+        if default_priority is None:
+            default_priority = _normalize_windows_shell_priority(
+                metadata.get("windows_shell_priority"),
+                strict=True,
+            )
+
+    return default_shell, default_priority
+
+
 def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     command = str(arguments.get("command", "")).strip()
     if not command:
@@ -61,20 +112,43 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
     stdin_text = str(stdin_data) if stdin_data is not None else None
     auto_confirm = bool(arguments.get("auto_confirm", False))
     run_in_background = bool(arguments.get("run_in_background", False))
+    try:
+        shell, windows_shell_priority = _read_shell_defaults(context)
+    except ValueError as exc:
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="error",
+            status_code=ToolResultStatus.ERROR,
+            error_code="invalid_shell_config",
+            content=to_json({"error": str(exc)}),
+        )
 
     if run_in_background:
-        session_id = background_session_manager.start(
-            command=command,
-            cwd=exec_dir,
-            timeout_seconds=timeout,
-            stdin=stdin_text,
-            auto_confirm=auto_confirm,
-        )
+        try:
+            session_id = background_session_manager.start(
+                command=command,
+                cwd=exec_dir,
+                timeout_seconds=timeout,
+                stdin=stdin_text,
+                auto_confirm=auto_confirm,
+                shell=shell,
+                windows_shell_priority=windows_shell_priority,
+            )
+        except ValueError as exc:
+            return ToolExecutionResult(
+                tool_call_id="",
+                status="error",
+                status_code=ToolResultStatus.ERROR,
+                error_code="shell_unavailable",
+                content=to_json({"error": str(exc)}),
+            )
         payload = {
             "status": "running",
             "session_id": session_id,
             "command": command,
         }
+        if shell:
+            payload["shell"] = shell
         return ToolExecutionResult(
             tool_call_id="",
             status="success",
@@ -83,11 +157,22 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             metadata=payload,
         )
 
-    shell_command, prepared_stdin = prepare_shell_execution(
-        command,
-        auto_confirm=auto_confirm,
-        stdin=stdin_text,
-    )
+    try:
+        shell_command, prepared_stdin = prepare_shell_execution(
+            command,
+            auto_confirm=auto_confirm,
+            stdin=stdin_text,
+            shell=shell,
+            windows_shell_priority=windows_shell_priority,
+        )
+    except ValueError as exc:
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="error",
+            status_code=ToolResultStatus.ERROR,
+            error_code="shell_unavailable",
+            content=to_json({"error": str(exc)}),
+        )
 
     try:
         completed = subprocess.run(
@@ -115,6 +200,8 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
         "exit_code": completed.returncode,
         "output": combined_output,
     }
+    if shell:
+        payload["shell"] = shell
 
     if completed.returncode != 0:
         return ToolExecutionResult(

@@ -50,6 +50,8 @@ class AgentDefinition:
     skill_directories: list[str] = field(default_factory=list)
     extra_tool_names: list[str] = field(default_factory=list)
     exclude_tools: list[str] = field(default_factory=list)
+    bash_shell: str | None = None
+    windows_shell_priority: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None
     system_prompt_template: str | None = None
@@ -71,6 +73,8 @@ class AgentSDKOptions:
     execution_backend: ExecutionBackend | None = None
     stream_callback: StreamCallback | None = None
     debug_dump_dir: str | None = None
+    bash_shell: str | None = None
+    windows_shell_priority: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

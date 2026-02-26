@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +23,7 @@ class ToolContext:
     workspace_backend: WorkspaceBackend
     sub_task_runner: SubTaskRunner | None = None
     ctx: ExecutionContext | None = None
+    task_metadata: dict[str, Any] = field(default_factory=dict)
 
     def resolve_workspace_path(self, raw_path: str) -> Path:
         base = self.workspace.resolve()

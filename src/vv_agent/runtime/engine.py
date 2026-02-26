@@ -254,6 +254,7 @@ class AgentRuntime:
                         ctx=ctx,
                     ),
                     ctx=ctx,
+                    task_metadata=dict(task.metadata),
                 )
 
                 def _on_tool_result(call: ToolCall, result: ToolExecutionResult, *, _cycle: int = cycle_index) -> None:
@@ -790,6 +791,10 @@ class AgentRuntime:
             "parent_task_id": parent_task.task_id,
             "sub_agent_name": sub_agent_name,
         }
+        for key in ("bash_shell", "windows_shell_priority"):
+            value = parent_task.metadata.get(key)
+            if value is not None:
+                metadata[key] = value
         if request.metadata:
             metadata.update(request.metadata)
 

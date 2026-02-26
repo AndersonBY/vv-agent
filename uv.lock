@@ -1151,7 +1151,7 @@ wheels = [
 
 [[package]]
 name = "vv-agent"
-version = "0.1.23"
+version = "0.1.24"
 source = { editable = "." }
 dependencies = [
     { name = "openai" },
@@ -1183,7 +1183,7 @@ requires-dist = [
     { name = "celery", extras = ["redis"], marker = "extra == 'celery'", specifier = ">=5.4" },
     { name = "openai", specifier = ">=1.109.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "ripgrep", specifier = "==14.1.0" },
+    { name = "ripgrep", specifier = ">=14.1.0" },
     { name = "vv-llm", directory = "../ref_repos/vv-llm" },
 ]
 provides-extras = ["celery", "s3"]
