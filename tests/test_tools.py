@@ -373,6 +373,58 @@ def test_workspace_grep_supports_multiline_and_head_limit(registry, tool_context
     assert payload["summary"]["total_matches"] == 1
 
 
+def test_workspace_grep_excludes_hidden_by_default(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / ".hidden.txt").write_text("secret Agent marker", encoding="utf-8")
+
+    call = ToolCall(id="call_hidden_default", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["total_matches"] == 0
+
+
+def test_workspace_grep_can_include_hidden_files(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / ".hidden.txt").write_text("secret Agent marker", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_hidden_include",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "Agent", "include_hidden": True},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["total_matches"] == 1
+    assert payload["matches"][0]["path"] == ".hidden.txt"
+
+
+def test_workspace_grep_skips_common_ignored_roots_by_default(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    (tool_context.workspace / "node_modules" / "pkg" / "x.js").write_text("Agent token", encoding="utf-8")
+
+    call = ToolCall(id="call_ignored_default", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["total_matches"] == 0
+
+
+def test_workspace_grep_can_include_common_ignored_roots(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
+    (tool_context.workspace / "node_modules" / "pkg" / "x.js").write_text("Agent token", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_ignored_include",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "Agent", "include_ignored": True},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["total_matches"] == 1
+    assert payload["matches"][0]["path"] == "node_modules/pkg/x.js"
+
+
 def test_workspace_grep_prefers_ripgrep_when_available(
     registry,
     tool_context: ToolContext,
@@ -435,6 +487,48 @@ def test_workspace_grep_prefers_ripgrep_when_available(
     assert payload["summary"]["files_with_matches"] == 2
 
 
+def test_workspace_grep_accepts_ripgrep_returncode_2_with_results(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tool_context.workspace / "a.py").write_text("no token here", encoding="utf-8")
+
+    class _PartialErrorProcess:
+        def __init__(self) -> None:
+            self.stdout = io.StringIO(
+                "\n".join(
+                    [
+                        '{"type":"begin","data":{"path":{"text":"a.py"}}}',
+                        (
+                            '{"type":"match","data":{"path":{"text":"a.py"},'
+                            '"lines":{"text":"Agent from rg\\n"},"line_number":1,'
+                            '"submatches":[{"start":0,"end":5}]}}'
+                        ),
+                        '{"type":"summary","data":{}}',
+                    ]
+                )
+                + "\n"
+            )
+            self.returncode = 2
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(search_handler.subprocess, "Popen", lambda *args, **kwargs: _PartialErrorProcess())
+
+    call = ToolCall(id="call_rg_partial_error", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    # If returncode=2 forced fallback, this would be 0 because source file does not contain "Agent".
+    assert payload["summary"]["total_matches"] == 1
+
+
 def test_workspace_grep_falls_back_when_ripgrep_errors(
     registry,
     tool_context: ToolContext,
@@ -446,7 +540,7 @@ def test_workspace_grep_falls_back_when_ripgrep_errors(
         def __init__(self) -> None:
             self.stdout = io.StringIO("")
             self.stderr = io.StringIO("ripgrep failed")
-            self.returncode = 2
+            self.returncode = 3
 
         def wait(self, timeout: float | None = None) -> int:
             return self.returncode

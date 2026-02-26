@@ -73,6 +73,27 @@ _OUTPUT_MODES = {"content", "files_with_matches", "count"}
 _MAX_RESULT_LINES = 500
 _MAX_RESULT_CHARS = 30_000
 _RG_EXECUTABLE_CACHE: str | None | bool = None
+_COMMON_IGNORED_ROOTS = frozenset(
+    {
+        ".venv",
+        "venv",
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".idea",
+        ".vscode",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        ".cache",
+        "target",
+        "vendor",
+    }
+)
 
 
 def _to_int(value: Any, *, name: str, min_value: int = 0) -> int:
@@ -119,6 +140,36 @@ def _resolve_rg_executable() -> str | None:
     return None
 
 
+def _is_workspace_root(path: str) -> bool:
+    normalized = path.strip()
+    if not normalized:
+        return True
+    return Path(normalized).as_posix() in {".", ""}
+
+
+def _collect_ignored_root_names(base_path: Path) -> list[str]:
+    ignored_root_names: list[str] = []
+    try:
+        with os.scandir(base_path) as iterator:
+            for entry in iterator:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if entry.name.lower() in _COMMON_IGNORED_ROOTS:
+                    ignored_root_names.append(entry.name)
+    except OSError:
+        pass
+    return ignored_root_names
+
+
+def _is_hidden_path(rel_path: str) -> bool:
+    return any(part.startswith(".") for part in PurePosixPath(rel_path).parts)
+
+
+def _is_in_common_ignored_root(rel_path: str) -> bool:
+    parts = PurePosixPath(rel_path).parts
+    return bool(parts) and parts[0].lower() in _COMMON_IGNORED_ROOTS
+
+
 def _decode_rg_field(field: Any) -> str:
     if not isinstance(field, dict):
         return ""
@@ -154,6 +205,8 @@ def _workspace_grep_local_rg(
     multiline_mode: bool,
     context_before: int,
     context_after: int,
+    include_hidden: bool,
+    include_ignored: bool,
 ) -> tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None:
     rg_executable = _resolve_rg_executable()
     if not rg_executable:
@@ -163,6 +216,12 @@ def _workspace_grep_local_rg(
     base_path = context.resolve_workspace_path(path)
     if not base_path.exists() or not base_path.is_dir():
         return None
+    base_is_workspace_root = _is_workspace_root(path)
+    ignored_root_names = (
+        _collect_ignored_root_names(base_path)
+        if base_is_workspace_root and not include_ignored
+        else []
+    )
 
     command = [
         rg_executable,
@@ -171,10 +230,11 @@ def _workspace_grep_local_rg(
         "--color",
         "never",
         "--no-messages",
-        "--hidden",
-        "--no-ignore",
-        "--no-ignore-vcs",
     ]
+    if include_hidden:
+        command.append("--hidden")
+    if include_ignored:
+        command.extend(["--no-ignore", "--no-ignore-vcs"])
     if case_insensitive:
         command.append("-i")
     if multiline_mode:
@@ -185,6 +245,9 @@ def _workspace_grep_local_rg(
         command.extend(["--after-context", str(context_after)])
     if glob_pattern and glob_pattern != "**/*":
         command.extend(["--glob", glob_pattern])
+    if base_is_workspace_root and not include_ignored:
+        for ignored_name in ignored_root_names:
+            command.extend(["--glob", f"!{ignored_name}/**"])
     if file_type:
         for token in FILE_TYPE_EXTENSIONS[file_type]:
             if token.startswith("."):
@@ -198,7 +261,7 @@ def _workspace_grep_local_rg(
             command,
             cwd=base_path,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -322,7 +385,7 @@ def _workspace_grep_local_rg(
             process.kill()
             process.wait(timeout=1)
 
-    if process.returncode not in (0, 1):
+    if process.returncode not in (0, 1, 2):
         return None
 
     if output_mode == "content" and not multiline_mode:
@@ -405,6 +468,9 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     path = str(arguments.get("path", "."))
     glob_pattern = str(arguments.get("glob", "**/*"))
     backend = context.workspace_backend
+    include_hidden = bool(arguments.get("include_hidden", False))
+    include_ignored = bool(arguments.get("include_ignored", False))
+    root_listing = _is_workspace_root(path)
 
     case_insensitive = bool(arguments.get("i", False))
     if "case_sensitive" in arguments:
@@ -430,7 +496,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     file_counts: dict[str, int] = {}
     content_rows: list[dict[str, Any]] = []
 
-    rg_result: tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]]|None = None
+    rg_result: tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None = None
     local_root = getattr(backend, "root", None)
     if isinstance(local_root, Path):
         rg_result = _workspace_grep_local_rg(
@@ -444,6 +510,8 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
             multiline_mode=multiline_mode,
             context_before=context_before,
             context_after=context_after,
+            include_hidden=include_hidden,
+            include_ignored=include_ignored,
         )
 
     if rg_result is not None:
@@ -451,6 +519,10 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     else:
         for rel_path in backend.list_files(path, glob_pattern):
             if not _matches_file_type(rel_path, file_type):
+                continue
+            if not include_hidden and _is_hidden_path(rel_path):
+                continue
+            if root_listing and not include_ignored and _is_in_common_ignored_root(rel_path):
                 continue
 
             try:

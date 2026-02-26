@@ -209,6 +209,8 @@ FILTERS:
 - `type`: language/file-type shortcut (py/js/ts/md/json/...)
 - `i`: case-insensitive search
 - `multiline`: let `.` match newlines and allow multi-line patterns
+- `include_hidden`: include hidden files/directories (default false)
+- `include_ignored`: include common dependency/cache roots at workspace root (default false)
 
 CONTENT OPTIONS (only for `content` mode):
 - `b`: lines before each match
@@ -237,6 +239,17 @@ Guidance:
                     "glob": {
                         "type": "string",
                         "description": "Optional file glob filter. Default **/*.",
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "Whether hidden files are included. Default false.",
+                    },
+                    "include_ignored": {
+                        "type": "boolean",
+                        "description": (
+                            "When searching workspace root, include files under common "
+                            "dependency/cache directories. Default false."
+                        ),
                     },
                     "output_mode": {
                         "type": "string",
