@@ -8,8 +8,13 @@ from vv_agent.constants import BATCH_SUB_TASKS_TOOL_NAME, CREATE_SUB_TASK_TOOL_N
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.backends.inline import InlineBackend
+from vv_agent.runtime.engine import (
+    _register_sub_agent_session,
+    _unregister_sub_agent_session,
+    steer_sub_agent_session,
+)
 from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentStatus, AgentTask, LLMResponse, SubAgentConfig, ToolCall
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse, SubAgentConfig, SubTaskRequest, ToolCall
 
 
 def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:
@@ -292,6 +297,52 @@ def test_batch_sub_tasks_uses_execution_backend_parallel_map(tmp_path: Path) -> 
     assert backend.parallel_map_calls == 1
 
 
+def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> None:
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(steps=[]),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    parent_task = AgentTask(
+        task_id="parent",
+        model="parent-model",
+        system_prompt="sys",
+        user_prompt="run parent task",
+        max_cycles=4,
+        metadata={"language": "zh-CN"},
+    )
+    sub_agent = SubAgentConfig(
+        model="kimi-k2.5",
+        backend="moonshot",
+        description="collect facts",
+    )
+    request = SubTaskRequest(
+        agent_name="research-sub",
+        task_description="Collect one fact",
+        metadata={
+            "task_id": "user-overridden-task-id",
+            "session_id": "user-overridden-session-id",
+            "browser_scope_key": "user-overridden-browser-scope",
+        },
+    )
+
+    sub_task = runtime._build_sub_agent_task(
+        parent_task=parent_task,
+        sub_task_id="sub-task-1",
+        sub_session_id="sub-session-1",
+        sub_agent_name="research-sub",
+        sub_agent=sub_agent,
+        resolved_model_id="kimi-k2.5",
+        request=request,
+        parent_shared_state={},
+        workspace_path=tmp_path,
+    )
+
+    assert sub_task.metadata["task_id"] == "sub-task-1"
+    assert sub_task.metadata["session_id"] == "sub-session-1"
+    assert sub_task.metadata["browser_scope_key"] == "sub-session-1"
+
+
 def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: Path) -> None:
     captured_events: list[tuple[str, dict[str, object]]] = []
 
@@ -429,3 +480,23 @@ def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_pa
     assert tool_result.error_code == "sub_task_failed"
     payload = json.loads(tool_result.content)
     assert "requires runtime settings_file" in payload["error"]
+
+
+def test_steer_sub_agent_session_targets_registered_session() -> None:
+    class _DummySession:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def steer(self, prompt: str) -> None:
+            self.messages.append(prompt)
+
+    session_id = "sub-steer-test"
+    dummy = _DummySession()
+    _register_sub_agent_session(session_id, dummy)
+    try:
+        assert steer_sub_agent_session(session_id=session_id, prompt="focus github") is True
+        assert dummy.messages == ["focus github"]
+    finally:
+        _unregister_sub_agent_session(session_id, dummy)
+
+    assert steer_sub_agent_session(session_id=session_id, prompt="after cleanup") is False

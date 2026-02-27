@@ -360,6 +360,10 @@ Each delegated sub-task now runs in a real `AgentSession` (session id defaults t
 
 `batch_sub_tasks` now dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so batches run concurrently when the backend supports parallel execution.
 
+Sub-task runtime metadata now includes `task_id`, `session_id`, and `browser_scope_key` for each sub-agent run, so session-scoped tools (for example, browser controllers) stay isolated across parallel sub-tasks.
+
+Host apps can interrupt a currently running sub-agent by calling `vv_agent.runtime.engine.steer_sub_agent_session(session_id=..., prompt=...)`.
+
 When a sub-agent uses a different model from the parent, the runtime needs `settings_file` and `default_backend` to resolve the LLM client.
 
 ## Examples

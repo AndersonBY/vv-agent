@@ -351,6 +351,10 @@ class MyBackend:
 
 `batch_sub_tasks` 现在会通过 runtime 执行后端的 `parallel_map` 分发有效子任务；当后端支持并行时，批量任务会并发执行。
 
+每个子任务的 runtime metadata 现在会写入 `task_id`、`session_id` 和 `browser_scope_key`，确保浏览器这类会话级工具在并行子任务间保持隔离。
+
+宿主应用可以通过 `vv_agent.runtime.engine.steer_sub_agent_session(session_id=..., prompt=...)` 向正在运行的子任务定向插话。
+
 子 Agent 使用与父任务不同的模型时，runtime 需要提供 `settings_file` 和 `default_backend` 来解析 LLM 客户端。
 
 ## 示例

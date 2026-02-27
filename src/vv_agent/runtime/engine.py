@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
@@ -40,6 +41,52 @@ from vv_agent.workspace import LocalWorkspaceBackend, WorkspaceBackend
 RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
 BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
 InterruptionMessageProvider = Callable[[], list[Message]]
+
+_ACTIVE_SUB_AGENT_SESSIONS_LOCK = RLock()
+_ACTIVE_SUB_AGENT_SESSIONS: dict[str, Any] = {}
+
+
+def steer_sub_agent_session(*, session_id: str, prompt: str) -> bool:
+    """Steer a running sub-agent session by its sub-session id."""
+    normalized_session_id = str(session_id or "").strip()
+    normalized_prompt = str(prompt or "").strip()
+    if not normalized_session_id or not normalized_prompt:
+        return False
+    with _ACTIVE_SUB_AGENT_SESSIONS_LOCK:
+        session = _ACTIVE_SUB_AGENT_SESSIONS.get(normalized_session_id)
+    if session is None:
+        return False
+    try:
+        session.steer(normalized_prompt)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to steer sub-agent session %s: %s",
+            normalized_session_id,
+            exc,
+        )
+        return False
+    return True
+
+
+def _register_sub_agent_session(session_id: str, session: Any) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    with _ACTIVE_SUB_AGENT_SESSIONS_LOCK:
+        _ACTIVE_SUB_AGENT_SESSIONS[normalized_session_id] = session
+
+
+def _unregister_sub_agent_session(session_id: str, session: Any | None = None) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    with _ACTIVE_SUB_AGENT_SESSIONS_LOCK:
+        registered = _ACTIVE_SUB_AGENT_SESSIONS.get(normalized_session_id)
+        if registered is None:
+            return
+        if session is not None and registered is not session:
+            return
+        _ACTIVE_SUB_AGENT_SESSIONS.pop(normalized_session_id, None)
 
 
 class LLMBuilder(Protocol):
@@ -686,6 +733,7 @@ class AgentRuntime:
             sub_task = self._build_sub_agent_task(
                 parent_task=parent_task,
                 sub_task_id=sub_task_id,
+                sub_session_id=sub_session_id,
                 sub_agent_name=request.agent_name,
                 sub_agent=sub_agent,
                 resolved_model_id=model_id,
@@ -797,20 +845,24 @@ class AgentRuntime:
                 shared_state={"todo_list": []},
             )
 
-            unsub = sub_session.subscribe(_emit_sub_session_event)
-            _emit_sub_session_event(
-                "session_created",
-                {
-                    "agent_name": request.agent_name,
-                    "model": sub_task.model,
-                    "workspace": str(workspace_path),
-                    "max_cycles": sub_task.max_cycles,
-                },
-            )
             try:
-                sub_run = sub_session.prompt(sub_task.user_prompt, auto_follow_up=False)
+                _register_sub_agent_session(sub_session_id, sub_session)
+                unsub = sub_session.subscribe(_emit_sub_session_event)
+                _emit_sub_session_event(
+                    "session_created",
+                    {
+                        "agent_name": request.agent_name,
+                        "model": sub_task.model,
+                        "workspace": str(workspace_path),
+                        "max_cycles": sub_task.max_cycles,
+                    },
+                )
+                try:
+                    sub_run = sub_session.prompt(sub_task.user_prompt, auto_follow_up=False)
+                finally:
+                    unsub()
             finally:
-                unsub()
+                _unregister_sub_agent_session(sub_session_id, sub_session)
         except Exception as exc:
             return SubTaskOutcome(
                 task_id=sub_task_id,
@@ -885,6 +937,7 @@ class AgentRuntime:
         *,
         parent_task: AgentTask,
         sub_task_id: str,
+        sub_session_id: str,
         sub_agent_name: str,
         sub_agent: SubAgentConfig,
         resolved_model_id: str,
@@ -936,6 +989,9 @@ class AgentRuntime:
                 metadata[key] = value
         if request.metadata:
             metadata.update(request.metadata)
+        metadata["task_id"] = sub_task_id
+        metadata["session_id"] = sub_session_id
+        metadata["browser_scope_key"] = sub_session_id
 
         return AgentTask(
             task_id=sub_task_id,
