@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
-from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions, create_agent_session
 from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentStatus, LLMResponse, ToolCall
+from vv_agent.types import AgentResult, AgentStatus, LLMResponse, ToolCall
 
 WRITE_FILE_TOOL_NAME = "write_file"
 
@@ -409,6 +412,55 @@ def test_session_emits_session_and_runtime_events(tmp_path: Path) -> None:
     assert "run_started" in events
     assert "run_completed" in events
     assert "session_run_end" in events
+
+
+def test_session_cancel_requests_running_execution() -> None:
+    run_started = threading.Event()
+    cancel_observed = threading.Event()
+
+    def execute_run(**kwargs):
+        cancellation_token = kwargs.get("cancellation_token")
+        run_started.set()
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if cancellation_token is not None and cancellation_token.cancelled:
+                cancel_observed.set()
+                break
+            time.sleep(0.01)
+        result = AgentResult(
+            status=AgentStatus.FAILED if cancel_observed.is_set() else AgentStatus.COMPLETED,
+            messages=[],
+            cycles=[],
+            error="Operation was cancelled" if cancel_observed.is_set() else None,
+            shared_state={},
+        )
+        return SimpleNamespace(result=result)
+
+    session = create_agent_session(
+        execute_run=execute_run,
+        session_id="cancel-test",
+        agent_name="default",
+        definition=AgentDefinition(description="helper", model="kimi-k2.5"),
+        workspace=Path("."),
+    )
+
+    captured_run = {}
+
+    def _run_prompt() -> None:
+        captured_run["run"] = session.prompt("run", auto_follow_up=False)
+
+    worker = threading.Thread(target=_run_prompt, daemon=True)
+    worker.start()
+    assert run_started.wait(timeout=1.0) is True
+    assert session.cancel() is True
+    worker.join(timeout=2.0)
+
+    assert cancel_observed.is_set() is True
+    run = captured_run.get("run")
+    assert run is not None
+    assert run.result.status == AgentStatus.FAILED
+    assert "cancelled" in (run.result.error or "").lower()
+    assert session.cancel() is False
 
 
 def test_session_run_to_dict_contains_structured_token_usage(tmp_path: Path) -> None:

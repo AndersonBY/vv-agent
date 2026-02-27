@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.prompt import build_system_prompt
-from vv_agent.runtime import AgentRuntime
+from vv_agent.runtime import AgentRuntime, CancellationToken
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.engine import BeforeCycleMessageProvider, InterruptionMessageProvider
 from vv_agent.sdk.types import AgentDefinition, AgentRun, AgentSDKOptions, RuntimeLogHandler
@@ -187,6 +187,7 @@ class AgentSDKClient:
         before_cycle_messages: BeforeCycleMessageProvider | None = None,
         interruption_messages: InterruptionMessageProvider | None = None,
         task_name: str | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> AgentRun:
         resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
         effective_definition = definition
@@ -208,6 +209,7 @@ class AgentSDKClient:
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
             task_name=task_name,
+            cancellation_token=cancellation_token,
         )
 
     def run_agent(
@@ -304,6 +306,7 @@ class AgentSDKClient:
         before_cycle_messages: BeforeCycleMessageProvider | None = None,
         interruption_messages: InterruptionMessageProvider | None = None,
         task_name: str | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> AgentRun:
         if definition is None or resolved_name is None:
             resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
@@ -345,8 +348,11 @@ class AgentSDKClient:
         )
 
         ctx: ExecutionContext | None = None
-        if self.options.stream_callback is not None:
-            ctx = ExecutionContext(stream_callback=self.options.stream_callback)
+        if self.options.stream_callback is not None or cancellation_token is not None:
+            ctx = ExecutionContext(
+                cancellation_token=cancellation_token,
+                stream_callback=self.options.stream_callback,
+            )
 
         result = runtime.run(
             task,

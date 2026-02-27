@@ -114,6 +114,7 @@ Notes:
 
 - `AgentSession.workspace` is fixed at session creation time.
 - `prompt()/continue_run()/follow_up()` all execute in that same session workspace.
+- `session.cancel()` requests cancellation for the currently running prompt in that session.
 - Top-level SDK helpers `vv_agent.sdk.run(...)` and `vv_agent.sdk.query(...)` also accept `workspace=...`.
 
 ### Shell Runtime Configuration (Windows)
@@ -356,6 +357,8 @@ Custom tools can be registered via `ToolRegistry.register()`.
 Configure named sub-agents on `AgentTask.sub_agents`. The parent agent delegates work via `create_sub_task` / `batch_sub_tasks`. Each sub-agent gets its own runtime, model, and tool set.
 
 Each delegated sub-task now runs in a real `AgentSession` (session id defaults to the sub-task id). Tool payloads include `session_id`, and runtime events include stable identifiers (`task_id` / `session_id`) so host apps can subscribe, persist, and stream sub-task progress independently (including `sub_agent_stream_delta` token chunks).
+
+`batch_sub_tasks` now dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so batches run concurrently when the backend supports parallel execution.
 
 When a sub-agent uses a different model from the parent, the runtime needs `settings_file` and `default_backend` to resolve the LLM client.
 

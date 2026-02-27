@@ -7,6 +7,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import BATCH_SUB_TASKS_TOOL_NAME, CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import AgentRuntime
+from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse, SubAgentConfig, ToolCall
 
@@ -195,6 +196,100 @@ def test_batch_sub_tasks_aggregates_sub_agent_results(tmp_path: Path) -> None:
     assert batch_payload["summary"] == {"total": 2, "completed": 2, "failed": 0}
     assert batch_payload["results"][0]["final_answer"] == "sub-A"
     assert batch_payload["results"][1]["final_answer"] == "sub-B"
+
+
+def test_batch_sub_tasks_uses_execution_backend_parallel_map(tmp_path: Path) -> None:
+    class _TrackingInlineBackend(InlineBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.parallel_map_calls = 0
+
+        def parallel_map(self, fn, items):
+            self.parallel_map_calls += 1
+            return super().parallel_map(fn, items)
+
+    backend = _TrackingInlineBackend()
+    parent_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="batch delegate",
+                tool_calls=[
+                    ToolCall(
+                        id="p1",
+                        name=BATCH_SUB_TASKS_TOOL_NAME,
+                        arguments={
+                            "agent_name": "writer-sub",
+                            "tasks": [
+                                {"task_description": "Write section A"},
+                                {"task_description": "Write section B"},
+                            ],
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finish parent",
+                tool_calls=[ToolCall(id="p2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            ),
+        ]
+    )
+
+    settings_file = tmp_path / "local_settings.py"
+    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
+    sub_answers = iter(["sub-A", "sub-B"])
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        sub_llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="sub done",
+                    tool_calls=[
+                        ToolCall(
+                            id="s1",
+                            name=TASK_FINISH_TOOL_NAME,
+                            arguments={"message": next(sub_answers)},
+                        )
+                    ],
+                )
+            ]
+        )
+        return sub_llm, _fake_resolved(backend=backend, model=model)
+
+    runtime = AgentRuntime(
+        llm_client=parent_llm,
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        settings_file=settings_file,
+        default_backend="moonshot",
+        llm_builder=fake_llm_builder,
+        tool_registry_factory=build_default_registry,
+        execution_backend=backend,
+    )
+    task = AgentTask(
+        task_id="parent_batch_parallel",
+        model="parent-model",
+        system_prompt="sys",
+        user_prompt="run parent batch task",
+        max_cycles=4,
+        sub_agents={
+            "writer-sub": SubAgentConfig(
+                model="kimi-k2.5",
+                backend="moonshot",
+                description="write sections",
+            )
+        },
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.COMPLETED
+    assert backend.parallel_map_calls == 1
 
 
 def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: Path) -> None:

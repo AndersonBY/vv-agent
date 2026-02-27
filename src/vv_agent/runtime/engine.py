@@ -149,12 +149,17 @@ class AgentRuntime:
             interruption_messages=interruption_messages,
         )
 
+        runtime_ctx = ctx
+        if runtime_ctx is None:
+            runtime_ctx = ExecutionContext()
+        runtime_ctx.metadata.setdefault("execution_backend", self.execution_backend)
+
         return self.execution_backend.execute(
             task=task,
             initial_messages=messages,
             shared_state=shared,
             cycle_executor=cycle_executor,
-            ctx=ctx,
+            ctx=runtime_ctx,
             max_cycles=task.max_cycles,
         )
 

@@ -114,6 +114,7 @@ session.continue_run()
 
 - `AgentSession.workspace` 在会话创建后固定。
 - `prompt()/continue_run()/follow_up()` 都在同一个会话工作区执行。
+- `session.cancel()` 可请求取消当前会话里正在执行的运行。
 - 顶层 SDK 辅助函数 `vv_agent.sdk.run(...)` 和 `vv_agent.sdk.query(...)` 也支持 `workspace=...`。
 
 ### Windows Shell 运行时配置
@@ -347,6 +348,8 @@ class MyBackend:
 在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` / `batch_sub_tasks` 委派任务。每个子 Agent 有独立的 runtime、模型和工具集。
 
 现在每个子任务都会创建真实 `AgentSession`（默认 `session_id == task_id`）。工具返回结果会包含 `session_id`，运行事件会携带稳定标识（`task_id` / `session_id`），宿主应用可以按子任务独立订阅、持久化与流式展示进度（含 `sub_agent_stream_delta` token 增量）。
+
+`batch_sub_tasks` 现在会通过 runtime 执行后端的 `parallel_map` 分发有效子任务；当后端支持并行时，批量任务会并发执行。
 
 子 Agent 使用与父任务不同的模型时，runtime 需要提供 `settings_file` 和 `default_backend` 来解析 LLM 客户端。
 

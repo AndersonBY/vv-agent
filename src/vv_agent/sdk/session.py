@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.sdk.types import AgentDefinition, AgentRun
 from vv_agent.types import AgentStatus, Message
 
@@ -51,6 +53,8 @@ class AgentSession:
         self._listeners: list[SessionEventHandler] = []
         self._steering_queue: deque[str] = deque()
         self._follow_up_queue: deque[str] = deque()
+        self._active_cancellation_token: CancellationToken | None = None
+        self._supports_run_cancellation = self._detect_run_cancellation_support(execute_run)
         self._lock = RLock()
 
     @property
@@ -110,6 +114,16 @@ class AgentSession:
             self._follow_up_queue.clear()
         self._emit("session_queues_cleared")
 
+    def cancel(self) -> bool:
+        with self._lock:
+            if not self._running or self._active_cancellation_token is None:
+                return False
+            self._active_cancellation_token.cancel()
+            self._steering_queue.clear()
+            self._follow_up_queue.clear()
+        self._emit("session_cancel_requested")
+        return True
+
     def prompt(self, prompt: str, *, auto_follow_up: bool = True) -> AgentRun:
         text = prompt.strip()
         if not text:
@@ -161,25 +175,30 @@ class AgentSession:
             if self._running:
                 raise RuntimeError("Session is already running. Queue with steer()/follow_up() or wait for completion.")
             self._running = True
+            self._active_cancellation_token = CancellationToken()
             initial_messages = list(self._messages)
             current_shared_state = dict(self._shared_state)
 
         self._emit("session_run_start", prompt=prompt, existing_messages=len(initial_messages))
         try:
-            run = self._execute_run(
-                prompt=prompt,
-                agent=self.definition,
-                task_name=self.agent_name,
-                workspace=self.workspace,
-                shared_state=current_shared_state,
-                initial_messages=initial_messages,
-                before_cycle_messages=self._before_cycle_messages,
-                interruption_messages=self._interruption_messages,
-                log_handler=self._session_log_handler,
-            )
+            run_kwargs: dict[str, Any] = {
+                "prompt": prompt,
+                "agent": self.definition,
+                "task_name": self.agent_name,
+                "workspace": self.workspace,
+                "shared_state": current_shared_state,
+                "initial_messages": initial_messages,
+                "before_cycle_messages": self._before_cycle_messages,
+                "interruption_messages": self._interruption_messages,
+                "log_handler": self._session_log_handler,
+            }
+            if self._supports_run_cancellation and self._active_cancellation_token is not None:
+                run_kwargs["cancellation_token"] = self._active_cancellation_token
+            run = self._execute_run(**run_kwargs)
         finally:
             with self._lock:
                 self._running = False
+                self._active_cancellation_token = None
 
         with self._lock:
             self._messages = list(run.result.messages)
@@ -229,6 +248,19 @@ class AgentSession:
             listeners = list(self._listeners)
         for listener in listeners:
             listener(event, payload)
+
+    @staticmethod
+    def _detect_run_cancellation_support(execute_run: Callable[..., AgentRun]) -> bool:
+        try:
+            signature = inspect.signature(execute_run)
+        except (TypeError, ValueError):
+            return True
+        params = signature.parameters.values()
+        return any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            or parameter.name == "cancellation_token"
+            for parameter in params
+        )
 
 
 def create_agent_session(
