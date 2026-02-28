@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -42,6 +43,7 @@ class BackgroundSessionManager:
         auto_confirm: bool = False,
         shell: str | None = None,
         windows_shell_priority: list[str] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> str:
         shell_command, prepared_stdin = prepare_shell_execution(
             command,
@@ -58,6 +60,7 @@ class BackgroundSessionManager:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            env=dict(env) if env is not None else None,
         )
 
         if prepared_stdin and process.stdin is not None:

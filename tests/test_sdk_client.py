@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -413,6 +414,84 @@ def test_sdk_client_applies_bash_shell_from_startup_options(tmp_path: Path, monk
     assert run.result.status == AgentStatus.COMPLETED
     assert captured["shell"] == "powershell"
     assert captured["windows_shell_priority"] == ["git-bash", "powershell", "cmd"]
+
+
+def test_sdk_client_merges_bash_env_from_startup_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_prepare(
+        command: str,
+        *,
+        auto_confirm: bool,
+        stdin: str | None,
+        shell: str | None = None,
+        windows_shell_priority: list[str] | None = None,
+    ) -> tuple[list[str], str | None]:
+        del auto_confirm, stdin, shell, windows_shell_priority
+        captured["command"] = command
+        return ["bash", "-lc", command], None
+
+    def fake_run(*args, **kwargs):
+        del args
+        captured["env"] = kwargs.get("env")
+        return SimpleNamespace(stdout="ok\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
+    monkeypatch.setattr(bash_handler.subprocess, "run", fake_run)
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="run shell",
+                    tool_calls=[ToolCall(id="b1", name="bash", arguments={"command": "echo startup-env"})],
+                ),
+                LLMResponse(
+                    content="finish",
+                    tool_calls=[ToolCall(id="f1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                ),
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+            bash_env={
+                "VV_AGENT_OPTION_ONLY": "from-option",
+                "VV_AGENT_SHARED": "from-option",
+            },
+        ),
+        agents={
+            "demo": AgentDefinition(
+                description="helper",
+                model="kimi-k2.5",
+                bash_env={
+                    "VV_AGENT_AGENT_ONLY": "from-agent",
+                    "VV_AGENT_SHARED": "from-agent",
+                },
+            )
+        },
+    )
+
+    run = client.run_agent(agent_name="demo", prompt="test env")
+    assert run.result.status == AgentStatus.COMPLETED
+    process_env = captured.get("env")
+    assert isinstance(process_env, dict)
+    assert process_env["VV_AGENT_OPTION_ONLY"] == "from-option"
+    assert process_env["VV_AGENT_AGENT_ONLY"] == "from-agent"
+    assert process_env["VV_AGENT_SHARED"] == "from-agent"
 
 
 def test_sdk_client_unknown_agent_raises_clear_error(tmp_path: Path) -> None:

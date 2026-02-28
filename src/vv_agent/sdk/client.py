@@ -95,6 +95,8 @@ class AgentSDKClient:
             metadata.setdefault("bash_shell", definition.bash_shell)
         if definition.windows_shell_priority:
             metadata.setdefault("windows_shell_priority", list(definition.windows_shell_priority))
+        if definition.bash_env:
+            metadata.setdefault("bash_env", dict(definition.bash_env))
         if definition.sub_agents:
             metadata.setdefault("sub_agent_names", sorted(definition.sub_agents.keys()))
 
@@ -198,6 +200,10 @@ class AgentSDKClient:
                 effective_definition,
                 windows_shell_priority=list(self.options.windows_shell_priority),
             )
+        if self.options.bash_env:
+            merged_bash_env = dict(self.options.bash_env)
+            merged_bash_env.update(effective_definition.bash_env)
+            effective_definition = replace(effective_definition, bash_env=merged_bash_env)
         return self._execute(
             prompt=prompt,
             resolved_name=resolved_name,

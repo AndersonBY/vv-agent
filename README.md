@@ -119,10 +119,10 @@ Notes:
 
 ### Shell Runtime Configuration (Windows)
 
-`bash` tool shell selection is a **runtime startup/session configuration**, not a tool-call argument.
+`bash` runtime defaults are a **startup/session configuration**, not tool-call arguments.
 
-- Global defaults: `AgentSDKOptions.bash_shell` and `AgentSDKOptions.windows_shell_priority`
-- Per-agent override: `AgentDefinition.bash_shell` and `AgentDefinition.windows_shell_priority`
+- Global defaults: `AgentSDKOptions.bash_shell`, `AgentSDKOptions.windows_shell_priority`, `AgentSDKOptions.bash_env`
+- Per-agent override: `AgentDefinition.bash_shell`, `AgentDefinition.windows_shell_priority`, `AgentDefinition.bash_env`
 - Recommended Windows priority: `["git-bash", "powershell", "cmd"]`
 
 ```python
@@ -133,6 +133,7 @@ client = AgentSDKClient(
         settings_file="local_settings.py",
         default_backend="moonshot",
         windows_shell_priority=["git-bash", "powershell", "cmd"],
+        bash_env={"PIP_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple"},
     ),
     agents={
         "desktop": AgentDefinition(
@@ -140,6 +141,7 @@ client = AgentSDKClient(
             model="kimi-k2.5",
             # Optional hard override for this agent only:
             bash_shell=None,
+            bash_env={"HTTP_PROXY": "http://127.0.0.1:7890"},
         )
     },
 )

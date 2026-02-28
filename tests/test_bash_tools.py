@@ -149,3 +149,75 @@ def test_bash_tool_uses_context_shell_defaults(tmp_path: Path, monkeypatch) -> N
     assert payload["exit_code"] == 0
     assert captured["shell"] == "powershell"
     assert captured["windows_shell_priority"] == ["git-bash", "powershell", "cmd"]
+
+
+def test_bash_tool_applies_context_bash_env(tmp_path: Path, monkeypatch) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+    context.task_metadata = {
+        "bash_env": {
+            "VV_AGENT_CUSTOM_ENV": "custom-value",
+            "VV_AGENT_SHARED_ENV": "from-task",
+        }
+    }
+
+    captured: dict[str, object] = {}
+
+    def fake_prepare(
+        command: str,
+        *,
+        auto_confirm: bool,
+        stdin: str | None,
+        shell: str | None = None,
+        windows_shell_priority: list[str] | None = None,
+    ) -> tuple[list[str], str | None]:
+        del auto_confirm, shell, windows_shell_priority
+        return ["bash", "-lc", command], stdin
+
+    def fake_run(*args, **kwargs):
+        del args
+        captured["env"] = kwargs.get("env")
+        return SimpleNamespace(stdout="ok\n", stderr="", returncode=0)
+
+    monkeypatch.setenv("VV_AGENT_SHARED_ENV", "from-process")
+    monkeypatch.setenv("VV_AGENT_BASE_ENV", "base-value")
+    monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
+    monkeypatch.setattr(bash_handler.subprocess, "run", fake_run)
+
+    result = registry.execute(
+        ToolCall(
+            id="c6",
+            name=BASH_TOOL_NAME,
+            arguments={"command": "echo ok"},
+        ),
+        context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status_code == ToolResultStatus.SUCCESS
+    assert payload["exit_code"] == 0
+    process_env = captured.get("env")
+    assert isinstance(process_env, dict)
+    assert process_env["VV_AGENT_CUSTOM_ENV"] == "custom-value"
+    assert process_env["VV_AGENT_SHARED_ENV"] == "from-task"
+    assert process_env["VV_AGENT_BASE_ENV"] == "base-value"
+
+
+def test_bash_tool_rejects_invalid_bash_env_metadata(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+    context.task_metadata = {"bash_env": ["invalid"]}
+
+    result = registry.execute(
+        ToolCall(
+            id="c7",
+            name=BASH_TOOL_NAME,
+            arguments={"command": "echo ok"},
+        ),
+        context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status_code == ToolResultStatus.ERROR
+    assert result.error_code == "invalid_shell_config"
+    assert "bash_env" in payload["error"]

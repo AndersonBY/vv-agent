@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -47,9 +48,29 @@ def _normalize_windows_shell_priority(raw: Any, *, strict: bool) -> list[str] | 
     return normalized
 
 
-def _read_shell_defaults(context: ToolContext) -> tuple[str | None, list[str] | None]:
+def _normalize_bash_env(raw: Any, *, strict: bool) -> dict[str, str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        if strict:
+            raise ValueError("`bash_env` must be an object mapping env names to values")
+        return None
+
+    normalized: dict[str, str] = {}
+    for key, value in raw.items():
+        env_name = str(key).strip()
+        if not env_name:
+            if strict:
+                raise ValueError("`bash_env` contains empty env variable name")
+            continue
+        normalized[env_name] = "" if value is None else str(value)
+    return normalized
+
+
+def _read_shell_defaults(context: ToolContext) -> tuple[str | None, list[str] | None, dict[str, str] | None]:
     default_shell: str | None = None
     default_priority: list[str] | None = None
+    default_bash_env: dict[str, str] | None = None
 
     metadata_sources: list[dict[str, Any]] = []
     runtime_metadata = getattr(context.ctx, "metadata", None)
@@ -68,8 +89,21 @@ def _read_shell_defaults(context: ToolContext) -> tuple[str | None, list[str] | 
                 metadata.get("windows_shell_priority"),
                 strict=True,
             )
+        if default_bash_env is None:
+            default_bash_env = _normalize_bash_env(
+                metadata.get("bash_env"),
+                strict=True,
+            )
 
-    return default_shell, default_priority
+    return default_shell, default_priority, default_bash_env
+
+
+def _build_process_env(extra_env: dict[str, str] | None) -> dict[str, str] | None:
+    if not extra_env:
+        return None
+    env = dict(os.environ)
+    env.update(extra_env)
+    return env
 
 
 def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -113,7 +147,7 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
     auto_confirm = bool(arguments.get("auto_confirm", False))
     run_in_background = bool(arguments.get("run_in_background", False))
     try:
-        shell, windows_shell_priority = _read_shell_defaults(context)
+        shell, windows_shell_priority, bash_env = _read_shell_defaults(context)
     except ValueError as exc:
         return ToolExecutionResult(
             tool_call_id="",
@@ -122,6 +156,7 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             error_code="invalid_shell_config",
             content=to_json({"error": str(exc)}),
         )
+    process_env = _build_process_env(bash_env)
 
     if run_in_background:
         try:
@@ -133,6 +168,7 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
                 auto_confirm=auto_confirm,
                 shell=shell,
                 windows_shell_priority=windows_shell_priority,
+                env=process_env,
             )
         except ValueError as exc:
             return ToolExecutionResult(
@@ -183,6 +219,7 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             text=True,
             timeout=timeout,
             check=False,
+            env=process_env,
         )
     except subprocess.TimeoutExpired:
         return ToolExecutionResult(

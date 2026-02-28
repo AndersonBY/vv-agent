@@ -52,6 +52,7 @@ class AgentDefinition:
     exclude_tools: list[str] = field(default_factory=list)
     bash_shell: str | None = None
     windows_shell_priority: list[str] = field(default_factory=list)
+    bash_env: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None
     system_prompt_template: str | None = None
@@ -75,6 +76,7 @@ class AgentSDKOptions:
     debug_dump_dir: str | None = None
     bash_shell: str | None = None
     windows_shell_priority: list[str] = field(default_factory=list)
+    bash_env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

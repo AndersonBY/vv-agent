@@ -34,6 +34,7 @@ def test_resource_loader_discovers_agents_prompts_skills_and_hooks(tmp_path: Pat
       "description": "research profile",
       "model": "kimi-k2.5",
       "backend": "moonshot",
+      "bash_env": {"VV_AGENT_RESOURCE_ENV": "resource"},
       "system_prompt_template": "research"
     }
   }
@@ -68,6 +69,7 @@ HOOK = NoopHook()
     discovered = loader.discover()
 
     assert "researcher" in discovered.agents
+    assert discovered.agents["researcher"].bash_env["VV_AGENT_RESOURCE_ENV"] == "resource"
     assert discovered.prompts["research"] == "You are loaded from template."
     assert any(path.endswith("/skills") for path in discovered.skill_directories)
     assert len(discovered.hooks) == 1

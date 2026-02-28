@@ -983,7 +983,7 @@ class AgentRuntime:
             "parent_task_id": parent_task.task_id,
             "sub_agent_name": sub_agent_name,
         }
-        for key in ("bash_shell", "windows_shell_priority"):
+        for key in ("bash_shell", "windows_shell_priority", "bash_env"):
             value = parent_task.metadata.get(key)
             if value is not None:
                 metadata[key] = value

@@ -187,6 +187,15 @@ class AgentResourceLoader:
                 if isinstance(payload.get("windows_shell_priority"), list)
                 else []
             ),
+            bash_env=(
+                {
+                    str(key).strip(): str(value)
+                    for key, value in payload.get("bash_env", {}).items()
+                    if str(key).strip()
+                }
+                if isinstance(payload.get("bash_env"), dict)
+                else {}
+            ),
             metadata=dict(payload.get("metadata", {})) if isinstance(payload.get("metadata"), dict) else {},
             system_prompt=payload.get("system_prompt") if isinstance(payload.get("system_prompt"), str) else None,
             system_prompt_template=payload.get("system_prompt_template")

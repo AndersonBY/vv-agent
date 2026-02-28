@@ -119,10 +119,10 @@ session.continue_run()
 
 ### Windows Shell 运行时配置
 
-`bash` 工具使用哪个 shell，属于**运行时启动/会话配置**，不是工具参数。
+`bash` 运行时默认配置属于**启动/会话配置**，不是工具参数。
 
-- 全局默认：`AgentSDKOptions.bash_shell`、`AgentSDKOptions.windows_shell_priority`
-- Agent 级覆盖：`AgentDefinition.bash_shell`、`AgentDefinition.windows_shell_priority`
+- 全局默认：`AgentSDKOptions.bash_shell`、`AgentSDKOptions.windows_shell_priority`、`AgentSDKOptions.bash_env`
+- Agent 级覆盖：`AgentDefinition.bash_shell`、`AgentDefinition.windows_shell_priority`、`AgentDefinition.bash_env`
 - Windows 推荐优先级：`["git-bash", "powershell", "cmd"]`
 
 ```python
@@ -133,6 +133,7 @@ client = AgentSDKClient(
         settings_file="local_settings.py",
         default_backend="moonshot",
         windows_shell_priority=["git-bash", "powershell", "cmd"],
+        bash_env={"PIP_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple"},
     ),
     agents={
         "desktop": AgentDefinition(
@@ -140,6 +141,7 @@ client = AgentSDKClient(
             model="kimi-k2.5",
             # 仅对该 Agent 强制指定 shell（可选）
             bash_shell=None,
+            bash_env={"HTTP_PROXY": "http://127.0.0.1:7890"},
         )
     },
 )
