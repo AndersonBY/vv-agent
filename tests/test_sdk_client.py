@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -487,8 +488,9 @@ def test_sdk_client_merges_bash_env_from_startup_options(tmp_path: Path, monkeyp
 
     run = client.run_agent(agent_name="demo", prompt="test env")
     assert run.result.status == AgentStatus.COMPLETED
-    process_env = captured.get("env")
-    assert isinstance(process_env, dict)
+    raw_env = captured.get("env")
+    assert isinstance(raw_env, dict)
+    process_env = cast("dict[str, str]", raw_env)
     assert process_env["VV_AGENT_OPTION_ONLY"] == "from-option"
     assert process_env["VV_AGENT_AGENT_ONLY"] == "from-agent"
     assert process_env["VV_AGENT_SHARED"] == "from-agent"

@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 from vv_agent.constants import BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME
 from vv_agent.tools import ToolContext, build_default_registry
@@ -196,8 +197,9 @@ def test_bash_tool_applies_context_bash_env(tmp_path: Path, monkeypatch) -> None
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
     assert payload["exit_code"] == 0
-    process_env = captured.get("env")
-    assert isinstance(process_env, dict)
+    raw_env = captured.get("env")
+    assert isinstance(raw_env, dict)
+    process_env = cast("dict[str, str]", raw_env)
     assert process_env["VV_AGENT_CUSTOM_ENV"] == "custom-value"
     assert process_env["VV_AGENT_SHARED_ENV"] == "from-task"
     assert process_env["VV_AGENT_BASE_ENV"] == "base-value"
