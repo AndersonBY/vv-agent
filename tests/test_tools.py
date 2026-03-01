@@ -210,6 +210,38 @@ def test_list_files_prefers_ripgrep_when_available(registry, tool_context: ToolC
     assert payload["truncated"] is False
 
 
+def test_list_files_glob_matches_rg_dot_slash_paths(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(b"./doc.md\x00./nested/inner.md\x00")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(workspace_io, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(workspace_io.subprocess, "Popen", lambda *args, **kwargs: _FakeProcess())
+
+    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": ".", "glob": "*.md"})
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["doc.md"]
+    assert payload["count"] == 1
+    assert payload["truncated"] is False
+
+
 def test_list_files_falls_back_when_ripgrep_errors(registry, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
     (tool_context.workspace / "fallback.txt").write_text("x", encoding="utf-8")
 

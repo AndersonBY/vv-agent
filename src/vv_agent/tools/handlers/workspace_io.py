@@ -72,6 +72,15 @@ def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
     return re.compile(regex)
 
 
+def _normalize_relative_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized == ".":
+        return ""
+    return normalized
+
+
 def _resolve_rg_executable() -> str | None:
     """Locate ripgrep executable shipped by environment or available in PATH."""
     global _RG_EXECUTABLE_CACHE
@@ -173,7 +182,9 @@ def _list_files_local_rg(
                 should_stop = True
                 break
 
-            rel_from_base = raw_entry.decode("utf-8", errors="replace").replace("\\", "/")
+            rel_from_base = _normalize_relative_path(raw_entry.decode("utf-8", errors="replace"))
+            if not rel_from_base:
+                continue
             if not glob_regex.match(rel_from_base):
                 continue
 
@@ -203,9 +214,9 @@ def _list_files_local_rg(
         return None
 
     if remainder and not scan_limited:
-        rel_from_base = remainder.decode("utf-8", errors="replace").replace("\\", "/")
+        rel_from_base = _normalize_relative_path(remainder.decode("utf-8", errors="replace"))
         scanned_count += 1
-        if scanned_count <= scan_limit and glob_regex.match(rel_from_base):
+        if scanned_count <= scan_limit and rel_from_base and glob_regex.match(rel_from_base):
             candidate_path = base_path / rel_from_base
             try:
                 rel_workspace = candidate_path.relative_to(workspace_root).as_posix()
