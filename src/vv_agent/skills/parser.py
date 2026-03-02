@@ -122,9 +122,19 @@ def read_properties(skill_dir: Path) -> SkillProperties:
     return _build_properties(metadata)
 
 
-def read_skill(skill_dir: Path) -> LoadedSkill:
-    """Read full skill content and validate against Agent Skills constraints."""
-    from vv_agent.skills.validator import validate_metadata
+def read_skill(
+    skill_dir: Path,
+    *,
+    validation_mode: str | None = "strict",
+) -> LoadedSkill:
+    """Read full skill content and validate against Agent Skills constraints.
+
+    Validation mode controls strictness:
+    - strict: enforce the full spec and fail on any violation.
+    - compat: allow common third-party deviations with warnings.
+    - minimal: keep only baseline safety/required checks as blocking errors.
+    """
+    from vv_agent.skills.validator import validate_metadata_with_diagnostics
 
     skill_dir = Path(skill_dir)
     skill_md = find_skill_md(skill_dir)
@@ -134,9 +144,18 @@ def read_skill(skill_dir: Path) -> LoadedSkill:
     content = skill_md.read_text(encoding="utf-8", errors="replace")
     metadata, body = parse_frontmatter(content)
 
-    errors = validate_metadata(metadata, skill_dir=skill_dir)
-    if errors:
-        raise SkillValidationError("; ".join(errors))
+    diagnostics = validate_metadata_with_diagnostics(
+        metadata,
+        skill_dir=skill_dir,
+        validation_mode=validation_mode,
+    )
+    if diagnostics.errors:
+        raise SkillValidationError("; ".join(diagnostics.errors))
 
     properties = _build_properties(metadata)
-    return LoadedSkill(properties=properties, skill_md_path=skill_md.resolve(), instructions=body)
+    return LoadedSkill(
+        properties=properties,
+        skill_md_path=skill_md.resolve(),
+        instructions=body,
+        warnings=list(diagnostics.warnings),
+    )

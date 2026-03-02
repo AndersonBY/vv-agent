@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from vv_agent.skills.errors import SkillParseError
 
@@ -20,32 +21,98 @@ ALLOWED_FIELDS = {
 }
 
 
-def _validate_name(name: Any, *, skill_dir: Path | None = None) -> list[str]:
-    errors: list[str] = []
+ValidationMode = Literal["strict", "compat", "minimal"]
+IssueSeverity = Literal["error", "warning", "ignore"]
+
+DEFAULT_VALIDATION_MODE: ValidationMode = "strict"
+VALIDATION_MODES: tuple[ValidationMode, ...] = ("strict", "compat", "minimal")
+
+
+@dataclass(slots=True)
+class ValidationDiagnostics:
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+def normalize_validation_mode(validation_mode: str | None) -> ValidationMode:
+    normalized = str(validation_mode or DEFAULT_VALIDATION_MODE).strip().lower()
+    if normalized == "strict":
+        return "strict"
+    if normalized == "compat":
+        return "compat"
+    if normalized == "minimal":
+        return "minimal"
+    raise ValueError(
+        f"Unsupported validation mode '{validation_mode}'. Expected one of {list(VALIDATION_MODES)}."
+    )
+
+
+def _append_issue(diagnostics: ValidationDiagnostics, message: str, *, severity: IssueSeverity) -> None:
+    if severity == "ignore":
+        return
+    if severity == "warning":
+        diagnostics.warnings.append(message)
+        return
+    diagnostics.errors.append(message)
+
+
+def _merge_diagnostics(base: ValidationDiagnostics, incoming: ValidationDiagnostics) -> None:
+    base.errors.extend(incoming.errors)
+    base.warnings.extend(incoming.warnings)
+
+
+def _validate_name(
+    name: Any,
+    *,
+    validation_mode: ValidationMode,
+    skill_dir: Path | None = None,
+) -> ValidationDiagnostics:
+    diagnostics = ValidationDiagnostics()
     if not isinstance(name, str) or not name.strip():
-        return ["Field 'name' must be a non-empty string"]
+        diagnostics.errors.append("Field 'name' must be a non-empty string")
+        return diagnostics
 
     normalized = unicodedata.normalize("NFKC", name.strip())
     if len(normalized) > MAX_SKILL_NAME_LENGTH:
-        errors.append(
+        diagnostics.errors.append(
             f"Skill name '{normalized}' exceeds {MAX_SKILL_NAME_LENGTH} character limit ({len(normalized)} chars)"
         )
-    if normalized != normalized.lower():
-        errors.append(f"Skill name '{normalized}' must be lowercase")
-    if normalized.startswith("-") or normalized.endswith("-"):
-        errors.append("Skill name cannot start or end with a hyphen")
-    if "--" in normalized:
-        errors.append("Skill name cannot contain consecutive hyphens")
+
     if not all(ch.isalnum() or ch == "-" for ch in normalized):
-        errors.append(
+        diagnostics.errors.append(
             f"Skill name '{normalized}' contains invalid characters. Only letters, digits, and hyphens are allowed."
+        )
+
+    naming_severity: IssueSeverity = "error" if validation_mode in {"strict", "compat"} else "warning"
+    if normalized != normalized.lower():
+        _append_issue(
+            diagnostics,
+            f"Skill name '{normalized}' must be lowercase",
+            severity=naming_severity,
+        )
+    if normalized.startswith("-") or normalized.endswith("-"):
+        _append_issue(
+            diagnostics,
+            "Skill name cannot start or end with a hyphen",
+            severity=naming_severity,
+        )
+    if "--" in normalized:
+        _append_issue(
+            diagnostics,
+            "Skill name cannot contain consecutive hyphens",
+            severity=naming_severity,
         )
 
     if skill_dir is not None:
         dir_name = unicodedata.normalize("NFKC", skill_dir.name)
         if dir_name != normalized:
-            errors.append(f"Directory name '{skill_dir.name}' must match skill name '{normalized}'")
-    return errors
+            _append_issue(
+                diagnostics,
+                f"Directory name '{skill_dir.name}' must match skill name '{normalized}'",
+                severity="error" if validation_mode == "strict" else "warning",
+            )
+
+    return diagnostics
 
 
 def _validate_description(description: Any) -> list[str]:
@@ -66,49 +133,103 @@ def _validate_compatibility(compatibility: Any) -> list[str]:
     return []
 
 
-def validate_metadata(metadata: dict[str, Any], *, skill_dir: Path | None = None) -> list[str]:
-    errors: list[str] = []
+def validate_metadata_with_diagnostics(
+    metadata: dict[str, Any],
+    *,
+    skill_dir: Path | None = None,
+    validation_mode: str | None = DEFAULT_VALIDATION_MODE,
+) -> ValidationDiagnostics:
+    mode = normalize_validation_mode(validation_mode)
+    diagnostics = ValidationDiagnostics()
 
     extra_fields = set(metadata.keys()) - ALLOWED_FIELDS
     if extra_fields:
-        errors.append(
+        _append_issue(
+            diagnostics,
             f"Unexpected fields in frontmatter: {', '.join(sorted(extra_fields))}. "
-            f"Only {sorted(ALLOWED_FIELDS)} are allowed."
+            f"Only {sorted(ALLOWED_FIELDS)} are allowed.",
+            severity="error" if mode == "strict" else "warning",
         )
 
     if "name" not in metadata:
-        errors.append("Missing required field in frontmatter: name")
+        diagnostics.errors.append("Missing required field in frontmatter: name")
     else:
-        errors.extend(_validate_name(metadata["name"], skill_dir=skill_dir))
+        _merge_diagnostics(
+            diagnostics,
+            _validate_name(
+                metadata["name"],
+                validation_mode=mode,
+                skill_dir=skill_dir,
+            ),
+        )
 
     if "description" not in metadata:
-        errors.append("Missing required field in frontmatter: description")
+        diagnostics.errors.append("Missing required field in frontmatter: description")
     else:
-        errors.extend(_validate_description(metadata["description"]))
+        diagnostics.errors.extend(_validate_description(metadata["description"]))
 
-    errors.extend(_validate_compatibility(metadata.get("compatibility")))
-    return errors
+    compatibility_errors = _validate_compatibility(metadata.get("compatibility"))
+    compatibility_severity: IssueSeverity = "error" if mode in {"strict", "compat"} else "warning"
+    for message in compatibility_errors:
+        _append_issue(diagnostics, message, severity=compatibility_severity)
+    return diagnostics
 
 
-def validate(skill_dir: Path) -> list[str]:
-    """Validate a skill directory path and return all validation errors."""
-    from vv_agent.skills.parser import find_skill_md, parse_frontmatter
+def validate_metadata(
+    metadata: dict[str, Any],
+    *,
+    skill_dir: Path | None = None,
+    validation_mode: str | None = DEFAULT_VALIDATION_MODE,
+) -> list[str]:
+    return validate_metadata_with_diagnostics(
+        metadata,
+        skill_dir=skill_dir,
+        validation_mode=validation_mode,
+    ).errors
 
+
+def validate_with_diagnostics(
+    skill_dir: Path,
+    *,
+    validation_mode: str | None = DEFAULT_VALIDATION_MODE,
+) -> ValidationDiagnostics:
+    """Validate a skill directory path and return diagnostics."""
+    diagnostics = ValidationDiagnostics()
+    mode = normalize_validation_mode(validation_mode)
     skill_dir = Path(skill_dir)
 
     if not skill_dir.exists():
-        return [f"Path does not exist: {skill_dir}"]
+        diagnostics.errors.append(f"Path does not exist: {skill_dir}")
+        return diagnostics
     if not skill_dir.is_dir():
-        return [f"Not a directory: {skill_dir}"]
+        diagnostics.errors.append(f"Not a directory: {skill_dir}")
+        return diagnostics
+
+    from vv_agent.skills.parser import find_skill_md, parse_frontmatter
 
     skill_md = find_skill_md(skill_dir)
     if skill_md is None:
-        return ["Missing required file: SKILL.md"]
+        diagnostics.errors.append("Missing required file: SKILL.md")
+        return diagnostics
 
     try:
         content = skill_md.read_text(encoding="utf-8", errors="replace")
         metadata, _ = parse_frontmatter(content)
     except SkillParseError as exc:
-        return [str(exc)]
+        diagnostics.errors.append(str(exc))
+        return diagnostics
 
-    return validate_metadata(metadata, skill_dir=skill_dir)
+    return validate_metadata_with_diagnostics(
+        metadata,
+        skill_dir=skill_dir,
+        validation_mode=mode,
+    )
+
+
+def validate(
+    skill_dir: Path,
+    *,
+    validation_mode: str | None = DEFAULT_VALIDATION_MODE,
+) -> list[str]:
+    """Validate a skill directory path and return all validation errors."""
+    return validate_with_diagnostics(skill_dir, validation_mode=validation_mode).errors

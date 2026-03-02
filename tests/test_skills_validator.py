@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vv_agent.skills.validator import validate, validate_metadata
+import pytest
+
+from vv_agent.skills.validator import (
+    normalize_validation_mode,
+    validate,
+    validate_metadata,
+    validate_metadata_with_diagnostics,
+)
 
 
 def test_validate_skill_dir_success(tmp_path: Path) -> None:
@@ -59,3 +66,35 @@ def test_validate_metadata_accepts_i18n_lowercase() -> None:
         skill_dir=skill_dir,
     )
     assert errors == []
+
+
+def test_validate_metadata_compat_mode_demotes_extra_fields_and_dir_mismatch() -> None:
+    diagnostics = validate_metadata_with_diagnostics(
+        {
+            "name": "tavily",
+            "description": "A third-party skill package",
+            "homepage": "https://example.com",
+        },
+        skill_dir=Path("5e4a40157abd"),
+        validation_mode="compat",
+    )
+    assert diagnostics.errors == []
+    assert any("Unexpected fields in frontmatter: homepage" in message for message in diagnostics.warnings)
+    assert any("Directory name '5e4a40157abd' must match skill name 'tavily'" in message for message in diagnostics.warnings)
+
+
+def test_validate_metadata_minimal_mode_demotes_naming_conventions() -> None:
+    diagnostics = validate_metadata_with_diagnostics(
+        {
+            "name": "My-Skill",
+            "description": "A test skill",
+        },
+        validation_mode="minimal",
+    )
+    assert diagnostics.errors == []
+    assert any("must be lowercase" in message for message in diagnostics.warnings)
+
+
+def test_normalize_validation_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="Unsupported validation mode"):
+        normalize_validation_mode("relaxed")

@@ -103,6 +103,26 @@ Body
         read_skill(skill_dir)
 
 
+def test_read_skill_compat_mode_allows_common_third_party_drift(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "5e4a40157abd"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        """---
+name: tavily
+description: Tavily skill package
+homepage: https://example.com
+---
+Body
+""",
+        encoding="utf-8",
+    )
+
+    loaded = read_skill(skill_dir, validation_mode="compat")
+    assert loaded.properties.name == "tavily"
+    assert any("Unexpected fields in frontmatter: homepage" in message for message in loaded.warnings)
+    assert any("must match skill name 'tavily'" in message for message in loaded.warnings)
+
+
 def test_discover_skill_dirs_from_root(tmp_path: Path) -> None:
     root = tmp_path / "skills"
     (root / "alpha").mkdir(parents=True)

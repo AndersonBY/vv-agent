@@ -38,6 +38,7 @@ class LoadedSkill:
     properties: SkillProperties
     skill_md_path: Path
     instructions: str
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
