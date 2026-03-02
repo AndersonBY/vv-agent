@@ -74,6 +74,31 @@ class TestLocalWorkspaceBackend:
         with pytest.raises(ValueError, match="escapes workspace"):
             backend.read_text("../../etc/passwd")
 
+    def test_allow_outside_root_reads_parent_file(self, tmp: Path) -> None:
+        backend = LocalWorkspaceBackend(tmp, allow_outside_root=True)
+        outside = (tmp.parent / f"{tmp.name}_outside.txt").resolve()
+        outside.write_text("external", encoding="utf-8")
+        assert backend.read_text(str(outside)) == "external"
+
+    def test_allow_outside_root_list_files_returns_absolute_paths(self, tmp: Path) -> None:
+        backend = LocalWorkspaceBackend(tmp, allow_outside_root=True)
+        outside_dir = (tmp.parent / f"{tmp.name}_outside_dir").resolve()
+        outside_dir.mkdir(parents=True, exist_ok=True)
+        target = outside_dir / "a.txt"
+        target.write_text("a", encoding="utf-8")
+
+        files = backend.list_files(str(outside_dir), "**/*")
+        assert str(target.resolve()) in files
+
+    def test_allow_outside_root_file_info_returns_absolute_path(self, tmp: Path) -> None:
+        backend = LocalWorkspaceBackend(tmp, allow_outside_root=True)
+        outside = (tmp.parent / f"{tmp.name}_outside_info.txt").resolve()
+        outside.write_text("info", encoding="utf-8")
+
+        info = backend.file_info(str(outside))
+        assert info is not None
+        assert info.path == str(outside)
+
 
 # ---------------------------------------------------------------------------
 # MemoryWorkspaceBackend

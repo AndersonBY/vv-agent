@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import cast
 
 from vv_agent.constants import BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME
+from vv_agent.runtime import background_sessions as background_runtime
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.tools.handlers import bash as bash_handler
 from vv_agent.types import ToolCall, ToolResultStatus
@@ -55,6 +56,31 @@ def test_bash_tool_blocks_dangerous_command(tmp_path: Path) -> None:
 
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "dangerous_command"
+
+
+def test_bash_tool_allows_absolute_exec_dir_when_enabled(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+    outside_dir = (tmp_path.parent / f"{tmp_path.name}_outside_exec").resolve()
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    context.task_metadata = {"allow_outside_workspace_paths": True}
+    context.workspace_backend = LocalWorkspaceBackend(
+        tmp_path,
+        allow_outside_root=True,
+    )
+
+    result = registry.execute(
+        ToolCall(
+            id="c2_abs",
+            name=BASH_TOOL_NAME,
+            arguments={"command": "echo outside", "exec_dir": str(outside_dir)},
+        ),
+        context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status_code == ToolResultStatus.SUCCESS
+    assert payload["cwd"] == str(outside_dir)
 
 
 def test_background_command_lifecycle(tmp_path: Path) -> None:
@@ -205,6 +231,87 @@ def test_bash_tool_applies_context_bash_env(tmp_path: Path, monkeypatch) -> None
     assert process_env["VV_AGENT_BASE_ENV"] == "base-value"
 
 
+def test_bash_tool_uses_replace_error_handler_for_decoding(tmp_path: Path, monkeypatch) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_prepare(
+        command: str,
+        *,
+        auto_confirm: bool,
+        stdin: str | None,
+        shell: str | None = None,
+        windows_shell_priority: list[str] | None = None,
+    ) -> tuple[list[str], str | None]:
+        del auto_confirm, shell, windows_shell_priority
+        return ["bash", "-lc", command], stdin
+
+    def fake_run(*args, **kwargs):
+        del args
+        captured["text"] = kwargs.get("text")
+        captured["errors"] = kwargs.get("errors")
+        return SimpleNamespace(stdout="ok\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
+    monkeypatch.setattr(bash_handler.subprocess, "run", fake_run)
+
+    result = registry.execute(
+        ToolCall(
+            id="c7",
+            name=BASH_TOOL_NAME,
+            arguments={"command": "echo ok"},
+        ),
+        context,
+    )
+
+    assert result.status_code == ToolResultStatus.SUCCESS
+    assert captured["text"] is True
+    assert captured["errors"] == "replace"
+
+
+def test_background_session_uses_replace_error_handler_for_decoding(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_prepare(
+        command: str,
+        *,
+        auto_confirm: bool,
+        stdin: str | None,
+        shell: str | None = None,
+        windows_shell_priority: list[str] | None = None,
+    ) -> tuple[list[str], str | None]:
+        del auto_confirm, shell, windows_shell_priority
+        return ["bash", "-lc", command], stdin
+
+    class _FakeStdin:
+        def write(self, value: str) -> None:
+            del value
+
+        def close(self) -> None:
+            pass
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdin: _FakeStdin | None = _FakeStdin()
+
+    def fake_popen(*args, **kwargs):
+        del args
+        captured["text"] = kwargs.get("text")
+        captured["errors"] = kwargs.get("errors")
+        return _FakeProcess()
+
+    monkeypatch.setattr(background_runtime, "prepare_shell_execution", fake_prepare)
+    monkeypatch.setattr(background_runtime.subprocess, "Popen", fake_popen)
+
+    manager = background_runtime.BackgroundSessionManager()
+    session_id = manager.start(command="echo ok", cwd=tmp_path, timeout_seconds=5)
+
+    assert session_id.startswith("bg_")
+    assert captured["text"] is True
+    assert captured["errors"] == "replace"
+
+
 def test_bash_tool_rejects_invalid_bash_env_metadata(tmp_path: Path) -> None:
     registry = build_default_registry()
     context = _context(tmp_path)
@@ -212,7 +319,7 @@ def test_bash_tool_rejects_invalid_bash_env_metadata(tmp_path: Path) -> None:
 
     result = registry.execute(
         ToolCall(
-            id="c7",
+            id="c8",
             name=BASH_TOOL_NAME,
             arguments={"command": "echo ok"},
         ),

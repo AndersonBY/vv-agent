@@ -52,13 +52,17 @@ Supported behavior:
 Guidance:
 - Prefer this tool instead of shell commands like cat/head/tail.
 - For large files, read in chunks by line range.
-- Paths are workspace-relative and cannot escape workspace root.""",
+- By default, paths are workspace-relative.
+- If runtime metadata enables outside-workspace access, absolute local paths are allowed.""",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative path to the target file.",
+                        "description": (
+                            "Target file path (workspace-relative by default; "
+                            "absolute path allowed when outside-workspace access is enabled)."
+                        ),
                     },
                     "start_line": {
                         "type": "integer",
@@ -94,7 +98,7 @@ WARNING:
 - Use `append=true` to add content instead.
 
 PARAMETERS:
-- `path` (required): Relative path from workspace root.
+- `path` (required): Workspace-relative path by default. Absolute path is allowed when outside-workspace access is enabled.
 - `content` (required): Content to write.
 - `append` (optional): Set true to append instead of overwrite.
 - `leading_newline`/`trailing_newline` (optional): Add newlines when appending.""",
@@ -103,7 +107,10 @@ PARAMETERS:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The relative path of the file to write to from the workspace root.",
+                        "description": (
+                            "Target file path (workspace-relative by default; "
+                            "absolute path allowed when outside-workspace access is enabled)."
+                        ),
                     },
                     "content": {
                         "type": "string",
@@ -140,7 +147,11 @@ PARAMETERS:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Optional root path relative to workspace. Default ..",
+                        "description": (
+                            "Optional search root path. Use workspace-relative path by default; "
+                            "absolute path is allowed when outside-workspace access is enabled. "
+                            "Default '.'."
+                        ),
                     },
                     "glob": {
                         "type": "string",
@@ -186,7 +197,10 @@ PARAMETERS:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative target file path.",
+                        "description": (
+                            "Target file path (workspace-relative by default; "
+                            "absolute path allowed when outside-workspace access is enabled)."
+                        ),
                     }
                 },
                 "required": ["path"],
@@ -234,7 +248,11 @@ Guidance:
                     },
                     "path": {
                         "type": "string",
-                        "description": "Optional search root or single file path relative to workspace root. Default '.'.",
+                        "description": (
+                            "Optional search root or single file path. Use workspace-relative path by "
+                            "default; absolute path is allowed when outside-workspace access is enabled. "
+                            "Default '.'."
+                        ),
                     },
                     "glob": {
                         "type": "string",
@@ -313,7 +331,10 @@ Guidance:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative file path.",
+                        "description": (
+                            "Target file path (workspace-relative by default; "
+                            "absolute path allowed when outside-workspace access is enabled)."
+                        ),
                     },
                     "old_str": {
                         "type": "string",
@@ -417,7 +438,13 @@ Guidelines:
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Bash command string."},
-                    "exec_dir": {"type": "string", "description": "Workspace-relative execution directory."},
+                    "exec_dir": {
+                        "type": "string",
+                        "description": (
+                            "Execution directory (workspace-relative by default; "
+                            "absolute path allowed when outside-workspace access is enabled)."
+                        ),
+                    },
                     "timeout": {"type": "integer", "description": "Timeout seconds, default 300, max 600."},
                     "stdin": {"type": "string", "description": "Optional stdin content."},
                     "auto_confirm": {"type": "boolean", "description": "Pipe yes to command when true."},
@@ -555,7 +582,10 @@ with per-item execution result.""",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Workspace-relative image path or http(s) image URL.",
+                        "description": (
+                            "Image path (workspace-relative by default; absolute path allowed when "
+                            "outside-workspace access is enabled) or http(s) image URL."
+                        ),
                     }
                 },
                 "required": ["path"],

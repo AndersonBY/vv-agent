@@ -33,20 +33,37 @@ def _glob_match(path: str, pattern: str) -> bool:
 
 
 class LocalWorkspaceBackend:
-    __slots__ = ("_root",)
+    __slots__ = ("_allow_outside_root", "_root")
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, allow_outside_root: bool = False) -> None:
         self._root = root.resolve()
+        self._allow_outside_root = bool(allow_outside_root)
 
     @property
     def root(self) -> Path:
         return self._root
 
+    @property
+    def allow_outside_root(self) -> bool:
+        return self._allow_outside_root
+
     def _resolve(self, path: str) -> Path:
-        target = (self._root / path).resolve()
-        if target != self._root and self._root not in target.parents:
+        candidate = Path(path).expanduser()
+        target = candidate.resolve() if candidate.is_absolute() else (self._root / candidate).resolve()
+        if (
+            not self._allow_outside_root
+            and target != self._root
+            and self._root not in target.parents
+        ):
             raise ValueError(f"Path escapes workspace: {path}")
         return target
+
+    def _to_output_path(self, path: Path) -> str:
+        try:
+            rel = path.relative_to(self._root).as_posix()
+            return rel or "."
+        except ValueError:
+            return str(path)
 
     def list_files(self, base: str, glob: str) -> list[str]:
         root = self._resolve(base)
@@ -65,7 +82,7 @@ class LocalWorkspaceBackend:
                     rel_from_base = candidate.relative_to(root).as_posix()
                     if not _glob_match(rel_from_base, pattern):
                         continue
-                    rel = candidate.relative_to(self._root).as_posix()
+                    rel = self._to_output_path(candidate)
                 except (OSError, ValueError):
                     continue
                 files.append(rel)
@@ -92,7 +109,7 @@ class LocalWorkspaceBackend:
             return None
         stat = target.stat()
         return FileInfo(
-            path=target.relative_to(self._root).as_posix(),
+            path=self._to_output_path(target),
             is_file=target.is_file(),
             is_dir=target.is_dir(),
             size=stat.st_size,

@@ -52,6 +52,46 @@ def test_workspace_write_and_read(registry, tool_context: ToolContext) -> None:
     assert payload["content"] == "hello"
 
 
+def test_read_file_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
+    outside = (tool_context.workspace.parent / f"{tool_context.workspace.name}_outside_read.txt").resolve()
+    outside.write_text("outside", encoding="utf-8")
+    tool_context.task_metadata = {"allow_outside_workspace_paths": True}
+    tool_context.workspace_backend = LocalWorkspaceBackend(
+        tool_context.workspace,
+        allow_outside_root=True,
+    )
+
+    read_call = ToolCall(id="call_abs_read", name=READ_FILE_TOOL_NAME, arguments={"path": str(outside)})
+    read_result = registry.execute(read_call, tool_context)
+    payload = json.loads(read_result.content)
+
+    assert read_result.status == "success"
+    assert payload["content"] == "outside"
+
+
+def test_list_files_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
+    outside_dir = (tool_context.workspace.parent / f"{tool_context.workspace.name}_outside_list").resolve()
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    target = (outside_dir / "a.txt").resolve()
+    target.write_text("a", encoding="utf-8")
+    tool_context.task_metadata = {"allow_outside_workspace_paths": True}
+    tool_context.workspace_backend = LocalWorkspaceBackend(
+        tool_context.workspace,
+        allow_outside_root=True,
+    )
+
+    list_call = ToolCall(
+        id="call_abs_list",
+        name=LIST_FILES_TOOL_NAME,
+        arguments={"path": str(outside_dir)},
+    )
+    list_result = registry.execute(list_call, tool_context)
+    payload = json.loads(list_result.content)
+
+    assert list_result.status == "success"
+    assert str(target) in payload["files"]
+
+
 def test_write_file_append_with_optional_newlines(registry, tool_context: ToolContext) -> None:
     base_call = ToolCall(id="call_write_base", name=WRITE_FILE_TOOL_NAME, arguments={"path": "notes/log.txt", "content": "line1"})
     base_result = registry.execute(base_call, tool_context)
@@ -338,6 +378,28 @@ def test_workspace_grep(registry, tool_context: ToolContext) -> None:
     payload = json.loads(result.content)
     assert payload["summary"]["total_matches"] == 1
     assert payload["matches"][0]["line"] == 1
+
+
+def test_workspace_grep_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
+    outside_dir = (tool_context.workspace.parent / f"{tool_context.workspace.name}_outside_grep").resolve()
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (outside_dir / "a.txt").write_text("hello outside", encoding="utf-8")
+    tool_context.task_metadata = {"allow_outside_workspace_paths": True}
+    tool_context.workspace_backend = LocalWorkspaceBackend(
+        tool_context.workspace,
+        allow_outside_root=True,
+    )
+
+    call = ToolCall(
+        id="call_abs_grep",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "hello", "output_mode": "content", "path": str(outside_dir)},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["total_matches"] == 1
+    assert payload["matches"][0]["path"] == str((outside_dir / "a.txt").resolve())
 
 
 def test_workspace_grep_supports_files_with_matches_mode(registry, tool_context: ToolContext) -> None:

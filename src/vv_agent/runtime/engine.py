@@ -46,6 +46,22 @@ _ACTIVE_SUB_AGENT_SESSIONS_LOCK = RLock()
 _ACTIVE_SUB_AGENT_SESSIONS: dict[str, Any] = {}
 
 
+def _parse_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
 def steer_sub_agent_session(*, session_id: str, prompt: str) -> bool:
     """Steer a running sub-agent session by its sub-session id."""
     normalized_session_id = str(session_id or "").strip()
@@ -186,11 +202,15 @@ class AgentRuntime:
         )
 
         memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
+        allow_outside_workspace_paths = self._allow_outside_workspace_paths(task)
 
         cycle_executor = self._build_cycle_executor(
             task=task,
             workspace_path=workspace_path,
-            workspace_backend=self._workspace_backend or LocalWorkspaceBackend(workspace_path),
+            workspace_backend=self._workspace_backend or LocalWorkspaceBackend(
+                workspace_path,
+                allow_outside_root=allow_outside_workspace_paths,
+            ),
             memory_manager=memory_manager,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
@@ -643,6 +663,20 @@ class AgentRuntime:
         return target
 
     @staticmethod
+    def _allow_outside_workspace_paths(task: AgentTask) -> bool:
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        for key in (
+            "allow_outside_workspace_paths",
+            "allow_outside_workspace",
+            "workspace_allow_outside_main",
+            "workspace_allow_outside",
+        ):
+            parsed = _parse_optional_bool(metadata.get(key))
+            if parsed is not None:
+                return parsed
+        return False
+
+    @staticmethod
     def _build_continue_hint() -> str:
         return (
             "No tool call was produced. "
@@ -983,7 +1017,15 @@ class AgentRuntime:
             "parent_task_id": parent_task.task_id,
             "sub_agent_name": sub_agent_name,
         }
-        for key in ("bash_shell", "windows_shell_priority", "bash_env"):
+        for key in (
+            "bash_shell",
+            "windows_shell_priority",
+            "bash_env",
+            "allow_outside_workspace_paths",
+            "allow_outside_workspace",
+            "workspace_allow_outside_main",
+            "workspace_allow_outside",
+        ):
             value = parent_task.metadata.get(key)
             if value is not None:
                 metadata[key] = value

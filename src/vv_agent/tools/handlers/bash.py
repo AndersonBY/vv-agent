@@ -217,6 +217,7 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             input=prepared_stdin,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             check=False,
             env=process_env,
@@ -231,9 +232,19 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
         )
 
     combined_output = f"{completed.stdout}{completed.stderr}"[:_OUTPUT_LIMIT]
+    workspace_root = context.workspace.resolve()
+    resolved_exec_dir = Path(exec_dir).resolve()
+    if resolved_exec_dir == workspace_root:
+        cwd = "."
+    else:
+        try:
+            cwd = resolved_exec_dir.relative_to(workspace_root).as_posix()
+        except ValueError:
+            cwd = str(resolved_exec_dir)
+
     payload = {
         "command": command,
-        "cwd": Path(exec_dir).relative_to(context.workspace).as_posix() if exec_dir != context.workspace else ".",
+        "cwd": cwd,
         "exit_code": completed.returncode,
         "output": combined_output,
     }

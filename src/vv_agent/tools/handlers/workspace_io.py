@@ -81,6 +81,16 @@ def _normalize_relative_path(path: str) -> str:
     return normalized
 
 
+def _format_output_path(context: ToolContext, candidate_path: Path) -> str:
+    resolved = candidate_path.resolve()
+    workspace_root = context.workspace.resolve()
+    try:
+        rel = resolved.relative_to(workspace_root).as_posix()
+        return rel or "."
+    except ValueError:
+        return str(resolved)
+
+
 def _resolve_rg_executable() -> str | None:
     """Locate ripgrep executable shipped by environment or available in PATH."""
     global _RG_EXECUTABLE_CACHE
@@ -112,7 +122,7 @@ def _resolve_rg_executable() -> str | None:
 
 def _list_files_local_rg(
     *,
-    workspace_root: Path,
+    context: ToolContext,
     base_path: Path,
     base_is_workspace_root: bool,
     glob_pattern: str,
@@ -189,10 +199,7 @@ def _list_files_local_rg(
                 continue
 
             candidate_path = base_path / rel_from_base
-            try:
-                rel_workspace = candidate_path.relative_to(workspace_root).as_posix()
-            except (OSError, ValueError):
-                continue
+            rel_workspace = _format_output_path(context, candidate_path)
 
             matched_count += 1
             if len(matched_files) < max_results:
@@ -218,14 +225,10 @@ def _list_files_local_rg(
         scanned_count += 1
         if scanned_count <= scan_limit and rel_from_base and glob_regex.match(rel_from_base):
             candidate_path = base_path / rel_from_base
-            try:
-                rel_workspace = candidate_path.relative_to(workspace_root).as_posix()
-            except (OSError, ValueError):
-                rel_workspace = ""
-            if rel_workspace:
-                matched_count += 1
-                if len(matched_files) < max_results:
-                    matched_files.append(rel_workspace)
+            rel_workspace = _format_output_path(context, candidate_path)
+            matched_count += 1
+            if len(matched_files) < max_results:
+                matched_files.append(rel_workspace)
         elif scanned_count > scan_limit:
             scan_limited = True
 
@@ -244,7 +247,6 @@ def _list_files_local_fast(
     max_results: int,
     scan_limit: int,
 ) -> tuple[list[str], int, bool, bool, list[dict[str, Any]]]:
-    workspace_root = context.workspace.resolve()
     base_path = context.resolve_workspace_path(path)
     if not base_path.exists():
         raise ValueError(f"path not found: {path}")
@@ -272,7 +274,7 @@ def _list_files_local_fast(
 
     glob_regex = _compile_glob_pattern(glob_pattern)
     rg_result = _list_files_local_rg(
-        workspace_root=workspace_root,
+        context=context,
         base_path=base_path,
         base_is_workspace_root=root_listing,
         glob_pattern=glob_pattern,
@@ -322,10 +324,7 @@ def _list_files_local_fast(
             if not glob_regex.match(rel_from_base):
                 continue
 
-            try:
-                rel_workspace = (current_path / filename).relative_to(workspace_root).as_posix()
-            except (OSError, ValueError):
-                continue
+            rel_workspace = _format_output_path(context, current_path / filename)
 
             matched_count += 1
             if len(matched_files) < max_results:

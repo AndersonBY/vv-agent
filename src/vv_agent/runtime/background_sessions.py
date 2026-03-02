@@ -60,6 +60,7 @@ class BackgroundSessionManager:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            errors="replace",
             env=dict(env) if env is not None else None,
         )
 

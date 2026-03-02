@@ -185,12 +185,14 @@ def _decode_rg_field(field: Any) -> str:
         return ""
 
 
-def _resolve_workspace_rel_path(workspace_root: Path, base_path: Path, rel_from_base: str) -> str | None:
-    normalized = rel_from_base.replace("\\", "/")
+def _format_output_path(context: ToolContext, candidate_path: Path) -> str:
+    resolved = candidate_path.resolve()
+    workspace_root = context.workspace.resolve()
     try:
-        return (base_path / normalized).relative_to(workspace_root).as_posix()
-    except (OSError, ValueError):
-        return None
+        rel = resolved.relative_to(workspace_root).as_posix()
+        return rel or "."
+    except ValueError:
+        return str(resolved)
 
 
 def _workspace_grep_local_rg(
@@ -212,7 +214,6 @@ def _workspace_grep_local_rg(
     if not rg_executable:
         return None
 
-    workspace_root = context.workspace.resolve()
     base_path = context.resolve_workspace_path(path)
     if not base_path.exists() or not base_path.is_dir():
         return None
@@ -295,9 +296,8 @@ def _workspace_grep_local_rg(
             rel_from_base = _decode_rg_field(data.get("path"))
             if not rel_from_base:
                 continue
-            rel_workspace = _resolve_workspace_rel_path(workspace_root, base_path, rel_from_base)
-            if not rel_workspace:
-                continue
+            normalized = rel_from_base.replace("\\", "/")
+            rel_workspace = _format_output_path(context, base_path / normalized)
             if file_type and not _matches_file_type(rel_workspace, file_type):
                 continue
 
