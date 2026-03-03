@@ -8,10 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
+from vv_agent.constants import ASK_USER_TOOL_NAME, BASH_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions, create_agent_session
 from vv_agent.tools import build_default_registry
+from vv_agent.tools.handlers import bash as bash_handler
 from vv_agent.types import AgentResult, AgentStatus, LLMResponse, ToolCall
 
 WRITE_FILE_TOOL_NAME = "write_file"
@@ -231,6 +232,73 @@ def test_session_prompt_supports_follow_up_queue(tmp_path: Path) -> None:
     assert run.result.final_answer == "second"
     assert session.latest_run is not None
     assert session.latest_run.result.final_answer == "second"
+
+
+def test_session_inherits_startup_shell_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_prepare(
+        command: str,
+        *,
+        auto_confirm: bool,
+        stdin: str | None,
+        shell: str | None = None,
+        windows_shell_priority: list[str] | None = None,
+    ) -> tuple[list[str], str | None]:
+        del auto_confirm, stdin
+        captured["command"] = command
+        captured["shell"] = shell
+        captured["windows_shell_priority"] = windows_shell_priority
+        return ["powershell", "-NoLogo", "-NoProfile", "-Command", command], None
+
+    monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
+    monkeypatch.setattr(
+        bash_handler.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="ok\n", stderr="", returncode=0),
+    )
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="run shell",
+                    tool_calls=[ToolCall(id="b1", name=BASH_TOOL_NAME, arguments={"command": "echo session-shell"})],
+                ),
+                LLMResponse(
+                    content="finish",
+                    tool_calls=[ToolCall(id="f1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                ),
+            ]
+        )
+        return llm, _fake_resolved(backend=backend, model=model)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+            bash_shell="powershell",
+            windows_shell_priority=["git-bash", "powershell", "cmd"],
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5", agent_type="computer"),
+    )
+
+    session = client.create_session()
+    run = session.prompt("test session shell defaults")
+
+    assert run.result.status == AgentStatus.COMPLETED
+    assert captured["shell"] == "powershell"
+    assert captured["windows_shell_priority"] == ["git-bash", "powershell", "cmd"]
 
 
 def test_session_can_queue_steer_from_runtime_event(tmp_path: Path) -> None:

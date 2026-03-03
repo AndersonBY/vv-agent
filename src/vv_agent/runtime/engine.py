@@ -21,6 +21,7 @@ from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
 from vv_agent.runtime.token_usage import summarize_task_token_usage
+from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints
 from vv_agent.runtime.tool_call_runner import ToolCallRunner
 from vv_agent.tools import ToolContext, ToolRegistry
 from vv_agent.types import (
@@ -193,6 +194,7 @@ class AgentRuntime:
             initial_messages=initial_messages,
             user_message=user_message,
         )
+        freeze_dynamic_tool_schema_hints(task)
         self._emit_log(
             "run_started",
             task_id=task.task_id,

@@ -124,6 +124,9 @@ Notes:
 - Global defaults: `AgentSDKOptions.bash_shell`, `AgentSDKOptions.windows_shell_priority`, `AgentSDKOptions.bash_env`
 - Per-agent override: `AgentDefinition.bash_shell`, `AgentDefinition.windows_shell_priority`, `AgentDefinition.bash_env`
 - Recommended Windows priority: `["git-bash", "powershell", "cmd"]`
+- `run(...)` and `create_session(...)` both inherit startup shell defaults.
+- The `bash` tool schema description includes a runtime shell hint (resolved shell kind + invocation prefix), so the model sees which shell command style is expected before calling the tool.
+- The runtime shell hint is frozen per task/session-run to keep tool schemas stable across cycles and preserve LLM prompt cache efficiency.
 
 ```python
 from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions

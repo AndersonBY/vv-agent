@@ -124,6 +124,9 @@ session.continue_run()
 - 全局默认：`AgentSDKOptions.bash_shell`、`AgentSDKOptions.windows_shell_priority`、`AgentSDKOptions.bash_env`
 - Agent 级覆盖：`AgentDefinition.bash_shell`、`AgentDefinition.windows_shell_priority`、`AgentDefinition.bash_env`
 - Windows 推荐优先级：`["git-bash", "powershell", "cmd"]`
+- `run(...)` 与 `create_session(...)` 都会继承 startup shell 默认配置。
+- `bash` 工具 schema 的 description 会注入运行时 shell 提示（解析后的 shell 类型与调用前缀），模型在调用前即可知道应使用哪种命令风格。
+- 该运行时 shell 提示会在单个 task/session-run 内固化，确保跨 cycles 的 tool schema 文本稳定，保护 LLM prompt cache 命中率。
 
 ```python
 from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions

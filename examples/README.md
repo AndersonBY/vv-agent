@@ -60,6 +60,7 @@ V_AGENT_EXAMPLE_USER_REPLY="请使用口语化风格" uv run python examples/05_
 | 07 | `07_token_budget_guard.py` | Token 预算保护: 超限自动注入 `task_finish` |
 | 15 | `15_memory_compact_hook.py` | Memory compaction hook: 压缩前审计 + 关键消息保留 |
 | 16 | `16_hook_composition.py` | 多 hook 组合: TimingHook + SafetyHook + AuditHook |
+| 25 | `25_temporary_tool_injection.py` | 临时增删 tools 示例: 中途注入工具 schema（明确会破坏 prompt cache） |
 
 ```bash
 uv run python examples/06_runtime_hooks.py
@@ -69,6 +70,9 @@ V_AGENT_EXAMPLE_TOKEN_BUDGET=4000 uv run python examples/07_token_budget_guard.p
 V_AGENT_EXAMPLE_PIN_KEYWORDS="priority,critical" uv run python examples/15_memory_compact_hook.py
 
 uv run python examples/16_hook_composition.py
+
+# 临时工具注入窗口: cycle 2~3 开放临时工具, cycle 4 起关闭
+V_AGENT_TEMP_TOOL_START_CYCLE=2 V_AGENT_TEMP_TOOL_END_CYCLE=4 uv run python examples/25_temporary_tool_injection.py
 ```
 
 ---

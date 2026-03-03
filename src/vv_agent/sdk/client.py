@@ -192,22 +192,10 @@ class AgentSDKClient:
         cancellation_token: CancellationToken | None = None,
     ) -> AgentRun:
         resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
-        effective_definition = definition
-        if self.options.bash_shell and not effective_definition.bash_shell:
-            effective_definition = replace(effective_definition, bash_shell=self.options.bash_shell)
-        if self.options.windows_shell_priority and not effective_definition.windows_shell_priority:
-            effective_definition = replace(
-                effective_definition,
-                windows_shell_priority=list(self.options.windows_shell_priority),
-            )
-        if self.options.bash_env:
-            merged_bash_env = dict(self.options.bash_env)
-            merged_bash_env.update(effective_definition.bash_env)
-            effective_definition = replace(effective_definition, bash_env=merged_bash_env)
         return self._execute(
             prompt=prompt,
             resolved_name=resolved_name,
-            definition=effective_definition,
+            definition=definition,
             workspace=workspace,
             shared_state=shared_state,
             log_handler=log_handler,
@@ -285,6 +273,7 @@ class AgentSDKClient:
         shared_state: dict[str, Any] | None = None,
     ):
         resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
+        definition = self._resolve_effective_definition(definition)
         effective_workspace = self._resolve_workspace(workspace)
 
         from vv_agent.sdk.session import create_agent_session
@@ -316,7 +305,7 @@ class AgentSDKClient:
     ) -> AgentRun:
         if definition is None or resolved_name is None:
             resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
-        definition = self._effective_definition(definition)
+        definition = self._resolve_effective_definition(definition)
         effective_workspace = self._resolve_workspace(workspace)
         run_name = task_name or resolved_name
         backend = definition.backend or self.options.default_backend
@@ -377,6 +366,24 @@ class AgentSDKClient:
         if not effective.skill_directories and self._resource_skill_directories:
             effective = replace(effective, skill_directories=list(self._resource_skill_directories))
         return effective
+
+    def _resolve_effective_definition(self, definition: AgentDefinition) -> AgentDefinition:
+        return self._effective_definition(self._apply_startup_shell_defaults(definition))
+
+    def _apply_startup_shell_defaults(self, definition: AgentDefinition) -> AgentDefinition:
+        effective_definition = definition
+        if self.options.bash_shell and not effective_definition.bash_shell:
+            effective_definition = replace(effective_definition, bash_shell=self.options.bash_shell)
+        if self.options.windows_shell_priority and not effective_definition.windows_shell_priority:
+            effective_definition = replace(
+                effective_definition,
+                windows_shell_priority=list(self.options.windows_shell_priority),
+            )
+        if self.options.bash_env:
+            merged_bash_env = dict(self.options.bash_env)
+            merged_bash_env.update(effective_definition.bash_env)
+            effective_definition = replace(effective_definition, bash_env=merged_bash_env)
+        return effective_definition
 
     def _resolve_agent(
         self,

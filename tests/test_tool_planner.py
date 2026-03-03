@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import vv_agent.runtime.tool_planner as tool_planner_module
 from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
@@ -110,3 +113,81 @@ def test_plan_tool_names_includes_activate_skill_for_skill_directories() -> None
     names = plan_tool_names(_task(metadata={"skill_directories": ["skills"]}))
 
     assert ACTIVATE_SKILL_TOOL_NAME in names
+
+
+def test_plan_tool_schemas_injects_runtime_shell_hint_for_bash(monkeypatch) -> None:
+    registry = build_default_registry()
+
+    def fake_resolve(*, shell: str | None = None, windows_shell_priority: list[str] | None = None):
+        del shell, windows_shell_priority
+        return SimpleNamespace(
+            kind="powershell",
+            prefix=["powershell", "-NoLogo", "-NoProfile", "-Command"],
+        )
+
+    monkeypatch.setattr(tool_planner_module, "resolve_shell_invocation", fake_resolve)
+
+    schemas = plan_tool_schemas(
+        registry=registry,
+        task=_task(
+            agent_type="computer",
+            metadata={"bash_shell": "powershell"},
+        ),
+    )
+
+    bash_schema = next(schema for schema in schemas if schema["function"]["name"] == BASH_TOOL_NAME)
+    description = bash_schema["function"]["description"]
+    assert "Runtime shell hint" in description
+    assert "powershell" in description
+    assert "-NoProfile" in description
+
+
+def test_plan_tool_schemas_reports_invalid_windows_shell_priority_config() -> None:
+    registry = build_default_registry()
+    schemas = plan_tool_schemas(
+        registry=registry,
+        task=_task(
+            agent_type="computer",
+            metadata={"windows_shell_priority": "git-bash,powershell,cmd"},
+        ),
+    )
+
+    bash_schema = next(schema for schema in schemas if schema["function"]["name"] == BASH_TOOL_NAME)
+    description = bash_schema["function"]["description"]
+    assert "Runtime shell hint" in description
+    assert "invalid shell config" in description
+
+
+def test_plan_tool_schemas_freezes_runtime_shell_hint_across_cycles(monkeypatch) -> None:
+    registry = build_default_registry()
+    task = _task(agent_type="computer")
+    call_count = {"value": 0}
+
+    def fake_resolve(*, shell: str | None = None, windows_shell_priority: list[str] | None = None):
+        del shell, windows_shell_priority
+        call_count["value"] += 1
+        index = call_count["value"]
+        return SimpleNamespace(
+            kind=f"shell-{index}",
+            prefix=[f"runner-{index}", "-Command"],
+        )
+
+    monkeypatch.setattr(tool_planner_module, "resolve_shell_invocation", fake_resolve)
+
+    first = plan_tool_schemas(
+        registry=registry,
+        task=task,
+    )
+    second = plan_tool_schemas(
+        registry=registry,
+        task=task,
+    )
+
+    first_bash = next(schema for schema in first if schema["function"]["name"] == BASH_TOOL_NAME)
+    second_bash = next(schema for schema in second if schema["function"]["name"] == BASH_TOOL_NAME)
+    first_description = first_bash["function"]["description"]
+    second_description = second_bash["function"]["description"]
+
+    assert first_description == second_description
+    assert "shell-1" in first_description
+    assert call_count["value"] == 1
