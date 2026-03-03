@@ -312,8 +312,8 @@ def main() -> None:
         run = client.run(
             prompt=(
                 "请先读取 input/context.md 并给出执行计划。"
-                f"当你看到 `{EPHEMERAL_NOTE_TOOL_NAME}` 可用时，可调用一次写入简短 note。"
-                f"最终请调用 `{TASK_FINISH_TOOL_NAME}`，并明确说明动态增删 tools 对 prompt cache 的影响。"
+                f"当你看到 `{EPHEMERAL_NOTE_TOOL_NAME}` 可用时, 可调用一次写入简短 note。"
+                f"最终请调用 `{TASK_FINISH_TOOL_NAME}`, 并明确说明动态增删 tools 对 prompt cache 的影响。"
             )
         )
         print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))

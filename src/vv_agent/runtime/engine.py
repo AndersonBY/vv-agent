@@ -21,8 +21,8 @@ from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
 from vv_agent.runtime.token_usage import summarize_task_token_usage
-from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints
 from vv_agent.runtime.tool_call_runner import ToolCallRunner
+from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints
 from vv_agent.tools import ToolContext, ToolRegistry
 from vv_agent.types import (
     AgentResult,
