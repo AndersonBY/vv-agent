@@ -1151,7 +1151,7 @@ wheels = [
 
 [[package]]
 name = "vv-agent"
-version = "0.1.28"
+version = "0.1.36"
 source = { editable = "." }
 dependencies = [
     { name = "openai" },
@@ -1184,7 +1184,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.109.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "ripgrep", specifier = ">=14.1.0" },
-    { name = "vv-llm", directory = "../ref_repos/vv-llm" },
+    { name = "vv-llm", specifier = ">=0.3.73" },
 ]
 provides-extras = ["celery", "s3"]
 
@@ -1200,7 +1200,7 @@ dev = [
 [[package]]
 name = "vv-llm"
 version = "0.3.73"
-source = { directory = "../ref_repos/vv-llm" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
     { name = "deepseek-tokenizer" },
@@ -1211,33 +1211,9 @@ dependencies = [
     { name = "qwen-tokenizer" },
     { name = "tiktoken" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.47.1" },
-    { name = "boto3", marker = "extra == 'bedrock'", specifier = ">=1.28.57" },
-    { name = "botocore", marker = "extra == 'bedrock'", specifier = ">=1.31.57" },
-    { name = "deepseek-tokenizer", specifier = ">=0.1.0" },
-    { name = "diskcache", marker = "extra == 'diskcache'" },
-    { name = "fastapi", marker = "extra == 'server'" },
-    { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.35.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "openai", specifier = ">=1.99.3" },
-    { name = "pillow", specifier = ">=10.4.0" },
-    { name = "pydantic", specifier = ">=2.8.2" },
-    { name = "qwen-tokenizer", specifier = ">=0.2.0" },
-    { name = "redis", marker = "extra == 'redis'" },
-    { name = "tiktoken", specifier = ">=0.7.0" },
-    { name = "uvicorn", marker = "extra == 'server'" },
-]
-provides-extras = ["bedrock", "diskcache", "redis", "server", "vertex"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.3.4" },
-    { name = "ruff", specifier = ">=0.8.0" },
-    { name = "ty", specifier = ">=0.0.1a24" },
-    { name = "types-redis", specifier = ">=4.6.0.20241004" },
+sdist = { url = "https://files.pythonhosted.org/packages/da/9c/44fe5f7688dcdf5c6cb37a32e5fbbbe70d0dd222a88870a765f71badfb12/vv_llm-0.3.73.tar.gz", hash = "sha256:63057fdeac46086bda9bf3098b9d26e9160dc452d629c45fcb1c21ab31b6733f", size = 58539, upload-time = "2026-02-18T18:25:19.872Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6f/09/ff4ace2178355b5e07e86cec6e24b0f7000d0f15a11b65d92a1a15b713de/vv_llm-0.3.73-py3-none-any.whl", hash = "sha256:bfae6494551f7559019c1626a334aac7f2e49945cd6c627df3760459472af838", size = 69820, upload-time = "2026-02-18T18:25:17.109Z" },
 ]
 
 [[package]]

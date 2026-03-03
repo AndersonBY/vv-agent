@@ -37,9 +37,6 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "vv_agent"
 
-[tool.uv.sources]
-vv-llm = { path = "../ref_repos/vv-llm" }
-
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
