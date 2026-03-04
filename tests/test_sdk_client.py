@@ -357,6 +357,45 @@ def test_sdk_prepare_task_supports_sub_agent_configs(tmp_path: Path) -> None:
     assert BATCH_SUB_TASKS_TOOL_NAME in task.system_prompt
 
 
+def test_sdk_prepare_task_applies_memory_compaction_thresholds(tmp_path: Path) -> None:
+    client = AgentSDKClient(
+        options=AgentSDKOptions(settings_file=Path("local_settings.py"), default_backend="moonshot", workspace=tmp_path),
+        agents={
+            "memory-agent": AgentDefinition(
+                description="memory tuned",
+                model="kimi-k2.5",
+                memory_compact_threshold=56000,
+                memory_threshold_percentage=73,
+            )
+        },
+    )
+
+    task = client.prepare_task(
+        agent_name="memory-agent",
+        prompt="run memory tuned task",
+        resolved_model_id="kimi-k2.5",
+    )
+    assert task.memory_compact_threshold == 56000
+    assert task.memory_threshold_percentage == 73
+
+    invalid_definition = cast(
+        AgentDefinition,
+        AgentDefinition(
+            description="invalid memory config",
+            model="kimi-k2.5",
+            memory_compact_threshold=0,
+            memory_threshold_percentage=130,
+        ),
+    )
+    inline_task = client.prepare_task(
+        agent=invalid_definition,
+        prompt="run invalid config",
+        resolved_model_id="kimi-k2.5",
+    )
+    assert inline_task.memory_compact_threshold == 1
+    assert inline_task.memory_threshold_percentage == 100
+
+
 def test_sdk_client_applies_bash_shell_from_startup_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

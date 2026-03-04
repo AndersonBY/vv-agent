@@ -39,6 +39,8 @@ class AgentDefinition:
     backend: str | None = None
     language: str = "zh-CN"
     max_cycles: int = 10
+    memory_compact_threshold: int = 128_000
+    memory_threshold_percentage: int = 90
     no_tool_policy: NoToolPolicy = "continue"
     allow_interruption: bool = True
     use_workspace: bool = True

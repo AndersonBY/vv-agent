@@ -158,12 +158,23 @@ class AgentSDKClient:
                 workspace=effective_workspace,
             )
 
+        memory_compact_threshold = self._to_positive_int(
+            definition.memory_compact_threshold,
+            default=128_000,
+        )
+        memory_threshold_percentage = self._to_percentage_int(
+            definition.memory_threshold_percentage,
+            default=90,
+        )
+
         return AgentTask(
             task_id=f"{effective_task_name}_{uuid.uuid4().hex[:8]}",
             model=resolved_model_id,
             system_prompt=system_prompt,
             user_prompt=prompt,
             max_cycles=max(definition.max_cycles, 1),
+            memory_compact_threshold=memory_compact_threshold,
+            memory_threshold_percentage=memory_threshold_percentage,
             no_tool_policy=definition.no_tool_policy,
             allow_interruption=definition.allow_interruption,
             use_workspace=definition.use_workspace,
@@ -424,6 +435,22 @@ class AgentSDKClient:
             available = ", ".join(sorted(self._agents))
             raise ValueError(f"Unknown agent: {agent_name}. Available: {available}")
         return definition
+
+    @staticmethod
+    def _to_positive_int(value: Any, *, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(parsed, 1)
+
+    @staticmethod
+    def _to_percentage_int(value: Any, *, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(1, min(parsed, 100))
 
     def _resolve_workspace(self, workspace: str | Path | None = None) -> Path:
         raw = workspace

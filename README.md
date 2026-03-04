@@ -312,6 +312,10 @@ class MyBackend:
 - Task-level knobs:
   - `memory_compact_threshold` (default `128000`)
   - `memory_threshold_percentage` (warning threshold percentage, default `90`)
+- SDK mapping:
+  - `AgentDefinition.memory_compact_threshold`
+  - `AgentDefinition.memory_threshold_percentage`
+  - `AgentSDKClient.prepare_task(...)` 会把这两个字段透传到 `AgentTask`。
 - Effective-length strategy (backend-aligned):
   - If previous cycle token usage exists:
     - `effective_length = previous_total_tokens + len(json.dumps(recent_tool_messages))`
