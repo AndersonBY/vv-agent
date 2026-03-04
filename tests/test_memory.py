@@ -179,3 +179,77 @@ def test_memory_uses_token_based_length_with_recent_tool_ids() -> None:
     compacted2, changed2 = manager.compact(messages, total_tokens=200, recent_tool_call_ids=set())
     assert changed2 is True
     assert len(compacted2) == 2
+
+
+def test_memory_normalize_orphan_tool_messages_respects_message_order_with_reused_call_id() -> None:
+    manager = MemoryManager(
+        tool_calls_keep_last=1,
+        assistant_no_tool_keep_last=10,
+    )
+    messages = [
+        Message(role="system", content="sys"),
+        Message(
+            role="assistant",
+            content="first capture request",
+            tool_calls=[
+                {
+                    "id": "screen_capture:4",
+                    "type": "function",
+                    "function": {"name": "screen_capture", "arguments": "{}"},
+                }
+            ],
+        ),
+        Message(role="tool", content="first result", tool_call_id="screen_capture:4"),
+        Message(role="assistant", content="narration"),
+        Message(
+            role="assistant",
+            content="second capture request",
+            tool_calls=[
+                {
+                    "id": "screen_capture:4",
+                    "type": "function",
+                    "function": {"name": "screen_capture", "arguments": "{}"},
+                }
+            ],
+        ),
+        Message(role="tool", content="second result", tool_call_id="screen_capture:4"),
+    ]
+
+    compacted, changed = manager._compact_messages(messages, cycle_index=1)
+    assert changed is True
+
+    assistant_tool_call_indices = [idx for idx, msg in enumerate(compacted) if msg.role == "assistant" and msg.tool_calls]
+    tool_indices = [
+        idx
+        for idx, msg in enumerate(compacted)
+        if msg.role == "tool" and msg.tool_call_id == "screen_capture:4"
+    ]
+    assert len(assistant_tool_call_indices) == 1
+    assert len(tool_indices) == 1
+    assert tool_indices[0] > assistant_tool_call_indices[0]
+    assert compacted[tool_indices[0]].content == "second result"
+
+
+def test_memory_normalize_orphan_tool_messages_drops_excess_tool_results_per_call_id() -> None:
+    manager = MemoryManager()
+    messages = [
+        Message(
+            role="assistant",
+            content="call",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                }
+            ],
+        ),
+        Message(role="tool", content="first", tool_call_id="call_1"),
+        Message(role="tool", content="second", tool_call_id="call_1"),
+    ]
+
+    normalized, changed = manager._normalize_orphan_tool_messages(messages)
+    assert changed is True
+    tool_messages = [msg for msg in normalized if msg.role == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].content == "first"

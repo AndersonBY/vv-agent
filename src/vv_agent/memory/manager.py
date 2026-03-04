@@ -294,22 +294,32 @@ class MemoryManager:
         return stripped, updated
 
     def _normalize_orphan_tool_messages(self, messages: list[Message]) -> tuple[list[Message], bool]:
-        allowed_tool_call_ids = {
-            tool_call.get("id")
-            for message in messages
-            if message.role == "assistant" and message.tool_calls
-            for tool_call in message.tool_calls
-            if isinstance(tool_call, dict) and tool_call.get("id")
-        }
-
         updated = False
+        pending_tool_calls: dict[str, int] = {}
         normalized: list[Message] = []
         for message in messages:
-            if message.role == "tool" and (
-                not message.tool_call_id or message.tool_call_id not in allowed_tool_call_ids
-            ):
-                updated = True
+            if message.role == "assistant" and message.tool_calls:
+                for tool_call in message.tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    raw_tool_call_id = tool_call.get("id")
+                    tool_call_id = str(raw_tool_call_id or "").strip()
+                    if not tool_call_id:
+                        continue
+                    pending_tool_calls[tool_call_id] = pending_tool_calls.get(tool_call_id, 0) + 1
+                normalized.append(message)
                 continue
+
+            if message.role == "tool":
+                tool_call_id = str(message.tool_call_id or "").strip()
+                if not tool_call_id:
+                    updated = True
+                    continue
+                remaining = pending_tool_calls.get(tool_call_id, 0)
+                if remaining <= 0:
+                    updated = True
+                    continue
+                pending_tool_calls[tool_call_id] = remaining - 1
             normalized.append(message)
         return normalized, updated
 

@@ -10,3 +10,4 @@ local_settings.py
 .vv-agent-workspace/
 /workspace/
 .env
+uv.lock
