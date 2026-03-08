@@ -471,13 +471,33 @@ def test_sdk_client_merges_bash_env_from_startup_options(tmp_path: Path, monkeyp
         captured["command"] = command
         return ["bash", "-lc", command], None
 
-    def fake_run(*args, **kwargs):
-        del args
-        captured["env"] = kwargs.get("env")
-        return SimpleNamespace(stdout="ok\n", stderr="", returncode=0)
+    output_file = tmp_path / "startup-env.log"
+    output_file.write_text("ok\n", encoding="utf-8")
+
+    class _FakeProcess:
+        returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+    def fake_start(command: list[str], *, cwd: Path, stdin_text: str | None, env=None):
+        del command, cwd, stdin_text
+        captured["env"] = env
+        return SimpleNamespace(process=_FakeProcess(), output_path=output_file)
 
     monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
-    monkeypatch.setattr(bash_handler.subprocess, "run", fake_run)
+    monkeypatch.setattr(bash_handler, "start_captured_process", fake_start)
+    monkeypatch.setattr(
+        bash_handler,
+        "read_captured_output",
+        lambda path, *, limit_chars: Path(path).read_text(encoding="utf-8")[:limit_chars],
+    )
+    monkeypatch.setattr(bash_handler, "remove_captured_output", lambda path: None)
+
 
     def fake_llm_builder(
         settings_path: str | Path,

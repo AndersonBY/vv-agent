@@ -433,6 +433,7 @@ Use this tool to keep task planning explicit and machine-readable.""",
 Guidelines:
 - Prefer specialized read/write/search/edit tools when possible.
 - Use this tool for command execution, package install, scripts, and piped workflows.
+- For commands that may prompt for confirmation, pass `auto_confirm=true` or provide explicit `stdin`.
 - Use `run_in_background=true` for long-running commands and poll with check tool.""",
             "parameters": {
                 "type": "object",

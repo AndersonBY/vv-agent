@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from vv_agent.runtime.background_sessions import background_session_manager
+from vv_agent.runtime.processes import (
+    kill_process_tree,
+    read_captured_output,
+    remove_captured_output,
+    start_captured_process,
+)
 from vv_agent.runtime.shell import prepare_shell_execution
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
@@ -210,28 +216,41 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             content=to_json({"error": str(exc)}),
         )
 
+    started_process = start_captured_process(
+        shell_command,
+        cwd=exec_dir,
+        stdin_text=prepared_stdin,
+        env=process_env,
+    )
+
     try:
-        completed = subprocess.run(
-            shell_command,
-            cwd=str(exec_dir),
-            input=prepared_stdin,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
-            check=False,
-            env=process_env,
-        )
+        completed_exit_code = started_process.process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        kill_process_tree(started_process.process)
+        payload = {
+            "command": command,
+            "cwd": exec_dir_raw,
+            "exit_code": started_process.process.returncode if started_process.process.returncode is not None else -9,
+            "output": read_captured_output(started_process.output_path, limit_chars=_OUTPUT_LIMIT),
+        }
+        if shell:
+            payload["shell"] = shell
+        remove_captured_output(started_process.output_path)
         return ToolExecutionResult(
             tool_call_id="",
             status="error",
             status_code=ToolResultStatus.ERROR,
             error_code="command_timeout",
-            content=to_json({"error": f"command timed out after {timeout} seconds"}),
+            content=to_json(
+                {
+                    "error": f"command timed out after {timeout} seconds",
+                    **payload,
+                }
+            ),
         )
 
-    combined_output = f"{completed.stdout}{completed.stderr}"[:_OUTPUT_LIMIT]
+    combined_output = read_captured_output(started_process.output_path, limit_chars=_OUTPUT_LIMIT)
+    remove_captured_output(started_process.output_path)
     workspace_root = context.workspace.resolve()
     resolved_exec_dir = Path(exec_dir).resolve()
     if resolved_exec_dir == workspace_root:
@@ -245,13 +264,13 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
     payload = {
         "command": command,
         "cwd": cwd,
-        "exit_code": completed.returncode,
+        "exit_code": completed_exit_code,
         "output": combined_output,
     }
     if shell:
         payload["shell"] = shell
 
-    if completed.returncode != 0:
+    if completed_exit_code != 0:
         return ToolExecutionResult(
             tool_call_id="",
             status="error",

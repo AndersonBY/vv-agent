@@ -9,6 +9,11 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from vv_agent.runtime.processes import (
+    kill_process_tree,
+    read_captured_output,
+    start_captured_process,
+)
 from vv_agent.runtime.shell import prepare_shell_execution
 
 _OUTPUT_LIMIT = 50_000
@@ -23,6 +28,7 @@ class _SessionState:
     started_at: float
     timeout_seconds: int
     process: subprocess.Popen[str]
+    output_path: Path
     status: str = "running"
     output: str = ""
     exit_code: int | None = None
@@ -53,23 +59,12 @@ class BackgroundSessionManager:
             windows_shell_priority=windows_shell_priority,
         )
 
-        process = subprocess.Popen(
+        started_process = start_captured_process(
             shell_command,
-            cwd=str(cwd),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            env=dict(env) if env is not None else None,
+            cwd=cwd,
+            stdin_text=prepared_stdin,
+            env=env,
         )
-
-        if prepared_stdin and process.stdin is not None:
-            process.stdin.write(prepared_stdin)
-            process.stdin.close()
-        elif process.stdin is not None:
-            process.stdin.close()
-        process.stdin = None
 
         session_id = f"bg_{uuid.uuid4().hex[:12]}"
         session = _SessionState(
@@ -79,7 +74,8 @@ class BackgroundSessionManager:
             cwd=str(cwd),
             started_at=time.time(),
             timeout_seconds=timeout_seconds,
-            process=process,
+            process=started_process.process,
+            output_path=started_process.output_path,
         )
 
         with self._lock:
@@ -103,10 +99,12 @@ class BackgroundSessionManager:
         if session.process.poll() is None:
             elapsed = time.time() - session.started_at
             if elapsed > session.timeout_seconds:
-                session.process.kill()
+                kill_process_tree(session.process)
                 session.status = "timeout"
-                session.exit_code = -9
-                session.output = "Command timed out in background session"
+                session.exit_code = session.process.returncode if session.process.returncode is not None else -9
+                session.output = read_captured_output(session.output_path, limit_chars=_OUTPUT_LIMIT)
+                if not session.output:
+                    session.output = "Command timed out in background session"
                 return self._snapshot(session)
 
             return {
@@ -117,8 +115,7 @@ class BackgroundSessionManager:
                 "shell": session.shell,
             }
 
-        output, _ = session.process.communicate(timeout=1)
-        session.output = (output or "")[:_OUTPUT_LIMIT]
+        session.output = read_captured_output(session.output_path, limit_chars=_OUTPUT_LIMIT)
         session.exit_code = session.process.returncode
         session.status = "completed" if session.exit_code == 0 else "failed"
         return self._snapshot(session)
