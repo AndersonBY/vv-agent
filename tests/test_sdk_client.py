@@ -378,14 +378,11 @@ def test_sdk_prepare_task_applies_memory_compaction_thresholds(tmp_path: Path) -
     assert task.memory_compact_threshold == 56000
     assert task.memory_threshold_percentage == 73
 
-    invalid_definition = cast(
-        AgentDefinition,
-        AgentDefinition(
-            description="invalid memory config",
-            model="kimi-k2.5",
-            memory_compact_threshold=0,
-            memory_threshold_percentage=130,
-        ),
+    invalid_definition = AgentDefinition(
+        description="invalid memory config",
+        model="kimi-k2.5",
+        memory_compact_threshold=0,
+        memory_threshold_percentage=130,
     )
     inline_task = client.prepare_task(
         agent=invalid_definition,

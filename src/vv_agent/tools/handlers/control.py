@@ -37,7 +37,7 @@ def task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutio
             ),
         )
 
-    metadata = {"final_message": message}
+    metadata: dict[str, Any] = {"final_message": message}
     if isinstance(exposed_files, list):
         metadata["exposed_files"] = [str(path) for path in exposed_files if str(path).strip()]
 

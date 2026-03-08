@@ -647,6 +647,8 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
         result_text = "\n".join(result_lines)
         payload = {"matches": visible_rows}
 
+    payload: dict[str, Any] = dict(payload)
+
     truncated_text, text_truncated = _truncate_result_text(
         result_text,
         total_matches=total_matches,
