@@ -58,7 +58,10 @@ jobs:
         run: uv run ty check
 
       - name: Build package
-        run: uv build
+        shell: bash
+        run: |
+          rm -rf dist
+          uv build
 
       - name: Generate release notes
         id: changelog
@@ -84,13 +87,30 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Collect release artifacts
+        id: artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.whl dist/*.tar.gz)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release artifacts found in dist/" >&2
+            exit 1
+          fi
+          {
+            echo "files<<EOF"
+            printf '%s\n' "${files[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
           name: v${{ steps.changelog.outputs.version }}
           body: ${{ steps.changelog.outputs.changelog }}
-          files: dist/*
+          files: ${{ steps.artifacts.outputs.files }}
           draft: false
           prerelease: false
 
