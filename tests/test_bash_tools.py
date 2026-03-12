@@ -271,6 +271,30 @@ def test_bash_tool_applies_context_bash_env(tmp_path: Path, monkeypatch) -> None
     assert process_env["VV_AGENT_BASE_ENV"] == "base-value"
 
 
+def test_build_process_env_injects_windows_python_encoding_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(bash_handler.os, "name", "nt", raising=False)
+    monkeypatch.delenv("PYTHONUTF8", raising=False)
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+
+    process_env = bash_handler._build_process_env(None)
+
+    assert process_env is not None
+    assert process_env["PYTHONUTF8"] == "1"
+    assert process_env["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_build_process_env_preserves_explicit_windows_python_encoding_overrides(monkeypatch) -> None:
+    monkeypatch.setattr(bash_handler.os, "name", "nt", raising=False)
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("PYTHONIOENCODING", "gbk")
+
+    process_env = bash_handler._build_process_env({"PYTHONIOENCODING": "utf-8:replace"})
+
+    assert process_env is not None
+    assert process_env["PYTHONUTF8"] == "0"
+    assert process_env["PYTHONIOENCODING"] == "utf-8:replace"
+
+
 def test_start_captured_process_uses_replace_error_handler_for_decoding(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 

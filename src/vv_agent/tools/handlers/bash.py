@@ -26,6 +26,10 @@ _DANGEROUS_SNIPPETS = (
 )
 
 _OUTPUT_LIMIT = 50_000
+_WINDOWS_PYTHON_ENV_DEFAULTS = {
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
+}
 
 
 def _normalize_shell_value(raw: Any) -> str | None:
@@ -105,10 +109,14 @@ def _read_shell_defaults(context: ToolContext) -> tuple[str | None, list[str] | 
 
 
 def _build_process_env(extra_env: dict[str, str] | None) -> dict[str, str] | None:
-    if not extra_env:
+    if not extra_env and os.name != "nt":
         return None
     env = dict(os.environ)
-    env.update(extra_env)
+    if os.name == "nt":
+        for key, value in _WINDOWS_PYTHON_ENV_DEFAULTS.items():
+            env.setdefault(key, value)
+    if extra_env:
+        env.update(extra_env)
     return env
 
 
