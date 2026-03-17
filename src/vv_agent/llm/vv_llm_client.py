@@ -711,11 +711,13 @@ class VVLlmClient(LLMClient):
                 continue
             raw_arguments = str(slot.get("arguments", ""))
             tool_id = str(slot.get("id") or f"call_{uuid.uuid4().hex[:12]}")
+            raw_extra_content = slot.get("extra_content")
             parsed_tool_calls.append(
                 ToolCall(
                     id=tool_id,
                     name=name,
                     arguments=self._parse_arguments(raw_arguments),
+                    extra_content=raw_extra_content if isinstance(raw_extra_content, dict) else None,
                 )
             )
             if options.is_gemini_3_model and "extra_content" in slot:
@@ -932,11 +934,13 @@ class VVLlmClient(LLMClient):
 
             arguments_raw = self._read_field(function_call, "arguments")
             call_id_raw = self._read_field(call, "id")
+            extra_content_raw = self._read_field(call, "extra_content")
             parsed_tool_calls.append(
                 ToolCall(
                     id=call_id_raw if isinstance(call_id_raw, str) and call_id_raw else f"call_{uuid.uuid4().hex[:12]}",
                     name=name_raw,
                     arguments=self._parse_arguments(arguments_raw if isinstance(arguments_raw, str) else None),
+                    extra_content=extra_content_raw if isinstance(extra_content_raw, dict) else None,
                 )
             )
 
@@ -953,6 +957,7 @@ class VVLlmClient(LLMClient):
                     id=tool_id,
                     name=tool_name,
                     arguments=tool_call.arguments,
+                    extra_content=tool_call.extra_content,
                 )
             )
         return normalized

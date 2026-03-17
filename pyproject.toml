@@ -1,6 +1,6 @@
 [project]
 name = "vv-agent"
-version = "0.1.41"
+version = "0.1.42"
 description = "Vector Vein inspired agent framework with cycle runtime, tools and memory management"
 readme = "README.md"
 authors = [
@@ -12,7 +12,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "ripgrep>=14.1.0,<15; platform_system == 'Windows'",
     "ripgrep>=14.1.0; platform_system != 'Windows'",
-    "vv-llm>=0.3.73",
+    "vv-llm>=0.3.83",
 ]
 
 [project.optional-dependencies]

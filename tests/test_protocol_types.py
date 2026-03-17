@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolExecutionResult, ToolResultStatus
+from vv_agent.runtime.cycle_runner import CycleRunner
+from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolCall, ToolExecutionResult, ToolResultStatus
 
 
 def test_tool_result_keeps_tool_message_shape() -> None:
@@ -54,6 +55,44 @@ def test_assistant_message_keeps_tool_calls_in_openai_payload() -> None:
     assert payload["content"] is None
     assert payload["reasoning_content"] == "analysis"
     assert payload["tool_calls"][0]["function"]["name"] == "todo_read"
+
+
+def test_assistant_message_preserves_tool_call_extra_content() -> None:
+    message = Message(
+        role="assistant",
+        content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "default_api:list_files",
+                    "arguments": '{"path":"."}',
+                },
+                "extra_content": {
+                    "google": {
+                        "thought_signature": "sig_123",
+                    }
+                },
+            }
+        ],
+    )
+    payload = message.to_openai_message()
+    assert payload["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "sig_123"
+
+
+def test_cycle_runner_serializes_tool_call_extra_content() -> None:
+    serialized = CycleRunner._serialize_tool_calls(
+        [
+            ToolCall(
+                id="call_1",
+                name="default_api:list_files",
+                arguments={"path": "."},
+                extra_content={"google": {"thought_signature": "sig_123"}},
+            )
+        ]
+    )
+    assert serialized[0]["extra_content"]["google"]["thought_signature"] == "sig_123"
 
 
 def test_assistant_message_can_skip_reasoning_content() -> None:

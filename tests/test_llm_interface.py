@@ -185,6 +185,68 @@ def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
     assert response.raw["reasoning_content"] == "step-1|step-2"
 
 
+def test_llm_stream_preserves_gemini3_tool_call_extra_content(monkeypatch) -> None:
+    chunk_1 = SimpleNamespace(
+        usage=None,
+        content="",
+        reasoning_content=None,
+        tool_calls=[
+            SimpleNamespace(
+                index=0,
+                id="tc1",
+                function=SimpleNamespace(
+                    name="default_api:list_files",
+                    arguments='{"path": "."}',
+                ),
+                extra_content={"google": {"thought_signature": "sig_123"}},
+            )
+        ],
+    )
+    chunk_2 = SimpleNamespace(
+        usage=_FakeUsage(),
+        content="done",
+        reasoning_content=None,
+        tool_calls=[],
+    )
+
+    def stream_call(kwargs: dict[str, Any]) -> Any:
+        assert kwargs["stream"] is True
+        return [chunk_1, chunk_2]
+
+    _FakeChatClient.behavior_by_endpoint = {"gemini-stream": stream_call}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="gemini-stream",
+                api_key="k",
+                api_base="https://gemini.example/v1",
+            )
+        ],
+        backend="gemini",
+        selected_model="gemini-3-pro-preview",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    response = llm.complete(
+        model="gemini-3-pro-preview",
+        messages=[Message(role="user", content="hi")],
+        tools=[],
+    )
+
+    assert response.content == "done"
+    assert response.tool_calls[0].extra_content == {"google": {"thought_signature": "sig_123"}}
+    assert response.raw["tool_call_extra_content"] == {
+        "tc1": {"google": {"thought_signature": "sig_123"}}
+    }
+
+
 def test_resolve_request_options_aligns_claude_thinking_profile() -> None:
     llm = VVLlmClient(endpoint_targets=[])
     options = llm._resolve_request_options("claude-opus-4-6-thinking", stream=True, endpoint_type="openai")

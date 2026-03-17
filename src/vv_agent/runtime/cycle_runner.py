@@ -123,14 +123,15 @@ class CycleRunner:
     def _serialize_tool_calls(tool_calls: list[ToolCall]) -> list[dict[str, Any]]:
         serialized: list[dict[str, Any]] = []
         for tool_call in tool_calls:
-            serialized.append(
-                {
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.name,
-                        "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
-                    },
-                }
-            )
+            payload = {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                },
+            }
+            if tool_call.extra_content is not None:
+                payload["extra_content"] = tool_call.extra_content
+            serialized.append(payload)
         return serialized

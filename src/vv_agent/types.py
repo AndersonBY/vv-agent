@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
@@ -117,13 +118,28 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    extra_content: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "name": self.name, "arguments": dict(self.arguments)}
+        payload: dict[str, Any] = {
+            "id": self.id,
+            "name": self.name,
+            "arguments": dict(self.arguments),
+        }
+        if self.extra_content is not None:
+            payload["extra_content"] = deepcopy(self.extra_content)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolCall:
-        return cls(id=data["id"], name=data["name"], arguments=dict(data.get("arguments", {})))
+        raw_extra_content = data.get("extra_content")
+        extra_content = deepcopy(raw_extra_content) if isinstance(raw_extra_content, dict) else None
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            arguments=dict(data.get("arguments", {})),
+            extra_content=extra_content,
+        )
 
 
 @dataclass(slots=True)

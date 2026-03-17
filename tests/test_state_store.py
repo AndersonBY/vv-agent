@@ -55,12 +55,18 @@ class TestSerializationRoundTrip:
         assert restored.reasoning_content == msg.reasoning_content
 
     def test_tool_call_roundtrip(self):
-        tc = ToolCall(id="c1", name="bash", arguments={"cmd": "ls"})
+        tc = ToolCall(
+            id="c1",
+            name="bash",
+            arguments={"cmd": "ls"},
+            extra_content={"google": {"thought_signature": "sig_123"}},
+        )
         d = tc.to_dict()
         restored = ToolCall.from_dict(d)
         assert restored.id == tc.id
         assert restored.name == tc.name
         assert restored.arguments == tc.arguments
+        assert restored.extra_content == tc.extra_content
 
     def test_tool_execution_result_roundtrip(self):
         tr = ToolExecutionResult(
