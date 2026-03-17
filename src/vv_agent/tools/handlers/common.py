@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from vv_agent.tools.base import ToolContext
 
 
 def to_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False)
+
+
+def is_string_keyed_dict(value: Any) -> TypeGuard[dict[str, Any]]:
+    return isinstance(value, dict) and all(isinstance(key, str) for key in value)
 
 
 def get_todo_list(shared_state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -25,7 +29,7 @@ def normalize_todo_items(raw_items: Any) -> list[dict[str, Any]]:
         return normalized
 
     for item in raw_items:
-        if not isinstance(item, dict):
+        if not is_string_keyed_dict(item):
             continue
         title = str(item.get("title", "")).strip()
         if not title:

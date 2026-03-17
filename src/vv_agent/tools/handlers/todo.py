@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import get_todo_list, to_json
+from vv_agent.tools.handlers.common import get_todo_list, is_string_keyed_dict, to_json
 from vv_agent.types import ToolExecutionResult
 
 _ALLOWED_STATUS = {"pending", "in_progress", "completed"}
@@ -27,34 +27,41 @@ def todo_write(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         return _error("`todos` must be an array", error_code="invalid_todos_payload")
 
     existing_todos = get_todo_list(context.shared_state)
-    existing_map = {str(item.get("id")): item for item in existing_todos if isinstance(item, dict) and item.get("id")}
+    existing_map: dict[str, dict[str, Any]] = {}
+    for item in existing_todos:
+        if not is_string_keyed_dict(item):
+            continue
+        raw_item_id = item.get("id")
+        item_id = str(raw_item_id).strip() if raw_item_id is not None else ""
+        if item_id:
+            existing_map[item_id] = item
 
     now = datetime.now(tz=UTC).isoformat()
     new_todo_list: list[dict[str, Any]] = []
 
-    for index, todo_item in enumerate(todos):
-        if not isinstance(todo_item, dict):
+    for index, raw_todo_item in enumerate(todos):
+        if not is_string_keyed_dict(raw_todo_item):
             return _error(f"TODO item at index {index} must be an object", error_code="invalid_todo_item")
 
-        title = str(todo_item.get("title", "")).strip()
+        title = str(raw_todo_item.get("title", "")).strip()
         if not title:
             return _error(f"TODO item at index {index} is missing `title`", error_code="todo_title_required")
 
-        status = str(todo_item.get("status", "pending")).lower()
+        status = str(raw_todo_item.get("status", "pending")).lower()
         if status not in _ALLOWED_STATUS:
             return _error(
                 f"TODO item {title} has invalid status {status}",
                 error_code="invalid_todo_status",
             )
 
-        priority = str(todo_item.get("priority", "medium")).lower()
+        priority = str(raw_todo_item.get("priority", "medium")).lower()
         if priority not in _ALLOWED_PRIORITY:
             return _error(
                 f"TODO item {title} has invalid priority {priority}",
                 error_code="invalid_todo_priority",
             )
 
-        raw_id = todo_item.get("id")
+        raw_id = raw_todo_item.get("id")
         item_id = str(raw_id).strip() if raw_id is not None else ""
         if not item_id:
             item_id = uuid.uuid4().hex[:8]

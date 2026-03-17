@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import to_json
+from vv_agent.tools.handlers.common import is_string_keyed_dict, to_json
 from vv_agent.types import AgentStatus, SubTaskRequest, ToolExecutionResult, ToolResultStatus
 
 
@@ -93,18 +93,18 @@ def batch_sub_tasks(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
 
     # Build validated requests
     requests: list[tuple[int, SubTaskRequest | None, str | None]] = []
-    for index, item in enumerate(raw_tasks):
-        if not isinstance(item, dict):
+    for index, raw_item in enumerate(raw_tasks):
+        if not is_string_keyed_dict(raw_item):
             requests.append((index, None, "Task item must be an object"))
             continue
-        task_description = str(item.get("task_description", "")).strip()
+        task_description = str(raw_item.get("task_description", "")).strip()
         if not task_description:
             requests.append((index, None, "`task_description` is required"))
             continue
         request = SubTaskRequest(
             agent_name=agent_name,
             task_description=task_description,
-            output_requirements=str(item.get("output_requirements", "")).strip(),
+            output_requirements=str(raw_item.get("output_requirements", "")).strip(),
             include_main_summary=include_main_summary,
             exclude_files_pattern=exclude_files_pattern,
             metadata={"batch_index": index},
