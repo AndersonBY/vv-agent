@@ -65,6 +65,7 @@ class Message:
     tool_calls: list[dict[str, Any]] | None = None
     reasoning_content: str | None = None
     image_url: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_openai_message(self, *, include_reasoning_content: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {"role": self.role, "content": self.content}
@@ -98,6 +99,8 @@ class Message:
             d["reasoning_content"] = self.reasoning_content
         if self.image_url is not None:
             d["image_url"] = self.image_url
+        if self.metadata:
+            d["metadata"] = dict(self.metadata)
         return d
 
     @classmethod
@@ -110,6 +113,7 @@ class Message:
             tool_calls=data.get("tool_calls"),
             reasoning_content=data.get("reasoning_content"),
             image_url=data.get("image_url"),
+            metadata=dict(data.get("metadata", {})),
         )
 
 

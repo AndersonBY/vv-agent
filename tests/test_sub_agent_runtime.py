@@ -343,6 +343,48 @@ def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> No
     assert sub_task.metadata["browser_scope_key"] == "sub-session-1"
 
 
+def test_sub_task_metadata_inherits_sub_agent_prompt_cache_metadata(tmp_path: Path) -> None:
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(steps=[]),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    parent_task = AgentTask(
+        task_id="parent",
+        model="parent-model",
+        system_prompt="sys",
+        user_prompt="run parent task",
+        max_cycles=4,
+        metadata={"language": "zh-CN"},
+    )
+    sub_agent = SubAgentConfig(
+        model="claude-sonnet-4-5-20250929",
+        backend="anthropic",
+        description="collect facts",
+        metadata={
+            "anthropic_prompt_cache_enabled": True,
+            "system_prompt_sections": [
+                {"id": "core_identity", "text": "stable section", "stable": True},
+            ],
+        },
+    )
+
+    sub_task = runtime._build_sub_agent_task(
+        parent_task=parent_task,
+        sub_task_id="sub-task-cache",
+        sub_session_id="sub-session-cache",
+        sub_agent_name="research-sub",
+        sub_agent=sub_agent,
+        resolved_model_id="claude-sonnet-4-5-20250929",
+        request=SubTaskRequest(agent_name="research-sub", task_description="Collect one fact"),
+        parent_shared_state={},
+        workspace_path=tmp_path,
+    )
+
+    assert sub_task.metadata["anthropic_prompt_cache_enabled"] is True
+    assert sub_task.metadata["system_prompt_sections"][0]["id"] == "core_identity"
+
+
 def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: Path) -> None:
     captured_events: list[tuple[str, dict[str, object]]] = []
 

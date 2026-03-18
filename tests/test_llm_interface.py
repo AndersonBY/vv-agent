@@ -8,6 +8,7 @@ from typing import Any, ClassVar, cast
 from openai.types.chat import ChatCompletionMessageParam
 
 from vv_agent.constants import TODO_WRITE_TOOL_NAME
+from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
 from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
 from vv_agent.types import Message
 
@@ -65,6 +66,7 @@ def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
 
     llm = VVLlmClient(
         endpoint_targets=[
@@ -614,3 +616,107 @@ def test_llm_debug_dump_writes_request_messages(monkeypatch, tmp_path: Path) -> 
     payload = dump_files[0].read_text(encoding="utf-8")
     assert '"request_index": 1' in payload
     assert '"message_count": 1' in payload
+
+
+def test_claude_direct_request_adds_auto_cache_and_explicit_breakpoints(monkeypatch) -> None:
+    chunk = SimpleNamespace(
+        usage=_FakeUsage(),
+        content="ok",
+        reasoning_content=None,
+        tool_calls=[],
+    )
+
+    def stream_call(kwargs: dict[str, Any]) -> Any:
+        assert kwargs["stream"] is True
+        return [chunk]
+
+    _FakeChatClient.behavior_by_endpoint = {"anthropic-direct": stream_call}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="anthropic-direct",
+                api_key="k",
+                api_base="https://api.anthropic.com",
+                endpoint_type="anthropic",
+            )
+        ],
+        backend="anthropic",
+        selected_model="claude-sonnet-4-5-20250929",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    long_section = "stable context " * 400
+    result = llm.complete(
+        model="claude-sonnet-4-5-20250929",
+        messages=[
+            Message(
+                role="system",
+                content="system",
+                metadata={
+                    "anthropic_prompt_cache_enabled": True,
+                    "system_prompt_sections": [
+                        {"id": "core_identity", "text": long_section, "stable": True},
+                        {"id": "tool_runtime_contract", "text": "tool contract", "stable": True},
+                    ],
+                },
+            ),
+            Message(role="user", content="hello"),
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_docs",
+                    "description": "Search docs " * 200,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+
+    assert result.content == "ok"
+    call = _FakeChatClient.seen_calls[-1]
+    assert call["extra_body"] == {"cache_control": {"type": "ephemeral"}}
+    assert call["messages"][0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert call["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert call["messages"][1]["content"] == "hello"
+
+
+def test_apply_claude_prompt_cache_vertex_marks_history_boundary_and_skips_thinking() -> None:
+    planned_messages, planned_tools, planned_extra_body = apply_claude_prompt_cache(
+        endpoint_type="anthropic_vertex",
+        model="claude-sonnet-4-5-20250929",
+        messages=[
+            {"role": "system", "content": "sys"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "assistant reply"},
+                    {"type": "thinking", "thinking": "private chain"},
+                ],
+            },
+            {"role": "user", "content": "latest user turn " * 300},
+        ],
+        tools=[],
+        extra_body=None,
+        metadata={
+            "anthropic_prompt_cache_enabled": True,
+            "system_prompt_sections": [
+                {"id": "core_identity", "text": "stable section " * 400, "stable": True},
+            ],
+        },
+    )
+
+    assert planned_extra_body is None
+    assert planned_tools == []
+    assert planned_messages[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert planned_messages[1]["content"][0].get("cache_control") is None
+    assert planned_messages[1]["content"][1].get("cache_control") is None
+    assert planned_messages[2]["content"][-1]["cache_control"] == {"type": "ephemeral"}

@@ -473,6 +473,7 @@ class AgentRuntime:
             tool_calls=list(message.tool_calls) if message.tool_calls else None,
             reasoning_content=message.reasoning_content,
             image_url=message.image_url,
+            metadata=dict(message.metadata),
         )
 
     def _build_initial_messages(
@@ -485,7 +486,11 @@ class AgentRuntime:
         if initial_messages:
             prepared = [self._copy_message(message) for message in initial_messages]
             if not prepared or prepared[0].role != "system":
-                prepared.insert(0, Message(role="system", content=task.system_prompt))
+                prepared.insert(0, Message(role="system", content=task.system_prompt, metadata=dict(task.metadata)))
+            elif task.metadata:
+                merged_metadata = dict(task.metadata)
+                merged_metadata.update(prepared[0].metadata)
+                prepared[0].metadata = merged_metadata
             message_to_append = task.user_prompt if user_message is None else user_message
             if message_to_append:
                 prepared.append(Message(role="user", content=message_to_append))
@@ -493,7 +498,7 @@ class AgentRuntime:
 
         first_user_message = task.user_prompt if user_message is None else user_message
         return [
-            Message(role="system", content=task.system_prompt),
+            Message(role="system", content=task.system_prompt, metadata=dict(task.metadata)),
             Message(role="user", content=first_user_message),
         ]
 
@@ -1031,6 +1036,8 @@ class AgentRuntime:
             value = parent_task.metadata.get(key)
             if value is not None:
                 metadata[key] = value
+        if sub_agent.metadata:
+            metadata.update(sub_agent.metadata)
         if request.metadata:
             metadata.update(request.metadata)
         metadata["task_id"] = sub_task_id

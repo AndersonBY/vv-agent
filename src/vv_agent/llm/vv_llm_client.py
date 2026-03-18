@@ -17,6 +17,7 @@ from vv_llm.settings import Settings
 from vv_llm.types import APIConnectionError, APIStatusError, BackendType
 
 from vv_agent.llm.base import LLMClient
+from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 _STREAM_MODEL_PREFIXES = (
@@ -176,6 +177,7 @@ class VVLlmClient(LLMClient):
         backend_type = self._resolve_backend_type(self.backend)
         model_name = self._current_model_name(model)
         settings = self._ensure_settings(model)
+        request_metadata = self._extract_request_metadata(messages)
         message_payload = self._build_message_payload(
             messages,
             preserve_reasoning_chain=self._should_preserve_reasoning_chain(model),
@@ -202,7 +204,25 @@ class VVLlmClient(LLMClient):
                 model_name=model_name,
                 messages=request_messages,
             )
-            self._dump_request_messages(formatted_messages, model_name=model_name)
+            request_messages_payload, request_tool_payload, request_extra_body = apply_claude_prompt_cache(
+                endpoint_type=target.endpoint_type,
+                model=request_options.model,
+                messages=formatted_messages,
+                tools=tool_payload,
+                extra_body=request_options.extra_body,
+                metadata=request_metadata,
+            )
+            request_options = _RequestOptions(
+                model=request_options.model,
+                temperature=request_options.temperature,
+                max_tokens=request_options.max_tokens,
+                thinking=request_options.thinking,
+                reasoning_effort=request_options.reasoning_effort,
+                extra_body=request_extra_body,
+                is_gemini_3_model=request_options.is_gemini_3_model,
+                tool_call_incremental=request_options.tool_call_incremental,
+            )
+            self._dump_request_messages(request_messages_payload, model_name=model_name)
 
             for attempt in range(1, self.max_retries_per_endpoint + 1):
                 try:
@@ -218,18 +238,18 @@ class VVLlmClient(LLMClient):
                         response = self._stream_completion(
                             chat_client=chat_client,
                             options=request_options,
-                            messages=formatted_messages,
+                            messages=request_messages_payload,
                             model_name=model_name,
-                            tool_payload=tool_payload,
+                            tool_payload=request_tool_payload,
                             stream_callback=stream_callback,
                         )
                     else:
                         response = self._non_stream_completion(
                             chat_client=chat_client,
                             options=request_options,
-                            messages=formatted_messages,
+                            messages=request_messages_payload,
                             model_name=model_name,
-                            tool_payload=tool_payload,
+                            tool_payload=request_tool_payload,
                         )
 
                     response.raw["used_endpoint_id"] = target.endpoint_id
@@ -327,6 +347,14 @@ class VVLlmClient(LLMClient):
                 item["reasoning_content"] = message.reasoning_content or ""
             payload.append(cast(ChatCompletionMessageParam, item))
         return payload
+
+    @staticmethod
+    def _extract_request_metadata(messages: list[Message]) -> dict[str, Any]:
+        for message in messages:
+            if message.role != "system":
+                continue
+            return dict(message.metadata)
+        return {}
 
     def _should_preserve_reasoning_chain(self, requested_model: str) -> bool:
         for candidate in self._iter_reasoning_model_candidates(requested_model):
