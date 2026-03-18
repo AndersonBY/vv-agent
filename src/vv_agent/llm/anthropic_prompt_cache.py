@@ -104,7 +104,11 @@ def _apply_system_cache_breakpoint(
     if _estimate_tokens(prefix_char_count) < token_threshold:
         return prefix_char_count
 
-    stable_indexes = [index for index, section in enumerate(sections) if section.get("stable", True)] if sections else list(range(len(blocks)))
+    stable_indexes = (
+        [index for index, section in enumerate(sections) if section.get("stable", True)]
+        if sections
+        else list(range(len(blocks)))
+    )
     if not stable_indexes:
         return prefix_char_count
 
