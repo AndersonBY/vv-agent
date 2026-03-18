@@ -221,7 +221,9 @@ OUTPUT MODES:
 FILTERS:
 - `path` + `glob`: scope the search root and file pattern
 - `type`: language/file-type shortcut (py/js/ts/md/json/...)
-- `i`: case-insensitive search
+- default matching uses smart-case: all-lowercase patterns search case-insensitively
+  and patterns containing uppercase stay case-sensitive
+- `i`: force case-insensitive search
 - `multiline`: let `.` match newlines and allow multi-line patterns
 - `include_hidden`: include hidden files/directories (default false)
 - `include_ignored`: include common dependency/cache roots at workspace root (default false)
@@ -292,7 +294,7 @@ Guidance:
                     },
                     "i": {
                         "type": "boolean",
-                        "description": "Case-insensitive search.",
+                        "description": "Force case-insensitive search.",
                     },
                     "type": {
                         "type": "string",
@@ -309,7 +311,7 @@ Guidance:
                     },
                     "case_sensitive": {
                         "type": "boolean",
-                        "description": "Compatibility parameter. When set, overrides `i`.",
+                        "description": "Explicitly override smart-case behavior and `i`.",
                     },
                     "max_results": {
                         "type": "integer",

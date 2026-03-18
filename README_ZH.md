@@ -221,6 +221,11 @@ options = AgentSDKOptions(
 
 工作区文件 I/O 通过可插拔的 `WorkspaceBackend` 协议分发。所有内建文件工具（`read_file`、`write_file`、`list_files` 等）均经过此抽象层。
 
+- 本地 `list_files` 优先使用 `rg` 加速遍历，必要时自动回退到 Python。
+- `workspace_grep` 在本地工作区同样优先使用 `rg`，默认采用 smart case：
+  小写 pattern 默认不区分大小写；pattern 中包含大写字母时默认区分大小写。
+- `workspace_grep` / `list_files` 默认会跳过隐藏目录和常见依赖/缓存根目录，除非显式开启包含选项。
+
 | 后端 | 场景 |
 |------|------|
 | `LocalWorkspaceBackend` | 默认。读写本地目录，带路径逃逸保护。 |

@@ -104,6 +104,10 @@ def _to_int(value: Any, *, name: str, min_value: int = 0) -> int:
     return max(parsed, min_value)
 
 
+def _smart_case_defaults_to_case_insensitive(pattern: str) -> bool:
+    return not any(char.isupper() for char in pattern)
+
+
 def _result_error(message: str) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_call_id="",
@@ -473,9 +477,12 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     root_listing = _is_workspace_root(path)
     explicit_file_target = backend.is_file(path)
 
-    case_insensitive = bool(arguments.get("i", False))
     if "case_sensitive" in arguments:
         case_insensitive = not bool(arguments.get("case_sensitive"))
+    elif "i" in arguments:
+        case_insensitive = bool(arguments.get("i"))
+    else:
+        case_insensitive = _smart_case_defaults_to_case_insensitive(pattern)
 
     multiline_mode = bool(arguments.get("multiline", False))
     show_line_numbers = bool(arguments.get("n", True))

@@ -380,6 +380,65 @@ def test_workspace_grep(registry, tool_context: ToolContext) -> None:
     assert payload["matches"][0]["line"] == 1
 
 
+def test_workspace_grep_uses_smart_case_for_lowercase_patterns(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "a.txt").write_text("update lower\nUpdate upper", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_smart_case_lower",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "update", "output_mode": "content"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["total_matches"] == 2
+    assert [row["text"] for row in payload["matches"]] == ["update lower", "Update upper"]
+
+
+def test_workspace_grep_uses_case_sensitive_default_when_pattern_has_uppercase(
+    registry,
+    tool_context: ToolContext,
+) -> None:
+    (tool_context.workspace / "a.txt").write_text("update lower\nUpdate upper", encoding="utf-8")
+
+    call = ToolCall(
+        id="call_smart_case_upper",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "Update", "output_mode": "content"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = json.loads(result.content)
+
+    assert payload["summary"]["total_matches"] == 1
+    assert [row["text"] for row in payload["matches"]] == ["Update upper"]
+
+
+def test_workspace_grep_explicit_case_flags_override_smart_case(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "a.txt").write_text("update lower\nUpdate upper", encoding="utf-8")
+
+    case_sensitive_call = ToolCall(
+        id="call_smart_case_override_lower",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "update", "output_mode": "content", "i": False},
+    )
+    case_sensitive_result = registry.execute(case_sensitive_call, tool_context)
+    case_sensitive_payload = json.loads(case_sensitive_result.content)
+
+    assert case_sensitive_payload["summary"]["total_matches"] == 1
+    assert [row["text"] for row in case_sensitive_payload["matches"]] == ["update lower"]
+
+    case_insensitive_call = ToolCall(
+        id="call_smart_case_override_upper",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "Update", "output_mode": "content", "case_sensitive": False},
+    )
+    case_insensitive_result = registry.execute(case_insensitive_call, tool_context)
+    case_insensitive_payload = json.loads(case_insensitive_result.content)
+
+    assert case_insensitive_payload["summary"]["total_matches"] == 2
+    assert [row["text"] for row in case_insensitive_payload["matches"]] == ["update lower", "Update upper"]
+
+
 def test_workspace_grep_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
     outside_dir = (tool_context.workspace.parent / f"{tool_context.workspace.name}_outside_grep").resolve()
     outside_dir.mkdir(parents=True, exist_ok=True)
