@@ -39,12 +39,6 @@ def apply_claude_prompt_cache(
     token_threshold = _minimum_cacheable_tokens(normalized_model)
     breakpoint_budget = _MAX_BREAKPOINTS
 
-    if normalized_endpoint == "anthropic":
-        if planned_extra_body is None:
-            planned_extra_body = {}
-        planned_extra_body["cache_control"] = dict(CACHE_CONTROL_EPHEMERAL)
-        breakpoint_budget -= 1
-
     budget_ref = [breakpoint_budget]
     system_char_count = _apply_system_cache_breakpoint(
         messages=planned_messages,
@@ -63,14 +57,13 @@ def apply_claude_prompt_cache(
     )
     breakpoint_budget = max(0, budget_ref[0])
 
-    if normalized_endpoint == "anthropic_vertex":
-        history_prefix_char_count = system_char_count + tool_char_count
-        _apply_history_cache_breakpoint(
-            messages=planned_messages,
-            prefix_char_count=history_prefix_char_count,
-            token_threshold=token_threshold,
-            breakpoint_budget=breakpoint_budget,
-        )
+    history_prefix_char_count = system_char_count + tool_char_count
+    _apply_history_cache_breakpoint(
+        messages=planned_messages,
+        prefix_char_count=history_prefix_char_count,
+        token_threshold=token_threshold,
+        breakpoint_budget=breakpoint_budget,
+    )
 
     return planned_messages, planned_tools, planned_extra_body
 
@@ -269,10 +262,10 @@ def _estimate_block_chars(block: dict[str, Any]) -> int:
 
 def _minimum_cacheable_tokens(model: str) -> int:
     normalized_model = str(model or "").strip().lower()
+    if "opus-4-6" in normalized_model or "opus-4-5" in normalized_model:
+        return 4096
     if "haiku-4-5" in normalized_model:
         return 4096
     if "haiku" in normalized_model:
-        return 2048
-    if "opus-4-6" in normalized_model or "sonnet-4-6" in normalized_model:
         return 2048
     return 1024

@@ -618,7 +618,7 @@ def test_llm_debug_dump_writes_request_messages(monkeypatch, tmp_path: Path) -> 
     assert '"message_count": 1' in payload
 
 
-def test_claude_direct_request_adds_auto_cache_and_explicit_breakpoints(monkeypatch) -> None:
+def test_claude_direct_request_adds_explicit_breakpoints(monkeypatch) -> None:
     chunk = SimpleNamespace(
         usage=_FakeUsage(),
         content="ok",
@@ -683,10 +683,10 @@ def test_claude_direct_request_adds_auto_cache_and_explicit_breakpoints(monkeypa
 
     assert result.content == "ok"
     call = _FakeChatClient.seen_calls[-1]
-    assert call["extra_body"] == {"cache_control": {"type": "ephemeral"}}
+    assert "extra_body" not in call
     assert call["messages"][0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert call["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert call["messages"][1]["content"] == "hello"
+    assert call["messages"][1]["content"][0]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_apply_claude_prompt_cache_vertex_marks_history_boundary_and_skips_thinking() -> None:
@@ -720,3 +720,28 @@ def test_apply_claude_prompt_cache_vertex_marks_history_boundary_and_skips_think
     assert planned_messages[1]["content"][0].get("cache_control") is None
     assert planned_messages[1]["content"][1].get("cache_control") is None
     assert planned_messages[2]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_apply_claude_prompt_cache_uses_sonnet_4_6_threshold() -> None:
+    planned_messages, planned_tools, planned_extra_body = apply_claude_prompt_cache(
+        endpoint_type="anthropic",
+        model="claude-sonnet-4-6",
+        messages=[
+            {
+                "role": "system",
+                    "content": "stable system " * 350,
+            },
+            {
+                "role": "user",
+                "content": "latest user turn " * 40,
+            },
+        ],
+        tools=[],
+        extra_body=None,
+        metadata={"anthropic_prompt_cache_enabled": True},
+    )
+
+    assert planned_extra_body is None
+    assert planned_tools == []
+    assert planned_messages[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert planned_messages[1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
