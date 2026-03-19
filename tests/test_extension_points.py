@@ -29,7 +29,7 @@ def _task(**overrides: object) -> AgentTask:
     return task
 
 
-def test_skill_extension_handler_requires_bound_skills(tmp_path: Path) -> None:
+def test_skill_extension_handler_requires_available_skills(tmp_path: Path) -> None:
     registry = build_default_registry()
     context = _context(tmp_path)
 
@@ -39,14 +39,14 @@ def test_skill_extension_handler_requires_bound_skills(tmp_path: Path) -> None:
     )
 
     assert result.status_code == ToolResultStatus.ERROR
-    assert json.loads(result.content)["error_code"] == "no_bound_skills_configured"
+    assert json.loads(result.content)["error_code"] == "no_skills_configured"
 
 
 def test_skill_extension_handler_activates_inline_skill(tmp_path: Path) -> None:
     registry = build_default_registry()
     context = ToolContext(
         workspace=tmp_path,
-        shared_state={"todo_list": [], "available_skills": [{"name": "demo", "instructions": "Do A then B"}]},
+        shared_state={"todo_list": [], "available_skills": [{"name": "demo", "description": "Demo skill", "instructions": "Do A then B"}]},
         cycle_index=3,
         workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
@@ -83,7 +83,7 @@ Follow this guide.
         workspace=tmp_path,
         shared_state={
             "todo_list": [],
-            "available_skills": [{"name": "demo", "skill_directory": str(skill_dir)}],
+            "available_skills": [{"name": "demo", "description": "Demo skill for tests", "location": str(skill_dir)}],
         },
         cycle_index=1,
         workspace_backend=LocalWorkspaceBackend(tmp_path),

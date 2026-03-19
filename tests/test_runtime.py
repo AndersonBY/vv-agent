@@ -554,14 +554,14 @@ def test_runtime_propagates_available_skills_into_tool_context(tmp_path: Path) -
         system_prompt="sys",
         user_prompt="activate",
         max_cycles=4,
-        metadata={"available_skills": [{"name": "demo", "instructions": "Use this"}]},
+        metadata={"available_skills": [{"name": "demo", "description": "Demo skill", "instructions": "Use this"}]},
     )
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.shared_state["active_skills"] == ["demo"]
 
 
-def test_runtime_propagates_skill_directories_into_tool_context(tmp_path: Path) -> None:
+def test_runtime_propagates_available_skills_path_list_into_tool_context(tmp_path: Path) -> None:
     llm = ScriptedLLM(
         steps=[
             LLMResponse(
@@ -600,7 +600,7 @@ Body
         system_prompt="sys",
         user_prompt="activate",
         max_cycles=4,
-        metadata={"skill_directories": ["skills"]},
+        metadata={"available_skills": ["skills"]},
     )
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED

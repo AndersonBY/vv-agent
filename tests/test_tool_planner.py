@@ -90,8 +90,8 @@ def test_plan_tool_names_includes_extra_tool_names() -> None:
     assert "_custom_workflow_tool" in names
 
 
-def test_plan_tool_names_includes_activate_skill_for_bound_skills() -> None:
-    names = plan_tool_names(_task(metadata={"bound_skills": [{"name": "demo"}]}))
+def test_plan_tool_names_includes_activate_skill_for_available_skills() -> None:
+    names = plan_tool_names(_task(metadata={"available_skills": [{"name": "demo", "description": "Demo"}]}))
 
     assert ACTIVATE_SKILL_TOOL_NAME in names
 
@@ -109,8 +109,8 @@ def test_plan_tool_schemas_only_returns_registered_tools() -> None:
     assert TASK_FINISH_TOOL_NAME in names
 
 
-def test_plan_tool_names_includes_activate_skill_for_skill_directories() -> None:
-    names = plan_tool_names(_task(metadata={"skill_directories": ["skills"]}))
+def test_plan_tool_names_includes_activate_skill_for_skill_dirs_in_available_skills() -> None:
+    names = plan_tool_names(_task(metadata={"available_skills": ["skills"]}))
 
     assert ACTIVATE_SKILL_TOOL_NAME in names
 

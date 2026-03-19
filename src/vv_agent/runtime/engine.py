@@ -182,10 +182,6 @@ class AgentRuntime:
         if isinstance(task.metadata, dict):
             if "available_skills" not in shared and task.metadata.get("available_skills") is not None:
                 shared["available_skills"] = task.metadata.get("available_skills")
-            if "available_skills" not in shared and task.metadata.get("skill_directories") is not None:
-                shared["available_skills"] = task.metadata.get("skill_directories")
-            if "bound_skills" not in shared and task.metadata.get("bound_skills") is not None:
-                shared["bound_skills"] = task.metadata.get("bound_skills")
             if "active_skills" not in shared and task.metadata.get("active_skills") is not None:
                 shared["active_skills"] = list(task.metadata.get("active_skills") or [])
 
@@ -988,8 +984,6 @@ class AgentRuntime:
     ) -> AgentTask:
         language = str(parent_task.metadata.get("language", "zh-CN"))
         available_skills = parent_task.metadata.get("available_skills")
-        if not isinstance(available_skills, list):
-            available_skills = parent_task.metadata.get("bound_skills")
         if not isinstance(available_skills, list):
             available_skills = None
 

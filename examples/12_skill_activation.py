@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example: auto-load skills directory and let agent choose skill(s) to activate."""
+"""Example: auto-discover skills directory and let agent choose skill(s) to activate."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
-from vv_agent.skills import prepare_skill_bundle
 
 
 def log_handler(event: str, payload: dict[str, Any]) -> None:
@@ -44,17 +43,13 @@ def main() -> None:
     if not source_root.exists() or not source_root.is_dir():
         raise FileNotFoundError(f"Skills directory not found: {source_root}")
 
-    prepared = prepare_skill_bundle(source_root, workspace)
-    runtime_skills_root = prepared[0].runtime.parent  # the bundle root
-    # Convert to workspace-relative path
+    # Convert to workspace-relative path for the agent
     try:
-        runtime_skills_root_str = runtime_skills_root.relative_to(workspace).as_posix()
+        skills_dir_str = source_root.relative_to(workspace).as_posix()
     except ValueError:
-        runtime_skills_root_str = str(runtime_skills_root)
+        skills_dir_str = str(source_root)
 
-    print("[skills] prepared runtime bundle:", flush=True)
-    for item in prepared:
-        print(f"- {item.name}: source={item.source} -> runtime={item.runtime}", flush=True)
+    print(f"[skills] using skill directory: {skills_dir_str}", flush=True)
 
     prompt = (
         "请执行一个 Remotion 视频工程任务, 并尽量利用已提供的技能元数据:\n"
@@ -70,7 +65,6 @@ def main() -> None:
         "5) 写出 `artifacts/remotion_demo/README_zh.md`, 说明如何安装依赖、预览、渲染视频.\n"
         "6) 最后调用 `task_finish`, 汇报中必须包含: 激活技能名、读取规则文件、生成路径、下一步命令.\n"
         "约束:\n"
-        f"- 运行时技能目录: `{runtime_skills_root_str}`\n"
         "- 不要只输出计划, 必须实际写文件.\n"
     )
 
@@ -90,7 +84,7 @@ def main() -> None:
             enable_todo_management=True,
             use_workspace=True,
             agent_type="computer",
-            skill_directories=[runtime_skills_root_str],
+            skill_directories=[skills_dir_str],
         ),
     )
 

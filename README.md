@@ -302,7 +302,7 @@ class MyBackend:
 | `vv_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
 | `vv_agent.tools` | Built-in tools: workspace I/O, todo, bash, image, sub-agents, skills |
 | `vv_agent.sdk` | High-level SDK: `AgentSDKClient`, `AgentSession`, `AgentResourceLoader` |
-| `vv_agent.skills` | Agent Skills support (`SKILL.md` parsing, `strict/compat/minimal` validation, prompt injection, activation) |
+| `vv_agent.skills` | Agent Skills support (`SKILL.md` parsing, validation, unified normalization, prompt rendering with budget management, `activate_skill` tool) |
 | `vv_agent.llm.VVLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
 | `vv_agent.config` | Model/endpoint/key resolution from `local_settings.py` |
 

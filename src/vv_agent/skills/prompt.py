@@ -1,39 +1,85 @@
+"""Skill prompt rendering with budget management."""
+
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from vv_agent.skills.errors import SkillError
-from vv_agent.skills.models import SkillProperties
-from vv_agent.skills.parser import discover_skill_dirs, find_skill_md, read_properties
+from vv_agent.skills.normalize import SkillEntry, normalize_skill_list
+from vv_agent.skills.parser import find_skill_md, read_properties
+
+MAX_SKILLS_PROMPT_CHARS = 8000
 
 
-@dataclass(slots=True)
-class PromptSkillEntry:
-    name: str
-    description: str
-    location: str | None = None
-
-
-def skill_to_prompt_entry(*, properties: SkillProperties, location: str | None = None) -> str:
+def skill_entry_to_xml(entry: SkillEntry, *, include_location: bool = True) -> str:
+    """Render a single SkillEntry as an XML ``<skill>`` block."""
     lines = [
         "<skill>",
         "<name>",
-        html.escape(properties.name),
+        html.escape(entry.name),
         "</name>",
         "<description>",
-        html.escape(properties.description),
+        html.escape(entry.description),
         "</description>",
     ]
-    if location:
-        lines.extend(["<location>", html.escape(location), "</location>"])
+    if include_location and entry.location:
+        lines.extend(["<location>", html.escape(entry.location), "</location>"])
     lines.append("</skill>")
     return "\n".join(lines)
 
 
+def render_skills_xml(
+    entries: list[SkillEntry],
+    *,
+    budget: int = MAX_SKILLS_PROMPT_CHARS,
+) -> str:
+    """Render ``<available_skills>`` XML with progressive degradation.
+
+    Tier 1 - Full: name + description + location for all skills.
+    Tier 2 - Compact: name + description only (drop location).
+    Tier 3 - Truncated: as many compact entries as fit, then a summary comment.
+    """
+    if not entries:
+        return "<available_skills>\n</available_skills>"
+
+    full_xml = _render_all(entries, include_location=True)
+    if len(full_xml) <= budget:
+        return full_xml
+
+    compact_xml = _render_all(entries, include_location=False)
+    if len(compact_xml) <= budget:
+        return compact_xml
+
+    wrapper_overhead = len("<available_skills>\n</available_skills>") + 80
+    remaining = budget - wrapper_overhead
+    lines = ["<available_skills>"]
+    included = 0
+    for entry in entries:
+        xml = skill_entry_to_xml(entry, include_location=False)
+        if len(xml) + 1 > remaining:
+            break
+        lines.append(xml)
+        remaining -= len(xml) + 1
+        included += 1
+
+    omitted = len(entries) - included
+    if omitted > 0:
+        lines.append(f"<!-- {omitted} more skills available; use activate_skill to discover -->")
+    lines.append("</available_skills>")
+    return "\n".join(lines)
+
+
+def _render_all(entries: list[SkillEntry], *, include_location: bool) -> str:
+    lines = ["<available_skills>"]
+    for entry in entries:
+        lines.append(skill_entry_to_xml(entry, include_location=include_location))
+    lines.append("</available_skills>")
+    return "\n".join(lines)
+
+
 def to_available_skills_xml(skill_dirs: list[Path]) -> str:
+    """Convenience: render ``<available_skills>`` directly from skill directory paths."""
     if not skill_dirs:
         return "<available_skills>\n</available_skills>"
 
@@ -42,115 +88,23 @@ def to_available_skills_xml(skill_dirs: list[Path]) -> str:
         normalized_dir = Path(skill_dir).resolve()
         properties = read_properties(normalized_dir)
         skill_md_path = find_skill_md(normalized_dir)
-        location = str(skill_md_path) if skill_md_path else None
-        lines.append(skill_to_prompt_entry(properties=properties, location=location))
-
-    lines.append("</available_skills>")
-    return "\n".join(lines)
-
-
-def _resolve_skill_location(location: str, *, workspace: Path | None = None) -> Path:
-    path = Path(location).expanduser()
-    if not path.is_absolute() and workspace is not None:
-        path = (workspace / path).resolve()
-    if path.is_file() and path.name.lower() == "skill.md":
-        return path.parent
-    return path
-
-
-def _is_existing_path(value: str, *, workspace: Path | None = None) -> bool:
-    raw = Path(value).expanduser()
-    if raw.exists():
-        return True
-    if workspace is not None and not raw.is_absolute():
-        return (workspace / raw).exists()
-    return False
-
-
-def _entries_from_skill_directory(*, skill_dir: Path, workspace: Path | None = None) -> list[PromptSkillEntry]:
-    try:
-        properties = read_properties(skill_dir)
-    except SkillError:
-        return []
-
-    skill_md_path = find_skill_md(skill_dir)
-    if skill_md_path is None:
-        return []
-
-    try:
-        location = skill_md_path.relative_to(workspace).as_posix() if workspace is not None else skill_md_path.as_posix()
-    except ValueError:
-        location = skill_md_path.as_posix()
-
-    return [
-        PromptSkillEntry(
+        entry = SkillEntry(
             name=properties.name,
             description=properties.description,
-            location=location,
+            location=str(skill_md_path) if skill_md_path else None,
         )
-    ]
-
-
-def _entries_from_skill_path(*, path: Path, workspace: Path | None = None) -> list[PromptSkillEntry]:
-    if path.is_dir() and find_skill_md(path) is None:
-        entries: list[PromptSkillEntry] = []
-        for skill_dir in discover_skill_dirs(path):
-            entries.extend(_entries_from_skill_directory(skill_dir=skill_dir, workspace=workspace))
-        return entries
-
-    return _entries_from_skill_directory(skill_dir=path, workspace=workspace)
+        lines.append(skill_entry_to_xml(entry))
+    lines.append("</available_skills>")
+    return "\n".join(lines)
 
 
 def metadata_to_prompt_entries(
     available_skills: list[dict[str, Any] | str],
     *,
     workspace: Path | None = None,
-) -> list[PromptSkillEntry]:
-    """Normalize runtime skill metadata into prompt-friendly entries."""
-    entries: list[PromptSkillEntry] = []
+) -> list[SkillEntry]:
+    """Normalize runtime skill metadata into prompt-friendly entries.
 
-    for item in available_skills:
-        if isinstance(item, str):
-            raw_location = item.strip()
-            if not raw_location:
-                continue
-            if not _is_existing_path(raw_location, workspace=workspace):
-                continue
-            path = _resolve_skill_location(raw_location, workspace=workspace)
-            entries.extend(_entries_from_skill_path(path=path, workspace=workspace))
-            continue
-
-        if not isinstance(item, dict):
-            continue
-
-        name = str(item.get("name") or "").strip()
-        description = str(item.get("description") or "").strip()
-        location_value = (
-            item.get("location")
-            or item.get("skill_md_path")
-            or item.get("skill_directory")
-            or item.get("directory")
-            or item.get("path")
-        )
-        location = str(location_value).strip() if isinstance(location_value, str) and location_value.strip() else None
-
-        if (not name or not description) and location and _is_existing_path(location, workspace=workspace):
-            path = _resolve_skill_location(location, workspace=workspace)
-            entries.extend(_entries_from_skill_path(path=path, workspace=workspace))
-            continue
-
-        if not name or not description:
-            continue
-
-        entries.append(PromptSkillEntry(name=name, description=description, location=location))
-
-    deduped: list[PromptSkillEntry] = []
-    seen: set[tuple[str, str | None]] = set()
-    for entry in entries:
-        key = (entry.name, entry.location)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(entry)
-
-    return deduped
+    Thin wrapper around :func:`normalize_skill_list` for backward compatibility.
+    """
+    return normalize_skill_list(available_skills, workspace=workspace)

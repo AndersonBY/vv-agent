@@ -17,7 +17,7 @@ from vv_agent.constants import (
     WORKSPACE_TOOLS,
     WRITE_FILE_TOOL_NAME,
 )
-from vv_agent.skills import SkillProperties, metadata_to_prompt_entries, skill_to_prompt_entry
+from vv_agent.skills import normalize_skill_list, render_skills_xml
 
 TASK_FINISH_PROMPT = {
     "en-US": (
@@ -140,15 +140,5 @@ def render_available_skills(
     workspace: Path | None = None,
 ) -> str:
     header = SKILL_PROMPT_HEADER.get(language, SKILL_PROMPT_HEADER["en-US"])
-    lines = [header, "<available_skills>"]
-
-    for entry in metadata_to_prompt_entries(available_skills, workspace=workspace):
-        lines.append(
-            skill_to_prompt_entry(
-                properties=SkillProperties(name=entry.name, description=entry.description),
-                location=entry.location,
-            )
-        )
-
-    lines.append("</available_skills>")
-    return "\n".join(lines)
+    entries = normalize_skill_list(available_skills, workspace=workspace)
+    return header + "\n" + render_skills_xml(entries)

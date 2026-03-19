@@ -298,7 +298,7 @@ class MyBackend:
 | `vv_agent.workspace` | 可插拔文件存储：`LocalWorkspaceBackend`、`MemoryWorkspaceBackend`、`S3WorkspaceBackend` |
 | `vv_agent.tools` | 内建工具：workspace I/O、todo、bash、image、sub-agent、skills |
 | `vv_agent.sdk` | 高层 SDK：`AgentSDKClient`、`AgentSession`、`AgentResourceLoader` |
-| `vv_agent.skills` | Agent Skills 支持（`SKILL.md` 解析、`strict/compat/minimal` 校验、prompt 注入、激活） |
+| `vv_agent.skills` | Agent Skills 支持（`SKILL.md` 解析、校验、统一 normalize、带预算管理的 prompt 渲染、`activate_skill` 工具） |
 | `vv_agent.llm.VVLlmClient` | 统一 LLM 接口，基于 `vv-llm`（端点轮询、重试、流式） |
 | `vv_agent.config` | 从 `local_settings.py` 解析模型/端点/Key |
 

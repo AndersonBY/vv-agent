@@ -660,9 +660,9 @@ ACTIVATE_SKILL_TOOL_SCHEMA: ToolSchema = {
 
 The skill metadata follows the Agent Skills specification (https://github.com/agentskills/agentskills):
 - name/description are exposed in <available_skills>
-- skill instructions are loaded from SKILL.md when location/path is provided
+- skill instructions are loaded from SKILL.md when location is provided
 
-Use this tool only for skills explicitly listed in available_skills/bound_skills.""",
+Use this tool only for skills explicitly listed in <available_skills>.""",
         "parameters": {
             "type": "object",
             "properties": {
