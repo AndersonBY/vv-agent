@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vv_agent.skills.normalize import SkillEntry, normalize_skill_list
+from vv_agent.skills.normalize import normalize_skill_list
 
 
 def _write_skill(skill_dir: Path, name: str, description: str, body: str = "Body") -> None:

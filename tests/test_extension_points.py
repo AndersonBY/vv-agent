@@ -46,7 +46,10 @@ def test_skill_extension_handler_activates_inline_skill(tmp_path: Path) -> None:
     registry = build_default_registry()
     context = ToolContext(
         workspace=tmp_path,
-        shared_state={"todo_list": [], "available_skills": [{"name": "demo", "description": "Demo skill", "instructions": "Do A then B"}]},
+        shared_state={
+            "todo_list": [],
+            "available_skills": [{"name": "demo", "description": "Demo skill", "instructions": "Do A then B"}],
+        },
         cycle_index=3,
         workspace_backend=LocalWorkspaceBackend(tmp_path),
     )

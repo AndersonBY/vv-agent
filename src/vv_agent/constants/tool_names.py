@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 TODO_INCOMPLETE_ERROR_CODE = "todo_incomplete"
 
 ASK_USER_TOOL_NAME = "ask_user"
