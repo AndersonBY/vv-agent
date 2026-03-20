@@ -202,7 +202,7 @@ result = runtime.run(task, ctx=ctx)
 
 ### Runtime 日志载荷
 
-`tool_result` 事件现在默认携带完整工具输出（`result`/`content`），不再隐式截断。
+`tool_result` 事件现在会把完整工具文本放在 `content`，把结构化工具载荷放在 `metadata`，且不会隐式截断 `content`。
 同时保留 `content_preview`、`assistant_preview` 供前端轻量展示。
 
 如果你希望限制预览长度（例如节省传输），可以显式配置：
@@ -224,6 +224,7 @@ options = AgentSDKOptions(
 - 本地 `list_files` 优先使用 `rg` 加速遍历，必要时自动回退到 Python。
 - `workspace_grep` 在本地工作区同样优先使用 `rg`，默认采用 smart case：
   小写 pattern 默认不区分大小写；pattern 中包含大写字母时默认区分大小写。
+- `workspace_grep` 的 `ToolExecutionResult.content` 只保留给模型的文本结果，结构化的命中/计数数据放在 `ToolExecutionResult.metadata`。
 - `workspace_grep` / `list_files` 默认会跳过隐藏目录和常见依赖/缓存根目录，除非显式开启包含选项。
 
 | 后端 | 场景 |

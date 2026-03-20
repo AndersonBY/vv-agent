@@ -347,12 +347,13 @@ class AgentRuntime:
                         "tool_result",
                         cycle=_cycle,
                         tool_name=call.name,
+                        tool_arguments=call.arguments,
                         tool_call_id=result.tool_call_id,
                         status=result.status_code.value if result.status_code else result.status,
                         directive=result.directive.value,
                         error_code=result.error_code,
                         content=result.content,
-                        result=result.content,
+                        metadata=dict(result.metadata),
                         content_preview=self._preview_text(result.content),
                     )
 
@@ -453,18 +454,21 @@ class AgentRuntime:
     def _emit_cycle_tool_results(self, *, cycle_record: CycleRecord) -> None:
         for idx, result in enumerate(cycle_record.tool_results):
             tool_name = None
+            tool_arguments = None
             if idx < len(cycle_record.tool_calls):
                 tool_name = cycle_record.tool_calls[idx].name
+                tool_arguments = cycle_record.tool_calls[idx].arguments
             self._emit_log(
                 "tool_result",
                 cycle=cycle_record.index,
                 tool_name=tool_name or "unknown",
+                tool_arguments=tool_arguments,
                 tool_call_id=result.tool_call_id,
                 status=result.status_code.value if result.status_code else result.status,
                 directive=result.directive.value,
                 error_code=result.error_code,
                 content=result.content,
-                result=result.content,
+                metadata=dict(result.metadata),
                 content_preview=self._preview_text(result.content),
             )
 

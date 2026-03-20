@@ -202,7 +202,7 @@ result = runtime.run(task, ctx=ctx)
 
 ### Runtime Log Payloads
 
-`tool_result` runtime events now carry full tool output in `result`/`content` by default (no implicit truncation).
+`tool_result` runtime events carry full tool output in `content` and any structured tool payload in `metadata` (no implicit truncation of `content`).
 `content_preview` and `assistant_preview` are still emitted for UI convenience.
 
 If you need shorter previews for logs/transport, configure an explicit preview limit:
@@ -226,6 +226,7 @@ Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All 
 - Returns at most `500` paths per call by default (`max_results` can tune this, with hard cap).
 - Uses `ripgrep` (`rg`) for fast local traversal when available, with automatic fallback to Python walk.
 - `workspace_grep` also uses `rg` for local workspaces (with Python fallback), defaults to smart-case matching (lowercase patterns are case-insensitive; patterns with uppercase stay case-sensitive), and skips hidden/common dependency roots unless explicitly included.
+- `workspace_grep` returns model-facing grep text in `ToolExecutionResult.content`, while structured matches/counts live in `ToolExecutionResult.metadata`.
 - When listing from workspace root, common dependency/cache roots (for example `node_modules`, `.venv`, `.git`) are summarized instead of expanded.
 - You can still inspect those paths explicitly by setting `path` to that directory (or by setting `include_ignored=true`).
 - Supports `scan_limit` to stop early on very large trees; when triggered, response sets `count_is_estimate=true`.

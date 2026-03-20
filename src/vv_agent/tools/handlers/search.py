@@ -7,11 +7,11 @@ import re
 import shutil
 import subprocess
 import sysconfig
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import to_json
 from vv_agent.types import ToolExecutionResult
 
 FILE_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
@@ -72,6 +72,8 @@ _BINARY_SUFFIXES = {
 _OUTPUT_MODES = {"content", "files_with_matches", "count"}
 _MAX_RESULT_LINES = 500
 _MAX_RESULT_CHARS = 30_000
+_MAX_STRUCTURED_ITEMS = 200
+_MAX_STRUCTURED_CHARS = 20_000
 _RG_EXECUTABLE_CACHE: str | None | bool = None
 _COMMON_IGNORED_ROOTS = frozenset(
     {
@@ -112,7 +114,8 @@ def _result_error(message: str) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_call_id="",
         status="error",
-        content=to_json({"error": message}),
+        content=message,
+        metadata={"error": message},
     )
 
 
@@ -442,6 +445,42 @@ def _truncate_result_text(result_text: str, *, total_matches: int, files_with_ma
     return f"{truncated}{truncated_info}", True
 
 
+def _estimate_match_row_size(row: dict[str, Any]) -> int:
+    return (
+        len(str(row.get("path") or ""))
+        + len(str(row.get("line") or ""))
+        + len(str(row.get("text") or ""))
+        + 32
+    )
+
+
+def _estimate_file_path_size(path: str) -> int:
+    return len(path) + 4
+
+
+def _estimate_file_count_size(item: tuple[str, int]) -> int:
+    file_path, count = item
+    return len(file_path) + len(str(count)) + 8
+
+
+def _cap_structured_items(
+    items: list[Any],
+    *,
+    estimator: Callable[[Any], int],
+) -> tuple[list[Any], bool]:
+    capped: list[Any] = []
+    used_chars = 0
+
+    for item in items:
+        item_size = max(int(estimator(item)), 1)
+        if capped and (len(capped) >= _MAX_STRUCTURED_ITEMS or used_chars + item_size > _MAX_STRUCTURED_CHARS):
+            return capped, True
+        capped.append(item)
+        used_chars += item_size
+
+    return capped, False
+
+
 def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     pattern = str(arguments.get("pattern", "")).strip()
     if not pattern:
@@ -609,31 +648,73 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
 
     files_with_matches.sort()
 
+    metadata: dict[str, Any] = {
+        "output_mode": output_mode,
+        "summary": {
+            "files_searched": files_searched,
+            "files_with_matches": len(files_with_matches),
+            "total_matches": total_matches,
+        },
+    }
+    if head_limit is not None:
+        metadata["head_limit"] = head_limit
+
+    total_result_items = 0
+    returned_count = 0
+    head_limited = False
+    structured_capped = False
+
     if output_mode == "files_with_matches":
+        total_result_items = len(files_with_matches)
         visible_files = files_with_matches[:head_limit] if head_limit is not None else files_with_matches
+        head_limited = len(visible_files) < total_result_items
+        visible_files, structured_capped = _cap_structured_items(
+            visible_files,
+            estimator=lambda item: _estimate_file_path_size(str(item)),
+        )
+        returned_count = len(visible_files)
         result_lines = [f"Found {len(files_with_matches)} files matching pattern {pattern!r}"]
         if visible_files:
+            if head_limited or structured_capped:
+                result_lines.append(f"Showing first {len(visible_files)} files.")
             result_lines.extend(visible_files)
         else:
             result_lines.append("No matches found.")
         result_text = "\n".join(result_lines)
-        payload: dict[str, Any] = {"files": visible_files}
+        metadata["files"] = visible_files
     elif output_mode == "count":
-        ordered_file_counts = dict(sorted(file_counts.items()))
-        count_items = list(ordered_file_counts.items())
+        count_items = sorted(file_counts.items())
+        total_result_items = len(count_items)
         visible_items = count_items[:head_limit] if head_limit is not None else count_items
+        head_limited = len(visible_items) < total_result_items
+        visible_items, structured_capped = _cap_structured_items(
+            visible_items,
+            estimator=lambda item: _estimate_file_count_size((str(item[0]), int(item[1]))),
+        )
+        returned_count = len(visible_items)
         result_lines = [f"Match counts for pattern {pattern!r}"]
+        if visible_items and (head_limited or structured_capped):
+            result_lines.append(f"Showing first {len(visible_items)} files.")
         for file_path, count in visible_items:
             result_lines.append(f"{file_path}: {count}")
         result_lines.append(f"Total: {total_matches} matches in {len(files_with_matches)} files")
         result_text = "\n".join(result_lines)
-        payload = {"file_counts": {file_path: count for file_path, count in visible_items}}
+        metadata["file_counts"] = {file_path: count for file_path, count in visible_items}
     else:
+        total_result_items = len(content_rows)
         visible_rows = content_rows[:head_limit] if head_limit is not None else content_rows
+        head_limited = len(visible_rows) < total_result_items
+        visible_rows, structured_capped = _cap_structured_items(
+            visible_rows,
+            estimator=lambda item: _estimate_match_row_size(item if isinstance(item, dict) else {}),
+        )
+        returned_count = len(visible_rows)
         result_lines = [f"Found {total_matches} matches in {len(files_with_matches)} files for pattern {pattern!r}"]
         if not visible_rows:
             result_lines.append("No matches found.")
         else:
+            if head_limited or structured_capped:
+                result_lines.append(f"Showing first {len(visible_rows)} rows.")
             current_file: str | None = None
             for row in visible_rows:
                 row_path = str(row["path"])
@@ -652,9 +733,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
                     result_lines.append(f"  {marker}{row_text}")
 
         result_text = "\n".join(result_lines)
-        payload = {"matches": visible_rows}
-
-    payload: dict[str, Any] = dict(payload)
+        metadata["matches"] = visible_rows
 
     truncated_text, text_truncated = _truncate_result_text(
         result_text,
@@ -662,24 +741,24 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
         files_with_matches=len(files_with_matches),
     )
 
-    payload.update(
+    structured_truncated = head_limited or structured_capped
+    metadata.update(
         {
-            "result": truncated_text,
-            "output_mode": output_mode,
-            "truncated": text_truncated,
-            "summary": {
-                "files_searched": files_searched,
-                "files_with_matches": len(files_with_matches),
-                "total_matches": total_matches,
-            },
+            "total_result_items": total_result_items,
+            "returned_count": returned_count,
+            "head_limited": head_limited,
+            "content_truncated": text_truncated,
+            "structured_truncated": structured_truncated,
+            "truncated": text_truncated or structured_truncated,
         }
     )
-
-    if head_limit is not None:
-        payload["head_limit"] = head_limit
+    if structured_capped:
+        metadata["structured_item_limit"] = _MAX_STRUCTURED_ITEMS
+        metadata["structured_char_limit"] = _MAX_STRUCTURED_CHARS
 
     return ToolExecutionResult(
         tool_call_id="",
         status="success",
-        content=to_json(payload),
+        content=truncated_text,
+        metadata=metadata,
     )

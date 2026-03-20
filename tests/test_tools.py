@@ -375,7 +375,9 @@ def test_workspace_grep(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("hello world\nsecond line", encoding="utf-8")
     call = ToolCall(id="call1", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "hello", "output_mode": "content"})
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
+
+    assert result.content.startswith("Found 1 matches in 1 files")
     assert payload["summary"]["total_matches"] == 1
     assert payload["matches"][0]["line"] == 1
 
@@ -389,7 +391,7 @@ def test_workspace_grep_uses_smart_case_for_lowercase_patterns(registry, tool_co
         arguments={"pattern": "update", "output_mode": "content"},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 2
     assert [row["text"] for row in payload["matches"]] == ["update lower", "Update upper"]
@@ -407,7 +409,7 @@ def test_workspace_grep_uses_case_sensitive_default_when_pattern_has_uppercase(
         arguments={"pattern": "Update", "output_mode": "content"},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 1
     assert [row["text"] for row in payload["matches"]] == ["Update upper"]
@@ -422,7 +424,7 @@ def test_workspace_grep_explicit_case_flags_override_smart_case(registry, tool_c
         arguments={"pattern": "update", "output_mode": "content", "i": False},
     )
     case_sensitive_result = registry.execute(case_sensitive_call, tool_context)
-    case_sensitive_payload = json.loads(case_sensitive_result.content)
+    case_sensitive_payload = case_sensitive_result.metadata
 
     assert case_sensitive_payload["summary"]["total_matches"] == 1
     assert [row["text"] for row in case_sensitive_payload["matches"]] == ["update lower"]
@@ -433,7 +435,7 @@ def test_workspace_grep_explicit_case_flags_override_smart_case(registry, tool_c
         arguments={"pattern": "Update", "output_mode": "content", "case_sensitive": False},
     )
     case_insensitive_result = registry.execute(case_insensitive_call, tool_context)
-    case_insensitive_payload = json.loads(case_insensitive_result.content)
+    case_insensitive_payload = case_insensitive_result.metadata
 
     assert case_insensitive_payload["summary"]["total_matches"] == 2
     assert [row["text"] for row in case_insensitive_payload["matches"]] == ["update lower", "Update upper"]
@@ -455,7 +457,7 @@ def test_workspace_grep_allows_absolute_path_when_enabled(registry, tool_context
         arguments={"pattern": "hello", "output_mode": "content", "path": str(outside_dir)},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 1
     assert payload["matches"][0]["path"] == str((outside_dir / "a.txt").resolve())
@@ -472,7 +474,7 @@ def test_workspace_grep_supports_files_with_matches_mode(registry, tool_context:
         arguments={"pattern": "token", "output_mode": "files_with_matches", "i": True, "type": "py"},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["files"] == ["a.py", "b.py"]
     assert payload["summary"]["files_with_matches"] == 2
@@ -490,7 +492,7 @@ def test_workspace_grep_supports_count_mode(registry, tool_context: ToolContext)
         arguments={"pattern": "err", "output_mode": "count", "path": "logs", "type": "log"},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["file_counts"] == {"logs/x.log": 2, "logs/y.log": 1}
     assert payload["summary"]["total_matches"] == 3
@@ -504,7 +506,7 @@ def test_workspace_grep_supports_context_lines(registry, tool_context: ToolConte
         arguments={"pattern": "hit", "output_mode": "content", "c": 1, "n": True},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert [row["line"] for row in payload["matches"]] == [1, 2, 3]
     assert payload["matches"][0]["is_match"] is False
@@ -519,11 +521,40 @@ def test_workspace_grep_supports_multiline_and_head_limit(registry, tool_context
         arguments={"pattern": "alpha\\nbeta", "multiline": True, "head_limit": 1},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert len(payload["matches"]) == 1
     assert payload["head_limit"] == 1
+    assert payload["head_limited"] is False
     assert payload["summary"]["total_matches"] == 1
+
+
+def test_workspace_grep_caps_structured_payload_without_duplication(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(3):
+        (tool_context.workspace / f"match_{index}.txt").write_text("token\n", encoding="utf-8")
+
+    monkeypatch.setattr(search_handler, "_MAX_STRUCTURED_ITEMS", 2)
+    monkeypatch.setattr(search_handler, "_MAX_STRUCTURED_CHARS", 10_000)
+
+    call = ToolCall(
+        id="call_structured_cap",
+        name=WORKSPACE_GREP_TOOL_NAME,
+        arguments={"pattern": "token", "output_mode": "content"},
+    )
+    result = registry.execute(call, tool_context)
+    payload = result.metadata
+
+    assert payload["total_result_items"] == 3
+    assert payload["returned_count"] == 2
+    assert payload["structured_truncated"] is True
+    assert payload["truncated"] is True
+    assert len(payload["matches"]) == 2
+    assert "Showing first 2 rows." in result.content
+    assert "\"matches\"" not in result.content
 
 
 def test_workspace_grep_excludes_hidden_by_default(registry, tool_context: ToolContext) -> None:
@@ -531,7 +562,7 @@ def test_workspace_grep_excludes_hidden_by_default(registry, tool_context: ToolC
 
     call = ToolCall(id="call_hidden_default", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 0
 
@@ -545,7 +576,7 @@ def test_workspace_grep_can_include_hidden_files(registry, tool_context: ToolCon
         arguments={"pattern": "Agent", "include_hidden": True},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 1
     assert payload["matches"][0]["path"] == ".hidden.txt"
@@ -557,7 +588,7 @@ def test_workspace_grep_skips_common_ignored_roots_by_default(registry, tool_con
 
     call = ToolCall(id="call_ignored_default", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 0
 
@@ -572,7 +603,7 @@ def test_workspace_grep_can_include_common_ignored_roots(registry, tool_context:
         arguments={"pattern": "Agent", "include_ignored": True},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 1
     assert payload["matches"][0]["path"] == "node_modules/pkg/x.js"
@@ -589,7 +620,7 @@ def test_workspace_grep_supports_file_path_target(registry, tool_context: ToolCo
         arguments={"pattern": "Agent", "path": file_path, "output_mode": "content", "c": 1},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["files_searched"] == 1
     assert payload["summary"]["files_with_matches"] == 1
@@ -608,7 +639,7 @@ def test_workspace_grep_file_path_works_inside_ignored_root(registry, tool_conte
         arguments={"pattern": "Agent", "path": file_path, "output_mode": "files_with_matches"},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["files"] == [file_path]
     assert payload["summary"]["total_matches"] == 1
@@ -669,7 +700,7 @@ def test_workspace_grep_prefers_ripgrep_when_available(
         arguments={"pattern": "token", "output_mode": "files_with_matches", "type": "py"},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["files"] == ["a.py", "b.py"]
     assert payload["summary"]["total_matches"] == 2
@@ -712,7 +743,7 @@ def test_workspace_grep_accepts_ripgrep_returncode_2_with_results(
 
     call = ToolCall(id="call_rg_partial_error", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     # If returncode=2 forced fallback, this would be 0 because source file does not contain "Agent".
     assert payload["summary"]["total_matches"] == 1
@@ -742,7 +773,7 @@ def test_workspace_grep_falls_back_when_ripgrep_errors(
 
     call = ToolCall(id="call_rg_fallback", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "hello"})
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
+    payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 1
     assert payload["matches"][0]["path"] == "fallback.txt"
@@ -755,10 +786,10 @@ def test_workspace_grep_rejects_unknown_file_type(registry, tool_context: ToolCo
         arguments={"pattern": "x", "type": "unknown"},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
 
     assert result.status == "error"
-    assert "Unsupported file type" in payload["error"]
+    assert "Unsupported file type" in result.content
+    assert "Unsupported file type" in result.metadata["error"]
 
 
 def test_file_info_and_string_replace(registry, tool_context: ToolContext) -> None:

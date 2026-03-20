@@ -219,8 +219,9 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert cycle_payload.get("tool_call_names") == [TODO_WRITE_TOOL_NAME]
 
     tool_payload = next(payload for name, payload in events if name == "tool_result")
-    assert isinstance(tool_payload.get("result"), str)
-    assert tool_payload.get("result") == tool_payload.get("content")
+    assert isinstance(tool_payload.get("content"), str)
+    assert "result" not in tool_payload
+    assert isinstance(tool_payload.get("metadata"), dict)
 
 
 def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
@@ -304,7 +305,7 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
     assert result.status == AgentStatus.COMPLETED
 
     tool_payload = next(payload for name, payload in events if name == "tool_result")
-    full_result = str(tool_payload.get("result") or "")
+    full_result = str(tool_payload.get("content") or "")
     assert long_title in full_result
     assert len(full_result) > 220
     assert str(tool_payload.get("content_preview") or "") == full_result
@@ -353,7 +354,7 @@ def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path:
     assert result.status == AgentStatus.COMPLETED
 
     tool_payload = next(payload for name, payload in events if name == "tool_result")
-    full_result = str(tool_payload.get("result") or "")
+    full_result = str(tool_payload.get("content") or "")
     preview = str(tool_payload.get("content_preview") or "")
     assert long_title in full_result
     assert full_result != preview
