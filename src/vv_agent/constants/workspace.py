@@ -7,7 +7,6 @@ from vv_agent.constants.tool_names import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
-    BATCH_SUB_TASKS_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
@@ -16,6 +15,7 @@ from vv_agent.constants.tool_names import (
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
+    SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
@@ -478,17 +478,17 @@ Guidelines:
         "type": "function",
         "function": {
             "name": CREATE_SUB_TASK_TOOL_NAME,
-            "description": """Create one sub-task and let a configured sub-agent execute it.
+            "description": """Create sub-tasks for a configured sub-agent.
 
-Use cases:
-- Delegate a focused sub-problem to a specialized sub-agent.
-- Keep parent context concise while getting targeted output.
+Modes:
+- Single task: provide `task_description` (+ optional `output_requirements`)
+- Batch task: provide `tasks` array for multiple independent tasks of the same sub-agent
 
-Input rules:
-- `agent_name` should match one key from configured `sub_agents`.
-- `task_description` should be specific and actionable.
-- `output_requirements` can constrain response format.
-- `agent_id` is accepted as a compatibility alias for `agent_name`.""",
+Execution:
+- `wait_for_completion=true` (default): wait for result(s) and return final payload
+- `wait_for_completion=false`: start background sub-task(s) and return `task_id` / `task_ids`
+
+Use `sub_task_status` later to inspect progress, fetch results, or send follow-up messages.""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -502,48 +502,15 @@ Input rules:
                     },
                     "task_description": {
                         "type": "string",
-                        "description": "Task description passed to the sub-agent.",
+                        "description": "Single-task description. Mutually exclusive with `tasks`.",
                     },
                     "output_requirements": {
                         "type": "string",
-                        "description": "Optional output format or content constraints.",
-                    },
-                    "include_main_summary": {
-                        "type": "boolean",
-                        "description": "Whether to include parent-task summary context. Default false.",
-                    },
-                    "exclude_files_pattern": {
-                        "type": "string",
-                        "description": "Optional regex for excluding files in shared context (reserved for compatibility).",
-                    },
-                },
-                "required": ["task_description"],
-            },
-        },
-    },
-    BATCH_SUB_TASKS_TOOL_NAME: {
-        "type": "function",
-        "function": {
-            "name": BATCH_SUB_TASKS_TOOL_NAME,
-            "description": """Create multiple sub-tasks for one sub-agent and aggregate results.
-
-Use this when you have multiple independent tasks of the same skill type.
-Each task can define its own output requirement. The tool returns a summary
-with per-item execution result.""",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "agent_name": {
-                        "type": "string",
-                        "description": "Sub-agent name from configured sub_agents mapping.",
-                    },
-                    "agent_id": {
-                        "type": "string",
-                        "description": "Compatibility alias of agent_name.",
+                        "description": "Optional output constraints for single-task mode.",
                     },
                     "tasks": {
                         "type": "array",
-                        "description": "Batch sub-task definitions.",
+                        "description": "Batch mode: multiple independent tasks for the same sub-agent.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -553,7 +520,7 @@ with per-item execution result.""",
                                 },
                                 "output_requirements": {
                                     "type": "string",
-                                    "description": "Optional per-task output requirements.",
+                                    "description": "Optional output constraints for one sub-task.",
                                 },
                             },
                             "required": ["task_description"],
@@ -567,8 +534,61 @@ with per-item execution result.""",
                         "type": "string",
                         "description": "Optional regex for excluding files in shared context (reserved for compatibility).",
                     },
+                    "wait_for_completion": {
+                        "type": "boolean",
+                        "description": "Whether to wait for completion. Default true; false starts background execution.",
+                    },
                 },
-                "required": ["tasks"],
+                "required": [],
+            },
+        },
+    },
+    SUB_TASK_STATUS_TOOL_NAME: {
+        "type": "function",
+        "function": {
+            "name": SUB_TASK_STATUS_TOOL_NAME,
+            "description": """Inspect sub-task status and optionally interact with a sub-task.
+
+Capabilities:
+- Query one or more sub-task ids
+- Return lightweight snapshot progress (`detail_level=snapshot`)
+- Send `message` to the first task id to steer a running task or continue a completed one
+- Optionally wait for the follow-up response with `wait_for_response=true`""",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_ids": {
+                        "type": "array",
+                        "description": (
+                            "Sub-task ids to query. When `message` is provided, "
+                            "only the first id is used as the target."
+                        ),
+                        "items": {"type": "string"},
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Optional follow-up or steering message for the first task id.",
+                    },
+                    "detail_level": {
+                        "type": "string",
+                        "enum": ["basic", "snapshot"],
+                        "description": (
+                            "Status response detail level. `snapshot` includes recent activity, "
+                            "latest tool call, and workspace files."
+                        ),
+                    },
+                    "workspace_file_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Maximum number of workspace files returned per task in snapshot mode. Default 20.",
+                    },
+                    "wait_for_response": {
+                        "type": "boolean",
+                        "description": "When `message` is provided, wait until the task finishes processing that message.",
+                    },
+                },
+                "required": ["task_ids"],
             },
         },
     },
@@ -693,7 +713,7 @@ def get_default_tool_schemas() -> dict[str, ToolSchema]:
         BASH_TOOL_NAME,
         CHECK_BACKGROUND_COMMAND_TOOL_NAME,
         CREATE_SUB_TASK_TOOL_NAME,
-        BATCH_SUB_TASKS_TOOL_NAME,
+        SUB_TASK_STATUS_TOOL_NAME,
         READ_IMAGE_TOOL_NAME,
     ):
         merged[extra_tool_name] = deepcopy(WORKSPACE_TOOLS_SCHEMAS[extra_tool_name])

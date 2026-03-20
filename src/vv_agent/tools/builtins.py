@@ -4,7 +4,6 @@ from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
-    BATCH_SUB_TASKS_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
@@ -13,6 +12,7 @@ from vv_agent.constants import (
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
+    SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
@@ -23,7 +23,6 @@ from vv_agent.tools.base import ToolSpec
 from vv_agent.tools.handlers import (
     activate_skill,
     ask_user,
-    batch_sub_tasks,
     check_background_command,
     compress_memory,
     create_sub_task,
@@ -33,6 +32,7 @@ from vv_agent.tools.handlers import (
     read_file,
     read_image,
     run_bash_command,
+    sub_task_status,
     task_finish,
     todo_write,
     workspace_grep,
@@ -60,7 +60,7 @@ def build_default_registry() -> ToolRegistry:
             ToolSpec(name=BASH_TOOL_NAME, handler=run_bash_command),
             ToolSpec(name=CHECK_BACKGROUND_COMMAND_TOOL_NAME, handler=check_background_command),
             ToolSpec(name=CREATE_SUB_TASK_TOOL_NAME, handler=create_sub_task),
-            ToolSpec(name=BATCH_SUB_TASKS_TOOL_NAME, handler=batch_sub_tasks),
+            ToolSpec(name=SUB_TASK_STATUS_TOOL_NAME, handler=sub_task_status),
             ToolSpec(name=READ_IMAGE_TOOL_NAME, handler=read_image),
         ]
     )

@@ -5,14 +5,14 @@ from vv_agent.tools.handlers.image import read_image
 from vv_agent.tools.handlers.memory import compress_memory
 from vv_agent.tools.handlers.search import workspace_grep
 from vv_agent.tools.handlers.skills import activate_skill
-from vv_agent.tools.handlers.sub_agents import batch_sub_tasks, create_sub_task
+from vv_agent.tools.handlers.sub_agents import create_sub_task
+from vv_agent.tools.handlers.sub_task_status import sub_task_status
 from vv_agent.tools.handlers.todo import todo_read, todo_write
 from vv_agent.tools.handlers.workspace_io import file_info, file_str_replace, list_files, read_file, write_file
 
 __all__ = [
     "activate_skill",
     "ask_user",
-    "batch_sub_tasks",
     "check_background_command",
     "compress_memory",
     "create_sub_task",
@@ -22,6 +22,7 @@ __all__ = [
     "read_file",
     "read_image",
     "run_bash_command",
+    "sub_task_status",
     "task_finish",
     "todo_read",
     "todo_write",

@@ -16,6 +16,7 @@ from vv_agent.runtime.hooks import (
     RuntimeHookManager,
 )
 from vv_agent.runtime.state import Checkpoint, InMemoryStateStore, StateStore
+from vv_agent.runtime.sub_task_manager import ManagedSubTask, SubTaskManager
 from vv_agent.runtime.tool_call_runner import ToolCallRunner
 
 __all__ = [
@@ -36,10 +37,12 @@ __all__ = [
     "ExecutionContext",
     "InMemoryStateStore",
     "InlineBackend",
+    "ManagedSubTask",
     "RuntimeHook",
     "RuntimeHookManager",
     "RuntimeLogHandler",
     "StateStore",
     "StreamCallback",
+    "SubTaskManager",
     "ToolCallRunner",
 ]

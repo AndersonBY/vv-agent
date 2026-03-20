@@ -102,7 +102,7 @@ V_AGENT_EXAMPLE_SKILLS_DIR=skills uv run python examples/12_skill_activation.py
 | 10 | `10_read_image.py` | 图片读取 + Markdown 报告输出 |
 | 11 | `11_sub_agent_pipeline.py` | Sub-agent 流水线: research → writer → 最终报告 |
 | 13 | `13_arxiv_pipeline.py` | arXiv 论文检索 + PDF 下载 + 图片解释 + 中文翻译 |
-| 14 | `14_batch_sub_tasks.py` | `batch_sub_tasks` 并行多文档处理 |
+| 14 | `14_batch_sub_tasks.py` | `create_sub_task` 批量模式并行多文档处理 |
 
 ```bash
 uv run python examples/10_read_image.py

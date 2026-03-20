@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import BATCH_SUB_TASKS_TOOL_NAME, CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.backends.inline import InlineBackend
@@ -112,7 +112,7 @@ def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
     assert first_tool_payload["resolved"]["backend"] == "moonshot"
 
 
-def test_batch_sub_tasks_aggregates_sub_agent_results(tmp_path: Path) -> None:
+def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> None:
     parent_llm = ScriptedLLM(
         steps=[
             LLMResponse(
@@ -120,7 +120,7 @@ def test_batch_sub_tasks_aggregates_sub_agent_results(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="p1",
-                        name=BATCH_SUB_TASKS_TOOL_NAME,
+                        name=CREATE_SUB_TASK_TOOL_NAME,
                         arguments={
                             "agent_name": "writer-sub",
                             "tasks": [
@@ -203,7 +203,7 @@ def test_batch_sub_tasks_aggregates_sub_agent_results(tmp_path: Path) -> None:
     assert batch_payload["results"][1]["final_answer"] == "sub-B"
 
 
-def test_batch_sub_tasks_uses_execution_backend_parallel_map(tmp_path: Path) -> None:
+def test_create_sub_task_batch_uses_execution_backend_parallel_map(tmp_path: Path) -> None:
     class _TrackingInlineBackend(InlineBackend):
         def __init__(self) -> None:
             super().__init__()
@@ -221,7 +221,7 @@ def test_batch_sub_tasks_uses_execution_backend_parallel_map(tmp_path: Path) -> 
                 tool_calls=[
                     ToolCall(
                         id="p1",
-                        name=BATCH_SUB_TASKS_TOOL_NAME,
+                        name=CREATE_SUB_TASK_TOOL_NAME,
                         arguments={
                             "agent_name": "writer-sub",
                             "tasks": [

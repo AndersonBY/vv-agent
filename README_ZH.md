@@ -350,17 +350,19 @@ class MyBackend:
 
 ## 内建工具
 
-`list_files`、`file_info`、`read_file`、`write_file`、`file_str_replace`、`workspace_grep`、`compress_memory`、`todo_write`、`task_finish`、`ask_user`、`bash`、`read_image`、`create_sub_task`、`batch_sub_tasks`。
+`list_files`、`file_info`、`read_file`、`write_file`、`file_str_replace`、`workspace_grep`、`compress_memory`、`todo_write`、`task_finish`、`ask_user`、`bash`、`read_image`、`create_sub_task`、`sub_task_status`。
 
 通过 `ToolRegistry.register()` 注册自定义工具。
 
 ## 子 Agent
 
-在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` / `batch_sub_tasks` 委派任务。每个子 Agent 有独立的 runtime、模型和工具集。
+在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` 委派任务：单任务用 `task_description`，批量模式用 `tasks`，后台子任务用 `wait_for_completion=false`。每个子 Agent 有独立的 runtime、模型和工具集。
 
 现在每个子任务都会创建真实 `AgentSession`（默认 `session_id == task_id`）。工具返回结果会包含 `session_id`，运行事件会携带稳定标识（`task_id` / `session_id`），宿主应用可以按子任务独立订阅、持久化与流式展示进度（含 `sub_agent_stream_delta` token 增量）。
 
-`batch_sub_tasks` 现在会通过 runtime 执行后端的 `parallel_map` 分发有效子任务；当后端支持并行时，批量任务会并发执行。
+`create_sub_task` 的批量模式现在会通过 runtime 执行后端的 `parallel_map` 分发有效子任务；当后端支持并行时，同步批量任务会并发执行。
+
+使用 `sub_task_status` 可以查询子任务状态、查看轻量级进度快照（`detail_level=snapshot`），或向运行中/已完成的子任务追加消息。
 
 每个子任务的 runtime metadata 现在会写入 `task_id`、`session_id` 和 `browser_scope_key`，确保浏览器这类会话级工具在并行子任务间保持隔离。
 

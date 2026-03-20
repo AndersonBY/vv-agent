@@ -358,17 +358,19 @@ Priority is strict:
 
 ## Built-in Tools
 
-`list_files`, `file_info`, `read_file`, `write_file`, `file_str_replace`, `workspace_grep`, `compress_memory`, `todo_write`, `task_finish`, `ask_user`, `bash`, `read_image`, `create_sub_task`, `batch_sub_tasks`.
+`list_files`, `file_info`, `read_file`, `write_file`, `file_str_replace`, `workspace_grep`, `compress_memory`, `todo_write`, `task_finish`, `ask_user`, `bash`, `read_image`, `create_sub_task`, `sub_task_status`.
 
 Custom tools can be registered via `ToolRegistry.register()`.
 
 ## Sub-agents
 
-Configure named sub-agents on `AgentTask.sub_agents`. The parent agent delegates work via `create_sub_task` / `batch_sub_tasks`. Each sub-agent gets its own runtime, model, and tool set.
+Configure named sub-agents on `AgentTask.sub_agents`. The parent agent delegates work via `create_sub_task`. Use `task_description` for one task, `tasks` for batch mode, and `wait_for_completion=false` to start background sub-tasks. Each sub-agent gets its own runtime, model, and tool set.
 
 Each delegated sub-task now runs in a real `AgentSession` (session id defaults to the sub-task id). Tool payloads include `session_id`, and runtime events include stable identifiers (`task_id` / `session_id`) so host apps can subscribe, persist, and stream sub-task progress independently (including `sub_agent_stream_delta` token chunks).
 
-`batch_sub_tasks` now dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so batches run concurrently when the backend supports parallel execution.
+Batch mode in `create_sub_task` dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so synchronous batches run concurrently when the backend supports parallel execution.
+
+Use `sub_task_status` to query sub-task states, inspect lightweight progress snapshots (`detail_level=snapshot`), or send follow-up messages to running/completed sub-tasks.
 
 Sub-task runtime metadata now includes `task_id`, `session_id`, and `browser_scope_key` for each sub-agent run, so session-scoped tools (for example, browser controllers) stay isolated across parallel sub-tasks.
 

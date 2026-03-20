@@ -29,7 +29,6 @@ class ToolResultStatus(StrEnum):
     ERROR = "ERROR"
     WAIT_RESPONSE = "WAIT_RESPONSE"
     RUNNING = "RUNNING"
-    BATCH_RUNNING = "BATCH_RUNNING"
     PENDING_COMPRESS = "PENDING_COMPRESS"
 
 
@@ -51,7 +50,6 @@ _STATUS_CODE_TO_LEGACY: dict[ToolResultStatus, Literal["success", "error"]] = {
     ToolResultStatus.ERROR: "error",
     ToolResultStatus.WAIT_RESPONSE: "success",
     ToolResultStatus.RUNNING: "success",
-    ToolResultStatus.BATCH_RUNNING: "success",
     ToolResultStatus.PENDING_COMPRESS: "success",
 }
 

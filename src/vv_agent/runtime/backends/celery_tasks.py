@@ -15,10 +15,11 @@ from typing import Any
 
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.runtime.backends.celery import RuntimeRecipe
-from vv_agent.runtime.engine import AgentRuntime
+from vv_agent.runtime.engine import AgentRuntime, _register_sub_agent_session, _unregister_sub_agent_session
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.runtime.state import Checkpoint
 from vv_agent.runtime.stores.sqlite import SqliteStateStore
+from vv_agent.runtime.sub_task_manager import SubTaskManager
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentResult, AgentStatus, AgentTask
 from vv_agent.workspace import LocalWorkspaceBackend
@@ -117,6 +118,10 @@ def run_single_cycle(
     memory_manager = runtime._build_memory_manager(
         task=task, workspace_path=workspace_path,
     )
+    sub_task_manager = SubTaskManager(
+        register_session=_register_sub_agent_session,
+        unregister_session=_unregister_sub_agent_session,
+    )
     cycle_executor = runtime._build_cycle_executor(
         task=task,
         workspace_path=workspace_path,
@@ -124,6 +129,7 @@ def run_single_cycle(
         memory_manager=memory_manager,
         before_cycle_messages=None,
         interruption_messages=None,
+        sub_task_manager=sub_task_manager,
     )
 
     messages = checkpoint.messages

@@ -7,9 +7,9 @@ from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
-    BATCH_SUB_TASKS_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
+    SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
@@ -67,7 +67,7 @@ def test_plan_tool_names_adds_sub_agent_tools_when_configured() -> None:
     )
 
     assert CREATE_SUB_TASK_TOOL_NAME in names
-    assert BATCH_SUB_TASKS_TOOL_NAME in names
+    assert SUB_TASK_STATUS_TOOL_NAME in names
 
 
 def test_plan_tool_schemas_adds_sub_agent_tools_when_configured() -> None:
@@ -82,7 +82,7 @@ def test_plan_tool_schemas_adds_sub_agent_tools_when_configured() -> None:
     )
     names = {schema["function"]["name"] for schema in schemas}
     assert CREATE_SUB_TASK_TOOL_NAME in names
-    assert BATCH_SUB_TASKS_TOOL_NAME in names
+    assert SUB_TASK_STATUS_TOOL_NAME in names
 
 
 def test_plan_tool_names_includes_extra_tool_names() -> None:

@@ -9,8 +9,8 @@ import pytest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
-    BATCH_SUB_TASKS_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
+    SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
 )
 from vv_agent.llm import ScriptedLLM
@@ -354,7 +354,7 @@ def test_sdk_prepare_task_supports_sub_agent_configs(tmp_path: Path) -> None:
     assert task.sub_agents["research-sub"].description == "collect data"
     assert task.metadata["sub_agent_names"] == ["research-sub"]
     assert CREATE_SUB_TASK_TOOL_NAME in task.system_prompt
-    assert BATCH_SUB_TASKS_TOOL_NAME in task.system_prompt
+    assert SUB_TASK_STATUS_TOOL_NAME in task.system_prompt
 
 
 def test_sdk_prepare_task_applies_memory_compaction_thresholds(tmp_path: Path) -> None:

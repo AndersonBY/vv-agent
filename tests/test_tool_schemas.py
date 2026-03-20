@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from vv_agent.constants import (
-    BATCH_SUB_TASKS_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     READ_FILE_TOOL_NAME,
+    SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
@@ -23,7 +23,7 @@ def test_registry_exports_backend_style_tool_schemas() -> None:
     assert TASK_FINISH_TOOL_NAME in names
     assert READ_FILE_TOOL_NAME in names
     assert CREATE_SUB_TASK_TOOL_NAME in names
-    assert BATCH_SUB_TASKS_TOOL_NAME in names
+    assert SUB_TASK_STATUS_TOOL_NAME in names
     for tool_name in WORKSPACE_TOOLS:
         assert tool_name in names
 

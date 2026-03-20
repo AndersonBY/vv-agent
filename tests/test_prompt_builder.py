@@ -5,9 +5,9 @@ from pathlib import Path
 
 from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
-    BATCH_SUB_TASKS_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     READ_FILE_TOOL_NAME,
+    SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
@@ -52,7 +52,7 @@ def test_prompt_can_include_sub_agent_guidance() -> None:
     )
 
     assert CREATE_SUB_TASK_TOOL_NAME in prompt
-    assert BATCH_SUB_TASKS_TOOL_NAME in prompt
+    assert SUB_TASK_STATUS_TOOL_NAME in prompt
     assert "research-sub" in prompt
     assert "writer-sub" in prompt
 

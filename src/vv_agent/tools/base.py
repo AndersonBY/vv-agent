@@ -9,6 +9,7 @@ from vv_agent.types import SubTaskOutcome, SubTaskRequest, ToolExecutionResult
 
 if TYPE_CHECKING:
     from vv_agent.runtime.context import ExecutionContext
+    from vv_agent.runtime.sub_task_manager import SubTaskManager
     from vv_agent.workspace.base import WorkspaceBackend
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], ToolExecutionResult]
@@ -37,7 +38,9 @@ class ToolContext:
     shared_state: dict[str, Any]
     cycle_index: int
     workspace_backend: WorkspaceBackend
+    task_id: str = ""
     sub_task_runner: SubTaskRunner | None = None
+    sub_task_manager: SubTaskManager | None = None
     ctx: ExecutionContext | None = None
     task_metadata: dict[str, Any] = field(default_factory=dict)
 

@@ -7,10 +7,10 @@ from typing import Any
 from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
-    BATCH_SUB_TASKS_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     FILE_STR_REPLACE_TOOL_NAME,
     READ_FILE_TOOL_NAME,
+    SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
@@ -105,12 +105,15 @@ CURRENT_TIME_PROMPT = {
 
 SUB_AGENT_PROMPT = {
     "en-US": (
-        f"If sub-agents are configured, delegate focused tasks with `{CREATE_SUB_TASK_TOOL_NAME}`. "
-        f"For multiple independent tasks of the same agent, use `{BATCH_SUB_TASKS_TOOL_NAME}`."
+        f"If sub-agents are configured, delegate work with `{CREATE_SUB_TASK_TOOL_NAME}`. "
+        f"Use `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, "
+        f"`wait_for_completion=false` for background execution, and `{SUB_TASK_STATUS_TOOL_NAME}` "
+        "to query progress or send follow-up messages."
     ),
     "zh-CN": (
-        f"如果已配置子 Agent, 可使用 `{CREATE_SUB_TASK_TOOL_NAME}` 委派单个子任务; "
-        f"同类型并行任务可使用 `{BATCH_SUB_TASKS_TOOL_NAME}` 批量委派。"
+        f"如果已配置子 Agent, 可使用 `{CREATE_SUB_TASK_TOOL_NAME}` 委派任务: 单任务用 `task_description`, "
+        f"同一子 Agent 的并行任务用 `tasks`, 后台执行用 `wait_for_completion=false`; "
+        f"需要查询进度或追加消息时使用 `{SUB_TASK_STATUS_TOOL_NAME}`。"
     ),
 }
 

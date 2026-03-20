@@ -11,7 +11,7 @@ from threading import RLock
 from typing import Any, Protocol
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
-from vv_agent.constants import BATCH_SUB_TASKS_TOOL_NAME, CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm.base import LLMClient
 from vv_agent.memory import MemoryManager
 from vv_agent.prompt import build_system_prompt
@@ -20,6 +20,7 @@ from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
+from vv_agent.runtime.sub_task_manager import SubTaskManager
 from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.runtime.tool_call_runner import ToolCallRunner
 from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints
@@ -201,6 +202,10 @@ class AgentRuntime:
 
         memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
         allow_outside_workspace_paths = self._allow_outside_workspace_paths(task)
+        sub_task_manager = SubTaskManager(
+            register_session=_register_sub_agent_session,
+            unregister_session=_unregister_sub_agent_session,
+        )
 
         cycle_executor = self._build_cycle_executor(
             task=task,
@@ -212,6 +217,7 @@ class AgentRuntime:
             memory_manager=memory_manager,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
+            sub_task_manager=sub_task_manager,
         )
 
         runtime_ctx = ctx
@@ -237,6 +243,7 @@ class AgentRuntime:
         memory_manager: MemoryManager,
         before_cycle_messages: BeforeCycleMessageProvider | None,
         interruption_messages: InterruptionMessageProvider | None,
+        sub_task_manager: SubTaskManager,
     ) -> Callable[[int, list[Message], list[CycleRecord], dict[str, Any], ExecutionContext | None], AgentResult | None]:
         def executor(
             cycle_index: int,
@@ -318,12 +325,16 @@ class AgentRuntime:
                     shared_state=shared,
                     cycle_index=cycle_index,
                     workspace_backend=workspace_backend,
+                    task_id=task.task_id,
                     sub_task_runner=self._build_sub_task_runner(
                         parent_task=task,
                         workspace_path=workspace_path,
+                        workspace_backend=workspace_backend,
                         parent_shared_state=shared,
+                        sub_task_manager=sub_task_manager,
                         ctx=ctx,
                     ),
+                    sub_task_manager=sub_task_manager,
                     ctx=ctx,
                     task_metadata=dict(task.metadata),
                 )
@@ -711,7 +722,9 @@ class AgentRuntime:
         *,
         parent_task: AgentTask,
         workspace_path: Path,
+        workspace_backend: WorkspaceBackend,
         parent_shared_state: dict[str, Any],
+        sub_task_manager: SubTaskManager,
         ctx: ExecutionContext | None = None,
     ) -> Callable[[SubTaskRequest], SubTaskOutcome] | None:
         if not parent_task.sub_agents:
@@ -721,8 +734,10 @@ class AgentRuntime:
             return self._run_sub_task(
                 parent_task=parent_task,
                 workspace_path=workspace_path,
+                workspace_backend=workspace_backend,
                 parent_shared_state=parent_shared_state,
                 request=request,
+                sub_task_manager=sub_task_manager,
                 ctx=ctx,
             )
 
@@ -733,25 +748,33 @@ class AgentRuntime:
         *,
         parent_task: AgentTask,
         workspace_path: Path,
+        workspace_backend: WorkspaceBackend,
         parent_shared_state: dict[str, Any],
         request: SubTaskRequest,
+        sub_task_manager: SubTaskManager | None = None,
         ctx: ExecutionContext | None = None,
     ) -> SubTaskOutcome:
         from vv_agent.sdk.session import create_agent_session
         from vv_agent.sdk.types import AgentDefinition, AgentRun
 
-        sub_task_id = f"{parent_task.task_id}_sub_{request.agent_name}_{uuid.uuid4().hex[:8]}"
-        sub_session_id = sub_task_id
+        request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        sub_task_id = str(request_metadata.get("task_id") or "").strip()
+        if not sub_task_id:
+            sub_task_id = f"{parent_task.task_id}_sub_{request.agent_name}_{uuid.uuid4().hex[:8]}"
+        sub_session_id = str(request_metadata.get("session_id") or "").strip() or sub_task_id
         sub_agent = parent_task.sub_agents.get(request.agent_name)
         if sub_agent is None:
             available = ", ".join(sorted(parent_task.sub_agents))
-            return SubTaskOutcome(
+            outcome = SubTaskOutcome(
                 task_id=sub_task_id,
                 session_id=sub_session_id,
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
                 error=f"Unknown sub-agent {request.agent_name!r}. Available: {available}",
             )
+            if sub_task_manager is not None:
+                sub_task_manager.record_outcome(sub_task_id, outcome)
+            return outcome
 
         def _emit_sub_session_event(event: str, payload: dict[str, Any]) -> None:
             if self.log_handler is None:
@@ -882,9 +905,22 @@ class AgentRuntime:
                 shared_state={"todo_list": []},
             )
 
+            if sub_task_manager is not None:
+                sub_task_manager.attach_session(
+                    task_id=sub_task_id,
+                    session_id=sub_session_id,
+                    agent_name=request.agent_name,
+                    task_title=request.task_description,
+                    workspace_backend=workspace_backend,
+                    session=sub_session,
+                    resolved=resolved_payload,
+                    event_forwarder=_emit_sub_session_event,
+                )
+            else:
+                sub_session.subscribe(_emit_sub_session_event)
+
             try:
                 _register_sub_agent_session(sub_session_id, sub_session)
-                unsub = sub_session.subscribe(_emit_sub_session_event)
                 _emit_sub_session_event(
                     "session_created",
                     {
@@ -894,22 +930,22 @@ class AgentRuntime:
                         "max_cycles": sub_task.max_cycles,
                     },
                 )
-                try:
-                    sub_run = sub_session.prompt(sub_task.user_prompt, auto_follow_up=False)
-                finally:
-                    unsub()
+                sub_run = sub_session.prompt(sub_task.user_prompt, auto_follow_up=False)
             finally:
                 _unregister_sub_agent_session(sub_session_id, sub_session)
         except Exception as exc:
-            return SubTaskOutcome(
+            outcome = SubTaskOutcome(
                 task_id=sub_task_id,
                 session_id=sub_session_id,
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
                 error=str(exc),
             )
+            if sub_task_manager is not None:
+                sub_task_manager.record_outcome(sub_task_id, outcome)
+            return outcome
 
-        return SubTaskOutcome(
+        outcome = SubTaskOutcome(
             task_id=sub_task_id,
             session_id=sub_session_id,
             agent_name=request.agent_name,
@@ -921,6 +957,9 @@ class AgentRuntime:
             todo_list=sub_run.result.todo_list,
             resolved=resolved_payload,
         )
+        if sub_task_manager is not None:
+            sub_task_manager.record_outcome(sub_task_id, outcome)
+        return outcome
 
     def _resolve_sub_agent_client(
         self,
@@ -1012,7 +1051,7 @@ class AgentRuntime:
 
         excluded_tools = set(parent_task.exclude_tools)
         excluded_tools.update(sub_agent.exclude_tools)
-        excluded_tools.update({CREATE_SUB_TASK_TOOL_NAME, BATCH_SUB_TASKS_TOOL_NAME})
+        excluded_tools.update({CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME})
         metadata = {
             "is_sub_task": True,
             "parent_task_id": parent_task.task_id,
