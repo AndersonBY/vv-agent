@@ -362,7 +362,7 @@ class MyBackend:
 
 `create_sub_task` 的批量模式现在会通过 runtime 执行后端的 `parallel_map` 分发有效子任务；当后端支持并行时，同步批量任务会并发执行。
 
-使用 `sub_task_status` 可以查询子任务状态、查看轻量级进度快照（`detail_level=snapshot`），或向运行中/已完成的子任务追加消息。
+使用 `sub_task_status` 可以查询子任务状态、查看轻量级进度快照（`detail_level=snapshot`），或向运行中/已完成的子任务追加消息。通过 `AgentSDKClient.create_session()` 运行时，子任务注册表会绑定在该会话上，因此同一主会话的后续轮次仍然可以查询前面创建的后台子任务。
 
 每个子任务的 runtime metadata 现在会写入 `task_id`、`session_id` 和 `browser_scope_key`，确保浏览器这类会话级工具在并行子任务间保持隔离。
 

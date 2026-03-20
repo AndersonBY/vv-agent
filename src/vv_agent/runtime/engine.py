@@ -176,6 +176,7 @@ class AgentRuntime:
         before_cycle_messages: BeforeCycleMessageProvider | None = None,
         interruption_messages: InterruptionMessageProvider | None = None,
         ctx: ExecutionContext | None = None,
+        sub_task_manager: SubTaskManager | None = None,
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
         shared = dict(shared_state or {})
@@ -202,10 +203,12 @@ class AgentRuntime:
 
         memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
         allow_outside_workspace_paths = self._allow_outside_workspace_paths(task)
-        sub_task_manager = SubTaskManager(
-            register_session=_register_sub_agent_session,
-            unregister_session=_unregister_sub_agent_session,
-        )
+        effective_sub_task_manager = sub_task_manager
+        if effective_sub_task_manager is None:
+            effective_sub_task_manager = SubTaskManager(
+                register_session=_register_sub_agent_session,
+                unregister_session=_unregister_sub_agent_session,
+            )
 
         cycle_executor = self._build_cycle_executor(
             task=task,
@@ -217,7 +220,7 @@ class AgentRuntime:
             memory_manager=memory_manager,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
-            sub_task_manager=sub_task_manager,
+            sub_task_manager=effective_sub_task_manager,
         )
 
         runtime_ctx = ctx

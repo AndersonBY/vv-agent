@@ -7,9 +7,14 @@ from typing import Any, cast
 
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.prompt import build_system_prompt
-from vv_agent.runtime import AgentRuntime, CancellationToken
+from vv_agent.runtime import AgentRuntime, CancellationToken, SubTaskManager
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.engine import BeforeCycleMessageProvider, InterruptionMessageProvider
+from vv_agent.runtime.engine import (
+    BeforeCycleMessageProvider,
+    InterruptionMessageProvider,
+    _register_sub_agent_session,
+    _unregister_sub_agent_session,
+)
 from vv_agent.sdk.types import AgentDefinition, AgentRun, AgentSDKOptions, RuntimeLogHandler
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, Message
@@ -266,8 +271,19 @@ class AgentSDKClient:
 
         from vv_agent.sdk.session import create_agent_session
 
+        session_sub_task_manager = SubTaskManager(
+            register_session=_register_sub_agent_session,
+            unregister_session=_unregister_sub_agent_session,
+        )
+
+        def _execute_session_run(**kwargs: Any) -> AgentRun:
+            return self._execute(
+                **kwargs,
+                sub_task_manager=session_sub_task_manager,
+            )
+
         return create_agent_session(
-            execute_run=self._execute,
+            execute_run=_execute_session_run,
             agent_name=resolved_name,
             definition=definition,
             workspace=effective_workspace,
@@ -290,6 +306,7 @@ class AgentSDKClient:
         interruption_messages: InterruptionMessageProvider | None = None,
         task_name: str | None = None,
         cancellation_token: CancellationToken | None = None,
+        sub_task_manager: SubTaskManager | None = None,
     ) -> AgentRun:
         if definition is None or resolved_name is None:
             resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
@@ -346,6 +363,7 @@ class AgentSDKClient:
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
             ctx=ctx,
+            sub_task_manager=sub_task_manager,
         )
         return AgentRun(agent_name=run_name, result=result, resolved=resolved)
 

@@ -370,7 +370,7 @@ Each delegated sub-task now runs in a real `AgentSession` (session id defaults t
 
 Batch mode in `create_sub_task` dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so synchronous batches run concurrently when the backend supports parallel execution.
 
-Use `sub_task_status` to query sub-task states, inspect lightweight progress snapshots (`detail_level=snapshot`), or send follow-up messages to running/completed sub-tasks.
+Use `sub_task_status` to query sub-task states, inspect lightweight progress snapshots (`detail_level=snapshot`), or send follow-up messages to running/completed sub-tasks. When you run agents through `AgentSDKClient.create_session()`, the sub-task registry stays attached to that session, so later turns can still query background sub-tasks created earlier in the same session.
 
 Sub-task runtime metadata now includes `task_id`, `session_id`, and `browser_scope_key` for each sub-agent run, so session-scoped tools (for example, browser controllers) stay isolated across parallel sub-tasks.
 

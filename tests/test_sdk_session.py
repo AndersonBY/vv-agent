@@ -10,10 +10,11 @@ import pytest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import ASK_USER_TOOL_NAME, BASH_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
+from vv_agent.runtime import AgentRuntime
 from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions, create_agent_session
 from vv_agent.tools import build_default_registry
 from vv_agent.tools.handlers import bash as bash_handler
-from vv_agent.types import AgentResult, AgentStatus, LLMResponse, ToolCall
+from vv_agent.types import AgentResult, AgentStatus, LLMResponse, Message, ToolCall
 
 WRITE_FILE_TOOL_NAME = "write_file"
 
@@ -187,6 +188,67 @@ def test_sessions_keep_workspace_isolated(tmp_path: Path) -> None:
     assert (workspace_a / "marker.txt").read_text(encoding="utf-8") == "isolated"
     assert (workspace_b / "marker.txt").read_text(encoding="utf-8") == "isolated"
     assert not (default_workspace / "marker.txt").exists()
+
+
+def test_session_reuses_sub_task_manager_across_turns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_managers: list[object] = []
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        return ScriptedLLM(steps=[]), _fake_resolved(backend=backend, model=model)
+
+    def fake_run(
+        self,
+        task,
+        *,
+        workspace=None,
+        shared_state=None,
+        initial_messages=None,
+        user_message=None,
+        before_cycle_messages=None,
+        interruption_messages=None,
+        ctx=None,
+        sub_task_manager=None,
+    ) -> AgentResult:
+        del self, task, workspace, initial_messages, user_message, before_cycle_messages, interruption_messages, ctx
+        seen_managers.append(sub_task_manager)
+        return AgentResult(
+            status=AgentStatus.COMPLETED,
+            messages=[Message(role="assistant", content="ok")],
+            cycles=[],
+            final_answer="ok",
+            shared_state=dict(shared_state or {"todo_list": []}),
+        )
+
+    monkeypatch.setattr(AgentRuntime, "run", fake_run)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+    )
+
+    session = client.create_session()
+    session.prompt("first turn")
+    session.prompt("second turn")
+
+    assert len(seen_managers) == 2
+    assert seen_managers[0] is not None
+    assert seen_managers[0] is seen_managers[1]
 
 
 def test_session_prompt_supports_follow_up_queue(tmp_path: Path) -> None:
