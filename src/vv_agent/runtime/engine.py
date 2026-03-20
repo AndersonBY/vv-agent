@@ -86,6 +86,28 @@ def steer_sub_agent_session(*, session_id: str, prompt: str) -> bool:
     return True
 
 
+def get_sub_agent_session(*, session_id: str) -> Any | None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return None
+    with _ACTIVE_SUB_AGENT_SESSIONS_LOCK:
+        return _ACTIVE_SUB_AGENT_SESSIONS.get(normalized_session_id)
+
+
+def subscribe_sub_agent_session(
+    *,
+    session_id: str,
+    listener: Callable[[str, dict[str, Any]], None],
+) -> Callable[[], None] | None:
+    session = get_sub_agent_session(session_id=session_id)
+    if session is None:
+        return None
+    subscribe = getattr(session, "subscribe", None)
+    if not callable(subscribe):
+        return None
+    return subscribe(listener)
+
+
 def _register_sub_agent_session(session_id: str, session: Any) -> None:
     normalized_session_id = str(session_id or "").strip()
     if not normalized_session_id:
@@ -228,7 +250,7 @@ class AgentRuntime:
             runtime_ctx = ExecutionContext()
         runtime_ctx.metadata.setdefault("execution_backend", self.execution_backend)
 
-        return self.execution_backend.execute(
+        result = self.execution_backend.execute(
             task=task,
             initial_messages=messages,
             shared_state=shared,
@@ -236,6 +258,14 @@ class AgentRuntime:
             ctx=runtime_ctx,
             max_cycles=task.max_cycles,
         )
+        if result.status == AgentStatus.MAX_CYCLES:
+            self._emit_log(
+                "run_max_cycles",
+                cycle=len(result.cycles),
+                final_answer=self._preview_text(result.final_answer or ""),
+                error=self._preview_text(result.error or ""),
+            )
+        return result
 
     def _build_cycle_executor(
         self,

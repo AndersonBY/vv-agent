@@ -140,6 +140,33 @@ def test_runtime_hits_max_cycles_with_continue_policy(tmp_path: Path) -> None:
     assert len(result.cycles) == 2
 
 
+def test_runtime_emits_run_max_cycles_log(tmp_path: Path) -> None:
+    llm = ScriptedLLM(steps=[LLMResponse(content="step1"), LLMResponse(content="step2")])
+    events: list[tuple[str, dict[str, object]]] = []
+
+    runtime = AgentRuntime(
+        llm_client=llm,
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        log_handler=lambda event, payload: events.append((event, payload)),
+    )
+    task = AgentTask(
+        task_id="task4_log",
+        model="m",
+        system_prompt="sys",
+        user_prompt="do",
+        max_cycles=2,
+        no_tool_policy="continue",
+    )
+
+    result = runtime.run(task)
+    assert result.status == AgentStatus.MAX_CYCLES
+
+    max_cycles_payload = next(payload for event, payload in events if event == "run_max_cycles")
+    assert max_cycles_payload["cycle"] == 2
+    assert max_cycles_payload["final_answer"] == "Reached max cycles without finish signal."
+
+
 def test_runtime_can_finish_without_tool_on_policy(tmp_path: Path) -> None:
     llm = ScriptedLLM(steps=[LLMResponse(content="direct answer")])
     runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)

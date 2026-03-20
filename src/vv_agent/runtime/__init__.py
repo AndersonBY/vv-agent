@@ -2,7 +2,12 @@ from vv_agent.runtime.backends import ExecutionBackend, InlineBackend
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.runtime.context import ExecutionContext, StreamCallback
 from vv_agent.runtime.cycle_runner import CycleRunner
-from vv_agent.runtime.engine import AgentRuntime, RuntimeLogHandler
+from vv_agent.runtime.engine import (
+    AgentRuntime,
+    RuntimeLogHandler,
+    get_sub_agent_session,
+    subscribe_sub_agent_session,
+)
 from vv_agent.runtime.hooks import (
     AfterLLMEvent,
     AfterToolCallEvent,
@@ -45,4 +50,6 @@ __all__ = [
     "StreamCallback",
     "SubTaskManager",
     "ToolCallRunner",
+    "get_sub_agent_session",
+    "subscribe_sub_agent_session",
 ]

@@ -11,6 +11,8 @@ from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.engine import (
     _register_sub_agent_session,
     _unregister_sub_agent_session,
+    get_sub_agent_session,
+    subscribe_sub_agent_session,
     steer_sub_agent_session,
 )
 from vv_agent.tools import build_default_registry
@@ -27,6 +29,39 @@ def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:
         model_id=model,
         endpoint_options=[option],
     )
+
+
+def test_sub_agent_session_helpers_expose_registered_session() -> None:
+    captured_events: list[tuple[str, dict[str, int]]] = []
+
+    class _DummySession:
+        def __init__(self) -> None:
+            self.listener = None
+
+        def subscribe(self, listener):
+            self.listener = listener
+
+            def _unsubscribe() -> None:
+                self.listener = None
+
+            return _unsubscribe
+
+    session = _DummySession()
+    _register_sub_agent_session("sub-session-1", session)
+    try:
+        assert get_sub_agent_session(session_id="sub-session-1") is session
+        unsubscribe = subscribe_sub_agent_session(
+            session_id="sub-session-1",
+            listener=lambda event, payload: captured_events.append((event, dict(payload))),
+        )
+        assert callable(unsubscribe)
+        assert session.listener is not None
+        session.listener("cycle_started", {"cycle": 1})
+        assert captured_events == [("cycle_started", {"cycle": 1})]
+        unsubscribe()
+        assert session.listener is None
+    finally:
+        _unregister_sub_agent_session("sub-session-1", session)
 
 
 def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
