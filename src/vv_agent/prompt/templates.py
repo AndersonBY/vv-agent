@@ -133,7 +133,7 @@ def render_sub_agents(language: str, available_sub_agents: dict[str, str]) -> st
     header = SUB_AGENT_PROMPT.get(language, SUB_AGENT_PROMPT["en-US"])
     list_header = "Available sub-agents (use the agent_id exactly as shown):"
     if language == "zh-CN":
-        list_header = "可用子 Agent 列表（调用时请直接使用下列 agent_id）:"
+        list_header = "可用子 Agent 列表 (调用时请直接使用下列 agent_id):"
     lines = [header, list_header]
     for name, description in sorted(available_sub_agents.items()):
         lines.append(f"- agent_id=`{name}`: {description}")
