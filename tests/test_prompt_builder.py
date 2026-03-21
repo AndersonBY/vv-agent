@@ -53,8 +53,8 @@ def test_prompt_can_include_sub_agent_guidance() -> None:
 
     assert CREATE_SUB_TASK_TOOL_NAME in prompt
     assert SUB_TASK_STATUS_TOOL_NAME in prompt
-    assert "research-sub" in prompt
-    assert "writer-sub" in prompt
+    assert "agent_id=`research-sub`" in prompt
+    assert "agent_id=`writer-sub`" in prompt
 
 
 def test_prompt_can_include_available_skills_xml(tmp_path: Path) -> None:

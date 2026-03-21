@@ -35,3 +35,15 @@ def test_schema_description_is_loaded_from_constants() -> None:
     description = read_schema["function"]["description"]
     assert "workspace" in description.lower()
     assert "line" in description.lower()
+
+
+def test_create_sub_task_schema_uses_agent_id_only() -> None:
+    registry = build_default_registry()
+    schema = registry.get_schema(CREATE_SUB_TASK_TOOL_NAME)
+
+    parameters = schema["function"]["parameters"]
+    properties = parameters["properties"]
+
+    assert "agent_id" in properties
+    assert "agent_name" not in properties
+    assert "agent_id" in parameters["required"]

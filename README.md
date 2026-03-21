@@ -365,7 +365,7 @@ Custom tools can be registered via `ToolRegistry.register()`.
 
 ## Sub-agents
 
-Configure named sub-agents on `AgentTask.sub_agents`. The parent agent delegates work via `create_sub_task`. Use `task_description` for one task, `tasks` for batch mode, and `wait_for_completion=false` to start background sub-tasks. Each sub-agent gets its own runtime, model, and tool set.
+Configure named sub-agents on `AgentTask.sub_agents`. The parent agent delegates work via `create_sub_task`: use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for batch mode, and `wait_for_completion=false` to start background sub-tasks. Each sub-agent gets its own runtime, model, and tool set. The default system prompt automatically injects the callable sub-agent list, including each `agent_id` and description, so the model can choose directly.
 
 Each delegated sub-task now runs in a real `AgentSession` (session id defaults to the sub-task id). Tool payloads include `session_id`, and runtime events include stable identifiers (`task_id` / `session_id`) so host apps can subscribe, persist, and stream sub-task progress independently (including `sub_agent_stream_delta` token chunks).
 

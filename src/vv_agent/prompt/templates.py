@@ -106,13 +106,14 @@ CURRENT_TIME_PROMPT = {
 SUB_AGENT_PROMPT = {
     "en-US": (
         f"If sub-agents are configured, delegate work with `{CREATE_SUB_TASK_TOOL_NAME}`. "
-        f"Use `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, "
+        f"Use `agent_id` to select the target sub-agent, `task_description` for one task, "
+        f"`tasks` for multiple independent tasks of the same sub-agent, "
         f"`wait_for_completion=false` for background execution, and `{SUB_TASK_STATUS_TOOL_NAME}` "
         "to query progress or send follow-up messages."
     ),
     "zh-CN": (
-        f"如果已配置子 Agent, 可使用 `{CREATE_SUB_TASK_TOOL_NAME}` 委派任务: 单任务用 `task_description`, "
-        f"同一子 Agent 的并行任务用 `tasks`, 后台执行用 `wait_for_completion=false`; "
+        f"如果已配置子 Agent, 可使用 `{CREATE_SUB_TASK_TOOL_NAME}` 委派任务: 用 `agent_id` 指定目标子 Agent, "
+        f"单任务用 `task_description`, 同一子 Agent 的并行任务用 `tasks`, 后台执行用 `wait_for_completion=false`; "
         f"需要查询进度或追加消息时使用 `{SUB_TASK_STATUS_TOOL_NAME}`。"
     ),
 }
@@ -130,9 +131,12 @@ def render_workspace_tools(language: str) -> str:
 
 def render_sub_agents(language: str, available_sub_agents: dict[str, str]) -> str:
     header = SUB_AGENT_PROMPT.get(language, SUB_AGENT_PROMPT["en-US"])
-    lines = [header, "Available sub-agents:"]
+    list_header = "Available sub-agents (use the agent_id exactly as shown):"
+    if language == "zh-CN":
+        list_header = "可用子 Agent 列表（调用时请直接使用下列 agent_id）:"
+    lines = [header, list_header]
     for name, description in sorted(available_sub_agents.items()):
-        lines.append(f"- {name}: {description}")
+        lines.append(f"- agent_id=`{name}`: {description}")
     return "\n".join(lines)
 
 

@@ -492,13 +492,9 @@ Use `sub_task_status` later to inspect progress, fetch results, or send follow-u
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {
-                        "type": "string",
-                        "description": "Sub-agent name from configured sub_agents mapping.",
-                    },
                     "agent_id": {
                         "type": "string",
-                        "description": "Compatibility alias of agent_name.",
+                        "description": "Sub-agent identifier from configured sub_agents mapping.",
                     },
                     "task_description": {
                         "type": "string",
@@ -539,7 +535,7 @@ Use `sub_task_status` later to inspect progress, fetch results, or send follow-u
                         "description": "Whether to wait for completion. Default true; false starts background execution.",
                     },
                 },
-                "required": [],
+                "required": ["agent_id"],
             },
         },
     },

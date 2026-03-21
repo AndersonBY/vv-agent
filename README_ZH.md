@@ -357,7 +357,7 @@ class MyBackend:
 
 ## 子 Agent
 
-在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` 委派任务：单任务用 `task_description`，批量模式用 `tasks`，后台子任务用 `wait_for_completion=false`。每个子 Agent 有独立的 runtime、模型和工具集。
+在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` 委派任务：用 `agent_id` 指定目标子 Agent，单任务用 `task_description`，批量模式用 `tasks`，后台子任务用 `wait_for_completion=false`。每个子 Agent 有独立的 runtime、模型和工具集。默认 system prompt 会自动注入可调用子 Agent 列表（含 `agent_id` 与描述），方便模型直接选择。
 
 现在每个子任务都会创建真实 `AgentSession`（默认 `session_id == task_id`）。工具返回结果会包含 `session_id`，运行事件会携带稳定标识（`task_id` / `session_id`），宿主应用可以按子任务独立订阅、持久化与流式展示进度（含 `sub_agent_stream_delta` token 增量）。
 

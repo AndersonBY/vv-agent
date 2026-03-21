@@ -9,7 +9,7 @@ from vv_agent.types import AgentStatus, SubTaskRequest, ToolExecutionResult, Too
 
 
 def _resolve_agent_name(arguments: dict[str, Any]) -> str:
-    for key in ("agent_name", "agent_id"):
+    for key in ("agent_id", "agent_name"):
         raw = arguments.get(key)
         if raw is None:
             continue
@@ -140,7 +140,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
 
     agent_name = _resolve_agent_name(arguments)
     if not agent_name:
-        return _error("`agent_name` is required", error_code="agent_name_required")
+        return _error("`agent_id` is required", error_code="agent_id_required")
 
     include_main_summary, exclude_files_pattern = _extract_shared_flags(arguments)
     wait_for_completion = _coerce_bool(arguments.get("wait_for_completion"), default=True)
