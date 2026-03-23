@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,7 @@ def test_bash_tool_executes_command(tmp_path: Path) -> None:
     assert result.status_code == ToolResultStatus.SUCCESS
     assert payload["exit_code"] == 0
     assert "hello" in payload["output"]
+    assert "command" not in payload
 
 
 def test_bash_tool_blocks_dangerous_command(tmp_path: Path) -> None:
@@ -107,6 +109,7 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
     )
     start_payload = json.loads(start.content)
     assert start.status_code == ToolResultStatus.RUNNING
+    assert "command" not in start_payload
     session_id = start_payload["session_id"]
 
     final_payload: dict[str, object] | None = None
@@ -128,7 +131,30 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
 
     assert final_payload is not None
     assert final_payload["status"] == "completed"
+    assert final_payload["command"] == (
+        f'"{sys.executable}" -c "import time; time.sleep(0.2); print(\'done\')"'
+    )
     assert "done" in str(final_payload.get("output", ""))
+
+
+def test_background_command_listener_receives_terminal_event(tmp_path: Path) -> None:
+    manager = background_runtime.BackgroundSessionManager()
+    notified = threading.Event()
+    received: dict[str, object] = {}
+
+    command = f'"{sys.executable}" -c "import time; time.sleep(0.2); print(\'done\')"'
+    session_id = manager.start(command=command, cwd=tmp_path, timeout_seconds=5)
+
+    manager.subscribe(
+        session_id,
+        lambda payload: (received.update(payload), notified.set()),
+    )
+
+    assert notified.wait(timeout=5.0) is True
+    assert received["session_id"] == session_id
+    assert received["status"] == "completed"
+    assert received["command"] == command
+    assert "done" in str(received.get("output", ""))
 
 
 def test_bash_tool_uses_context_shell_defaults(tmp_path: Path, monkeypatch) -> None:
@@ -363,7 +389,35 @@ def test_background_session_uses_replace_error_handler_for_decoding(tmp_path: Pa
     assert captured["errors"] == "replace"
 
 
-def test_bash_tool_timeout_kills_process_tree_and_returns_partial_output(tmp_path: Path, monkeypatch) -> None:
+def test_background_session_manager_can_adopt_running_process(tmp_path: Path) -> None:
+    output_file = tmp_path / "adopt.log"
+    output_file.write_text("still running\n", encoding="utf-8")
+
+    class _FakeProcess:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    manager = background_runtime.BackgroundSessionManager()
+    session_id = manager.adopt_running_process(
+        command="sleep 10",
+        cwd=tmp_path,
+        timeout_seconds=5,
+        process=cast(subprocess.Popen[str], _FakeProcess()),
+        output_path=output_file,
+        shell="bash",
+    )
+
+    payload = manager.check(session_id)
+
+    assert payload["status"] == "running"
+    assert payload["session_id"] == session_id
+    assert payload["command"] == "sleep 10"
+    assert payload["shell"] == "bash"
+
+
+def test_bash_tool_timeout_moves_process_to_background_and_returns_session(tmp_path: Path, monkeypatch) -> None:
     registry = build_default_registry()
     context = _context(tmp_path)
     captured: dict[str, object] = {}
@@ -394,13 +448,32 @@ def test_bash_tool_timeout_kills_process_tree_and_returns_partial_output(tmp_pat
         del command, cwd, stdin_text, env
         return SimpleNamespace(process=_FakeProcess(), output_path=output_file)
 
-    def fake_kill(process):
-        captured["killed"] = True
-        process.returncode = -9
+    def fake_adopt_running_process(
+        *,
+        command: str,
+        cwd: Path,
+        timeout_seconds: int,
+        process,
+        output_path: Path,
+        shell: str | None = None,
+        started_at: float | None = None,
+    ) -> str:
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["timeout_seconds"] = timeout_seconds
+        captured["process"] = process
+        captured["output_path"] = output_path
+        captured["shell"] = shell
+        captured["started_at"] = started_at
+        return "bg_timeout_123"
 
     monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
     monkeypatch.setattr(bash_handler, "start_captured_process", fake_start)
-    monkeypatch.setattr(bash_handler, "kill_process_tree", fake_kill)
+    monkeypatch.setattr(
+        bash_handler.background_session_manager,
+        "adopt_running_process",
+        fake_adopt_running_process,
+    )
     monkeypatch.setattr(
         bash_handler,
         "read_captured_output",
@@ -418,11 +491,18 @@ def test_bash_tool_timeout_kills_process_tree_and_returns_partial_output(tmp_pat
     )
 
     payload = json.loads(result.content)
-    assert result.status_code == ToolResultStatus.ERROR
-    assert result.error_code == "command_timeout"
-    assert captured["killed"] is True
+    assert result.status_code == ToolResultStatus.RUNNING
+    assert result.error_code is None
+    assert payload["status"] == "running"
+    assert payload["session_id"] == "bg_timeout_123"
+    assert "command" not in payload
+    assert payload["transitioned_to_background"] is True
+    assert "check_background_command" in payload["message"]
     assert payload["output"] == "partial output\n"
-    assert payload["exit_code"] == -9
+    assert captured["command"] == "sleep 10"
+    assert captured["cwd"] == tmp_path
+    assert captured["timeout_seconds"] == 1
+    assert captured["output_path"] == output_file
 
 
 def test_background_session_timeout_kills_process_tree_and_reads_output(tmp_path: Path, monkeypatch) -> None:

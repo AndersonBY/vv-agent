@@ -363,6 +363,11 @@ Priority is strict:
 
 Custom tools can be registered via `ToolRegistry.register()`.
 
+The `bash` tool supports two background paths:
+
+- Explicit background: pass `run_in_background=true`, receive a `session_id` immediately, then poll with `check_background_command`.
+- Timeout handoff: if a foreground command reaches `timeout`, it is moved into a background session instead of failing immediately. The tool returns a `session_id`, and the session emits terminal background-command events when that process completes, fails, or times out.
+
 ## Sub-agents
 
 Configure named sub-agents on `AgentTask.sub_agents`. The parent agent delegates work via `create_sub_task`: use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for batch mode, and `wait_for_completion=false` to start background sub-tasks. Each sub-agent gets its own runtime, model, and tool set. The default system prompt automatically injects the callable sub-agent list, including each `agent_id` and description, so the model can choose directly.

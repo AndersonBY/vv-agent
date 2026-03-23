@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -11,10 +13,11 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import ASK_USER_TOOL_NAME, BASH_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import AgentRuntime
+from vv_agent.runtime import background_sessions as background_runtime
 from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions, create_agent_session
 from vv_agent.tools import build_default_registry
 from vv_agent.tools.handlers import bash as bash_handler
-from vv_agent.types import AgentResult, AgentStatus, LLMResponse, Message, ToolCall
+from vv_agent.types import AgentResult, AgentStatus, LLMResponse, Message, ToolCall, ToolResultStatus
 
 WRITE_FILE_TOOL_NAME = "write_file"
 
@@ -542,6 +545,90 @@ def test_session_emits_session_and_runtime_events(tmp_path: Path) -> None:
     assert "run_started" in events
     assert "run_completed" in events
     assert "session_run_end" in events
+
+
+def test_session_auto_steers_when_background_command_completes_during_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_subscribe(session_id: str, listener):
+        captured["session_id"] = session_id
+        captured["listener"] = listener
+        captured["unsubscribed"] = False
+
+        def _unsubscribe() -> None:
+            captured["unsubscribed"] = True
+
+        return _unsubscribe
+
+    monkeypatch.setattr(background_runtime.background_session_manager, "subscribe", fake_subscribe)
+
+    def execute_run(**kwargs):
+        log_handler = kwargs["log_handler"]
+        log_handler(
+            "tool_result",
+            {
+                "tool_name": BASH_TOOL_NAME,
+                "tool_call_id": "bg-1",
+                "status": ToolResultStatus.RUNNING.value,
+                "metadata": {
+                    "status": "running",
+                    "session_id": "bg_live_1",
+                },
+            },
+        )
+        listener = captured.get("listener")
+        assert callable(listener)
+        listener = cast(Callable[[dict[str, object]], None], listener)
+        listener(
+            {
+                "status": "completed",
+                "session_id": "bg_live_1",
+                "command": "echo done",
+                "exit_code": 0,
+                "output": "done\n",
+            }
+        )
+        return SimpleNamespace(
+            result=AgentResult(
+                status=AgentStatus.COMPLETED,
+                messages=[],
+                cycles=[],
+                final_answer="ok",
+                shared_state={},
+            )
+        )
+
+    session = create_agent_session(
+        execute_run=execute_run,
+        session_id="background-steer-test",
+        agent_name="default",
+        definition=AgentDefinition(description="helper", model="kimi-k2.5"),
+        workspace=Path("."),
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    session.subscribe(lambda event, payload: events.append((event, dict(payload))))
+
+    run = session.prompt("run", auto_follow_up=False)
+
+    assert run.result.status == AgentStatus.COMPLETED
+    assert captured["session_id"] == "bg_live_1"
+    assert captured["unsubscribed"] is True
+    background_events = [
+        payload
+        for event, payload in events
+        if event == "background_command_completed"
+    ]
+    assert background_events
+    assert background_events[0]["queued_to_running_session"] is True
+    steer_events = [
+        payload
+        for event, payload in events
+        if event == "session_steer_queued"
+    ]
+    assert steer_events
+    assert "background command bg_live_1 completed" in str(steer_events[0].get("prompt", "")).lower()
 
 
 def test_session_cancel_requests_running_execution() -> None:

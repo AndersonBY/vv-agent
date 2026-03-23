@@ -436,7 +436,9 @@ Guidelines:
 - Prefer specialized read/write/search/edit tools when possible.
 - Use this tool for command execution, package install, scripts, and piped workflows.
 - For commands that may prompt for confirmation, pass `auto_confirm=true` or provide explicit `stdin`.
-- Use `run_in_background=true` for long-running commands and poll with check tool.""",
+- Use `run_in_background=true` for long-running commands and poll with check tool.
+- If a foreground command hits its timeout, it is automatically moved to a background
+  session and returns a `session_id` for polling.""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -464,7 +466,10 @@ Guidelines:
         "type": "function",
         "function": {
             "name": CHECK_BACKGROUND_COMMAND_TOOL_NAME,
-            "description": "Check status/output for command launched in background mode.",
+            "description": (
+                "Check status/output for command launched in background mode, "
+                "including sessions auto-detached after foreground timeout."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

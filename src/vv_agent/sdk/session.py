@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.sdk.types import AgentDefinition, AgentRun
 from vv_agent.types import AgentStatus, Message
@@ -51,6 +52,7 @@ class AgentSession:
         self._latest_run: AgentRun | None = None
         self._running = False
         self._listeners: list[SessionEventHandler] = []
+        self._background_command_unsubscribers: dict[str, Callable[[], None]] = {}
         self._steering_queue: deque[str] = deque()
         self._follow_up_queue: deque[str] = deque()
         self._active_cancellation_token: CancellationToken | None = None
@@ -241,7 +243,107 @@ class AgentSession:
         return [Message(role="user", content=prompt)]
 
     def _session_log_handler(self, event: str, payload: dict[str, Any]) -> None:
+        self._sync_background_command_watchers(event, payload)
         self._emit(event, **payload)
+
+    def _sync_background_command_watchers(self, event: str, payload: dict[str, Any]) -> None:
+        if event != "tool_result" or not isinstance(payload, dict):
+            return
+        tool_name = str(payload.get("tool_name") or "").strip().lower()
+        if tool_name not in {"bash", "check_background_command"}:
+            return
+
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            return
+
+        background_session_id = str(metadata.get("session_id") or "").strip()
+        if not background_session_id:
+            return
+
+        status = str(metadata.get("status") or payload.get("status") or "").strip().lower()
+        if status == "running":
+            self._subscribe_background_command(background_session_id)
+            return
+        if status in {"completed", "failed", "timeout", "missing"}:
+            self._unsubscribe_background_command(background_session_id)
+
+    def _subscribe_background_command(self, background_session_id: str) -> None:
+        normalized_session_id = str(background_session_id or "").strip()
+        if not normalized_session_id:
+            return
+        with self._lock:
+            if normalized_session_id in self._background_command_unsubscribers:
+                return
+            self._background_command_unsubscribers[normalized_session_id] = lambda: None
+
+        def _listener(payload: dict[str, Any]) -> None:
+            self._handle_background_command_terminal(normalized_session_id, payload)
+
+        unsubscribe = background_session_manager.subscribe(normalized_session_id, _listener)
+        with self._lock:
+            if normalized_session_id in self._background_command_unsubscribers:
+                self._background_command_unsubscribers[normalized_session_id] = unsubscribe
+            else:
+                unsubscribe()
+
+    def _unsubscribe_background_command(self, background_session_id: str) -> None:
+        normalized_session_id = str(background_session_id or "").strip()
+        if not normalized_session_id:
+            return
+        with self._lock:
+            unsubscribe = self._background_command_unsubscribers.pop(normalized_session_id, None)
+        if unsubscribe is not None:
+            unsubscribe()
+
+    def _handle_background_command_terminal(
+        self,
+        background_session_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        self._unsubscribe_background_command(background_session_id)
+        notification_message = self._build_background_command_notification(payload)
+        queued_to_running_session = False
+        with self._lock:
+            running = self._running
+        if running:
+            try:
+                self.steer(notification_message)
+                queued_to_running_session = True
+            except Exception:
+                queued_to_running_session = False
+
+        event_payload = dict(payload)
+        event_payload["session_id"] = background_session_id
+        event_payload["notification_message"] = notification_message
+        event_payload["queued_to_running_session"] = queued_to_running_session
+
+        status = str(payload.get("status") or "").strip().lower() or "terminal"
+        self._emit(f"background_command_{status}", **event_payload)
+        self._emit("background_command_terminal", **event_payload)
+
+    @staticmethod
+    def _build_background_command_notification(payload: dict[str, Any]) -> str:
+        status = str(payload.get("status") or "").strip().lower()
+        status_text = {
+            "completed": "completed",
+            "failed": "failed",
+            "timeout": "timed out",
+        }.get(status, status or "updated")
+        background_session_id = str(payload.get("session_id") or "").strip()
+        command = str(payload.get("command") or "").strip()
+        output = str(payload.get("output") or "").strip()
+        exit_code = payload.get("exit_code")
+        summary = output or f"exit_code={exit_code}"
+        if len(summary) > 500:
+            summary = summary[:497].rstrip() + "..."
+
+        lines = [f"System notification: background command {background_session_id} {status_text}."]
+        if command:
+            lines.append(f"Command: {command}")
+        if summary:
+            lines.append(f"Summary: {summary}")
+        return "\n".join(lines)
 
     def _emit(self, event: str, **payload: Any) -> None:
         with self._lock:

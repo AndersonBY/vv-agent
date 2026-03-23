@@ -355,6 +355,12 @@ class MyBackend:
 
 通过 `ToolRegistry.register()` 注册自定义工具。
 
+`bash` 工具支持两种后台路径：
+
+- 显式后台：传 `run_in_background=true`，立即返回 `session_id`，后续用 `check_background_command` 轮询。
+- 超时转后台：前台命令如果达到 `timeout` 仍未结束，不会直接中断报错，而是自动转入后台 session，并返回 `session_id` 与提示信息；后续同样用 `check_background_command` 查询。
+- 主动终态通知：后台命令完成、失败或超时后，会触发 session 级事件；如果当前 session 正在运行，系统会自动向 Agent 注入一条 steering 提醒。
+
 ## 子 Agent
 
 在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` 委派任务：用 `agent_id` 指定目标子 Agent，单任务用 `task_description`，批量模式用 `tasks`，后台子任务用 `wait_for_completion=false`。每个子 Agent 有独立的 runtime、模型和工具集。默认 system prompt 会自动注入可调用子 Agent 列表（含 `agent_id` 与描述），方便模型直接选择。
