@@ -353,6 +353,9 @@ def test_sdk_prepare_task_supports_sub_agent_configs(tmp_path: Path) -> None:
     assert task.sub_agents_enabled is True
     assert task.sub_agents["research-sub"].description == "collect data"
     assert task.metadata["sub_agent_names"] == ["research-sub"]
+    assert task.metadata["system_prompt_sections"][0]["id"] == "agent_definition"
+    assert task.metadata["system_prompt_sections"][-1]["id"] == "current_time"
+    assert task.metadata["system_prompt_sections"][-1]["stable"] is False
     assert CREATE_SUB_TASK_TOOL_NAME in task.system_prompt
     assert SUB_TASK_STATUS_TOOL_NAME in task.system_prompt
 

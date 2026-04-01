@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from vv_agent.config import build_openai_llm_from_local_settings
-from vv_agent.prompt import build_system_prompt
+from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime, CancellationToken, SubTaskManager
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.engine import (
@@ -121,10 +121,12 @@ class AgentSDKClient:
             if isinstance(template, str) and template.strip():
                 prompt_definition = template
 
+        generated_sections: list[dict[str, Any]] = []
         if definition.system_prompt:
             system_prompt = definition.system_prompt
+            generated_sections = build_raw_system_prompt_sections(system_prompt)
         else:
-            system_prompt = build_system_prompt(
+            prompt_bundle = build_system_prompt_bundle(
                 prompt_definition,
                 language=definition.language,
                 allow_interruption=definition.allow_interruption,
@@ -139,6 +141,10 @@ class AgentSDKClient:
                 available_skills=available_skills,
                 workspace=effective_workspace,
             )
+            system_prompt = prompt_bundle.prompt
+            generated_sections = prompt_bundle.sections
+        if generated_sections:
+            metadata.setdefault("system_prompt_sections", generated_sections)
 
         memory_compact_threshold = self._to_positive_int(
             definition.memory_compact_threshold,

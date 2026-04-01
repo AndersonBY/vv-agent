@@ -16,8 +16,13 @@ from vv_llm.chat_clients import create_chat_client, format_messages, get_token_c
 from vv_llm.settings import Settings
 from vv_llm.types import APIConnectionError, APIStatusError, BackendType
 
-from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
+from vv_agent.llm.anthropic_prompt_cache import (
+    PROMPT_CACHE_ENABLED_KEY,
+    SYSTEM_PROMPT_SECTIONS_KEY,
+    apply_claude_prompt_cache,
+)
 from vv_agent.llm.base import LLMClient
+from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash_tool_payload
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 _STREAM_MODEL_PREFIXES = (
@@ -162,6 +167,7 @@ class VVLlmClient(LLMClient):
     debug_dump_dir: str | None = None
     _preferred_endpoint_id: str | None = field(default=None, init=False, repr=False)
     _request_counter: int = field(default=0, init=False, repr=False)
+    _prompt_cache_tracker: CacheBreakTracker = field(default_factory=CacheBreakTracker, init=False, repr=False)
 
     def complete(
         self,
@@ -211,6 +217,12 @@ class VVLlmClient(LLMClient):
                 tools=tool_payload,
                 extra_body=request_options.extra_body,
                 metadata=request_metadata,
+            )
+            self._track_prompt_cache_state(
+                endpoint_type=target.endpoint_type,
+                model=request_options.model,
+                metadata=request_metadata,
+                tool_payload=request_tool_payload,
             )
             request_options = _RequestOptions(
                 model=request_options.model,
@@ -355,6 +367,27 @@ class VVLlmClient(LLMClient):
                 continue
             return dict(message.metadata)
         return {}
+
+    def _track_prompt_cache_state(
+        self,
+        *,
+        endpoint_type: str,
+        model: str,
+        metadata: dict[str, Any],
+        tool_payload: list[dict[str, Any]],
+    ) -> None:
+        normalized_endpoint = str(endpoint_type or "").strip().lower()
+        normalized_model = str(model or "").strip().lower()
+        if normalized_endpoint not in {"anthropic", "anthropic_vertex"}:
+            return
+        if not normalized_model.startswith("claude"):
+            return
+        if metadata.get(PROMPT_CACHE_ENABLED_KEY, True) is False:
+            return
+
+        system_hash = hash_system_prompt_sections(metadata.get(SYSTEM_PROMPT_SECTIONS_KEY))
+        tool_hash = hash_tool_payload(tool_payload)
+        self._prompt_cache_tracker.check(system_hash=system_hash, tool_hash=tool_hash)
 
     def _should_preserve_reasoning_chain(self, requested_model: str) -> bool:
         for candidate in self._iter_reasoning_model_candidates(requested_model):

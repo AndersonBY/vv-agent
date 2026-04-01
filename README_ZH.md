@@ -128,6 +128,7 @@ session.continue_run()
 - `run(...)` 与 `create_session(...)` 都会继承 startup shell 默认配置。
 - `bash` 工具 schema 的 description 会注入运行时 shell 提示（解析后的 shell 类型与调用前缀），模型在调用前即可知道应使用哪种命令风格。
 - 该运行时 shell 提示会在单个 task/session-run 内固化，确保跨 cycles 的 tool schema 文本稳定，保护 LLM prompt cache 命中率。
+- SDK/CLI 自动生成的任务现在还会把 `system_prompt_sections` 元数据挂到 system message 上，Anthropic prompt cache 可以据此把稳定前缀长期缓存，同时把当前时间、Session Memory 这类易变段落视为 volatile。
 
 ```python
 from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
@@ -305,26 +306,53 @@ class MyBackend:
 
 ## Memory 压缩与配置
 
-`MemoryManager` 会在 `AgentTask.memory_compact_threshold` 超限时触发压缩。
+`MemoryManager` 现在按 token 计算上下文大小，并在超过模型推导出的自动压缩阈值时触发压缩。
 
 - 任务级参数：
-  - `memory_compact_threshold`（默认 `128000`）
+  - `memory_compact_threshold`（默认 `128000`，仅在 token 计数不可用时作为 legacy 兜底）
   - `memory_threshold_percentage`（内存预警百分比，默认 `90`）
+- token 预算模型：
+  - `effective_context_window = model_context_window - reserved_output_tokens`
+  - `autocompact_threshold = effective_context_window - autocompact_buffer_tokens`
+  - 默认优先读取 `vv-llm` 的模型元数据；拿不到时回退到 `200000 / 16000 / 13000`
 - 有效长度策略（与 backend 对齐）：
   - 如果有上一轮 token 用量：
-    - `effective_length = previous_total_tokens + len(json.dumps(recent_tool_messages))`
+    - `effective_length = previous_prompt_tokens + token_count(recent_tool_messages)`
   - 否则兜底：
-    - `len(json.dumps(messages[2:]))`
+    - `vv_llm.chat_clients.utils.get_message_token_counts(...)`
+    - 如果 tokenizer 不可用，再用本地 CJK 感知估算
 - 压缩流程：
-  1. 结构化清理（陈旧 tool_calls、孤儿 tool 消息、assistant 无工具消息折叠、旧 tool 结果 artifact 化）
-  2. 若仍超阈值，再生成压缩记忆总结
+  1. 预防性 microcompact：当使用量超过 `microcompact_trigger_ratio` 时，先清理旧的大 tool result
+  2. Session Memory 提取：在全量摘要前抽取并持久化关键事实，避免后续压缩丢失
+  3. 结构化清理（陈旧 tool_calls、孤儿 tool 消息、assistant 无工具消息折叠、旧 tool 结果 artifact 化）
+  4. 若仍超阈值，再生成增强版压缩记忆总结，显式保留用户原始消息、文件操作、当前工作状态和错误修复信息
+  5. 如果 provider 仍返回 prompt-too-long，再执行一次强制压缩，之后逐步加大 emergency tail-dropping 重试
+  6. 全量压缩后，会在预算内自动恢复相关工作区文件内容到 `<Post-Compaction File Context>`
+- Session Memory 行为：
+  - 默认存放在 `workspace/.memory/session/session_memory.json`
+  - 每个 cycle 都会以 `<Session Memory>` 的形式注入到第一条 system message
+  - 提取阶段复用现有的 memory summary backend/model 选择逻辑
+  - 全量压缩后只重置 transcript 跟踪索引，不清空已持久化记忆
+  - 子任务默认关闭 Session Memory，避免父子任务共享同一记忆文件
 
 ### Runtime metadata 参数
 
 通过 `AgentTask.metadata` 传入：
 
 - `memory_keep_recent_messages`
+- `model_context_window`
+- `reserved_output_tokens`
+- `autocompact_buffer_tokens`
+- `microcompact_trigger_ratio`
+- `microcompact_keep_recent_cycles`
+- `microcompact_min_result_length`
+- `microcompact_compactable_tools`
 - `include_memory_warning`
+- `session_memory_enabled` / `enable_session_memory`
+- `session_memory_min_tokens`
+- `session_memory_max_tokens`
+- `session_memory_min_text_messages`
+- `session_memory_storage_dir`
 - `tool_result_compact_threshold`
 - `tool_result_keep_last`
 - `tool_result_excerpt_head`
@@ -370,6 +398,8 @@ class MyBackend:
 `create_sub_task` 的批量模式现在会通过 runtime 执行后端的 `parallel_map` 分发有效子任务；当后端支持并行时，同步批量任务会并发执行。
 
 使用 `sub_task_status` 可以查询子任务状态、查看轻量级进度快照（`detail_level=snapshot`），或向运行中/已完成的子任务追加消息。通过 `AgentSDKClient.create_session()` 运行时，子任务注册表会绑定在该会话上，因此同一主会话的后续轮次仍然可以查询前面创建的后台子任务。
+
+已完成的子任务在续传前会先清洗保存下来的会话 transcript：空 assistant、只有 thinking 的 assistant、孤儿 tool result、以及未完成的尾部 tool call 都会被移除，避免把无效历史再次注入下一轮上下文。
 
 每个子任务的 runtime metadata 现在会写入 `task_id`、`session_id` 和 `browser_scope_key`，确保浏览器这类会话级工具在并行子任务间保持隔离。
 

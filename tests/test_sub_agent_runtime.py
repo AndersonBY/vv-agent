@@ -420,6 +420,43 @@ def test_sub_task_metadata_inherits_sub_agent_prompt_cache_metadata(tmp_path: Pa
     assert sub_task.metadata["system_prompt_sections"][0]["id"] == "core_identity"
 
 
+def test_sub_task_metadata_generates_prompt_cache_sections_for_default_prompt(tmp_path: Path) -> None:
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(steps=[]),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    parent_task = AgentTask(
+        task_id="parent",
+        model="parent-model",
+        system_prompt="sys",
+        user_prompt="run parent task",
+        max_cycles=4,
+        metadata={"language": "zh-CN"},
+    )
+    sub_agent = SubAgentConfig(
+        model="claude-sonnet-4-5-20250929",
+        backend="anthropic",
+        description="collect facts",
+    )
+
+    sub_task = runtime._build_sub_agent_task(
+        parent_task=parent_task,
+        sub_task_id="sub-task-cache-default",
+        sub_session_id="sub-session-cache-default",
+        sub_agent_name="research-sub",
+        sub_agent=sub_agent,
+        resolved_model_id="claude-sonnet-4-5-20250929",
+        request=SubTaskRequest(agent_name="research-sub", task_description="Collect one fact"),
+        parent_shared_state={},
+        workspace_path=tmp_path,
+    )
+
+    assert sub_task.metadata["system_prompt_sections"][0]["id"] == "agent_definition"
+    assert sub_task.metadata["system_prompt_sections"][-1]["id"] == "current_time"
+    assert sub_task.metadata["system_prompt_sections"][-1]["stable"] is False
+
+
 def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: Path) -> None:
     captured_events: list[tuple[str, dict[str, object]]] = []
 

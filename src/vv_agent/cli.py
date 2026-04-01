@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from vv_agent.config import build_openai_llm_from_local_settings
-from vv_agent.prompt import build_system_prompt
+from vv_agent.prompt import build_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask
@@ -102,7 +102,7 @@ def main() -> None:
         tool_registry_factory=build_default_registry,
     )
 
-    system_prompt = build_system_prompt(
+    prompt_bundle = build_system_prompt_bundle(
         "You are Vector Vein agent runtime demo. Execute tasks with reliable tool usage and clear final outputs.",
         language=args.language,
         allow_interruption=True,
@@ -115,9 +115,13 @@ def main() -> None:
     task = AgentTask(
         task_id=f"task_{uuid.uuid4().hex[:8]}",
         model=resolved.model_id,
-        system_prompt=system_prompt,
+        system_prompt=prompt_bundle.prompt,
         user_prompt=args.prompt,
         max_cycles=max(args.max_cycles, 1),
+        metadata={
+            "language": args.language,
+            "system_prompt_sections": prompt_bundle.sections,
+        },
     )
 
     result = runtime.run(task)

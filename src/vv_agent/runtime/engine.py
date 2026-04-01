@@ -13,8 +13,9 @@ from typing import Any, Protocol
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm.base import LLMClient
-from vv_agent.memory import MemoryManager
-from vv_agent.prompt import build_system_prompt
+from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
+from vv_agent.memory.token_utils import resolve_model_token_limits
+from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.context import ExecutionContext
@@ -300,18 +301,16 @@ class AgentRuntime:
                 max_cycles=task.max_cycles,
                 message_count=len(messages),
             )
-            previous_total_tokens: int | None = None
+            previous_prompt_tokens: int | None = None
             recent_tool_call_ids: set[str] | None = None
             if cycles:
                 last_cycle = cycles[-1]
                 usage = last_cycle.token_usage
-                total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-                if total_tokens <= 0:
-                    total_tokens = int(getattr(usage, "prompt_tokens", 0) or 0) + int(
-                        getattr(usage, "completion_tokens", 0) or 0
-                    )
-                if total_tokens > 0:
-                    previous_total_tokens = total_tokens
+                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                if prompt_tokens <= 0:
+                    prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+                if prompt_tokens > 0:
+                    previous_prompt_tokens = prompt_tokens
 
                 candidate_ids = {call.id for call in last_cycle.tool_calls if getattr(call, "id", "")}
                 if candidate_ids:
@@ -322,7 +321,7 @@ class AgentRuntime:
                     messages=messages,
                     cycle_index=cycle_index,
                     memory_manager=memory_manager,
-                    previous_total_tokens=previous_total_tokens,
+                    previous_prompt_tokens=previous_prompt_tokens,
                     recent_tool_call_ids=recent_tool_call_ids,
                     shared_state=shared,
                     ctx=ctx,
@@ -557,6 +556,24 @@ class AgentRuntime:
                 value = default
             return max(value, minimum)
 
+        def read_float(key: str, default: float, *, minimum: float = 0.0, maximum: float | None = None) -> float:
+            raw = metadata.get(key, default)
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                value = default
+            value = max(value, minimum)
+            if maximum is not None:
+                value = min(value, maximum)
+            return value
+
+        def read_str_set(key: str) -> set[str] | None:
+            raw = metadata.get(key)
+            if not isinstance(raw, list):
+                return None
+            values = {str(item).strip() for item in raw if str(item).strip()}
+            return values or None
+
         warning_threshold = max(1, min(task.memory_threshold_percentage, 100))
         local_summary_backend, local_summary_model = self._load_local_memory_summary_defaults()
         metadata_summary_backend = self._read_optional_str(
@@ -573,9 +590,41 @@ class AgentRuntime:
         )
         summary_backend = metadata_summary_backend or local_summary_backend or self.default_backend
         summary_model = metadata_summary_model or local_summary_model or task.model
+        session_memory_enabled = self._read_session_memory_enabled(metadata)
+        resolved_context_window, resolved_max_output_tokens = resolve_model_token_limits(task.model)
+        model_context_window = read_int(
+            "model_context_window",
+            resolved_context_window or 200_000,
+            minimum=1,
+        )
+        reserved_output_tokens = read_int(
+            "reserved_output_tokens",
+            resolved_max_output_tokens or 16_000,
+            minimum=0,
+        )
+        session_memory: SessionMemory | None = None
+        if session_memory_enabled:
+            session_memory = SessionMemory(
+                SessionMemoryConfig(
+                    min_tokens_before_extraction=read_int("session_memory_min_tokens", 10_000, minimum=1),
+                    max_tokens=read_int("session_memory_max_tokens", 40_000, minimum=1),
+                    min_text_messages=read_int("session_memory_min_text_messages", 5, minimum=1),
+                    storage_dir=str(metadata.get("session_memory_storage_dir", ".memory/session")),
+                    extraction_callback=self._summarize_memory_prompt,
+                    extraction_backend=summary_backend,
+                    extraction_model=summary_model,
+                    token_model=task.model or "",
+                ),
+                workspace=workspace_path if task.use_workspace else None,
+            )
+            session_memory.load()
         return MemoryManager(
             compact_threshold=max(task.memory_compact_threshold, 0),
             keep_recent_messages=read_int("memory_keep_recent_messages", 10, minimum=1),
+            model=task.model or "",
+            model_context_window=model_context_window,
+            reserved_output_tokens=reserved_output_tokens,
+            autocompact_buffer_tokens=read_int("autocompact_buffer_tokens", 13_000, minimum=0),
             language=str(metadata.get("language", "zh-CN")),
             warning_threshold_percentage=warning_threshold,
             include_memory_warning=bool(metadata.get("include_memory_warning", False)),
@@ -585,12 +634,18 @@ class AgentRuntime:
             tool_result_excerpt_tail=read_int("tool_result_excerpt_tail", 200),
             tool_calls_keep_last=read_int("tool_calls_keep_last", 3),
             assistant_no_tool_keep_last=read_int("assistant_no_tool_keep_last", 1),
+            microcompact_trigger_ratio=read_float("microcompact_trigger_ratio", 0.75, minimum=0.0, maximum=1.0),
+            microcompact_keep_recent_cycles=read_int("microcompact_keep_recent_cycles", 3, minimum=0),
+            microcompact_min_result_length=read_int("microcompact_min_result_length", 500, minimum=1),
+            microcompact_compactable_tools=read_str_set("microcompact_compactable_tools"),
             tool_result_artifact_dir=str(metadata.get("tool_result_artifact_dir", ".memory/tool_results")),
             workspace=workspace_path if task.use_workspace else None,
             summary_event_limit=read_int("summary_event_limit", 40, minimum=1),
             summary_backend=summary_backend,
             summary_model=summary_model,
             summary_callback=self._summarize_memory_prompt,
+            base_system_prompt=task.system_prompt,
+            session_memory=session_memory,
         )
 
     @staticmethod
@@ -602,6 +657,15 @@ class AgentRuntime:
                 if value:
                     return value
         return None
+
+    @staticmethod
+    def _read_session_memory_enabled(metadata: dict[str, Any]) -> bool:
+        explicit = _parse_optional_bool(
+            metadata.get("session_memory_enabled", metadata.get("enable_session_memory"))
+        )
+        if explicit is not None:
+            return explicit
+        return not bool(metadata.get("is_sub_task"))
 
     def _load_local_memory_summary_defaults(self) -> tuple[str | None, str | None]:
         if self._memory_summary_defaults is not None:
@@ -1063,16 +1127,23 @@ class AgentRuntime:
         if not isinstance(available_skills, list):
             available_skills = None
 
-        system_prompt = sub_agent.system_prompt or build_system_prompt(
-            sub_agent.description,
-            language=language,
-            allow_interruption=False,
-            use_workspace=parent_task.use_workspace,
-            enable_todo_management=True,
-            agent_type=parent_task.agent_type,
-            available_skills=available_skills,
-            workspace=workspace_path,
-        )
+        generated_sections: list[dict[str, Any]] = []
+        if sub_agent.system_prompt:
+            system_prompt = sub_agent.system_prompt
+            generated_sections = build_raw_system_prompt_sections(system_prompt)
+        else:
+            prompt_bundle = build_system_prompt_bundle(
+                sub_agent.description,
+                language=language,
+                allow_interruption=False,
+                use_workspace=parent_task.use_workspace,
+                enable_todo_management=True,
+                agent_type=parent_task.agent_type,
+                available_skills=available_skills,
+                workspace=workspace_path,
+            )
+            system_prompt = prompt_bundle.prompt
+            generated_sections = prompt_bundle.sections
 
         user_prompt = request.task_description
         if request.output_requirements:
@@ -1089,10 +1160,11 @@ class AgentRuntime:
         excluded_tools = set(parent_task.exclude_tools)
         excluded_tools.update(sub_agent.exclude_tools)
         excluded_tools.update({CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME})
-        metadata = {
+        metadata: dict[str, Any] = {
             "is_sub_task": True,
             "parent_task_id": parent_task.task_id,
             "sub_agent_name": sub_agent_name,
+            "session_memory_enabled": False,
         }
         for key in (
             "bash_shell",
@@ -1110,6 +1182,8 @@ class AgentRuntime:
             metadata.update(sub_agent.metadata)
         if request.metadata:
             metadata.update(request.metadata)
+        if generated_sections:
+            metadata.setdefault("system_prompt_sections", generated_sections)
         metadata["task_id"] = sub_task_id
         metadata["session_id"] = sub_session_id
         metadata["browser_scope_key"] = sub_session_id

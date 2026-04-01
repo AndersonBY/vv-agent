@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,9 +12,19 @@ from vv_agent.constants import (
     TODO_WRITE_TOOL_NAME,
 )
 from vv_agent.llm import ScriptedLLM
+from vv_agent.memory import SessionMemoryEntry, SessionMemoryState
 from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
-from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall, ToolExecutionResult
+from vv_agent.types import (
+    AgentStatus,
+    AgentTask,
+    LLMResponse,
+    Message,
+    SubAgentConfig,
+    SubTaskRequest,
+    ToolCall,
+    ToolExecutionResult,
+)
 
 _PNG_1X1 = bytes.fromhex(
     "89504e470d0a1a0a"
@@ -249,6 +260,201 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert isinstance(tool_payload.get("content"), str)
     assert "result" not in tool_payload
     assert isinstance(tool_payload.get("metadata"), dict)
+
+
+def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("vv_agent.runtime.engine.resolve_model_token_limits", lambda _model: (64_000, 8_000))
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    task = AgentTask(
+        task_id="task_memory_defaults",
+        model="demo-model",
+        system_prompt="sys",
+        user_prompt="run",
+    )
+
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+
+    assert manager.model == "demo-model"
+    assert manager.model_context_window == 64_000
+    assert manager.reserved_output_tokens == 8_000
+    assert manager.autocompact_buffer_tokens == 13_000
+    assert manager.session_memory is not None
+    assert manager.session_memory.config.extraction_model == "demo-model"
+
+
+def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("vv_agent.runtime.engine.resolve_model_token_limits", lambda _model: (64_000, 8_000))
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    task = AgentTask(
+        task_id="task_memory_override",
+        model="demo-model",
+        system_prompt="sys",
+        user_prompt="run",
+        metadata={
+            "model_context_window": 32_000,
+            "reserved_output_tokens": 4_000,
+            "autocompact_buffer_tokens": 2_000,
+            "microcompact_trigger_ratio": 0.5,
+            "microcompact_keep_recent_cycles": 5,
+            "microcompact_min_result_length": 900,
+            "microcompact_compactable_tools": ["read_file", "bash"],
+            "session_memory_min_tokens": 2_000,
+            "session_memory_max_tokens": 9_000,
+            "session_memory_min_text_messages": 7,
+            "session_memory_storage_dir": ".custom/session-memory",
+        },
+    )
+
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+
+    assert manager.model_context_window == 32_000
+    assert manager.reserved_output_tokens == 4_000
+    assert manager.autocompact_buffer_tokens == 2_000
+    assert manager.microcompact_trigger_ratio == 0.5
+    assert manager.microcompact_keep_recent_cycles == 5
+    assert manager.microcompact_min_result_length == 900
+    assert manager.microcompact_compactable_tools == {"read_file", "bash"}
+    assert manager.session_memory is not None
+    assert manager.session_memory.config.min_tokens_before_extraction == 2_000
+    assert manager.session_memory.config.max_tokens == 9_000
+    assert manager.session_memory.config.min_text_messages == 7
+    assert manager.session_memory.config.storage_dir == ".custom/session-memory"
+
+
+def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path) -> None:
+    storage_path = tmp_path / ".memory" / "session" / "session_memory.json"
+    storage_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_path.write_text(
+        json.dumps(
+            SessionMemoryState(
+                entries=[
+                    SessionMemoryEntry(
+                        category="key_fact",
+                        content="persisted workspace fact",
+                        source_cycle=3,
+                        importance=9,
+                    )
+                ],
+                initialized=True,
+            ).to_dict(),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    def assert_session_memory(_model: str, messages: list[Message]) -> LLMResponse:
+        assert messages[0].role == "system"
+        assert "<Session Memory>" in messages[0].content
+        assert "persisted workspace fact" in messages[0].content
+        return LLMResponse(content="done")
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(steps=[assert_session_memory]),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    task = AgentTask(
+        task_id="task_session_memory",
+        model="demo-model",
+        system_prompt="sys",
+        user_prompt="run",
+        max_cycles=1,
+        no_tool_policy="finish",
+    )
+
+    result = runtime.run(task)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert result.final_answer == "done"
+
+
+def test_runtime_disables_session_memory_for_subtasks_by_default(tmp_path: Path) -> None:
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    parent_task = AgentTask(
+        task_id="parent",
+        model="demo-model",
+        system_prompt="sys",
+        user_prompt="run",
+        metadata={"language": "en-US"},
+        sub_agents={
+            "worker": SubAgentConfig(
+                model="demo-model",
+                description="Worker agent",
+            )
+        },
+    )
+    sub_task = runtime._build_sub_agent_task(
+        parent_task=parent_task,
+        sub_task_id="sub-1",
+        sub_session_id="session-sub-1",
+        sub_agent_name="worker",
+        sub_agent=parent_task.sub_agents["worker"],
+        resolved_model_id="demo-model",
+        request=SubTaskRequest(agent_name="worker", task_description="do work"),
+        parent_shared_state={},
+        workspace_path=tmp_path,
+    )
+
+    manager = runtime._build_memory_manager(task=sub_task, workspace_path=tmp_path)
+
+    assert sub_task.metadata["session_memory_enabled"] is False
+    assert manager.session_memory is None
+
+
+def test_runtime_uses_prompt_tokens_for_followup_compaction_budget(tmp_path: Path) -> None:
+    observed_cycle_two_messages: list[Message] = []
+
+    def inspect_cycle_two_messages(_model: str, messages: list[Message]) -> LLMResponse:
+        observed_cycle_two_messages.extend(messages)
+        return LLMResponse(
+            content="finish",
+            tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+        )
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="step1",
+                raw={"usage": {"prompt_tokens": 10, "completion_tokens": 500, "total_tokens": 510}},
+            ),
+            inspect_cycle_two_messages,
+        ]
+    )
+    runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
+    task = AgentTask(
+        task_id="task_prompt_budget",
+        model="dummy-model",
+        system_prompt="sys",
+        user_prompt="keep context",
+        max_cycles=2,
+        no_tool_policy="continue",
+        metadata={
+            "model_context_window": 100,
+            "reserved_output_tokens": 10,
+            "autocompact_buffer_tokens": 10,
+        },
+    )
+
+    result = runtime.run(task)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert observed_cycle_two_messages
+    assert all("<Compressed Agent Memory>" not in message.content for message in observed_cycle_two_messages)
 
 
 def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from vv_agent.memory import sanitize_for_resume
 from vv_agent.types import AgentStatus, SubTaskOutcome
 
 if TYPE_CHECKING:
     from vv_agent.sdk.types import AgentRun
     from vv_agent.workspace.base import WorkspaceBackend
+
+logger = logging.getLogger(__name__)
 
 SessionRegistrar = Callable[[str, Any], None]
 SessionUnregistrar = Callable[[str, Any | None], None]
@@ -40,6 +44,13 @@ def _preview_text(value: Any, *, limit: int = 240) -> str | None:
     if len(text) <= limit:
         return text
     return f"{text[: limit - 3].rstrip()}..."
+
+
+def _message_snapshot(message: Any) -> Any:
+    serializer = getattr(message, "to_dict", None)
+    if callable(serializer):
+        return serializer()
+    return message
 
 
 @dataclass(slots=True)
@@ -217,6 +228,14 @@ class SubTaskManager:
             if record.outcome is not None and record.outcome.status == AgentStatus.MAX_CYCLES:
                 raise RuntimeError(f"Sub-task {task_id} reached max cycles and cannot continue")
 
+            removed_messages = self._sanitize_resumable_session_messages(record.session)
+            if removed_messages > 0:
+                logger.info(
+                    "Sanitized %s stale message(s) before resuming sub-task %s",
+                    removed_messages,
+                    task_id,
+                )
+
             record.task_title = prompt_text
             record.outcome = None
             record.updated_at = _now_iso()
@@ -291,6 +310,27 @@ class SubTaskManager:
             self._unregister_session(session_id, session)
 
         self.record_outcome(task_id, outcome)
+
+    @staticmethod
+    def _sanitize_resumable_session_messages(session: SubTaskSession) -> int:
+        raw_messages = getattr(session, "_messages", None)
+        if not isinstance(raw_messages, list):
+            return 0
+
+        session_lock = getattr(session, "_lock", None)
+        if session_lock is not None and hasattr(session_lock, "__enter__") and hasattr(session_lock, "__exit__"):
+            with session_lock:
+                return SubTaskManager._replace_session_messages_if_needed(session, raw_messages)
+        return SubTaskManager._replace_session_messages_if_needed(session, raw_messages)
+
+    @staticmethod
+    def _replace_session_messages_if_needed(session: SubTaskSession, messages: list[Any]) -> int:
+        original = list(messages)
+        sanitized = sanitize_for_resume(original)
+        if [_message_snapshot(message) for message in sanitized] == [_message_snapshot(message) for message in original]:
+            return 0
+        session._messages = sanitized  # type: ignore[attr-defined]
+        return max(len(original) - len(sanitized), 0)
 
     def _build_outcome_from_run(self, *, task_id: str, run: AgentRun) -> SubTaskOutcome:
         with self._lock:

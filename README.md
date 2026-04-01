@@ -128,6 +128,7 @@ Notes:
 - `run(...)` and `create_session(...)` both inherit startup shell defaults.
 - The `bash` tool schema description includes a runtime shell hint (resolved shell kind + invocation prefix), so the model sees which shell command style is expected before calling the tool.
 - The runtime shell hint is frozen per task/session-run to keep tool schemas stable across cycles and preserve LLM prompt cache efficiency.
+- SDK/CLI-generated tasks now also attach structured `system_prompt_sections` metadata to the system message, so Anthropic prompt-cache breakpoints can keep the stable prompt prefix hot while treating current time and session-memory blocks as volatile.
 
 ```python
 from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
@@ -309,30 +310,57 @@ class MyBackend:
 
 ## Memory Compaction
 
-`MemoryManager` compacts history when `AgentTask.memory_compact_threshold` is exceeded.
+`MemoryManager` now measures context size in tokens and compacts history when a model-derived auto-compaction threshold is exceeded.
 
 - Task-level knobs:
-  - `memory_compact_threshold` (default `128000`)
+  - `memory_compact_threshold` (default `128000`, legacy fallback only when token counting is unavailable)
   - `memory_threshold_percentage` (warning threshold percentage, default `90`)
 - SDK mapping:
   - `AgentDefinition.memory_compact_threshold`
   - `AgentDefinition.memory_threshold_percentage`
-  - `AgentSDKClient.prepare_task(...)` 会把这两个字段透传到 `AgentTask`。
+  - `AgentSDKClient.prepare_task(...)` forwards both values to `AgentTask`.
+- Token budget model:
+  - `effective_context_window = model_context_window - reserved_output_tokens`
+  - `autocompact_threshold = effective_context_window - autocompact_buffer_tokens`
+  - Defaults come from `vv-llm` model metadata when available, otherwise fall back to `200000 / 16000 / 13000`
 - Effective-length strategy (backend-aligned):
   - If previous cycle token usage exists:
-    - `effective_length = previous_total_tokens + len(json.dumps(recent_tool_messages))`
+    - `effective_length = previous_prompt_tokens + token_count(recent_tool_messages)`
   - Otherwise fallback to:
-    - `len(json.dumps(messages[2:]))`
+    - `vv_llm.chat_clients.utils.get_message_token_counts(...)`
+    - If tokenizer resolution fails, use a local CJK-aware estimate
 - Compaction pipeline:
-  1. Structural cleanup (stale tool calls, orphan tool messages, assistant-no-tool collapse, old tool result artifactization)
-  2. If still over threshold, generate compressed memory summary
+  1. Preemptive microcompact: clear old large tool results when usage crosses `microcompact_trigger_ratio`
+  2. Session Memory extraction: persist key facts before full summarization so they survive later compactions
+  3. Structural cleanup (stale tool calls, orphan tool messages, assistant-no-tool collapse, old tool result artifactization)
+  4. If still over threshold, generate a compressed memory summary that preserves original user messages, file operations, current work state, and resolved errors
+  5. If the provider still returns prompt-too-long, retry with forced compaction once, then progressively stronger emergency tail-dropping
+  6. After full compaction, re-inject relevant workspace files into `<Post-Compaction File Context>` under a bounded token budget
+- Session Memory behavior:
+  - Stored in `workspace/.memory/session/session_memory.json` by default
+  - Injected into the first system message on every cycle as `<Session Memory>`
+  - Extraction reuses the configured memory summary backend/model
+  - Full compaction resets transcript tracking but preserves persisted memory entries
+  - Sub-tasks disable Session Memory by default to avoid parent/child memory-file contamination
 
 ### Runtime metadata keys
 
 Pass these via `AgentTask.metadata`:
 
 - `memory_keep_recent_messages`
+- `model_context_window`
+- `reserved_output_tokens`
+- `autocompact_buffer_tokens`
+- `microcompact_trigger_ratio`
+- `microcompact_keep_recent_cycles`
+- `microcompact_min_result_length`
+- `microcompact_compactable_tools`
 - `include_memory_warning`
+- `session_memory_enabled` / `enable_session_memory`
+- `session_memory_min_tokens`
+- `session_memory_max_tokens`
+- `session_memory_min_text_messages`
+- `session_memory_storage_dir`
 - `tool_result_compact_threshold`
 - `tool_result_keep_last`
 - `tool_result_excerpt_head`
@@ -377,6 +405,8 @@ Each delegated sub-task now runs in a real `AgentSession` (session id defaults t
 Batch mode in `create_sub_task` dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so synchronous batches run concurrently when the backend supports parallel execution.
 
 Use `sub_task_status` to query sub-task states, inspect lightweight progress snapshots (`detail_level=snapshot`), or send follow-up messages to running/completed sub-tasks. When you run agents through `AgentSDKClient.create_session()`, the sub-task registry stays attached to that session, so later turns can still query background sub-tasks created earlier in the same session.
+
+Before a completed sub-task is resumed, the runtime now sanitizes the saved session transcript: empty assistant turns, thinking-only turns, orphaned tool results, and unresolved tail tool calls are removed so the next follow-up prompt resumes from a coherent history.
 
 Sub-task runtime metadata now includes `task_id`, `session_id`, and `browser_scope_key` for each sub-agent run, so session-scoped tools (for example, browser controllers) stay isolated across parallel sub-tasks.
 

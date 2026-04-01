@@ -11,7 +11,7 @@ from vv_agent.constants import (
     TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
-from vv_agent.prompt import build_system_prompt
+from vv_agent.prompt import PromptSection, SystemPromptBuilder, build_system_prompt, build_system_prompt_bundle
 
 
 def test_build_system_prompt_includes_required_sections() -> None:
@@ -25,6 +25,18 @@ def test_build_system_prompt_includes_required_sections() -> None:
     assert "<Tools>" in prompt
     assert "<Current Time>" in prompt
     assert "2026-02-17T15:00:00Z" in prompt
+
+
+def test_build_system_prompt_can_include_session_memory_context() -> None:
+    prompt = build_system_prompt(
+        "You are a test agent.",
+        language="en-US",
+        session_memory_context="<Session Memory>\n## key_fact\n- prior decision\n</Session Memory>",
+    )
+
+    assert "<Session Memory>" in prompt
+    assert prompt.index("</Agent Definition>") < prompt.index("<Session Memory>")
+    assert prompt.index("<Session Memory>") < prompt.index("<Tools>")
 
 
 def test_prompt_includes_tool_governance_rules() -> None:
@@ -104,3 +116,52 @@ Body
 
     assert "<available_skills>" in prompt
     assert "<name>\nalpha\n</name>" in prompt
+
+
+def test_build_system_prompt_bundle_includes_cacheable_sections() -> None:
+    bundle = build_system_prompt_bundle(
+        "Agent",
+        language="en-US",
+        current_time_utc=datetime(2026, 2, 17, 15, 0, 0, tzinfo=UTC),
+        session_memory_context="<Session Memory>\n- note\n</Session Memory>",
+    )
+
+    assert bundle.prompt.startswith("<Agent Definition>")
+    assert [section["id"] for section in bundle.sections] == [
+        "agent_definition",
+        "session_memory",
+        "tools",
+        "current_time",
+    ]
+    assert bundle.sections[0]["stable"] is True
+    assert bundle.sections[1]["stable"] is False
+    assert bundle.sections[-1]["stable"] is False
+    assert bundle.stable_hash
+
+
+def test_system_prompt_builder_caches_stable_sections_only() -> None:
+    counters = {"stable": 0, "volatile": 0}
+
+    def build_stable() -> str:
+        counters["stable"] += 1
+        return "stable"
+
+    def build_volatile() -> str:
+        counters["volatile"] += 1
+        return f"volatile-{counters['volatile']}"
+
+    builder = SystemPromptBuilder()
+    builder.add_section(PromptSection(id="stable", compute=build_stable, stable=True))
+    builder.add_section(PromptSection(id="volatile", compute=build_volatile, stable=False))
+
+    assert builder.build() == "stable\n\nvolatile-1"
+    assert builder.build() == "stable\n\nvolatile-2"
+    assert counters == {"stable": 1, "volatile": 2}
+
+
+def test_system_prompt_builder_stable_hash_matches_build_result_hash() -> None:
+    builder = SystemPromptBuilder()
+    builder.add_section(PromptSection(id="stable", compute=lambda: "  stable section  ", stable=True))
+    builder.add_section(PromptSection(id="volatile", compute=lambda: " volatile ", stable=False))
+
+    assert builder.stable_hash() == builder.build_result().stable_hash
