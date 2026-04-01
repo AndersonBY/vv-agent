@@ -247,6 +247,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert isinstance(cycle_payload["token_usage"], dict)
     assert isinstance(cycle_payload.get("assistant_message"), str)
     assert isinstance(cycle_payload.get("tool_calls"), list)
+    assert cycle_payload.get("memory_compacted") is False
     tool_calls = cycle_payload["tool_calls"]
     assert tool_calls
     first_tool_call = tool_calls[0] if isinstance(tool_calls, list) else None
@@ -283,6 +284,7 @@ def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, mo
     assert manager.model_context_window == 64_000
     assert manager.reserved_output_tokens == 8_000
     assert manager.autocompact_buffer_tokens == 13_000
+    assert manager.autocompact_threshold == 43_000
     assert manager.session_memory is not None
     assert manager.session_memory.config.extraction_model == "demo-model"
 

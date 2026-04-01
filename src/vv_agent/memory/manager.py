@@ -12,7 +12,7 @@ from vv_agent.constants import READ_FILE_TOOL_NAME
 from vv_agent.memory.microcompact import MicrocompactConfig, is_microcompacted_tool_content, microcompact
 from vv_agent.memory.post_compact_restore import PostCompactRestoreConfig, restore_key_files
 from vv_agent.memory.session_memory import SessionMemory
-from vv_agent.memory.token_utils import count_messages_tokens
+from vv_agent.memory.token_utils import compute_compaction_threshold, count_messages_tokens
 from vv_agent.types import Message
 
 _MEMORY_SUMMARY_NAME = "memory_summary"
@@ -158,10 +158,12 @@ class MemoryManager:
     @property
     def autocompact_threshold(self) -> int:
         """Prompt token threshold that triggers automatic compaction."""
-        threshold = self.effective_context_window - self.autocompact_buffer_tokens
-        if threshold > 0:
-            return threshold
-        return max(self.compact_threshold, 0)
+        return compute_compaction_threshold(
+            configured_threshold=self.compact_threshold,
+            model_context_window=self.model_context_window,
+            reserved_output_tokens=self.reserved_output_tokens,
+            autocompact_buffer_tokens=self.autocompact_buffer_tokens,
+        )
 
     @property
     def warning_threshold(self) -> int:

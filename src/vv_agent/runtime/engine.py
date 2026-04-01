@@ -348,6 +348,7 @@ class AgentRuntime:
                 tool_calls=[call.to_dict() for call in cycle_record.tool_calls],
                 tool_call_names=[call.name for call in cycle_record.tool_calls],
                 tool_call_count=len(cycle_record.tool_calls),
+                memory_compacted=cycle_record.memory_compacted,
                 token_usage=cycle_record.token_usage.to_dict(),
             )
 

@@ -246,7 +246,7 @@ def test_memory_uses_token_based_length_with_recent_tool_ids() -> None:
     assert len(compacted2) == 2
 
 
-def test_memory_thresholds_derive_from_model_window() -> None:
+def test_memory_thresholds_respect_configured_ceiling() -> None:
     manager = MemoryManager(
         model_context_window=200_000,
         reserved_output_tokens=16_000,
@@ -255,8 +255,19 @@ def test_memory_thresholds_derive_from_model_window() -> None:
     )
 
     assert manager.effective_context_window == 184_000
-    assert manager.autocompact_threshold == 171_000
-    assert manager.warning_threshold == 153_900
+    assert manager.autocompact_threshold == 128_000
+    assert manager.warning_threshold == 115_200
+
+
+def test_memory_thresholds_fall_back_to_model_limit_when_smaller() -> None:
+    manager = MemoryManager(
+        compact_threshold=128_000,
+        model_context_window=64_000,
+        reserved_output_tokens=8_000,
+        autocompact_buffer_tokens=13_000,
+    )
+
+    assert manager.autocompact_threshold == 43_000
 
 
 def test_memory_recomputes_compacted_length_without_stale_total_tokens() -> None:
