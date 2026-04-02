@@ -334,7 +334,7 @@ def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_
 
 
 def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path) -> None:
-    storage_path = tmp_path / ".memory" / "session" / "session_memory.json"
+    storage_path = tmp_path / ".memory" / "session" / "task_session_memory" / "session_memory.json"
     storage_path.parent.mkdir(parents=True, exist_ok=True)
     storage_path.write_text(
         json.dumps(
@@ -368,6 +368,54 @@ def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path
     )
     task = AgentTask(
         task_id="task_session_memory",
+        model="demo-model",
+        system_prompt="sys",
+        user_prompt="run",
+        max_cycles=1,
+        no_tool_policy="finish",
+    )
+
+    result = runtime.run(task)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert result.final_answer == "done"
+
+
+def test_runtime_does_not_load_session_memory_from_other_task_scope(tmp_path: Path) -> None:
+    scoped_storage_path = tmp_path / ".memory" / "session" / "task_with_memory" / "session_memory.json"
+    scoped_storage_path.parent.mkdir(parents=True, exist_ok=True)
+    scoped_storage_path.write_text(
+        json.dumps(
+            SessionMemoryState(
+                entries=[
+                    SessionMemoryEntry(
+                        category="key_fact",
+                        content="old task fact",
+                        source_cycle=2,
+                        importance=7,
+                    )
+                ],
+                initialized=True,
+            ).to_dict(),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    def assert_no_session_memory(_model: str, messages: list[Message]) -> LLMResponse:
+        assert messages[0].role == "system"
+        assert "<Session Memory>" not in messages[0].content
+        assert "old task fact" not in messages[0].content
+        return LLMResponse(content="done")
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(steps=[assert_no_session_memory]),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    task = AgentTask(
+        task_id="fresh_task",
         model="demo-model",
         system_prompt="sys",
         user_prompt="run",

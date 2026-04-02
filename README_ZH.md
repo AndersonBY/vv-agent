@@ -329,7 +329,9 @@ class MyBackend:
   5. 如果 provider 仍返回 prompt-too-long，再执行一次强制压缩，之后逐步加大 emergency tail-dropping 重试
   6. 全量压缩后，会在预算内自动恢复相关工作区文件内容到 `<Post-Compaction File Context>`
 - Session Memory 行为：
-  - 默认存放在 `workspace/.memory/session/session_memory.json`
+  - 默认存放在 `workspace/.memory/session/<session-or-task-scope>/session_memory.json`
+  - 若 `metadata.session_id` 存在，则按当前 session 隔离；否则按当前 `task_id` 隔离
+  - 新 session / 新 task 不会继承上一轮 session / task 的 Session Memory
   - 每个 cycle 都会以 `<Session Memory>` 的形式注入到第一条 system message
   - 提取阶段复用现有的 memory summary backend/model 选择逻辑
   - 全量压缩后只重置 transcript 跟踪索引，不清空已持久化记忆

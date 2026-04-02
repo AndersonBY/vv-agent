@@ -185,6 +185,7 @@ class AgentSession:
         try:
             run_kwargs: dict[str, Any] = {
                 "prompt": prompt,
+                "session_id": self.session_id,
                 "agent": self.definition,
                 "task_name": self.agent_name,
                 "workspace": self.workspace,

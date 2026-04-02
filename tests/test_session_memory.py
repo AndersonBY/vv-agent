@@ -170,7 +170,11 @@ def test_session_memory_prunes_low_importance_entries_first() -> None:
 
 
 def test_session_memory_can_persist_load_and_reset_on_compaction(tmp_path) -> None:
-    memory = SessionMemory(SessionMemoryConfig(storage_dir=".memory/session"), workspace=tmp_path)
+    memory = SessionMemory(
+        SessionMemoryConfig(storage_dir=".memory/session"),
+        workspace=tmp_path,
+        storage_scope="task-a",
+    )
     memory.state.entries = [
         SessionMemoryEntry(category="user_intent", content="finish phase 4", source_cycle=9, importance=10)
     ]
@@ -179,7 +183,11 @@ def test_session_memory_can_persist_load_and_reset_on_compaction(tmp_path) -> No
     memory.state.initialized = True
     memory._save()
 
-    loaded = SessionMemory(SessionMemoryConfig(storage_dir=".memory/session"), workspace=tmp_path)
+    loaded = SessionMemory(
+        SessionMemoryConfig(storage_dir=".memory/session"),
+        workspace=tmp_path,
+        storage_scope="task-a",
+    )
     loaded.load()
 
     assert len(loaded.state.entries) == 1
@@ -191,6 +199,27 @@ def test_session_memory_can_persist_load_and_reset_on_compaction(tmp_path) -> No
     assert loaded.state.last_extracted_message_index == -1
     assert loaded.state.tokens_at_last_extraction == 33
     assert loaded.state.entries[0].content == "finish phase 4"
+
+
+def test_session_memory_storage_scope_isolates_new_tasks(tmp_path) -> None:
+    scoped = SessionMemory(
+        SessionMemoryConfig(storage_dir=".memory/session"),
+        workspace=tmp_path,
+        storage_scope="session-one",
+    )
+    scoped.state.entries = [
+        SessionMemoryEntry(category="key_fact", content="first session fact", source_cycle=2, importance=8)
+    ]
+    scoped._save()
+
+    isolated = SessionMemory(
+        SessionMemoryConfig(storage_dir=".memory/session"),
+        workspace=tmp_path,
+        storage_scope="session-two",
+    )
+    isolated.load()
+
+    assert isolated.state.entries == []
 
 
 def test_session_memory_rejects_storage_dir_path_traversal(tmp_path) -> None:

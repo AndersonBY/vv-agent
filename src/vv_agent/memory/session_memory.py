@@ -116,9 +116,16 @@ class SessionMemoryState:
 class SessionMemory:
     """Persistent structured memory that survives conversation compaction."""
 
-    def __init__(self, config: SessionMemoryConfig, workspace: Path | None = None) -> None:
+    def __init__(
+        self,
+        config: SessionMemoryConfig,
+        workspace: Path | None = None,
+        *,
+        storage_scope: str | None = None,
+    ) -> None:
         self.config = config
         self.workspace = workspace
+        self.storage_scope = str(storage_scope or "").strip()
         self.state = SessionMemoryState()
 
     def should_extract(self, current_tokens: int, message_count: int) -> bool:
@@ -238,7 +245,14 @@ class SessionMemory:
         workspace_root = self.workspace.resolve()
         storage_dir = Path(self.config.storage_dir)
         base = storage_dir if storage_dir.is_absolute() else self.workspace / storage_dir
-        resolved = (base / _SESSION_MEMORY_FILENAME).resolve()
+        if self.storage_scope:
+            safe_scope = self._sanitize_storage_scope(self.storage_scope)
+            if safe_scope is None:
+                logger.warning("Session memory storage scope is invalid, refusing: %s", self.storage_scope)
+                return None
+            resolved = (base / safe_scope / _SESSION_MEMORY_FILENAME).resolve()
+        else:
+            resolved = (base / _SESSION_MEMORY_FILENAME).resolve()
         try:
             resolved.relative_to(workspace_root)
         except ValueError:
@@ -263,6 +277,11 @@ class SessionMemory:
         self.state.last_extracted_message_index = last_message_index
         self.state.tokens_at_last_extraction = max(int(current_tokens or 0), 0)
         self.state.initialized = True
+
+    @staticmethod
+    def _sanitize_storage_scope(raw: str) -> str | None:
+        normalized = re.sub(r"[^A-Za-z0-9._-]+", "_", str(raw or "").strip()).strip("._-")
+        return normalized or None
 
     @staticmethod
     def _should_skip_message(message: Message) -> bool:

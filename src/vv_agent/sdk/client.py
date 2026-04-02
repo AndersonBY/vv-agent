@@ -89,12 +89,16 @@ class AgentSDKClient:
         agent_name: str | None = None,
         task_name: str | None = None,
         workspace: str | Path | None = None,
+        session_id: str | None = None,
     ) -> AgentTask:
         effective_workspace = self._resolve_workspace(workspace)
         resolved_name, raw_definition = self._resolve_agent(agent=agent, agent_name=agent_name)
         definition = self._effective_definition(raw_definition)
         effective_task_name = task_name or resolved_name
         metadata = dict(definition.metadata)
+        normalized_session_id = str(session_id or "").strip()
+        if normalized_session_id:
+            metadata.setdefault("session_id", normalized_session_id)
         metadata.setdefault("language", definition.language)
         if definition.bash_shell:
             metadata.setdefault("bash_shell", definition.bash_shell)
@@ -270,6 +274,7 @@ class AgentSDKClient:
         agent_name: str | None = None,
         workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ):
         resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
         definition = self._resolve_effective_definition(definition)
@@ -290,6 +295,7 @@ class AgentSDKClient:
 
         return create_agent_session(
             execute_run=_execute_session_run,
+            session_id=session_id,
             agent_name=resolved_name,
             definition=definition,
             workspace=effective_workspace,
@@ -313,6 +319,7 @@ class AgentSDKClient:
         task_name: str | None = None,
         cancellation_token: CancellationToken | None = None,
         sub_task_manager: SubTaskManager | None = None,
+        session_id: str | None = None,
     ) -> AgentRun:
         if definition is None or resolved_name is None:
             resolved_name, definition = self._resolve_agent(agent=agent, agent_name=agent_name)
@@ -351,6 +358,7 @@ class AgentSDKClient:
             agent=definition,
             task_name=run_name,
             workspace=effective_workspace,
+            session_id=session_id,
         )
 
         ctx: ExecutionContext | None = None

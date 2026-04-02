@@ -337,7 +337,9 @@ class MyBackend:
   5. If the provider still returns prompt-too-long, retry with forced compaction once, then progressively stronger emergency tail-dropping
   6. After full compaction, re-inject relevant workspace files into `<Post-Compaction File Context>` under a bounded token budget
 - Session Memory behavior:
-  - Stored in `workspace/.memory/session/session_memory.json` by default
+  - Stored in `workspace/.memory/session/<session-or-task-scope>/session_memory.json` by default
+  - Scoped to the current session when `metadata.session_id` is present; otherwise scoped to the current `task_id`
+  - New sessions/tasks start without inherited Session Memory from previous sessions/tasks
   - Injected into the first system message on every cycle as `<Session Memory>`
   - Extraction reuses the configured memory summary backend/model
   - Full compaction resets transcript tracking but preserves persisted memory entries

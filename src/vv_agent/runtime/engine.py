@@ -605,6 +605,10 @@ class AgentRuntime:
         )
         session_memory: SessionMemory | None = None
         if session_memory_enabled:
+            session_memory_scope = (
+                self._read_optional_str(metadata, "session_id", "task_id")
+                or str(task.task_id or "").strip()
+            )
             session_memory = SessionMemory(
                 SessionMemoryConfig(
                     min_tokens_before_extraction=read_int("session_memory_min_tokens", 10_000, minimum=1),
@@ -617,6 +621,7 @@ class AgentRuntime:
                     token_model=task.model or "",
                 ),
                 workspace=workspace_path if task.use_workspace else None,
+                storage_scope=session_memory_scope,
             )
             session_memory.load()
         return MemoryManager(

@@ -254,6 +254,65 @@ def test_session_reuses_sub_task_manager_across_turns(
     assert seen_managers[0] is seen_managers[1]
 
 
+def test_session_run_injects_session_id_into_task_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_session_ids: list[str] = []
+
+    def fake_llm_builder(
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
+        del settings_path, timeout_seconds
+        return ScriptedLLM(steps=[]), _fake_resolved(backend=backend, model=model)
+
+    def fake_run(
+        self,
+        task,
+        *,
+        workspace=None,
+        shared_state=None,
+        initial_messages=None,
+        user_message=None,
+        before_cycle_messages=None,
+        interruption_messages=None,
+        ctx=None,
+        sub_task_manager=None,
+    ) -> AgentResult:
+        del self, workspace, shared_state, initial_messages, user_message, before_cycle_messages
+        del interruption_messages, ctx, sub_task_manager
+        seen_session_ids.append(str(task.metadata.get("session_id") or ""))
+        return AgentResult(
+            status=AgentStatus.COMPLETED,
+            messages=[Message(role="assistant", content="ok")],
+            cycles=[],
+            final_answer="ok",
+            shared_state={"todo_list": []},
+        )
+
+    monkeypatch.setattr(AgentRuntime, "run", fake_run)
+
+    client = AgentSDKClient(
+        options=AgentSDKOptions(
+            settings_file=Path("local_settings.py"),
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=fake_llm_builder,
+            tool_registry_factory=build_default_registry,
+        ),
+        agent=AgentDefinition(description="helper", model="kimi-k2.5"),
+    )
+
+    session = client.create_session(session_id="session-metadata-test")
+    session.prompt("hello")
+
+    assert seen_session_ids == ["session-metadata-test"]
+
+
 def test_session_prompt_supports_follow_up_queue(tmp_path: Path) -> None:
     llm = ScriptedLLM(
         steps=[
