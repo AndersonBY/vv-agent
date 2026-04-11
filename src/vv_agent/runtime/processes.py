@@ -8,12 +8,41 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(slots=True, frozen=True)
 class CapturedProcess:
     process: subprocess.Popen[str]
     output_path: Path
+
+
+def _build_windows_hidden_startupinfo() -> Any | None:
+    startupinfo_factory = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_factory is None:
+        return None
+    startupinfo = startupinfo_factory()
+    startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    return startupinfo
+
+
+def _build_captured_process_platform_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {"start_new_session": True}
+
+    kwargs: dict[str, Any] = {}
+    creationflags = (
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+
+    startupinfo = _build_windows_hidden_startupinfo()
+    if startupinfo is not None:
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
 
 
 def start_captured_process(
@@ -44,7 +73,7 @@ def start_captured_process(
                 text=True,
                 errors="replace",
                 env=dict(env) if env is not None else None,
-                start_new_session=True,
+                **_build_captured_process_platform_kwargs(),
             )
     except Exception:
         if output_path is not None:

@@ -344,6 +344,43 @@ def test_start_captured_process_uses_replace_error_handler_for_decoding(tmp_path
     process_runtime.remove_captured_output(started.output_path)
 
 
+def test_start_captured_process_hides_console_window_on_windows(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        stdin = None
+
+    class _StartupInfo:
+        def __init__(self) -> None:
+            self.dwFlags = 0
+            self.wShowWindow = None
+
+    def fake_popen(*args, **kwargs):
+        del args
+        captured["creationflags"] = kwargs.get("creationflags")
+        captured["startupinfo"] = kwargs.get("startupinfo")
+        captured["start_new_session"] = kwargs.get("start_new_session")
+        return _FakeProcess()
+
+    monkeypatch.setattr(process_runtime.os, "name", "nt", raising=False)
+    monkeypatch.setattr(process_runtime.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(process_runtime.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(process_runtime.subprocess, "STARTF_USESHOWWINDOW", 0x001, raising=False)
+    monkeypatch.setattr(process_runtime.subprocess, "SW_HIDE", 0, raising=False)
+    monkeypatch.setattr(process_runtime.subprocess, "STARTUPINFO", _StartupInfo, raising=False)
+    monkeypatch.setattr(process_runtime.subprocess, "Popen", fake_popen)
+
+    started = process_runtime.start_captured_process(["bash", "-lc", "echo ok"], cwd=tmp_path)
+
+    assert captured["creationflags"] == (0x200 | 0x08000000)
+    startupinfo = captured["startupinfo"]
+    assert isinstance(startupinfo, _StartupInfo)
+    assert startupinfo.dwFlags == 0x001
+    assert startupinfo.wShowWindow == 0
+    assert captured["start_new_session"] is None
+    process_runtime.remove_captured_output(started.output_path)
+
+
 def test_background_session_uses_replace_error_handler_for_decoding(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 

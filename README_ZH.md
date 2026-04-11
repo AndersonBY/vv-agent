@@ -125,6 +125,7 @@ session.continue_run()
 - Agent 级覆盖：`AgentDefinition.bash_shell`、`AgentDefinition.windows_shell_priority`、`AgentDefinition.bash_env`
 - Windows 推荐优先级：`["git-bash", "powershell", "cmd"]`
 - 在 Windows 上，`bash` 工具启动的子进程会默认注入 `PYTHONUTF8=1` 与 `PYTHONIOENCODING=utf-8`；若父进程环境或 `bash_env` 已显式设置，则以显式值为准。
+- 在 Windows 上，`bash` 工具启动子进程时还会附带隐藏控制台窗口的启动参数，方便 GUI 宿主调用 `bash` / `powershell` 时不再闪出额外终端窗口。
 - `run(...)` 与 `create_session(...)` 都会继承 startup shell 默认配置。
 - `bash` 工具 schema 的 description 会注入运行时 shell 提示（解析后的 shell 类型与调用前缀），模型在调用前即可知道应使用哪种命令风格。
 - 该运行时 shell 提示会在单个 task/session-run 内固化，确保跨 cycles 的 tool schema 文本稳定，保护 LLM prompt cache 命中率。
