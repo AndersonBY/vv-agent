@@ -81,6 +81,12 @@ def test_resolve_model_endpoint_alias(sample_settings_file: Path) -> None:
     assert resolved.selected_model == "kimi-k2-thinking"
 
 
+def test_resolve_model_endpoint_canonical_alias(sample_settings_file: Path) -> None:
+    settings = load_llm_settings_from_file(sample_settings_file)
+    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
+    assert resolved.selected_model == "kimi-k2-thinking"
+
+
 def test_decode_api_key_with_compound_format() -> None:
     key = decode_api_key("prefix:sk-live-example")
     assert key == "sk-live-example"

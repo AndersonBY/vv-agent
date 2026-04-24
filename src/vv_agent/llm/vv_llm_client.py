@@ -39,6 +39,8 @@ _STREAM_MODEL_PREFIXES = (
 _STREAM_MODEL_EXACT = {
     "deepseek-reasoner",
     "deepseek-r1-tools",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
 }
 
 _STREAM_MODEL_PREFIXES_LOWER = tuple(prefix.lower() for prefix in _STREAM_MODEL_PREFIXES)
@@ -47,6 +49,8 @@ _STREAM_MODEL_EXACT_LOWER = {item.lower() for item in _STREAM_MODEL_EXACT}
 _DEEPSEEK_REASONING_MODELS = (
     "deepseek-reasoner",
     "deepseek-r1-tools",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
 )
 
 _MINIMAX_REASONING_MODELS = (
@@ -55,11 +59,14 @@ _MINIMAX_REASONING_MODELS = (
     "minimax-m2.1-highspeed",
     "minimax-m2.5",
     "minimax-m2.5-highspeed",
+    "minimax-m2.7",
+    "minimax-m2.7-highspeed",
 )
 
 _MOONSHOT_REASONING_MODELS = (
     "kimi-k2-thinking",
     "kimi-k2.5",
+    "kimi-k2.6",
 )
 
 _REASONING_CHAIN_MODELS = {

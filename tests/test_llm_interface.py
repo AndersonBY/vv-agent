@@ -411,6 +411,12 @@ def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
 def test_should_use_stream_is_case_insensitive_for_minimax() -> None:
     assert VVLlmClient._should_use_stream("MiniMax-M2.5") is True
     assert VVLlmClient._should_use_stream("minimax-m2.5") is True
+    assert VVLlmClient._should_use_stream("MiniMax-M2.7") is True
+
+
+def test_should_use_stream_includes_deepseek_v4_reasoning_models() -> None:
+    assert VVLlmClient._should_use_stream("deepseek-v4-flash") is True
+    assert VVLlmClient._should_use_stream("deepseek-v4-pro") is True
 
 
 def test_build_message_payload_keeps_reasoning_only_for_last_assistant_by_default() -> None:
@@ -446,6 +452,48 @@ def test_build_message_payload_preserves_reasoning_chain_for_reasoning_models() 
     second_assistant = cast(dict[str, Any], payload[3])
     assert first_assistant["reasoning_content"] == "old-thought"
     assert second_assistant["reasoning_content"] == ""
+
+
+def test_deepseek_v4_request_preserves_reasoning_for_all_assistant_turns(monkeypatch) -> None:
+    response = SimpleNamespace(
+        usage=_FakeUsage(),
+        content="done",
+        reasoning_content=None,
+        tool_calls=[],
+    )
+
+    def completion_call(kwargs: dict[str, Any]) -> Any:
+        assistant_messages = [msg for msg in kwargs["messages"] if msg.get("role") == "assistant"]
+        assert len(assistant_messages) == 2
+        assert assistant_messages[0]["reasoning_content"] == "old-thought"
+        assert assistant_messages[1]["reasoning_content"] == "latest-thought"
+        return [response]
+
+    _FakeChatClient.behavior_by_endpoint = {"deepseek-v4": completion_call}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[EndpointTarget(endpoint_id="deepseek-v4", api_key="k", api_base="https://deepseek.example/v1")],
+        backend="deepseek",
+        selected_model="deepseek-v4-pro",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+    llm.complete(
+        model="deepseek-v4-pro",
+        messages=[
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="", reasoning_content="old-thought"),
+            Message(role="tool", content="result", tool_call_id="call_1"),
+            Message(role="assistant", content="", reasoning_content="latest-thought"),
+            Message(role="user", content="continue"),
+        ],
+        tools=[],
+    )
 
 
 def test_moonshot_request_preserves_reasoning_for_all_assistant_turns(monkeypatch) -> None:
