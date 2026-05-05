@@ -8,6 +8,7 @@ from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.backends.inline import InlineBackend
+from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.engine import (
     _register_sub_agent_session,
     _unregister_sub_agent_session,
@@ -551,6 +552,114 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
     assert session_run_events
     assert session_run_events[0][1]["task_id"] == task_id
     assert session_run_events[0][1]["session_id"] == session_id
+
+
+def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> None:
+    parent_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="delegate",
+                tool_calls=[
+                    ToolCall(
+                        id="p1",
+                        name=CREATE_SUB_TASK_TOOL_NAME,
+                        arguments={"agent_name": "research-sub", "task_description": "Collect core facts"},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="finish parent",
+                tool_calls=[ToolCall(id="p2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})],
+            ),
+        ]
+    )
+
+    class StreamingSubLLM:
+        def complete(self, *, model, messages, tools, stream_callback=None):
+            del model, messages, tools
+            if stream_callback is not None:
+                stream_callback({"event": "assistant_delta", "content_delta": "checking"})
+                stream_callback(
+                    {
+                        "event": "tool_call_started",
+                        "tool_call_id": "sub-tool-1",
+                        "tool_call_index": 0,
+                        "function_name": "bash",
+                        "arguments_chars": 0,
+                        "estimated_tokens": 0,
+                    }
+                )
+                stream_callback(
+                    {
+                        "event": "tool_call_progress",
+                        "tool_call_id": "sub-tool-1",
+                        "tool_call_index": 0,
+                        "function_name": "bash",
+                        "arguments_chars": 48,
+                        "estimated_tokens": 12,
+                    }
+                )
+            return LLMResponse(
+                content="sub done",
+                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
+            )
+
+    settings_file = tmp_path / "local_settings.py"
+    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
+
+    def fake_llm_builder(settings_path, *, backend, model, timeout_seconds=90.0):
+        del settings_path, timeout_seconds
+        return StreamingSubLLM(), _fake_resolved(backend=backend, model=model)
+
+    captured_logs: list[tuple[str, dict[str, object]]] = []
+    parent_stream_events: list[dict[str, object]] = []
+    runtime = AgentRuntime(
+        llm_client=parent_llm,
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        settings_file=settings_file,
+        default_backend="moonshot",
+        llm_builder=fake_llm_builder,
+        tool_registry_factory=build_default_registry,
+        log_handler=lambda event, payload: captured_logs.append((event, dict(payload))),
+    )
+    task = AgentTask(
+        task_id="parent_stream_events",
+        model="parent-model",
+        system_prompt="sys",
+        user_prompt="run parent task",
+        max_cycles=4,
+        sub_agents={
+            "research-sub": SubAgentConfig(
+                model="kimi-k2.5",
+                backend="moonshot",
+                description="collect facts",
+            )
+        },
+    )
+
+    result = runtime.run(task, ctx=ExecutionContext(stream_callback=parent_stream_events.append))
+
+    assert result.status == AgentStatus.COMPLETED
+    event_names = [name for name, _ in captured_logs]
+    assert "sub_agent_assistant_delta" in event_names
+    assert "sub_agent_tool_call_started" in event_names
+    assert "sub_agent_tool_call_progress" in event_names
+
+    progress_payload = next(payload for name, payload in captured_logs if name == "sub_agent_tool_call_progress")
+    assert progress_payload["tool_call_id"] == "sub-tool-1"
+    assert progress_payload["function_name"] == "bash"
+    assert progress_payload["estimated_tokens"] == 12
+    assert progress_payload["sub_agent_name"] == "research-sub"
+    assert progress_payload["task_id"]
+    assert progress_payload["session_id"] == progress_payload["task_id"]
+
+    assert [event["event"] for event in parent_stream_events] == [
+        "assistant_delta",
+        "tool_call_started",
+        "tool_call_progress",
+    ]
+    assert parent_stream_events[-1]["sub_agent_name"] == "research-sub"
 
 
 def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_path: Path) -> None:

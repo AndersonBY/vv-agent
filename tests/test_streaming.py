@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import Any
 
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.runtime import AgentRuntime
@@ -10,7 +10,7 @@ from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCal
 
 
 class StreamCapturingLLM:
-    """LLM that captures stream_callback and simulates token-level streaming."""
+    """LLM that captures stream_callback and simulates stream events."""
 
     def __init__(self, tokens: list[str], tool_calls: list[ToolCall] | None = None):
         self.tokens = tokens
@@ -22,13 +22,13 @@ class StreamCapturingLLM:
         model: str,
         messages: list[Message],
         tools: list[dict[str, object]],
-        stream_callback: Callable[[str], None] | None = None,
+        stream_callback=None,
     ) -> LLMResponse:
         content_parts = []
         for token in self.tokens:
             content_parts.append(token)
             if stream_callback is not None:
-                stream_callback(token)
+                stream_callback({"event": "assistant_delta", "content_delta": token})
         return LLMResponse(
             content="".join(content_parts),
             tool_calls=self.tool_calls,
@@ -36,7 +36,7 @@ class StreamCapturingLLM:
 
 
 class TestStreamCallback:
-    def test_stream_callback_receives_tokens(self):
+    def test_stream_callback_receives_events(self):
         tokens = ["Hello", " ", "world", "!"]
         llm = StreamCapturingLLM(tokens=tokens)
         runtime = AgentRuntime(
@@ -51,11 +51,16 @@ class TestStreamCallback:
             max_cycles=1,
             no_tool_policy="finish",
         )
-        received: list[str] = []
-        ctx = ExecutionContext(stream_callback=lambda t: received.append(t))
+        received: list[dict[str, Any]] = []
+        ctx = ExecutionContext(stream_callback=received.append)
         result = runtime.run(task, ctx=ctx)
         assert result.status == AgentStatus.COMPLETED
-        assert received == tokens
+        assert received == [
+            {"event": "assistant_delta", "content_delta": "Hello"},
+            {"event": "assistant_delta", "content_delta": " "},
+            {"event": "assistant_delta", "content_delta": "world"},
+            {"event": "assistant_delta", "content_delta": "!"},
+        ]
         assert result.final_answer == "Hello world!"
 
     def test_no_stream_callback_still_works(self):
@@ -91,8 +96,8 @@ class TestStreamCallback:
             max_cycles=1,
             no_tool_policy="finish",
         )
-        received: list[str] = []
-        ctx = ExecutionContext(stream_callback=lambda t: received.append(t))
+        received: list[dict[str, Any]] = []
+        ctx = ExecutionContext(stream_callback=received.append)
         result = runtime.run(task, ctx=ctx)
         assert result.status == AgentStatus.COMPLETED
         # ScriptedLLM doesn't call stream_callback

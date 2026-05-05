@@ -6,7 +6,7 @@ import random
 import re
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +23,7 @@ from vv_agent.llm.anthropic_prompt_cache import (
 )
 from vv_agent.llm.base import LLMClient
 from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash_tool_payload
+from vv_agent.runtime.context import StreamCallback
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 _STREAM_MODEL_PREFIXES = (
@@ -182,7 +183,7 @@ class VVLlmClient(LLMClient):
         model: str,
         messages: list[Message],
         tools: list[dict[str, object]],
-        stream_callback: Callable[[str], None] | None = None,
+        stream_callback: StreamCallback | None = None,
     ) -> LLMResponse:
         if not self.endpoint_targets:
             raise RuntimeError("No endpoint targets configured")
@@ -722,7 +723,7 @@ class VVLlmClient(LLMClient):
         messages: list[dict[str, Any]],
         model_name: str,
         tool_payload: list[dict[str, Any]],
-        stream_callback: Callable[[str], None] | None = None,
+        stream_callback: StreamCallback | None = None,
     ) -> LLMResponse:
         payload = self._build_request_payload(
             options=options,
@@ -736,6 +737,8 @@ class VVLlmClient(LLMClient):
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        content_chars = 0
+        reasoning_chars = 0
         complete_raw_content: list[dict[str, Any]] = []
         tool_call_parts: dict[str, dict[str, Any]] = {}
         last_active_tool_call_id: str | None = None
@@ -750,6 +753,16 @@ class VVLlmClient(LLMClient):
             chunk_reasoning = self._extract_reasoning_content(self._read_field(chunk, "reasoning_content"))
             if chunk_reasoning:
                 reasoning_parts.append(chunk_reasoning)
+                reasoning_chars += len(chunk_reasoning)
+                self._emit_stream_event(
+                    stream_callback,
+                    {
+                        "event": "reasoning_delta",
+                        "reasoning_delta": chunk_reasoning,
+                        "reasoning_chars": reasoning_chars,
+                        "estimated_tokens": self._estimate_stream_tokens(reasoning_chars),
+                    },
+                )
 
             raw_content = self._read_field(chunk, "raw_content")
             if raw_content is not None:
@@ -758,10 +771,19 @@ class VVLlmClient(LLMClient):
             text = self._extract_content(self._read_field(chunk, "content"))
             if text:
                 content_parts.append(text)
-                if stream_callback is not None:
-                    stream_callback(text)
+                content_chars += len(text)
+                self._emit_stream_event(
+                    stream_callback,
+                    {
+                        "event": "assistant_delta",
+                        "content_delta": text,
+                        "content_chars": content_chars,
+                        "estimated_tokens": self._estimate_stream_tokens(content_chars),
+                    },
+                )
 
             for tool_call_index, tool_delta in enumerate(self._read_field(chunk, "tool_calls") or []):
+                previous_active_tool_call_id = last_active_tool_call_id
                 last_active_tool_call_id = self._accumulate_tool_call_delta(
                     tool_call_parts=tool_call_parts,
                     tool_delta=tool_delta,
@@ -769,6 +791,14 @@ class VVLlmClient(LLMClient):
                     last_active_tool_call_id=last_active_tool_call_id,
                     incremental=options.tool_call_incremental,
                     keep_extra_content=options.is_gemini_3_model,
+                )
+                self._emit_tool_call_stream_events(
+                    stream_callback=stream_callback,
+                    tool_call_parts=tool_call_parts,
+                    tool_delta=tool_delta,
+                    default_index=tool_call_index,
+                    previous_active_tool_call_id=previous_active_tool_call_id,
+                    active_tool_call_id=last_active_tool_call_id,
                 )
 
         parsed_tool_calls: list[ToolCall] = []
@@ -813,6 +843,74 @@ class VVLlmClient(LLMClient):
             tool_calls=normalized,
             raw=raw_payload,
         )
+
+    @staticmethod
+    def _emit_stream_event(stream_callback: StreamCallback | None, event: dict[str, Any]) -> None:
+        if stream_callback is not None:
+            stream_callback(event)
+
+    @staticmethod
+    def _estimate_stream_tokens(text_length: int) -> int:
+        if text_length <= 0:
+            return 0
+        return (text_length + 3) // 4
+
+    def _emit_tool_call_stream_events(
+        self,
+        *,
+        stream_callback: StreamCallback | None,
+        tool_call_parts: dict[str, dict[str, Any]],
+        tool_delta: Any,
+        default_index: int,
+        previous_active_tool_call_id: str | None,
+        active_tool_call_id: str | None,
+    ) -> None:
+        if stream_callback is None or not active_tool_call_id or active_tool_call_id not in tool_call_parts:
+            return
+
+        function = self._read_field(tool_delta, "function")
+        if function is None:
+            return
+
+        name_raw = self._read_field(function, "name")
+        has_name = isinstance(name_raw, str) and bool(name_raw.strip())
+        arguments_raw = self._read_field(function, "arguments")
+        has_arguments_delta = isinstance(arguments_raw, str) and bool(arguments_raw)
+        slot = tool_call_parts[active_tool_call_id]
+
+        started_emitted = bool(slot.get("_stream_started_emitted"))
+        if has_name and not started_emitted:
+            arguments_chars = len(str(slot.get("arguments") or ""))
+            self._emit_stream_event(
+                stream_callback,
+                {
+                    "event": "tool_call_started",
+                    "tool_call_id": str(slot.get("id") or ""),
+                    "tool_call_index": self._resolve_tool_call_index(tool_delta, default_index),
+                    "function_name": str(slot.get("name") or ""),
+                    "arguments_chars": arguments_chars,
+                    "estimated_tokens": self._estimate_stream_tokens(arguments_chars),
+                },
+            )
+            slot["_stream_started_emitted"] = True
+
+        if has_arguments_delta:
+            arguments_chars = len(str(slot.get("arguments") or ""))
+            self._emit_stream_event(
+                stream_callback,
+                {
+                    "event": "tool_call_progress",
+                    "tool_call_id": str(slot.get("id") or ""),
+                    "tool_call_index": self._resolve_tool_call_index(tool_delta, default_index),
+                    "function_name": str(slot.get("name") or ""),
+                    "arguments_chars": arguments_chars,
+                    "estimated_tokens": self._estimate_stream_tokens(arguments_chars),
+                },
+            )
+
+    def _resolve_tool_call_index(self, tool_delta: Any, default_index: int) -> int:
+        index_raw = self._read_field(tool_delta, "index")
+        return index_raw if isinstance(index_raw, int) else default_index
 
     @staticmethod
     def _tool_call_sort_key(item: tuple[str, dict[str, Any]]) -> tuple[int, str]:

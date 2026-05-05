@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from vv_agent.runtime.cancellation import CancellationToken
     from vv_agent.runtime.state import StateStore
 
-StreamCallback = Callable[[str], None]
+StreamCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass(slots=True)

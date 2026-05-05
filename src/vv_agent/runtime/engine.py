@@ -18,7 +18,7 @@ from vv_agent.memory.token_utils import resolve_model_token_limits
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.backends.inline import InlineBackend
-from vv_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.context import ExecutionContext, StreamCallback
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
 from vv_agent.runtime.sub_task_manager import SubTaskManager
@@ -964,18 +964,17 @@ class AgentRuntime:
                 if log_handler is not None:
                     parent_stream_callback = child_ctx.stream_callback if child_ctx is not None else None
 
-                    def _sub_stream_callback(text: str) -> None:
-                        log_handler(
-                            "stream_delta",
-                            {
-                                "delta": text,
-                                "task_id": sub_task_id,
-                                "session_id": sub_session_id,
-                                "sub_agent_name": request.agent_name,
-                            },
-                        )
+                    def _sub_stream_callback(event: dict[str, Any]) -> None:
+                        enriched = dict(event)
+                        event_name = str(enriched.get("event") or "stream_event")
+                        enriched.setdefault("task_id", sub_task_id)
+                        enriched.setdefault("session_id", sub_session_id)
+                        enriched.setdefault("sub_agent_name", request.agent_name)
+                        log_payload = dict(enriched)
+                        log_payload.pop("event", None)
+                        log_handler(event_name, log_payload)
                         if parent_stream_callback is not None:
-                            parent_stream_callback(text)
+                            parent_stream_callback(enriched)
 
                     if child_ctx is None:
                         child_ctx = ExecutionContext(stream_callback=_sub_stream_callback)
@@ -1223,7 +1222,7 @@ class AgentRuntime:
     def _build_child_ctx(
         ctx: ExecutionContext | None,
         *,
-        stream_callback: Callable[[str], None] | None = None,
+        stream_callback: StreamCallback | None = None,
     ) -> ExecutionContext | None:
         if ctx is None:
             if stream_callback is None:

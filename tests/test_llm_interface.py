@@ -143,6 +143,83 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
     assert response.tool_calls[0].arguments["todos"][0]["title"] == "a"
 
 
+def test_llm_stream_emits_tool_call_progress_events(monkeypatch) -> None:
+    chunk_1 = SimpleNamespace(
+        usage=None,
+        content="hello ",
+        reasoning_content=None,
+        tool_calls=[
+            SimpleNamespace(
+                index=0,
+                id="tc1",
+                function=SimpleNamespace(
+                    name=TODO_WRITE_TOOL_NAME,
+                    arguments='{"todos":[{"title":"a",',
+                ),
+            )
+        ],
+    )
+    chunk_2 = SimpleNamespace(
+        usage=_FakeUsage(),
+        content="world",
+        reasoning_content=None,
+        tool_calls=[
+            SimpleNamespace(
+                index=0,
+                id=None,
+                function=SimpleNamespace(name=None, arguments='"status":"pending"}]}'),
+            )
+        ],
+    )
+
+    def stream_call(kwargs: dict[str, Any]) -> Any:
+        assert kwargs["stream"] is True
+        return [chunk_1, chunk_2]
+
+    _FakeChatClient.behavior_by_endpoint = {"stream-events": stream_call}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[EndpointTarget(endpoint_id="stream-events", api_key="k", api_base="https://stream.example/v1")],
+        backend="moonshot",
+        selected_model="kimi-k2.5",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+    stream_events: list[dict[str, Any]] = []
+
+    response = llm.complete(
+        model="kimi-k2.5",
+        messages=[Message(role="user", content="hi")],
+        tools=[],
+        stream_callback=stream_events.append,
+    )
+
+    assert response.content == "hello world"
+    assert [event["event"] for event in stream_events] == [
+        "assistant_delta",
+        "tool_call_started",
+        "tool_call_progress",
+        "assistant_delta",
+        "tool_call_progress",
+    ]
+    assert stream_events[1] == {
+        "event": "tool_call_started",
+        "tool_call_id": "tc1",
+        "tool_call_index": 0,
+        "function_name": TODO_WRITE_TOOL_NAME,
+        "arguments_chars": 23,
+        "estimated_tokens": 6,
+    }
+    assert stream_events[-1]["tool_call_id"] == "tc1"
+    assert stream_events[-1]["arguments_chars"] == len('{"todos":[{"title":"a","status":"pending"}]}')
+    assert stream_events[-1]["estimated_tokens"] == 11
+
+
 def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
     chunk_1 = SimpleNamespace(
         usage=None,
