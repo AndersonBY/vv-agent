@@ -27,7 +27,7 @@ def log_handler(event: str, payload: dict[str, Any]) -> None:
 
 default_agent = AgentDefinition(
     description="你是任务规划 Agent, 先拆任务, 再逐步执行并维护 todo.",
-    model="kimi-k2.5",
+    model="kimi-k2.6",
     max_cycles=10,
     enable_todo_management=True,
 )
@@ -42,11 +42,11 @@ agents = {
     ),
     "orchestrator": AgentDefinition(
         description="你是主控 Agent, 负责把任务分派给已定义的子 Agent.",
-        model="kimi-k2.5",
+        model="kimi-k2.6",
         enable_sub_agents=True,
         sub_agents={
             "research-sub": SubAgentConfig(
-                model="kimi-k2.5",
+                model="kimi-k2.6",
                 description="负责背景检索和资料整理.",
                 max_cycles=8,
             ),

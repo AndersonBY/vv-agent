@@ -11,10 +11,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from vv_llm.settings import Settings
 
-_ALIAS_MAP = {
-    "kimi-k2.5": "kimi-k2-thinking",
-}
-
 
 @dataclass(slots=True)
 class EndpointConfig:
@@ -103,7 +99,7 @@ def resolve_model_endpoint(settings: dict[str, Any], backend: str, model: str) -
     if not isinstance(models, dict):
         raise ConfigError(f"Backend {backend!r} has no models")
 
-    selected_model = model if model in models else _ALIAS_MAP.get(model, model)
+    selected_model = model
     model_config = models.get(selected_model)
     if not isinstance(model_config, dict):
         available = ", ".join(sorted(models.keys())[:10])

@@ -139,7 +139,7 @@ def main() -> None:
     settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
     workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
     backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
 
     workspace.mkdir(parents=True, exist_ok=True)
     sample_log = workspace / "logs" / "app.log"

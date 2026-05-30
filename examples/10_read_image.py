@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example: call read_image with kimi-k2.5 and write Markdown report."""
+"""Example: call read_image with kimi-k2.6 and write Markdown report."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def main() -> None:
     image_path = os.getenv("V_AGENT_EXAMPLE_IMAGE_PATH", "test_image.png")
     output_path = os.getenv("V_AGENT_EXAMPLE_OUTPUT_PATH", "artifacts/image_read_report.md")
     backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
     verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
     workspace.mkdir(parents=True, exist_ok=True)

@@ -34,7 +34,7 @@ def stream_callback(text: str) -> None:
 def main() -> None:
     settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
     backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
     workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
     verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
 

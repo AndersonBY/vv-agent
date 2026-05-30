@@ -73,7 +73,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run a vv-agent task against configured LLM endpoint")
     parser.add_argument("--prompt", required=True, help="Task prompt")
     parser.add_argument("--backend", default="moonshot", help="Provider backend key in LLM_SETTINGS")
-    parser.add_argument("--model", default="kimi-k2.5", help="Model key in provider models")
+    parser.add_argument("--model", default="kimi-k2.6", help="Model key in provider models")
     parser.add_argument(
         "--settings-file",
         default=os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"),

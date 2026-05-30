@@ -60,7 +60,7 @@ def _select_live_backend_model(settings_file: Path) -> tuple[str, str]:
         ("gemini", "gemini-2.5-flash"),
         ("deepseek", "deepseek-chat"),
         ("qwen", "qwen2.5-72b-instruct"),
-        ("moonshot", "kimi-k2.5"),
+        ("moonshot", "kimi-k2.6"),
     ]
     failures: list[str] = []
 

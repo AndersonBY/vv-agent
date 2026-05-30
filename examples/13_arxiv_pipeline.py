@@ -87,7 +87,7 @@ def main() -> None:
     settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
     workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace/arxiv_memory_demo")).resolve()
     backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
     token_budget = int(os.getenv("V_AGENT_EXAMPLE_TOKEN_BUDGET", "50000"))
     verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
 

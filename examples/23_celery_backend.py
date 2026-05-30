@@ -60,7 +60,7 @@ def run_agent_task(prompt: str) -> dict[str, Any]:
     """在 worker 进程中执行一次 agent 调用, 返回结果摘要."""
     settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
     backend_name = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
     workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -101,7 +101,7 @@ def log_handler(event: str, payload: dict[str, Any]) -> None:
 def main() -> None:
     settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
     backend_name = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
     workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
     verbose = os.getenv(
         "V_AGENT_EXAMPLE_VERBOSE", "true",

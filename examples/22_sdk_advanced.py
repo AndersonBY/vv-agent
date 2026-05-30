@@ -29,7 +29,7 @@ def on_token(text: str) -> None:
 
 agent = AgentDefinition(
     description="你是一个简洁的助手, 用最少的话回答问题.",
-    model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5"),
+    model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
     max_cycles=5,
 )
 

@@ -31,7 +31,7 @@ def main() -> None:
     workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
     skills_dir = os.getenv("V_AGENT_EXAMPLE_SKILLS_DIR", "skills")
     backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
     max_cycles = int(os.getenv("V_AGENT_EXAMPLE_MAX_CYCLES", "80"))
     verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
 

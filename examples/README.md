@@ -11,7 +11,7 @@
 | `V_AGENT_LOCAL_SETTINGS` | `local_settings.py` | LLM 后端配置文件 |
 | `V_AGENT_EXAMPLE_WORKSPACE` | `./workspace` | 工作目录 |
 | `V_AGENT_EXAMPLE_BACKEND` | `moonshot` | LLM 后端 |
-| `V_AGENT_EXAMPLE_MODEL` | `kimi-k2.5` | 模型名称 |
+| `V_AGENT_EXAMPLE_MODEL` | `kimi-k2.6` | 模型名称 |
 | `V_AGENT_EXAMPLE_VERBOSE` | `true` | 是否打印运行时日志 |
 
 ---

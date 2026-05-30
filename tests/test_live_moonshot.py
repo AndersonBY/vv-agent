@@ -26,7 +26,7 @@ def test_moonshot_openai_compatible_smoke() -> None:
         pytest.skip(f"Live settings file not found: {settings_file}")
 
     backend = os.getenv("V_AGENT_LIVE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_LIVE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_LIVE_MODEL", "kimi-k2.6")
 
     llm, resolved = build_openai_llm_from_local_settings(settings_file, backend=backend, model=model)
     response = llm.complete(

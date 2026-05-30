@@ -14,7 +14,7 @@ profiles: dict[str, AgentDefinition] = {
     "researcher": AgentDefinition(
         description="你是研究助理, 先检索材料再输出结构化结论.",
         backend="moonshot",
-        model="kimi-k2.5",
+        model="kimi-k2.6",
         max_cycles=12,
         enable_todo_management=True,
     ),
@@ -28,7 +28,7 @@ profiles: dict[str, AgentDefinition] = {
     "computer": AgentDefinition(
         description="你是桌面执行代理, 优先使用工具完成任务.",
         backend="moonshot",
-        model="kimi-k2.5",
+        model="kimi-k2.6",
         max_cycles=16,
         agent_type="computer",
     ),

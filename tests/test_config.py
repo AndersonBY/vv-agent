@@ -24,11 +24,11 @@ LLM_SETTINGS = {
         "moonshot": {
             "default_endpoint": "moonshot-default",
             "models": {
-                "kimi-k2-thinking": {
-                    "id": "kimi-k2-thinking",
+                "kimi-k2.6": {
+                    "id": "kimi-k2.6",
                     "endpoints": [
-                        {"endpoint_id": "moonshot-default", "model_id": "kimi-k2-thinking"},
-                        {"endpoint_id": "moonshot-backup", "model_id": "kimi-k2-thinking"},
+                        {"endpoint_id": "moonshot-default", "model_id": "kimi-k2.6"},
+                        {"endpoint_id": "moonshot-backup", "model_id": "kimi-k2.6"},
                     ],
                 }
             },
@@ -61,30 +61,63 @@ def test_load_llm_settings_from_file(sample_settings_file: Path) -> None:
 
 def test_resolve_model_endpoint(sample_settings_file: Path) -> None:
     settings = load_llm_settings_from_file(sample_settings_file)
-    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
+    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
     assert resolved.backend == "moonshot"
-    assert resolved.model_id == "kimi-k2-thinking"
+    assert resolved.model_id == "kimi-k2.6"
     assert resolved.endpoint.endpoint_id == "moonshot-default"
     assert resolved.endpoint.api_key == "sk-test-123456789"
 
 
 def test_resolve_model_endpoint_collects_all_endpoint_options(sample_settings_file: Path) -> None:
     settings = load_llm_settings_from_file(sample_settings_file)
-    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
+    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
     assert len(resolved.endpoint_options) == 2
     assert {item.endpoint.endpoint_id for item in resolved.endpoint_options} == {"moonshot-default", "moonshot-backup"}
 
 
-def test_resolve_model_endpoint_alias(sample_settings_file: Path) -> None:
+def test_resolve_model_endpoint_does_not_alias_missing_kimi_k25(sample_settings_file: Path) -> None:
     settings = load_llm_settings_from_file(sample_settings_file)
-    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.5")
-    assert resolved.selected_model == "kimi-k2-thinking"
+    with pytest.raises(ConfigError, match="kimi-k2\\.5"):
+        resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.5")
 
 
-def test_resolve_model_endpoint_canonical_alias(sample_settings_file: Path) -> None:
+def test_resolve_model_endpoint_keeps_kimi_k25_and_k26_distinct() -> None:
+    settings = {
+        "backends": {
+            "moonshot": {
+                "models": {
+                    "kimi-k2.5": {
+                        "id": "kimi-k2.5",
+                        "endpoints": [{"endpoint_id": "moonshot-default", "model_id": "kimi-k2.5"}],
+                    },
+                    "kimi-k2.6": {
+                        "id": "kimi-k2.6",
+                        "endpoints": [{"endpoint_id": "moonshot-default", "model_id": "kimi-k2.6"}],
+                    },
+                }
+            }
+        },
+        "endpoints": [
+            {
+                "id": "moonshot-default",
+                "api_key": "sk-test-123456789",
+                "api_base": "https://api.moonshot.cn/v1",
+            }
+        ],
+    }
+
+    k25 = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.5")
+    k26 = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
+    assert k25.selected_model == "kimi-k2.5"
+    assert k25.model_id == "kimi-k2.5"
+    assert k26.selected_model == "kimi-k2.6"
+    assert k26.model_id == "kimi-k2.6"
+
+
+def test_resolve_model_endpoint_uses_exact_model_key(sample_settings_file: Path) -> None:
     settings = load_llm_settings_from_file(sample_settings_file)
-    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
-    assert resolved.selected_model == "kimi-k2-thinking"
+    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
+    assert resolved.selected_model == "kimi-k2.6"
 
 
 def test_decode_api_key_with_compound_format() -> None:
@@ -102,7 +135,7 @@ def test_missing_llm_settings_raises(tmp_path: Path) -> None:
 def test_parse_project_example_settings_file() -> None:
     file_path = Path(__file__).resolve().parents[1] / "local_settings.example.py"
     settings = load_llm_settings_from_file(file_path)
-    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
+    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
     assert resolved.endpoint.api_base.startswith("https://")
     assert resolved.endpoint.api_key.startswith("REPLACE_WITH")
 
@@ -116,7 +149,7 @@ LLM_SETTINGS = {
         "backends": {
             "moonshot": {
                 "default_endpoint": "moonshot-default",
-                "models": {"kimi-k2-thinking": {"id": "kimi-k2-thinking", "endpoints": ["moonshot-default"]}},
+                "models": {"kimi-k2.6": {"id": "kimi-k2.6", "endpoints": ["moonshot-default"]}},
             }
         },
         "endpoints": [{"id": "moonshot-default", "api_key": "sk-test-123456789", "api_base": "https://api.moonshot.cn/v1"}],
@@ -126,17 +159,17 @@ LLM_SETTINGS = {
         encoding="utf-8",
     )
     settings = load_llm_settings_from_file(settings_file)
-    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
+    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
     assert resolved.endpoint.endpoint_id == "moonshot-default"
 
 
 def test_build_vv_llm_settings_normalizes_provider_aliases_and_keys(sample_settings_file: Path) -> None:
     settings = load_llm_settings_from_file(sample_settings_file)
-    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2-thinking")
+    resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
 
     vv_settings = build_vv_llm_settings(settings=settings, backend="moonshot", resolved=resolved)
     backend_settings = vv_settings.get_backend(BackendType.Moonshot)
-    model_setting = backend_settings.get_model_setting("kimi-k2-thinking")
+    model_setting = backend_settings.get_model_setting("kimi-k2.6")
     first_endpoint = model_setting.endpoints[0]
     assert isinstance(first_endpoint, dict)
 

@@ -7,38 +7,38 @@ LLM_SETTINGS = {
     "VERSION": "2",
     "backends": {
         "moonshot": {
-            "default_endpoint": "moonshot-default",
+            "default_endpoint": "moonshot-official",
             "models": {
-                "kimi-k2-thinking": {
-                    "id": "kimi-k2-thinking",
+                "kimi-k2.6": {
+                    "id": "kimi-k2.6",
                     "endpoints": [
                         {
-                            "endpoint_id": "moonshot-default",
-                            "model_id": "kimi-k2-thinking",
+                            "endpoint_id": "moonshot-official",
+                            "model_id": "kimi-k2.6",
                         }
                     ],
                 },
             },
         },
         "openai": {
-            "default_endpoint": "openai-default",
+            "default_endpoint": "openai-official",
             "models": {
-                "gpt-4o-mini": {
-                    "id": "gpt-4o-mini",
-                    "endpoints": ["openai-default"],
+                "gpt-5.5": {
+                    "id": "gpt-5.5",
+                    "endpoints": ["openai-official"],
                 }
             },
         },
     },
     "endpoints": [
         {
-            "id": "moonshot-default",
+            "id": "moonshot-official",
             "api_key": "REPLACE_WITH_MOONSHOT_API_KEY",
             "api_base": "https://api.moonshot.cn/v1",
             "endpoint_type": "openai",
         },
         {
-            "id": "openai-default",
+            "id": "openai-official",
             "api_key": "REPLACE_WITH_OPENAI_API_KEY",
             "api_base": "https://api.openai.com/v1",
             "endpoint_type": "openai",
@@ -52,4 +52,4 @@ LLM_SETTINGS = {
 # 2) local_settings.py constants below
 # 3) fallback to runtime default_backend + task.model
 DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND = "moonshot"
-DEFAULT_USER_MEMORY_SUMMARIZE_MODEL = "kimi-k2.5"
+DEFAULT_USER_MEMORY_SUMMARIZE_MODEL = "kimi-k2.6"

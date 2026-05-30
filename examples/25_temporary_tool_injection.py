@@ -239,7 +239,7 @@ def main() -> None:
     settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
     workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace/temp_tool_demo")).resolve()
     backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
 
     start_cycle = _env_int("V_AGENT_TEMP_TOOL_START_CYCLE", 2)
     end_cycle = _env_int("V_AGENT_TEMP_TOOL_END_CYCLE", 4)

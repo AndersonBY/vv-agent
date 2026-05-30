@@ -39,10 +39,10 @@ uv run pytest
 ### CLI
 
 ```bash
-uv run vv-agent --prompt "概述一下这个框架" --backend moonshot --model kimi-k2.5
+uv run vv-agent --prompt "概述一下这个框架" --backend moonshot --model kimi-k2.6
 
 # 带每轮日志
-uv run vv-agent --prompt "概述一下这个框架" --backend moonshot --model kimi-k2.5 --verbose
+uv run vv-agent --prompt "概述一下这个框架" --backend moonshot --model kimi-k2.6 --verbose
 ```
 
 参数：`--settings-file`、`--backend`、`--model`、`--verbose`。
@@ -55,7 +55,7 @@ from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask
 
-llm, resolved = build_openai_llm_from_local_settings("local_settings.py", backend="moonshot", model="kimi-k2.5")
+llm, resolved = build_openai_llm_from_local_settings("local_settings.py", backend="moonshot", model="kimi-k2.6")
 runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
 
 result = runtime.run(AgentTask(
@@ -75,7 +75,7 @@ from vv_agent.sdk import AgentSDKClient, AgentSDKOptions
 client = AgentSDKClient(options=AgentSDKOptions(
     settings_file="local_settings.py",
     default_backend="moonshot",
-    default_model="kimi-k2.5",
+    default_model="kimi-k2.6",
 ))
 result = client.run("用一句话解释 Python 的 GIL。")
 print(result.final_answer)
@@ -96,7 +96,7 @@ from vv_agent.sdk import AgentSDKClient, AgentSDKOptions
 client = AgentSDKClient(options=AgentSDKOptions(
     settings_file="local_settings.py",
     default_backend="moonshot",
-    default_model="kimi-k2.5",
+    default_model="kimi-k2.6",
     workspace="./workspace/default",
 ))
 
@@ -144,7 +144,7 @@ client = AgentSDKClient(
     agents={
         "desktop": AgentDefinition(
             description="桌面助手",
-            model="kimi-k2.5",
+            model="kimi-k2.6",
             # 仅对该 Agent 强制指定 shell（可选）
             bash_shell=None,
             bash_env={"HTTP_PROXY": "http://127.0.0.1:7890"},
@@ -178,7 +178,7 @@ register_cycle_task(celery_app)
 recipe = RuntimeRecipe(
     settings_file="local_settings.py",
     backend="moonshot",
-    model="kimi-k2.5",
+    model="kimi-k2.6",
     workspace="./workspace",
 )
 backend = CeleryBackend(celery_app=app, state_store=store, runtime_recipe=recipe)
@@ -440,5 +440,5 @@ V_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live   # 集成测试（需要真实 L
 |------|--------|------|
 | `V_AGENT_LOCAL_SETTINGS` | `local_settings.py` | 配置文件路径 |
 | `V_AGENT_LIVE_BACKEND` | `moonshot` | LLM 后端 |
-| `V_AGENT_LIVE_MODEL` | `kimi-k2.5` | 模型名称 |
+| `V_AGENT_LIVE_MODEL` | `kimi-k2.6` | 模型名称 |
 | `V_AGENT_ENABLE_BASE64_KEY_DECODE` | - | 设为 `1` 启用 base64 API key 解码 |

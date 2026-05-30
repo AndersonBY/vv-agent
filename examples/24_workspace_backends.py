@@ -160,7 +160,7 @@ def main() -> None:
         os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"),
     )
     backend_name = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.5")
+    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
     workspace = Path(
         os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace"),
     ).resolve()
