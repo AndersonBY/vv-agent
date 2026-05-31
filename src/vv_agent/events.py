@@ -380,6 +380,7 @@ class ToolCallCompletedEvent(RunEvent):
 
 @dataclass(frozen=True, slots=True)
 class ApprovalRequestedEvent(RunEvent):
+    request_id: str = ""
     tool_name: str = ""
     tool_call_id: str = ""
     message: str = ""
@@ -392,6 +393,7 @@ class ApprovalRequestedEvent(RunEvent):
         tool_name: str,
         tool_call_id: str,
         message: str,
+        request_id: str = "",
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -415,12 +417,14 @@ class ApprovalRequestedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
+        object.__setattr__(self, "request_id", request_id)
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "tool_call_id", tool_call_id)
         object.__setattr__(self, "message", message)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
+        payload["request_id"] = self.request_id
         payload["tool_name"] = self.tool_name
         payload["tool_call_id"] = self.tool_call_id
         payload["message"] = self.message
@@ -429,6 +433,7 @@ class ApprovalRequestedEvent(RunEvent):
 
 @dataclass(frozen=True, slots=True)
 class ApprovalResolvedEvent(RunEvent):
+    request_id: str = ""
     tool_name: str = ""
     tool_call_id: str = ""
     approved: bool | None = None
@@ -441,6 +446,7 @@ class ApprovalResolvedEvent(RunEvent):
         tool_name: str,
         tool_call_id: str,
         approved: bool | None = None,
+        request_id: str = "",
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -464,12 +470,14 @@ class ApprovalResolvedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
+        object.__setattr__(self, "request_id", request_id)
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "tool_call_id", tool_call_id)
         object.__setattr__(self, "approved", approved)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
+        payload["request_id"] = self.request_id
         payload["tool_name"] = self.tool_name
         payload["tool_call_id"] = self.tool_call_id
         if self.approved is not None:
@@ -676,6 +684,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "approval_requested":
         return ApprovalRequestedEvent(
+            request_id=str(payload.get("request_id") or ""),
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
             message=str(payload.get("message") or ""),
@@ -683,6 +692,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "approval_resolved":
         return ApprovalResolvedEvent(
+            request_id=str(payload.get("request_id") or ""),
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
             approved=payload.get("approved") if isinstance(payload.get("approved"), bool) else None,
@@ -799,6 +809,7 @@ def event_from_runtime_log(
                 trace_id=trace_id,
                 agent_name=agent_name,
                 cycle_index=cycle_index,
+                request_id=str(metadata.get("request_id") or ""),
                 tool_name=str(metadata.get("tool_name") or payload.get("tool_name") or ""),
                 tool_call_id=str(payload.get("tool_call_id") or ""),
                 message=str(metadata.get("message") or payload.get("content") or ""),

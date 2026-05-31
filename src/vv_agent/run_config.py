@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from vv_agent.approval import ApprovalBroker, ApprovalProvider
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.event_store import RunEventStore
 from vv_agent.llm.base import LLMClient
@@ -45,6 +46,9 @@ class RunConfig:
     tool_policy: ToolPolicy | None = None
     execution_backend: ExecutionBackend | None = None
     cancellation_token: CancellationToken | None = None
+    approval_provider: ApprovalProvider | None = None
+    approval_timeout_seconds: float | None = None
+    approval_broker: ApprovalBroker | None = None
     event_store: RunEventStore | None = None
     event_store_fail_closed: bool = False
     stream: StreamHandler | None = None

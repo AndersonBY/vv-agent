@@ -1,4 +1,5 @@
 from vv_agent.agent import Agent, RunContext
+from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import (
     ConfigError,
     EndpointConfig,
@@ -42,7 +43,7 @@ from vv_agent.interactive import (
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.result import RunResult
 from vv_agent.run_config import ModelProvider, RunConfig, ToolPolicy
-from vv_agent.run_handle import ApprovalDecision, RunHandle, RunHandleState
+from vv_agent.run_handle import RunHandle, RunHandleState
 from vv_agent.runner import Runner
 from vv_agent.sessions import MemorySession, RedisSession, Session, SQLiteSession
 from vv_agent.tools import (
@@ -71,6 +72,8 @@ __all__ = [
     "AgentStartedEvent",
     "AgentStatus",
     "ApprovalDecision",
+    "ApprovalProvider",
+    "ApprovalRequest",
     "ApprovalRequestedEvent",
     "ApprovalResolvedEvent",
     "AssistantDeltaEvent",

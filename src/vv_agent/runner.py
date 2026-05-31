@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from vv_agent.agent import Agent, RunContext
+from vv_agent.approval import ApprovalBroker, ApprovalRequest
 from vv_agent.config import (
     EndpointConfig,
     EndpointOption,
@@ -17,6 +18,8 @@ from vv_agent.config import (
     load_llm_settings_from_file,
 )
 from vv_agent.events import (
+    ApprovalRequestedEvent,
+    ApprovalResolvedEvent,
     HandoffEvent,
     RunEvent,
     RunFailedEvent,
@@ -66,6 +69,8 @@ class Runner:
         run_config: RunConfig,
         event_sink: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
+        if run_config.approval_provider is not None and run_config.approval_broker is None:
+            run_config = replace(run_config, approval_broker=ApprovalBroker())
         run_id = f"run_{uuid.uuid4().hex}"
         trace_id = cls._resolve_trace_id(run_config)
         collected_events: list[RunEvent] = []
@@ -182,7 +187,11 @@ class Runner:
             cancellation_token=run_config.cancellation_token,
             stream_callback=stream_callback,
             metadata={
+                "_vv_agent_agent_name": agent.name,
+                "_vv_agent_emit_event": capture_event,
                 "trace_id": trace_id,
+                "_vv_agent_run_id": run_id,
+                "_vv_agent_trace_id": trace_id,
                 "_vv_agent_model_settings": resolved_model_settings,
                 "_vv_agent_run_context": guardrail_context,
                 "_vv_agent_session": run_config.session,
@@ -470,6 +479,13 @@ class Runner:
             needs_approval = needs_approval or bool(tool.needs_approval)
         if not needs_approval:
             return None
+        if run_config.approval_provider is not None:
+            return Runner._brokered_approval_result(
+                tool,
+                context=context,
+                arguments=arguments,
+                run_config=run_config,
+            )
         message = f"Approval required for tool {tool.name}."
         return ToolExecutionResult(
             tool_call_id="",
@@ -478,6 +494,135 @@ class Runner:
             directive=ToolDirective.WAIT_USER,
             metadata={
                 "mode": "approval_requested",
+                "tool_name": tool.name,
+                "arguments": dict(arguments),
+                "message": message,
+            },
+        )
+
+    @staticmethod
+    def _brokered_approval_result(
+        tool: FunctionTool,
+        *,
+        context: ToolContext,
+        arguments: dict[str, Any],
+        run_config: RunConfig,
+    ) -> ToolExecutionResult | None:
+        provider = run_config.approval_provider
+        broker = run_config.approval_broker
+        runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
+        run_id = str(runtime_metadata.get("_vv_agent_run_id") or "")
+        trace_id = str(runtime_metadata.get("_vv_agent_trace_id") or runtime_metadata.get("trace_id") or "")
+        agent_name = str(runtime_metadata.get("_vv_agent_agent_name") or "")
+        request = ApprovalRequest.create(
+            tool_name=tool.name,
+            tool_call_id=context.tool_call_id,
+            arguments=arguments,
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            cycle_index=context.cycle_index,
+            metadata={"tool_metadata": dict(tool.metadata)},
+        )
+        if provider is None or not provider.should_request(request):
+            return None
+        if broker is None:
+            broker = ApprovalBroker()
+        broker.register(request)
+
+        def emit(event: RunEvent) -> None:
+            event_sink = runtime_metadata.get("_vv_agent_emit_event")
+            if callable(event_sink):
+                event_sink(event)
+
+        message = f"Approval required for tool {tool.name}."
+        emit(
+            ApprovalRequestedEvent(
+                run_id=run_id,
+                trace_id=trace_id,
+                agent_name=agent_name,
+                cycle_index=context.cycle_index,
+                request_id=request.request_id,
+                tool_name=tool.name,
+                tool_call_id=context.tool_call_id,
+                message=message,
+                metadata={
+                    "arguments": dict(arguments),
+                    "tool_name": tool.name,
+                },
+            )
+        )
+
+        decision = provider.decide(request)
+        if decision is None:
+            decision = broker.wait(request.request_id, timeout=run_config.approval_timeout_seconds)
+        else:
+            broker.resolve(request.request_id, decision)
+            decision = broker.wait(request.request_id, timeout=0)
+        approved = decision.action in {"allow", "allow_session"}
+        emit(
+            ApprovalResolvedEvent(
+                run_id=run_id,
+                trace_id=trace_id,
+                agent_name=agent_name,
+                cycle_index=context.cycle_index,
+                request_id=request.request_id,
+                tool_name=tool.name,
+                tool_call_id=context.tool_call_id,
+                approved=approved,
+                metadata={
+                    "action": decision.action,
+                    "reason": decision.reason,
+                    "decision_metadata": dict(decision.metadata),
+                },
+            )
+        )
+        if approved:
+            return None
+        if decision.action == "timeout":
+            return Runner._approval_error_result(
+                tool=tool,
+                context=context,
+                arguments=arguments,
+                request_id=request.request_id,
+                error_code="tool_approval_timeout",
+                message=decision.reason or "Approval request timed out.",
+            )
+        return Runner._approval_error_result(
+            tool=tool,
+            context=context,
+            arguments=arguments,
+            request_id=request.request_id,
+            error_code="tool_approval_denied",
+            message=decision.reason or f"Approval denied for tool {tool.name}.",
+        )
+
+    @staticmethod
+    def _approval_error_result(
+        *,
+        tool: FunctionTool,
+        context: ToolContext,
+        arguments: dict[str, Any],
+        request_id: str,
+        error_code: str,
+        message: str,
+    ) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            tool_call_id=context.tool_call_id,
+            content=json.dumps(
+                {
+                    "ok": False,
+                    "error": message,
+                    "error_code": error_code,
+                },
+                ensure_ascii=False,
+            ),
+            status="error",
+            status_code=ToolResultStatus.ERROR,
+            error_code=error_code,
+            metadata={
+                "mode": "approval_resolved",
+                "request_id": request_id,
                 "tool_name": tool.name,
                 "arguments": dict(arguments),
                 "message": message,

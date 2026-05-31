@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from vv_agent.agent import Agent
+from vv_agent.approval import ApprovalBroker, ApprovalDecision
 from vv_agent.events import RunEvent
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
     from vv_agent.runner import Runner
 
 
-ApprovalDecision = Literal["approve", "reject", "approved", "rejected", "allow", "deny"]
+ApprovalInput = ApprovalDecision | str
 RunHandleStatus = Literal["pending", "running", "wait_user", "completed", "failed", "max_cycles", "cancelled"]
 
 
@@ -41,11 +42,13 @@ class RunHandle:
         done_event: threading.Event,
         thread: threading.Thread,
         cancellation_token: CancellationToken,
+        approval_broker: ApprovalBroker,
     ) -> None:
         self._event_queue = event_queue
         self._done_event = done_event
         self._thread = thread
         self._cancellation_token = cancellation_token
+        self._approval_broker = approval_broker
         self._lock = threading.Lock()
         self._result: RunResult | None = None
         self._exception: BaseException | None = None
@@ -56,13 +59,16 @@ class RunHandle:
         event_queue: queue.Queue[RunEvent | _Sentinel] = queue.Queue()
         done_event = threading.Event()
         cancellation_token = run_config.cancellation_token or CancellationToken()
+        approval_broker = run_config.approval_broker or ApprovalBroker()
         worker_config = run_config.with_cancellation_token(cancellation_token)
+        worker_config.approval_broker = approval_broker
 
         handle = cls(
             event_queue=event_queue,
             done_event=done_event,
             thread=threading.Thread(),
             cancellation_token=cancellation_token,
+            approval_broker=approval_broker,
         )
 
         def event_sink(event: RunEvent) -> None:
@@ -122,9 +128,8 @@ class RunHandle:
         del message
         raise NotImplementedError("RunHandle.follow_up() is not supported by the synchronous runner yet.")
 
-    def approve(self, request_id: str, decision: ApprovalDecision | str) -> None:
-        del request_id, decision
-        raise NotImplementedError("RunHandle.approve() is not supported by the synchronous runner yet.")
+    def approve(self, request_id: str, decision: ApprovalInput) -> None:
+        self._approval_broker.resolve(request_id, decision)
 
     def resume(self, resume_token: str, payload: dict[str, Any] | None = None) -> None:
         del resume_token, payload
