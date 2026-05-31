@@ -620,6 +620,102 @@ def new_trace_id() -> str:
     return f"trace_{uuid.uuid4().hex}"
 
 
+def _common_event_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": str(payload["run_id"]),
+        "trace_id": str(payload["trace_id"]),
+        "session_id": payload.get("session_id"),
+        "parent_event_id": payload.get("parent_event_id"),
+        "parent_run_id": payload.get("parent_run_id"),
+        "event_id": payload.get("event_id"),
+        "created_at": payload.get("created_at"),
+        "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
+    }
+
+
+def _with_cycle_and_agent(payload: dict[str, Any], common: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **common,
+        "cycle_index": payload.get("cycle_index") if isinstance(payload.get("cycle_index"), int) else None,
+        "agent_name": payload.get("agent_name"),
+    }
+
+
+def event_from_dict(payload: dict[str, Any]) -> RunEvent:
+    if payload.get("version") != RUN_EVENT_VERSION:
+        raise ValueError(f"Unsupported run event version: {payload.get('version')!r}")
+
+    event_type = payload.get("type")
+    common = _common_event_kwargs(payload)
+    if event_type == "run_started":
+        return RunStartedEvent(input=str(payload.get("input") or ""), agent_name=payload.get("agent_name"), **common)
+    if event_type == "agent_started":
+        return AgentStartedEvent(**_with_cycle_and_agent(payload, common))
+    if event_type == "llm_started":
+        return LLMStartedEvent(model=str(payload.get("model") or ""), **_with_cycle_and_agent(payload, common))
+    if event_type == "memory_compacted":
+        return MemoryCompactedEvent(
+            before_count=payload.get("before_count") if isinstance(payload.get("before_count"), int) else None,
+            after_count=payload.get("after_count") if isinstance(payload.get("after_count"), int) else None,
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "assistant_delta":
+        return AssistantDeltaEvent(delta=str(payload.get("delta") or ""), **_with_cycle_and_agent(payload, common))
+    if event_type == "tool_call_started":
+        return ToolCallStartedEvent(
+            tool_name=str(payload.get("tool_name") or ""),
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "tool_call_completed":
+        return ToolCallCompletedEvent(
+            tool_name=str(payload.get("tool_name") or ""),
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            status=str(payload.get("status") or ""),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "approval_requested":
+        return ApprovalRequestedEvent(
+            tool_name=str(payload.get("tool_name") or ""),
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            message=str(payload.get("message") or ""),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "approval_resolved":
+        return ApprovalResolvedEvent(
+            tool_name=str(payload.get("tool_name") or ""),
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            approved=payload.get("approved") if isinstance(payload.get("approved"), bool) else None,
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "handoff":
+        return HandoffEvent(
+            source_agent=str(payload.get("source_agent") or payload.get("agent_name") or ""),
+            target_agent=str(payload.get("target_agent") or ""),
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            run_id=common["run_id"],
+            trace_id=common["trace_id"],
+            cycle_index=payload.get("cycle_index") if isinstance(payload.get("cycle_index"), int) else None,
+            session_id=common["session_id"],
+            parent_event_id=common["parent_event_id"],
+            parent_run_id=common["parent_run_id"],
+            event_id=common["event_id"],
+            created_at=common["created_at"],
+            metadata=common["metadata"],
+        )
+    if event_type == "run_completed":
+        final_output = payload.get("final_output")
+        return RunCompletedEvent(
+            final_output=str(final_output) if final_output is not None else None,
+            status=str(payload.get("status") or ""),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "run_failed":
+        return RunFailedEvent(error=str(payload.get("error") or ""), **_with_cycle_and_agent(payload, common))
+
+    return RunEvent(type=str(event_type or "run_event"), **_with_cycle_and_agent(payload, common))
+
+
 def event_from_stream_payload(
     payload: dict[str, Any],
     *,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+import warnings
 from collections.abc import Callable, Iterator
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
@@ -97,6 +98,13 @@ class Runner:
                 span = tool_spans.pop(event.tool_call_id, None)
                 if span is not None:
                     cls._end_span(trace_processors, span, metadata=event.to_dict())
+            if run_config.event_store is not None:
+                try:
+                    run_config.event_store.append(event)
+                except Exception as exc:
+                    if run_config.event_store_fail_closed:
+                        raise
+                    warnings.warn(f"Run event store append failed: {exc}", RuntimeWarning, stacklevel=2)
             if run_config.stream is not None:
                 run_config.stream(event)
             if event_sink is not None:

@@ -8,6 +8,7 @@ from vv_agent.config import (
     load_llm_settings_from_file,
     resolve_model_endpoint,
 )
+from vv_agent.event_store import JsonlRunEventStore, RunEventStore
 from vv_agent.events import (
     AgentStartedEvent,
     ApprovalRequestedEvent,
@@ -81,6 +82,7 @@ __all__ = [
     "HandoffEvent",
     "InteractiveAgentClient",
     "InteractiveAgentDefinition",
+    "JsonlRunEventStore",
     "LLMStartedEvent",
     "MemoryCompactedEvent",
     "MemorySession",
@@ -94,6 +96,7 @@ __all__ = [
     "RunConfig",
     "RunContext",
     "RunEvent",
+    "RunEventStore",
     "RunFailedEvent",
     "RunHandle",
     "RunHandleState",
