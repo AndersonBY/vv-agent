@@ -3,9 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
-from vv_agent import Agent, RunConfig, Runner, ToolPolicy, function_tool
+from vv_agent import Agent, RunConfig, Runner, ToolPolicy, build_default_registry, function_tool
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME, WRITE_FILE_TOOL_NAME
+from vv_agent.constants import (
+    BASH_TOOL_NAME,
+    CREATE_SUB_TASK_TOOL_NAME,
+    READ_IMAGE_TOOL_NAME,
+    TASK_FINISH_TOOL_NAME,
+    WRITE_FILE_TOOL_NAME,
+)
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 
@@ -102,6 +108,28 @@ def test_tool_policy_disallowed_tools_filters_custom_tool_schema(tmp_path: Path)
     assert "blocked" not in llm.tool_names
 
 
+def test_default_registry_factory_does_not_expose_gated_tools_for_plain_agent(tmp_path: Path) -> None:
+    llm = CapturingLLM()
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return llm, _resolved()
+
+    Runner.run_sync(
+        Agent(name="assistant", instructions="Use tools.", model="m"),
+        "go",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            tool_registry_factory=build_default_registry,
+        ),
+    )
+
+    assert BASH_TOOL_NAME not in llm.tool_names
+    assert CREATE_SUB_TASK_TOOL_NAME not in llm.tool_names
+    assert READ_IMAGE_TOOL_NAME not in llm.tool_names
+
+
 def test_tool_policy_disallowed_default_tool_cannot_execute_even_if_model_calls_it(tmp_path: Path) -> None:
     def model_provider(agent: Agent, run_config: RunConfig):
         del agent, run_config
@@ -124,6 +152,41 @@ def test_tool_policy_disallowed_default_tool_cannot_execute_even_if_model_calls_
     )
 
     assert not (tmp_path / "secret.txt").exists()
+    assert result.raw_result.cycles[0].tool_results[0].error_code == "tool_not_allowed"
+
+
+def test_tool_policy_can_use_tool_blocks_executor_registered_tool(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    @function_tool
+    def registered_executor(path: str) -> str:
+        calls.append(path)
+        return "ran"
+
+    def registry_factory():
+        registry = build_default_registry()
+        registry.register_executor(registered_executor.to_executor())
+        return registry
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return (
+            CapturingLLMWithToolCall("registered_executor", {"path": "secret.txt"}),
+            _resolved(),
+        )
+
+    result = Runner.run_sync(
+        Agent(name="assistant", instructions="Use tools.", model="m"),
+        "run",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            tool_registry_factory=registry_factory,
+            tool_policy=ToolPolicy(can_use_tool=lambda name, args: False),
+        ),
+    )
+
+    assert calls == []
     assert result.raw_result.cycles[0].tool_results[0].error_code == "tool_not_allowed"
 
 

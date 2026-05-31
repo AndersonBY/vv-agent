@@ -73,8 +73,12 @@ class ToolOrchestrator:
 
         self._emit_started(normalized_call, context=call_context, event_sink=event_sink)
         try:
-            approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
-            result = approval_result if approval_result is not None else executor.execute(normalized_call, call_context)
+            policy_result = self._policy_denial_result(executor, call=normalized_call, context=call_context)
+            if policy_result is not None:
+                result = policy_result
+            else:
+                approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
+                result = approval_result if approval_result is not None else executor.execute(normalized_call, call_context)
         except Exception as exc:
             if _is_cancelled_error(exc):
                 raise
@@ -112,9 +116,15 @@ class ToolOrchestrator:
         call: ToolCall,
         context: ToolContext,
     ) -> ToolExecutionResult | None:
-        if not executor.requires_approval(context, call.arguments):
-            return None
         metadata = _runtime_metadata(context)
+        approval_mode = str(metadata.get("_vv_agent_tool_policy_approval") or "default")
+        if approval_mode == "never":
+            return None
+        needs_approval = approval_mode == "always"
+        if not needs_approval:
+            needs_approval = executor.requires_approval(context, call.arguments)
+        if not needs_approval:
+            return None
         request = ApprovalRequest.create(
             tool_name=executor.name,
             tool_call_id=call.id,
@@ -165,6 +175,27 @@ class ToolOrchestrator:
                 "arguments": dict(call.arguments),
                 "message": message,
             },
+        )
+
+    @staticmethod
+    def _policy_denial_result(
+        executor: ToolExecutor,
+        *,
+        call: ToolCall,
+        context: ToolContext,
+    ) -> ToolExecutionResult | None:
+        if executor.metadata.get("policy_managed_by_handler"):
+            return None
+        can_use_tool = _runtime_metadata(context).get("_vv_agent_tool_policy_can_use_tool")
+        if not callable(can_use_tool):
+            return None
+        if bool(can_use_tool(call.name, dict(call.arguments))):
+            return None
+        message = f"Tool {call.name} is not allowed for these arguments."
+        return ToolOrchestrator._error_result(
+            call.id,
+            message,
+            error_code="tool_not_allowed",
         )
 
     @staticmethod

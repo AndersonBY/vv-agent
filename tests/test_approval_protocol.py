@@ -5,7 +5,16 @@ from threading import Event
 
 import pytest
 
-from vv_agent import Agent, AgentStatus, ApprovalRequestedEvent, RunConfig, Runner, build_default_registry, function_tool
+from vv_agent import (
+    Agent,
+    AgentStatus,
+    ApprovalRequestedEvent,
+    RunConfig,
+    Runner,
+    ToolPolicy,
+    build_default_registry,
+    function_tool,
+)
 from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
@@ -144,9 +153,98 @@ def test_executor_registered_tool_approval_can_be_approved_from_run_handle() -> 
     request_id = ""
     for event in handle.events():
         if isinstance(event, ApprovalRequestedEvent):
-            request_id = event.request_id
-            assert calls == []
-            handle.approve(request_id, ApprovalDecision.allow())
+            if event.tool_name == "dangerous_executor":
+                request_id = event.request_id
+                assert calls == []
+            handle.approve(event.request_id, ApprovalDecision.allow())
+        if event.type == "run_completed":
+            break
+
+    assert request_id
+    assert calls == ["ran"]
+    assert handle.result().final_output == "finished"
+
+
+def test_executor_approval_policy_never_skips_executor_approval() -> None:
+    calls: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def safe_executor() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    def registry_factory():
+        registry = build_default_registry()
+        registry.register_executor(safe_executor.to_executor())
+        return registry
+
+    agent = Agent(name="assistant", instructions="Use tool.", model="test-model")
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="safe_executor", arguments={})]),
+            _finish_response(),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        return llm, _resolved_model()
+
+    result = Runner.run_sync(
+        agent,
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            tool_registry_factory=registry_factory,
+            tool_policy=ToolPolicy(approval="never"),
+        ),
+    )
+
+    assert calls == ["ran"]
+    assert result.final_output == "finished"
+
+
+def test_executor_approval_policy_always_requests_executor_approval() -> None:
+    calls: list[str] = []
+
+    @function_tool
+    def policy_executor() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    def registry_factory():
+        registry = build_default_registry()
+        registry.register_executor(policy_executor.to_executor())
+        return registry
+
+    agent = Agent(name="assistant", instructions="Use tool.", model="test-model")
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="policy_executor", arguments={})]),
+            _finish_response(),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        agent,
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            approval_provider=AlwaysAskApprovalProvider(),
+            tool_registry_factory=registry_factory,
+            tool_policy=ToolPolicy(approval="always"),
+        ),
+    )
+
+    request_id = ""
+    for event in handle.events():
+        if isinstance(event, ApprovalRequestedEvent):
+            if event.tool_name == "policy_executor":
+                request_id = event.request_id
+                assert calls == []
+            handle.approve(event.request_id, ApprovalDecision.allow())
         if event.type == "run_completed":
             break
 
