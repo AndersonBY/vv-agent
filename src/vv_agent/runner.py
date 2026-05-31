@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -29,6 +29,7 @@ from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm.base import LLMClient
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig
+from vv_agent.run_handle import RunHandle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.context import ExecutionContext
@@ -46,11 +47,24 @@ class Runner:
 
     @classmethod
     def stream_sync(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> Iterator[RunEvent]:
-        result = cls._run(agent, input, run_config=run_config or RunConfig())
-        yield from result.events
+        handle = cls.start(agent, input, run_config=run_config)
+        yield from handle.events()
+        handle.result()
 
     @classmethod
-    def _run(cls, agent: Agent, input: str, *, run_config: RunConfig) -> RunResult:
+    def start(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunHandle:
+        config = run_config or RunConfig()
+        return RunHandle.start_worker(agent=agent, input=input, run_config=config, runner=cls)
+
+    @classmethod
+    def _run(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig,
+        event_sink: Callable[[RunEvent], None] | None = None,
+    ) -> RunResult:
         run_id = f"run_{uuid.uuid4().hex}"
         trace_id = cls._resolve_trace_id(run_config)
         collected_events: list[RunEvent] = []
@@ -85,6 +99,8 @@ class Runner:
                     cls._end_span(trace_processors, span, metadata=event.to_dict())
             if run_config.stream is not None:
                 run_config.stream(event)
+            if event_sink is not None:
+                event_sink(event)
 
         def log_handler(event: str, payload: dict[str, Any]) -> None:
             capture_event(
@@ -113,7 +129,7 @@ class Runner:
         if input_result.outcome in {"block", "require_approval"}:
             message = input_result.message or "Input blocked by guardrail."
             failed_event = RunFailedEvent(run_id=run_id, trace_id=trace_id, error=message, agent_name=agent.name)
-            collected_events.append(failed_event)
+            capture_event(failed_event)
             raw_result = AgentResult(status=AgentStatus.FAILED, messages=[], cycles=[], error=message)
             ended_run_span = cls._end_span(trace_processors, run_span, metadata={"status": "failed", "error": message})
             return RunResult(
@@ -153,6 +169,7 @@ class Runner:
             resolved=resolved,
             trace_id=trace_id,
         )
+        task.no_tool_policy = "finish"
         initial_messages = cls._session_initial_messages(run_config)
         ctx = ExecutionContext(
             cancellation_token=run_config.cancellation_token,

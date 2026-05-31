@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -56,3 +56,6 @@ class RunConfig:
     runtime_hooks: list[RuntimeHook] = field(default_factory=list)
     log_preview_chars: int | None = None
     debug_dump_dir: str | None = None
+
+    def with_cancellation_token(self, cancellation_token: CancellationToken) -> RunConfig:
+        return replace(self, cancellation_token=cancellation_token)

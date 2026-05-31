@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import queue
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
+
+from vv_agent.agent import Agent
+from vv_agent.events import RunEvent
+from vv_agent.result import RunResult
+from vv_agent.run_config import RunConfig
+from vv_agent.runtime.cancellation import CancellationToken
+
+if TYPE_CHECKING:
+    from vv_agent.runner import Runner
+
+
+ApprovalDecision = Literal["approve", "reject", "approved", "rejected", "allow", "deny"]
+
+
+@dataclass(frozen=True, slots=True)
+class RunHandleState:
+    status: Literal["running", "completed", "failed", "cancelled"]
+    done: bool
+    cancelled: bool = False
+    error: str | None = None
+
+
+class _Sentinel:
+    pass
+
+
+class RunHandle:
+    def __init__(
+        self,
+        *,
+        event_queue: queue.Queue[RunEvent | _Sentinel],
+        done_event: threading.Event,
+        thread: threading.Thread,
+        cancellation_token: CancellationToken,
+    ) -> None:
+        self._event_queue = event_queue
+        self._done_event = done_event
+        self._thread = thread
+        self._cancellation_token = cancellation_token
+        self._lock = threading.Lock()
+        self._result: RunResult | None = None
+        self._exception: BaseException | None = None
+        self._cancel_requested = False
+
+    @classmethod
+    def start_worker(cls, *, agent: Agent, input: str, run_config: RunConfig, runner: type[Runner]) -> RunHandle:
+        event_queue: queue.Queue[RunEvent | _Sentinel] = queue.Queue()
+        done_event = threading.Event()
+        cancellation_token = run_config.cancellation_token or CancellationToken()
+        worker_config = run_config.with_cancellation_token(cancellation_token)
+
+        handle = cls(
+            event_queue=event_queue,
+            done_event=done_event,
+            thread=threading.Thread(),
+            cancellation_token=cancellation_token,
+        )
+
+        def event_sink(event: RunEvent) -> None:
+            event_queue.put(event)
+
+        def worker() -> None:
+            try:
+                result = runner._run(agent, input, run_config=worker_config, event_sink=event_sink)
+            except BaseException as exc:
+                with handle._lock:
+                    handle._exception = exc
+            else:
+                with handle._lock:
+                    handle._result = result
+            finally:
+                done_event.set()
+                event_queue.put(_Sentinel())
+
+        handle._thread = threading.Thread(target=worker, name="vv-agent-run-handle", daemon=False)
+        handle._thread.start()
+        return handle
+
+    def events(self) -> Iterator[RunEvent]:
+        while True:
+            item = self._event_queue.get()
+            if isinstance(item, _Sentinel):
+                break
+            yield item
+
+    def result(self, timeout: float | None = None) -> RunResult:
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise TimeoutError("RunHandle result was not ready before timeout.")
+        with self._lock:
+            if self._exception is not None:
+                raise self._exception
+            if self._result is None:
+                raise RuntimeError("RunHandle completed without a result.")
+            return self._result
+
+    def done(self) -> bool:
+        return self._done_event.is_set()
+
+    def cancel(self, reason: str = "") -> bool:
+        del reason
+        if self.done():
+            return False
+        self._cancel_requested = True
+        self._cancellation_token.cancel()
+        return True
+
+    def steer(self, message: str) -> None:
+        del message
+        raise NotImplementedError("RunHandle.steer() is not supported by the synchronous runner yet.")
+
+    def follow_up(self, message: str) -> None:
+        del message
+        raise NotImplementedError("RunHandle.follow_up() is not supported by the synchronous runner yet.")
+
+    def approve(self, request_id: str, decision: ApprovalDecision | str) -> None:
+        del request_id, decision
+        raise NotImplementedError("RunHandle.approve() is not supported by the synchronous runner yet.")
+
+    def resume(self, resume_token: str, payload: dict[str, Any] | None = None) -> None:
+        del resume_token, payload
+        raise NotImplementedError("RunHandle.resume() is not supported by the synchronous runner yet.")
+
+    def state(self) -> RunHandleState:
+        with self._lock:
+            if self._exception is not None:
+                return RunHandleState(status="failed", done=True, cancelled=self._cancel_requested, error=str(self._exception))
+        if not self.done():
+            return RunHandleState(status="running", done=False, cancelled=self._cancel_requested)
+        if self._cancel_requested:
+            return RunHandleState(status="cancelled", done=True, cancelled=True)
+        return RunHandleState(status="completed", done=True)
