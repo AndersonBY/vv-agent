@@ -195,6 +195,7 @@ class Runner:
             ]
         policy = run_config.tool_policy
         initial_messages = cls._session_initial_messages(run_config)
+        session_id = getattr(run_config.session, "session_id", None)
         ctx = ExecutionContext(
             cancellation_token=run_config.cancellation_token,
             stream_callback=stream_callback,
@@ -207,6 +208,8 @@ class Runner:
                 "_vv_agent_model_settings": resolved_model_settings,
                 "_vv_agent_run_context": guardrail_context,
                 "_vv_agent_session": run_config.session,
+                "_vv_agent_session_id": str(session_id) if session_id is not None else None,
+                "_vv_agent_memory_providers": list(run_config.memory_providers),
                 "_vv_agent_approval_provider": run_config.approval_provider,
                 "_vv_agent_approval_broker": run_config.approval_broker,
                 "_vv_agent_approval_timeout_seconds": run_config.approval_timeout_seconds,

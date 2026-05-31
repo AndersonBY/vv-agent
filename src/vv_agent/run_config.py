@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from vv_agent.approval import ApprovalBroker, ApprovalProvider
 from vv_agent.config import ResolvedModelConfig
@@ -15,6 +15,9 @@ from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from vv_agent.memory.provider import MemoryProvider
 
 StreamHandler = Callable[[Any], None]
 ToolRegistryFactory = Callable[[], ToolRegistry]
@@ -57,6 +60,7 @@ class RunConfig:
     tracing: dict[str, Any] | None = None
     context: Any | None = None
     context_providers: list[ContextProvider] = field(default_factory=list)
+    memory_providers: list[MemoryProvider] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     settings_file: str | Path = "local_settings.py"
     default_backend: str | None = None

@@ -244,6 +244,102 @@ class MemoryCompactedEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryCompactStarted(RunEvent):
+    message_count: int = 0
+    estimated_tokens: int | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str = "",
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        message_count: int = 0,
+        estimated_tokens: int | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="memory_compact_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "message_count", message_count)
+        object.__setattr__(self, "estimated_tokens", estimated_tokens)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["message_count"] = self.message_count
+        if self.estimated_tokens is not None:
+            payload["estimated_tokens"] = self.estimated_tokens
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCompactCompleted(RunEvent):
+    before_count: int = 0
+    after_count: int = 0
+    summary_tokens: int | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str = "",
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        before_count: int = 0,
+        after_count: int = 0,
+        summary_tokens: int | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="memory_compact_completed",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "before_count", before_count)
+        object.__setattr__(self, "after_count", after_count)
+        object.__setattr__(self, "summary_tokens", summary_tokens)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["before_count"] = self.before_count
+        payload["after_count"] = self.after_count
+        if self.summary_tokens is not None:
+            payload["summary_tokens"] = self.summary_tokens
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class AssistantDeltaEvent(RunEvent):
     delta: str = ""
 
@@ -667,6 +763,24 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             after_count=payload.get("after_count") if isinstance(payload.get("after_count"), int) else None,
             **_with_cycle_and_agent(payload, common),
         )
+    if event_type == "memory_compact_started":
+        message_count = payload.get("message_count")
+        estimated_tokens = payload.get("estimated_tokens")
+        return MemoryCompactStarted(
+            message_count=message_count if isinstance(message_count, int) else 0,
+            estimated_tokens=estimated_tokens if isinstance(estimated_tokens, int) else None,
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "memory_compact_completed":
+        before_count = payload.get("before_count")
+        after_count = payload.get("after_count")
+        summary_tokens = payload.get("summary_tokens")
+        return MemoryCompactCompleted(
+            before_count=before_count if isinstance(before_count, int) else 0,
+            after_count=after_count if isinstance(after_count, int) else 0,
+            summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
+            **_with_cycle_and_agent(payload, common),
+        )
     if event_type == "assistant_delta":
         return AssistantDeltaEvent(delta=str(payload.get("delta") or ""), **_with_cycle_and_agent(payload, common))
     if event_type == "tool_call_started":
@@ -799,6 +913,32 @@ def event_from_runtime_log(
             cycle_index=cycle_index,
             before_count=before_count if isinstance(before_count, int) else None,
             after_count=after_count if isinstance(after_count, int) else None,
+            metadata=dict(payload),
+        )
+    if event == "memory_compact_started":
+        message_count = payload.get("message_count")
+        estimated_tokens = payload.get("estimated_tokens")
+        return MemoryCompactStarted(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            cycle_index=cycle_index,
+            message_count=message_count if isinstance(message_count, int) else 0,
+            estimated_tokens=estimated_tokens if isinstance(estimated_tokens, int) else None,
+            metadata=dict(payload),
+        )
+    if event == "memory_compact_completed":
+        before_count = payload.get("before_count")
+        after_count = payload.get("after_count")
+        summary_tokens = payload.get("summary_tokens")
+        return MemoryCompactCompleted(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            cycle_index=cycle_index,
+            before_count=before_count if isinstance(before_count, int) else 0,
+            after_count=after_count if isinstance(after_count, int) else 0,
+            summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
             metadata=dict(payload),
         )
     if event == "tool_result":
