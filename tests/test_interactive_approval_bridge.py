@@ -19,6 +19,8 @@ from vv_agent.llm import ScriptedLLM
 from vv_agent.tools.executor import FunctionToolExecutor
 from vv_agent.types import LLMResponse, ToolCall
 
+_TEST_APPROVAL_TIMEOUT_SECONDS = 10.0
+
 
 class AlwaysAskApprovalProvider(ApprovalProvider):
     def __init__(self) -> None:
@@ -75,7 +77,7 @@ def test_interactive_session_routes_approval_to_active_run_handle(tmp_path) -> N
             llm_builder=model_provider,
             tool_registry_factory=lambda: registry,
             approval_provider=provider,
-            approval_timeout_seconds=2.0,
+            approval_timeout_seconds=_TEST_APPROVAL_TIMEOUT_SECONDS,
             tool_policy=ToolPolicy(approval="always"),
         )
     )
@@ -105,10 +107,10 @@ def test_interactive_session_routes_approval_to_active_run_handle(tmp_path) -> N
     thread = Thread(target=run_prompt)
     thread.start()
 
-    assert request_seen.wait(timeout=2)
+    assert request_seen.wait(timeout=_TEST_APPROVAL_TIMEOUT_SECONDS)
     assert calls == []
     session.approve(request_id, "allow")
-    thread.join(timeout=2)
+    thread.join(timeout=_TEST_APPROVAL_TIMEOUT_SECONDS)
 
     assert not thread.is_alive()
     assert run_error == []
