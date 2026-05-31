@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
 from vv_agent import (
     AgentStartedEvent,
     ApprovalRequestedEvent,
@@ -141,7 +143,15 @@ def test_concrete_event_constructors_can_preserve_replayed_identity_and_timing()
         assert payload["parent_run_id"] == "run_parent"
 
 
-def _replay_fields() -> dict[str, object]:
+class ReplayFields(TypedDict):
+    event_id: str
+    created_at: float
+    session_id: str
+    parent_event_id: str
+    parent_run_id: str
+
+
+def _replay_fields() -> ReplayFields:
     return {
         "event_id": "evt_replayed",
         "created_at": 123.45,
