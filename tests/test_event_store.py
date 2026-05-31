@@ -8,7 +8,7 @@ from vv_agent import Agent, RunConfig, Runner, event_from_dict
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.event_store import JsonlRunEventStore
-from vv_agent.events import ApprovalResolvedEvent, RunEvent, RunStartedEvent
+from vv_agent.events import ApprovalResolvedEvent, RunEvent, RunStartedEvent, SubRunCompletedEvent, SubRunStartedEvent
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -53,6 +53,65 @@ def test_jsonl_event_store_appends_and_replays_events(tmp_path) -> None:
     assert isinstance(replayed[1], ApprovalResolvedEvent)
     assert replayed[1].approved is False
     assert event_from_dict(replayed[1].to_dict()).event_id == "evt_approval"
+
+
+def test_jsonl_event_store_parent_replay_includes_child_run_edges(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    store = JsonlRunEventStore(path)
+    parent = RunStartedEvent(
+        run_id="run_parent",
+        trace_id="trace_1",
+        input="parent input",
+        event_id="evt_parent",
+        created_at=1.0,
+    )
+    child_started = SubRunStartedEvent(
+        run_id="run_child",
+        trace_id="trace_1",
+        session_id="session_child",
+        parent_run_id="run_parent",
+        parent_tool_call_id="call_create_sub_task",
+        agent_name="researcher",
+        event_id="evt_child_started",
+        created_at=2.0,
+    )
+    child_completed = SubRunCompletedEvent(
+        run_id="run_child",
+        trace_id="trace_1",
+        session_id="session_child",
+        parent_run_id="run_parent",
+        parent_tool_call_id="call_create_sub_task",
+        agent_name="researcher",
+        status="completed",
+        event_id="evt_child_completed",
+        created_at=3.0,
+    )
+    unrelated = SubRunStartedEvent(
+        run_id="run_other_child",
+        trace_id="trace_1",
+        parent_run_id="run_other_parent",
+        parent_tool_call_id="call_other",
+        agent_name="other",
+        event_id="evt_unrelated",
+        created_at=4.0,
+    )
+
+    store.append(parent)
+    store.append(child_started)
+    store.append(child_completed)
+    store.append(unrelated)
+
+    parent_replay = list(store.replay(run_id="run_parent"))
+    assert [event.event_id for event in parent_replay] == [
+        "evt_parent",
+        "evt_child_started",
+        "evt_child_completed",
+    ]
+    assert parent_replay[1].run_id == "run_child"
+    assert parent_replay[1].parent_run_id == "run_parent"
+
+    child_replay = list(store.replay(run_id="run_child"))
+    assert [event.event_id for event in child_replay] == ["evt_child_started", "evt_child_completed"]
 
 
 def test_runner_appends_events_to_configured_event_store(tmp_path) -> None:

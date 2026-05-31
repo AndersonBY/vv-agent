@@ -31,5 +31,5 @@ class JsonlRunEventStore:
         with self.path.open(encoding="utf-8") as file:
             for line in file:
                 payload = json.loads(line)
-                if payload.get("run_id") == run_id:
+                if payload.get("run_id") == run_id or payload.get("parent_run_id") == run_id:
                     yield event_from_dict(payload)

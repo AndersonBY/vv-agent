@@ -7,13 +7,17 @@ from vv_agent import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    HandoffCompletedEvent,
     HandoffEvent,
+    HandoffStartedEvent,
     LLMStartedEvent,
     MemoryCompactedEvent,
     RunCompletedEvent,
     RunEvent,
     RunFailedEvent,
     RunStartedEvent,
+    SubRunCompletedEvent,
+    SubRunStartedEvent,
     ToolApprovalRequestedEvent,
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
@@ -172,3 +176,7 @@ def test_base_run_event_is_public() -> None:
     assert ToolCallStartedEvent.__name__ == "ToolCallStartedEvent"
     assert ToolCallCompletedEvent.__name__ == "ToolCallCompletedEvent"
     assert ApprovalRequestedEvent.__name__ == "ApprovalRequestedEvent"
+    assert SubRunStartedEvent.__name__ == "SubRunStartedEvent"
+    assert SubRunCompletedEvent.__name__ == "SubRunCompletedEvent"
+    assert HandoffStartedEvent.__name__ == "HandoffStartedEvent"
+    assert HandoffCompletedEvent.__name__ == "HandoffCompletedEvent"
