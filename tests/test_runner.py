@@ -118,10 +118,44 @@ def test_runner_passes_resolved_model_settings_to_llm_complete(tmp_path: Path) -
     assert seen_settings == [ModelSettings(temperature=0.2, top_p=0.8, max_tokens=250)]
 
 
+def test_runner_requires_llm_complete_to_accept_model_settings(tmp_path: Path) -> None:
+    class LegacyLLM:
+        def complete(self, *, model: str, messages: list[Message], tools: list[dict[str, object]], stream_callback=None):
+            del model, messages, tools, stream_callback
+            return LLMResponse(content="unused")
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return LegacyLLM(), _fake_resolved()
+
+    result = Runner.run_sync(
+        Agent(
+            name="assistant",
+            instructions="Use resolved settings.",
+            model="m",
+            model_settings=ModelSettings(temperature=0.2),
+        ),
+        "go",
+        run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
+    )
+
+    error_text = result.raw_result.error or result.final_output or ""
+    assert result.status == AgentStatus.FAILED
+    assert "model_settings" in error_text
+
+
 def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
     class StreamingLLM:
-        def complete(self, *, model: str, messages: list[Message], tools: list[dict[str, object]], stream_callback=None):
-            del model, messages, tools
+        def complete(
+            self,
+            *,
+            model: str,
+            messages: list[Message],
+            tools: list[dict[str, object]],
+            stream_callback=None,
+            model_settings: ModelSettings | None = None,
+        ) -> LLMResponse:
+            del model, messages, tools, model_settings
             if stream_callback is not None:
                 stream_callback({"event": "assistant_delta", "content_delta": "hel"})
                 stream_callback({"event": "assistant_delta", "content_delta": "lo"})

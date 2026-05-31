@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+import pytest
 
 import vv_agent
+import vv_agent.interactive as interactive_module
 from vv_agent import (
     AgentSessionOptions,
     AgentSessionRun,
@@ -113,6 +116,35 @@ def test_agent_session_preserves_session_id_messages_shared_state_and_events(tmp
     assert events[-1][0] == "session_run_end"
 
 
+def test_agent_session_requires_execute_run_to_accept_cancellation_token(tmp_path: Path) -> None:
+    def execute_run(
+        *,
+        prompt: str,
+        session_id: str,
+        agent: InteractiveAgentDefinition,
+        task_name: str,
+        workspace: Path,
+        shared_state: dict[str, Any],
+        initial_messages: list[Message],
+        before_cycle_messages: Any,
+        interruption_messages: Any,
+        log_handler: Any,
+    ) -> AgentSessionRun:
+        del session_id, agent, task_name, workspace, initial_messages, before_cycle_messages, interruption_messages, log_handler
+        return _completed_run(prompt=prompt, shared_state=shared_state)
+
+    session = create_agent_session(
+        execute_run=execute_run,
+        session_id="desktop-session-requires-cancel",
+        agent_name="desktop",
+        definition=InteractiveAgentDefinition(description="desktop agent", model="kimi-k2.6"),
+        workspace=tmp_path,
+    )
+
+    with pytest.raises(TypeError, match="cancellation_token"):
+        session.prompt("hello")
+
+
 def test_agent_session_queues_steering_and_follow_up_prompts(tmp_path: Path) -> None:
     prompts: list[str] = []
 
@@ -204,6 +236,39 @@ def test_interactive_client_create_session_preserves_caller_session_id(tmp_path:
     )
 
     assert session.session_id == "caller-session-id"
+
+
+def test_interactive_client_requires_debug_dump_capable_llm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class NoDebugDumpLLM:
+        __slots__ = ()
+
+    class FakeRuntime:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def run(self, *_: Any, **__: Any) -> AgentResult:
+            return _completed_run(prompt="hello").result
+
+    def llm_builder(*_: Any, **__: Any) -> tuple[NoDebugDumpLLM, ResolvedModelConfig]:
+        return NoDebugDumpLLM(), _resolved()
+
+    monkeypatch.setattr(interactive_module, "AgentRuntime", FakeRuntime)
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="moonshot",
+            workspace=tmp_path,
+            llm_builder=cast(Any, llm_builder),
+            debug_dump_dir=str(tmp_path / "debug"),
+        )
+    )
+
+    with pytest.raises(AttributeError):
+        client._execute(
+            prompt="hello",
+            agent=InteractiveAgentDefinition(description="desktop agent", model="kimi-k2.6"),
+            workspace=tmp_path,
+        )
 
 
 def test_public_sub_agent_session_registry_wrappers() -> None:

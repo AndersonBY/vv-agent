@@ -14,9 +14,16 @@ from vv_agent.workspace import LocalWorkspaceBackend
 class _DummySession:
     def __init__(self) -> None:
         self._listeners = []
-        self._messages: list[Message] = []
+        self._stored_messages: list[Message] = []
         self.queued_messages: list[str] = []
         self.continue_messages_snapshot: list[Message] = []
+
+    @property
+    def messages(self) -> list[Message]:
+        return list(self._stored_messages)
+
+    def replace_messages(self, messages: list[Message]) -> None:
+        self._stored_messages = list(messages)
 
     def subscribe(self, listener):
         self._listeners.append(listener)
@@ -30,7 +37,7 @@ class _DummySession:
         self.queued_messages.append(prompt)
 
     def continue_run(self, prompt: str):
-        self.continue_messages_snapshot = list(self._messages)
+        self.continue_messages_snapshot = self.messages
         self.emit("session_run_start", {"prompt": prompt})
         self.emit("cycle_started", {"cycle": 2})
         self.emit("cycle_llm_response", {"cycle": 2, "assistant_preview": "Finishing the follow-up"})
@@ -53,7 +60,7 @@ class _DummySession:
                 shared_state={"todo_list": []},
             )
         )
-        self._messages = list(run.result.messages)
+        self.replace_messages(list(run.result.messages))
         return run
 
 
@@ -201,15 +208,17 @@ def test_sub_task_status_can_continue_completed_task(tmp_path: Path) -> None:
 def test_sub_task_manager_sanitizes_session_messages_before_continue(tmp_path: Path) -> None:
     manager = _build_manager()
     session = _DummySession()
-    session._messages = [
-        Message(role="system", content="sys"),
-        Message(role="assistant", content="", reasoning_content="thinking only"),
-        Message(
-            role="assistant",
-            content="",
-            tool_calls=[{"id": "tool-1", "name": "read_file", "arguments": {"path": "README.md"}}],
-        ),
-    ]
+    session.replace_messages(
+        [
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="", reasoning_content="thinking only"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[{"id": "tool-1", "name": "read_file", "arguments": {"path": "README.md"}}],
+            ),
+        ]
+    )
     manager.attach_session(
         task_id="sub-sanitize",
         session_id="sub-sanitize",
@@ -235,4 +244,4 @@ def test_sub_task_manager_sanitizes_session_messages_before_continue(tmp_path: P
     manager.wait("sub-sanitize", timeout=5.0)
 
     assert session.continue_messages_snapshot == [Message(role="system", content="sys")]
-    assert session._messages == [Message(role="assistant", content="done")]
+    assert session.messages == [Message(role="assistant", content="done")]

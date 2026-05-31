@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -143,7 +142,6 @@ class AgentSession:
         self._steering_queue: deque[str] = deque()
         self._follow_up_queue: deque[str] = deque()
         self._active_cancellation_token: CancellationToken | None = None
-        self._supports_run_cancellation = self._detect_run_cancellation_support(execute_run)
         self._lock = RLock()
 
     @property
@@ -292,9 +290,8 @@ class AgentSession:
                 "before_cycle_messages": self._before_cycle_messages,
                 "interruption_messages": self._interruption_messages,
                 "log_handler": self._session_log_handler,
+                "cancellation_token": self._active_cancellation_token,
             }
-            if self._supports_run_cancellation and self._active_cancellation_token is not None:
-                run_kwargs["cancellation_token"] = self._active_cancellation_token
             run = self._execute_run(**run_kwargs)
         finally:
             with self._lock:
@@ -402,11 +399,8 @@ class AgentSession:
         with self._lock:
             running = self._running
         if running:
-            try:
-                self.steer(notification_message)
-                queued_to_running_session = True
-            except Exception:
-                queued_to_running_session = False
+            self.steer(notification_message)
+            queued_to_running_session = True
 
         event_payload = dict(payload)
         event_payload["session_id"] = background_session_id
@@ -445,19 +439,6 @@ class AgentSession:
             listeners = list(self._listeners)
         for listener in listeners:
             listener(event, payload)
-
-    @staticmethod
-    def _detect_run_cancellation_support(execute_run: Callable[..., AgentSessionRun]) -> bool:
-        try:
-            signature = inspect.signature(execute_run)
-        except (TypeError, ValueError):
-            return True
-        params = signature.parameters.values()
-        return any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == "cancellation_token"
-            for parameter in params
-        )
-
 
 class InteractiveAgentClient:
     """Session client backed by vv-agent runtime primitives."""
@@ -609,7 +590,7 @@ class InteractiveAgentClient:
             model=definition.model,
             timeout_seconds=self.options.timeout_seconds,
         )
-        if self.options.debug_dump_dir and hasattr(llm, "debug_dump_dir"):
+        if self.options.debug_dump_dir:
             cast(_SupportsDebugDumpDir, llm).debug_dump_dir = self.options.debug_dump_dir
 
         tool_registry_factory = self.options.tool_registry_factory or build_default_registry

@@ -133,7 +133,7 @@ class Runner:
 
         llm_client, resolved = cls._resolve_model(agent=agent, run_config=run_config)
         resolved_model_settings = agent.model_settings.resolve(run_config.model_settings)
-        if run_config.debug_dump_dir and hasattr(llm_client, "debug_dump_dir"):
+        if run_config.debug_dump_dir:
             cast(Any, llm_client).debug_dump_dir = run_config.debug_dump_dir
 
         registry = cls._build_tool_registry(agent=agent, run_config=run_config)

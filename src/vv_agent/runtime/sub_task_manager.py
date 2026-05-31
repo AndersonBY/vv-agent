@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vv_agent.memory import sanitize_for_resume
-from vv_agent.types import AgentStatus, SubTaskOutcome
+from vv_agent.types import AgentStatus, Message, SubTaskOutcome
 
 if TYPE_CHECKING:
     from vv_agent.interactive import AgentSessionRun
@@ -22,6 +22,9 @@ SubTaskRunnerCallable = Callable[[], SubTaskOutcome]
 
 
 class SubTaskSession(Protocol):
+    @property
+    def messages(self) -> list[Message]: ...
+    def replace_messages(self, messages: list[Message]) -> None: ...
     def subscribe(self, listener: Callable[[str, dict[str, Any]], None]) -> Callable[[], None]: ...
     def continue_run(self, prompt: str) -> Any: ...
 
@@ -313,24 +316,15 @@ class SubTaskManager:
 
     @staticmethod
     def _sanitize_resumable_session_messages(session: SubTaskSession) -> int:
-        raw_messages = getattr(session, "_messages", None)
-        if not isinstance(raw_messages, list):
-            return 0
-
-        session_lock = getattr(session, "_lock", None)
-        if session_lock is not None and hasattr(session_lock, "__enter__") and hasattr(session_lock, "__exit__"):
-            with session_lock:
-                return SubTaskManager._replace_session_messages_if_needed(session, raw_messages)
-        return SubTaskManager._replace_session_messages_if_needed(session, raw_messages)
+        return SubTaskManager._replace_session_messages_if_needed(session, session.messages)
 
     @staticmethod
-    def _replace_session_messages_if_needed(session: SubTaskSession, messages: list[Any]) -> int:
+    def _replace_session_messages_if_needed(session: SubTaskSession, messages: list[Message]) -> int:
         original = list(messages)
         sanitized = sanitize_for_resume(original)
         if [_message_snapshot(message) for message in sanitized] == [_message_snapshot(message) for message in original]:
             return 0
-        session_any: Any = session
-        session_any._messages = sanitized
+        session.replace_messages(sanitized)
         return max(len(original) - len(sanitized), 0)
 
     def _build_outcome_from_run(self, *, task_id: str, run: AgentSessionRun) -> SubTaskOutcome:

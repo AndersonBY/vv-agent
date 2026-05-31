@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -208,32 +207,13 @@ class CycleRunner:
         stream_callback: Any,
         model_settings: ModelSettings | None,
     ) -> LLMResponse:
-        if model_settings is not None and self._llm_accepts_model_settings():
-            return self.llm_client.complete(
-                model=model,
-                messages=messages,
-                tools=tools,
-                stream_callback=stream_callback,
-                model_settings=model_settings,
-            )
         return self.llm_client.complete(
             model=model,
             messages=messages,
             tools=tools,
             stream_callback=stream_callback,
+            model_settings=model_settings,
         )
-
-    def _llm_accepts_model_settings(self) -> bool:
-        try:
-            signature = inspect.signature(self.llm_client.complete)
-        except (TypeError, ValueError):
-            return False
-        for parameter in signature.parameters.values():
-            if parameter.name == "model_settings":
-                return True
-            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
-                return True
-        return False
 
     @staticmethod
     def _model_settings_from_context(ctx: ExecutionContext | None) -> ModelSettings | None:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
@@ -63,6 +65,18 @@ def test_sub_agent_session_helpers_expose_registered_session() -> None:
         assert session.listener is None
     finally:
         _unregister_sub_agent_session("sub-session-1", session)
+
+
+def test_sub_agent_session_helpers_raise_for_registered_non_session() -> None:
+    bad_session = object()
+    _register_sub_agent_session("bad-sub-session", bad_session)
+    try:
+        with pytest.raises(AttributeError, match="subscribe"):
+            subscribe_sub_agent_session(session_id="bad-sub-session", listener=lambda *_args: None)
+        with pytest.raises(AttributeError, match="steer"):
+            steer_sub_agent_session(session_id="bad-sub-session", prompt="focus")
+    finally:
+        _unregister_sub_agent_session("bad-sub-session", bad_session)
 
 
 def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
@@ -575,8 +589,8 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
     )
 
     class StreamingSubLLM:
-        def complete(self, *, model, messages, tools, stream_callback=None):
-            del model, messages, tools
+        def complete(self, *, model, messages, tools, stream_callback=None, model_settings=None):
+            del model, messages, tools, model_settings
             if stream_callback is not None:
                 stream_callback({"event": "assistant_delta", "content_delta": "checking"})
                 stream_callback(

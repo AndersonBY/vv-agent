@@ -31,8 +31,9 @@ class CapturingLLM:
         messages: list[Message],
         tools: list[dict[str, object]],
         stream_callback=None,
+        model_settings=None,
     ) -> LLMResponse:
-        del model, messages, stream_callback
+        del model, messages, stream_callback, model_settings
         names: list[str] = []
         for tool in tools:
             function = cast(dict[str, object], tool["function"])
@@ -175,8 +176,9 @@ class CapturingLLMWithToolCall:
         messages: list[Message],
         tools: list[dict[str, object]],
         stream_callback=None,
+        model_settings=None,
     ) -> LLMResponse:
-        del model, messages, tools, stream_callback
+        del model, messages, tools, stream_callback, model_settings
         return LLMResponse(
             content="call tool",
             tool_calls=[ToolCall(id="policy-call", name=self.tool_name, arguments=self.arguments)],

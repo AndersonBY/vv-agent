@@ -75,15 +75,7 @@ def steer_sub_agent_session(*, session_id: str, prompt: str) -> bool:
         session = _ACTIVE_SUB_AGENT_SESSIONS.get(normalized_session_id)
     if session is None:
         return False
-    try:
-        session.steer(normalized_prompt)
-    except Exception as exc:
-        logging.getLogger(__name__).warning(
-            "Failed to steer sub-agent session %s: %s",
-            normalized_session_id,
-            exc,
-        )
-        return False
+    session.steer(normalized_prompt)
     return True
 
 
@@ -103,10 +95,7 @@ def subscribe_sub_agent_session(
     session = get_sub_agent_session(session_id=session_id)
     if session is None:
         return None
-    subscribe = getattr(session, "subscribe", None)
-    if not callable(subscribe):
-        return None
-    return subscribe(listener)
+    return session.subscribe(listener)
 
 
 def register_sub_agent_session(session_id: str, session: Any) -> None:
