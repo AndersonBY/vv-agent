@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from threading import Event
 
 import pytest
 
@@ -38,6 +39,22 @@ class DenyApprovalProvider(ApprovalProvider):
 
     def decide(self, request: ApprovalRequest) -> ApprovalDecision | None:
         return ApprovalDecision.deny("not safe")
+
+
+class BlockingShouldRequestApprovalProvider(ApprovalProvider):
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.proceed = Event()
+        self.request_id = ""
+
+    def should_request(self, request: ApprovalRequest) -> bool:
+        self.request_id = request.request_id
+        self.entered.set()
+        self.proceed.wait(timeout=2)
+        return True
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision | None:
+        return None
 
 
 def _finish_response(message: str = "finished") -> LLMResponse:
@@ -285,6 +302,55 @@ def test_cancel_unblocks_pending_approval_without_running_tool() -> None:
 
     if isinstance(caught, TimeoutError):
         handle.approve(request_id, ApprovalDecision.deny("cleanup"))
+        with suppress(CancelledError):
+            handle.result(timeout=2)
+
+    assert not isinstance(caught, TimeoutError)
+    assert isinstance(caught, CancelledError)
+    assert calls == []
+
+
+def test_cancel_during_should_request_does_not_lose_cancellation() -> None:
+    calls: list[str] = []
+    provider = BlockingShouldRequestApprovalProvider()
+
+    @function_tool(needs_approval=True)
+    def dangerous() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
+            _finish_response(),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        agent,
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            approval_provider=provider,
+        ),
+    )
+
+    assert provider.entered.wait(timeout=2)
+    assert handle.cancel()
+    provider.proceed.set()
+
+    caught: BaseException | None = None
+    try:
+        handle.result(timeout=0.6)
+    except BaseException as exc:
+        caught = exc
+
+    if isinstance(caught, TimeoutError):
+        handle.approve(provider.request_id, ApprovalDecision.deny("cleanup"))
         with suppress(CancelledError):
             handle.result(timeout=2)
 

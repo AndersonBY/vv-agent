@@ -91,9 +91,14 @@ class ApprovalBroker:
         self._condition = threading.Condition()
         self._pending: dict[str, ApprovalRequest] = {}
         self._decisions: dict[str, ApprovalDecision] = {}
+        self._cancel_decision: ApprovalDecision | None = None
 
     def register(self, request: ApprovalRequest) -> None:
         with self._condition:
+            if self._cancel_decision is not None:
+                self._decisions[request.request_id] = self._cancel_decision
+                self._condition.notify_all()
+                return
             self._pending[request.request_id] = request
 
     def resolve(self, request_id: str, decision: ApprovalDecision | str) -> bool:
@@ -109,6 +114,7 @@ class ApprovalBroker:
     def cancel_pending(self, reason: str = "Run was cancelled.") -> int:
         decision = ApprovalDecision.deny(reason)
         with self._condition:
+            self._cancel_decision = decision
             request_ids = list(self._pending)
             for request_id in request_ids:
                 self._pending.pop(request_id, None)
