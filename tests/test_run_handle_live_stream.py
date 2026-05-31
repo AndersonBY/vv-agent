@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from threading import Event
+from threading import Event, Thread
 
 from vv_agent import Agent, RunConfig, Runner, function_tool
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -19,7 +20,7 @@ def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
     )
 
 
-def test_runner_start_yields_tool_started_before_result_is_ready(tmp_path) -> None:
+def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
     gate = Event()
 
     @function_tool
@@ -40,7 +41,10 @@ def test_runner_start_yields_tool_started_before_result_is_ready(tmp_path) -> No
                 content="calling",
                 tool_calls=[ToolCall(id="call_1", name="slow_tool", arguments={})],
             ),
-            LLMResponse(content="done", tool_calls=[]),
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            ),
         ]
     )
 
@@ -57,7 +61,6 @@ def test_runner_start_yields_tool_started_before_result_is_ready(tmp_path) -> No
     for event in handle.events():
         first_types.append(event.type)
         if event.type == "tool_call_started":
-            assert not handle.done()
             gate.set()
         if event.type == "run_completed":
             break
@@ -67,20 +70,89 @@ def test_runner_start_yields_tool_started_before_result_is_ready(tmp_path) -> No
     assert "tool_call_started" in first_types
 
 
-def test_stream_sync_is_backed_by_live_handle() -> None:
+def test_runner_start_preserves_default_no_tool_continue_policy() -> None:
     agent = Agent(name="assistant", instructions="Answer.", model="test-model")
-    llm = ScriptedLLM(steps=[LLMResponse(content="hello", tool_calls=[])])
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="first", tool_calls=[]),
+            LLMResponse(content="second", tool_calls=[]),
+        ]
+    )
 
     def model_provider(_agent: Agent, _config: RunConfig):
         return llm, _resolved_model()
 
-    events = list(
-        Runner.stream_sync(
-            agent,
-            "say hi",
-            run_config=RunConfig(model_provider=model_provider),
-        )
+    result = Runner.start(
+        agent,
+        "say hi",
+        run_config=RunConfig(model_provider=model_provider, max_cycles=2),
+    ).result(timeout=2)
+
+    assert result.status == AgentStatus.MAX_CYCLES
+    assert result.final_output == "Reached max cycles without finish signal."
+
+
+def test_stream_sync_is_backed_by_live_handle() -> None:
+    gate = Event()
+
+    @function_tool
+    def slow_tool() -> str:
+        gate.wait(timeout=2)
+        return "slow done"
+
+    agent = Agent(
+        name="assistant",
+        instructions="Use the tool.",
+        model="test-model",
+        tools=[slow_tool],
+    )
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="calling",
+                tool_calls=[ToolCall(id="call_1", name="slow_tool", arguments={})],
+            ),
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            ),
+        ]
     )
 
+    def model_provider(_agent: Agent, _config: RunConfig):
+        return llm, _resolved_model()
+
+    stream = Runner.stream_sync(
+        agent,
+        "go",
+        run_config=RunConfig(model_provider=model_provider),
+    )
+    seen_tool_started = Event()
+    stream_finished = Event()
+    events = []
+    errors: list[BaseException] = []
+
+    def consume_stream() -> None:
+        try:
+            for event in stream:
+                events.append(event)
+                if event.type == "tool_call_started":
+                    seen_tool_started.set()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            stream_finished.set()
+
+    consumer = Thread(target=consume_stream)
+    consumer.start()
+    try:
+        assert seen_tool_started.wait(timeout=0.5)
+        assert not stream_finished.is_set()
+    finally:
+        gate.set()
+        consumer.join(timeout=2)
+
     assert events[0].type == "run_started"
+    assert not consumer.is_alive()
+    assert errors == []
     assert events[-1].type == "run_completed"

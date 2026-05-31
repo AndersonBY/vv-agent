@@ -169,7 +169,6 @@ class Runner:
             resolved=resolved,
             trace_id=trace_id,
         )
-        task.no_tool_policy = "finish"
         initial_messages = cls._session_initial_messages(run_config)
         ctx = ExecutionContext(
             cancellation_token=run_config.cancellation_token,
