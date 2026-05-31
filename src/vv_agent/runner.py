@@ -23,6 +23,7 @@ from vv_agent.events import (
     HandoffCompletedEvent,
     HandoffEvent,
     HandoffStartedEvent,
+    RunCompletedEvent,
     RunEvent,
     RunFailedEvent,
     ToolFinishedEvent,
@@ -134,8 +135,12 @@ class Runner:
                     user_input=user_input,
                 )
             )
+            if run_config.runtime_log_handler is not None:
+                run_config.runtime_log_handler(event, payload)
 
         def stream_callback(payload: dict[str, Any]) -> None:
+            if run_config.runtime_stream_callback is not None:
+                run_config.runtime_stream_callback(payload)
             capture_event(
                 event_from_stream_payload(
                     payload,
@@ -183,7 +188,7 @@ class Runner:
             execution_backend=run_config.execution_backend,
             hooks=list(run_config.runtime_hooks),
         )
-        task = AgentCompiler().compile(
+        task = run_config.runtime_task or AgentCompiler().compile(
             agent=agent,
             input=user_input,
             run_config=run_config,
@@ -196,7 +201,11 @@ class Runner:
                 *[name for name in registry.list_planner_extra_tool_names() if name not in task.extra_tool_names],
             ]
         policy = run_config.tool_policy
-        initial_messages = cls._session_initial_messages(run_config)
+        initial_messages = (
+            list(run_config.initial_messages)
+            if run_config.initial_messages is not None
+            else cls._session_initial_messages(run_config)
+        )
         session_id = getattr(run_config.session, "session_id", None)
         ctx = ExecutionContext(
             cancellation_token=run_config.cancellation_token,
@@ -224,9 +233,13 @@ class Runner:
         raw_result = runtime.run(
             task,
             workspace=cls._resolve_workspace(run_config.workspace),
+            shared_state=run_config.shared_state,
             initial_messages=initial_messages,
             user_message=user_input,
             ctx=ctx,
+            before_cycle_messages=run_config.before_cycle_messages,
+            interruption_messages=run_config.interruption_messages,
+            sub_task_manager=run_config.sub_task_manager,
         )
         new_items = cls._new_session_items(user_input=user_input, result=raw_result)
         if run_config.session is not None and new_items:
@@ -245,6 +258,21 @@ class Runner:
             raw_result.status = AgentStatus.FAILED
             raw_result.error = final_output
         final_output = cls._coerce_output_type(agent=agent, final_output=final_output)
+        if not any(event.type == "run_completed" for event in collected_events):
+            capture_event(
+                RunCompletedEvent(
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    agent_name=agent.name,
+                    cycle_index=len(raw_result.cycles) or None,
+                    final_output=str(final_output) if final_output is not None else None,
+                    status=raw_result.status.value,
+                    metadata={
+                        "status": raw_result.status.value,
+                        "final_output": final_output,
+                    },
+                )
+            )
         ended_run_span = cls._end_span(
             trace_processors,
             run_span,
@@ -727,7 +755,19 @@ class Runner:
     @classmethod
     def _run_child_agent(cls, child_agent: Agent, *, arguments: dict[str, Any], parent_config: RunConfig) -> RunResult:
         child_input = str(arguments.get("input") or arguments.get("prompt") or "")
-        child_config = replace(parent_config, session=None, stream=None)
+        child_config = replace(
+            parent_config,
+            session=None,
+            stream=None,
+            runtime_task=None,
+            shared_state=None,
+            initial_messages=None,
+            before_cycle_messages=None,
+            interruption_messages=None,
+            sub_task_manager=None,
+            runtime_log_handler=None,
+            runtime_stream_callback=None,
+        )
         return cls.run_sync(child_agent, child_input, run_config=child_config)
 
     @staticmethod

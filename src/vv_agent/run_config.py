@@ -15,6 +15,7 @@ from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.tools.registry import ToolRegistry
+from vv_agent.types import Message
 
 if TYPE_CHECKING:
     from vv_agent.memory.provider import MemoryProvider
@@ -23,6 +24,9 @@ StreamHandler = Callable[[Any], None]
 ToolRegistryFactory = Callable[[], ToolRegistry]
 ApprovalPolicy = Literal["default", "always", "never"]
 CanUseTool = Callable[[str, dict[str, Any]], bool]
+RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
+BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
+InterruptionMessageProvider = Callable[[], list[Message]]
 
 
 class ModelProvider(Protocol):
@@ -69,6 +73,14 @@ class RunConfig:
     runtime_hooks: list[RuntimeHook] = field(default_factory=list)
     log_preview_chars: int | None = None
     debug_dump_dir: str | None = None
+    runtime_task: Any | None = None
+    shared_state: dict[str, Any] | None = None
+    initial_messages: list[Message] | None = None
+    before_cycle_messages: BeforeCycleMessageProvider | None = None
+    interruption_messages: InterruptionMessageProvider | None = None
+    sub_task_manager: Any | None = None
+    runtime_log_handler: RuntimeLogHandler | None = None
+    runtime_stream_callback: StreamHandler | None = None
 
     def with_cancellation_token(self, cancellation_token: CancellationToken) -> RunConfig:
         return replace(self, cancellation_token=cancellation_token)

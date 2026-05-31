@@ -6,7 +6,6 @@ from typing import Any, cast
 import pytest
 
 import vv_agent
-import vv_agent.interactive as interactive_module
 from vv_agent import (
     AgentSessionOptions,
     AgentSessionRun,
@@ -238,21 +237,13 @@ def test_interactive_client_create_session_preserves_caller_session_id(tmp_path:
     assert session.session_id == "caller-session-id"
 
 
-def test_interactive_client_requires_debug_dump_capable_llm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_interactive_client_requires_debug_dump_capable_llm(tmp_path: Path) -> None:
     class NoDebugDumpLLM:
         __slots__ = ()
-
-    class FakeRuntime:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-        def run(self, *_: Any, **__: Any) -> AgentResult:
-            return _completed_run(prompt="hello").result
 
     def llm_builder(*_: Any, **__: Any) -> tuple[NoDebugDumpLLM, ResolvedModelConfig]:
         return NoDebugDumpLLM(), _resolved()
 
-    monkeypatch.setattr(interactive_module, "AgentRuntime", FakeRuntime)
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
             settings_file=tmp_path / "settings.py",

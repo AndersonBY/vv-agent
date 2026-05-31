@@ -8,10 +8,13 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol, cast
 
+from vv_agent.agent import Agent
 from vv_agent.config import ResolvedModelConfig, build_openai_llm_from_local_settings
 from vv_agent.llm.base import LLMClient
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
-from vv_agent.runtime import AgentRuntime, CancellationToken, ExecutionContext
+from vv_agent.run_config import RunConfig
+from vv_agent.runner import Runner
+from vv_agent.runtime import CancellationToken
 from vv_agent.runtime.backends import ExecutionBackend
 from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.engine import register_sub_agent_session, unregister_sub_agent_session
@@ -594,20 +597,6 @@ class InteractiveAgentClient:
             cast(_SupportsDebugDumpDir, llm).debug_dump_dir = self.options.debug_dump_dir
 
         tool_registry_factory = self.options.tool_registry_factory or build_default_registry
-        runtime = AgentRuntime(
-            llm_client=llm,
-            tool_registry=tool_registry_factory(),
-            default_workspace=effective_workspace,
-            log_handler=self._compose_log_handlers(self.options.log_handler, log_handler),
-            log_preview_chars=self.options.log_preview_chars,
-            settings_file=self.options.settings_file,
-            default_backend=backend,
-            llm_builder=llm_builder,
-            tool_registry_factory=tool_registry_factory,
-            hooks=list(self.options.runtime_hooks),
-            execution_backend=self.options.execution_backend,
-        )
-
         task = self.prepare_task(
             prompt=prompt,
             resolved_model_id=resolved.model_id,
@@ -617,25 +606,46 @@ class InteractiveAgentClient:
             session_id=session_id,
         )
 
-        ctx: ExecutionContext | None = None
-        if self.options.stream_callback is not None or cancellation_token is not None:
-            ctx = ExecutionContext(
-                cancellation_token=cancellation_token,
-                stream_callback=self.options.stream_callback,
-            )
+        sdk_agent = Agent(
+            name=run_name,
+            instructions=task.system_prompt,
+            model=definition.model,
+            metadata=dict(task.metadata),
+        )
 
-        result = runtime.run(
-            task,
+        def model_provider(agent: Agent[Any], run_config: RunConfig) -> tuple[LLMClient, ResolvedModelConfig]:
+            del agent, run_config
+            return llm, resolved
+
+        run_config = RunConfig(
+            model_provider=model_provider,
             workspace=effective_workspace,
+            max_cycles=task.max_cycles,
+            execution_backend=self.options.execution_backend,
+            cancellation_token=cancellation_token,
+            tool_registry_factory=tool_registry_factory,
+            runtime_hooks=list(self.options.runtime_hooks),
+            log_preview_chars=self.options.log_preview_chars,
+            debug_dump_dir=self.options.debug_dump_dir,
+            settings_file=self.options.settings_file,
+            default_backend=backend,
+            timeout_seconds=self.options.timeout_seconds,
+            metadata=dict(task.metadata),
+            runtime_task=task,
             shared_state=shared_state,
             initial_messages=initial_messages,
-            user_message=prompt,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
-            ctx=ctx,
             sub_task_manager=sub_task_manager,
+            runtime_log_handler=self._compose_log_handlers(self.options.log_handler, log_handler),
+            runtime_stream_callback=self.options.stream_callback,
         )
-        return AgentSessionRun(agent_name=run_name, result=result, resolved=resolved)
+        handle = Runner.start(sdk_agent, prompt, run_config=run_config)
+        if log_handler is not None:
+            for event in handle.events():
+                log_handler(event.type, event.to_dict())
+        result = handle.result()
+        return AgentSessionRun(agent_name=run_name, result=result.raw_result, resolved=resolved)
 
     def _apply_startup_shell_defaults(self, definition: InteractiveAgentDefinition) -> InteractiveAgentDefinition:
         effective_definition = definition
