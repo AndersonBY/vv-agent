@@ -113,11 +113,11 @@ class RunHandle:
         return self._done_event.is_set()
 
     def cancel(self, reason: str = "") -> bool:
-        del reason
         if self.done():
             return False
         self._cancel_requested = True
         self._cancellation_token.cancel()
+        self._approval_broker.cancel_pending(reason or "Run was cancelled.")
         return True
 
     def steer(self, message: str) -> None:

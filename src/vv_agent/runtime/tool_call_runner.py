@@ -69,6 +69,8 @@ class ToolCallRunner:
                     context=call_context,
                     call=patched_call,
                 )
+                if ctx is not None:
+                    ctx.check_cancelled()
             result = self.hook_manager.apply_after_tool_call(
                 task=task,
                 cycle_index=context.cycle_index,

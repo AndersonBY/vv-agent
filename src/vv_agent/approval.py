@@ -101,9 +101,21 @@ class ApprovalBroker:
             if request_id not in self._pending:
                 return False
             normalized = ApprovalDecision.from_input(decision)
+            self._pending.pop(request_id, None)
             self._decisions[request_id] = normalized
             self._condition.notify_all()
             return True
+
+    def cancel_pending(self, reason: str = "Run was cancelled.") -> int:
+        decision = ApprovalDecision.deny(reason)
+        with self._condition:
+            request_ids = list(self._pending)
+            for request_id in request_ids:
+                self._pending.pop(request_id, None)
+                self._decisions[request_id] = decision
+            if request_ids:
+                self._condition.notify_all()
+            return len(request_ids)
 
     def wait(self, request_id: str, timeout: float | None) -> ApprovalDecision:
         with self._condition:
