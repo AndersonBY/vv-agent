@@ -82,6 +82,7 @@ class Runner:
             run_config.cancellation_token.on_cancel(cancel_approval_waits)
         run_id = f"run_{uuid.uuid4().hex}"
         trace_id = cls._resolve_trace_id(run_config)
+        event_session_id = cls._resolve_event_session_id(run_config)
         collected_events: list[RunEvent] = []
         trace_processors = cls._trace_processors(run_config)
         run_span = cls._start_span(
@@ -133,6 +134,7 @@ class Runner:
                     trace_id=trace_id,
                     agent_name=agent.name,
                     user_input=user_input,
+                    session_id=event_session_id,
                 )
             )
             if run_config.runtime_log_handler is not None:
@@ -147,6 +149,7 @@ class Runner:
                     run_id=run_id,
                     trace_id=trace_id,
                     agent_name=agent.name,
+                    session_id=event_session_id,
                 )
             )
 
@@ -154,7 +157,13 @@ class Runner:
         input_result = cls._apply_input_guardrails(agent=agent, run_context=guardrail_context, user_input=user_input)
         if input_result.outcome in {"block", "require_approval"}:
             message = input_result.message or "Input blocked by guardrail."
-            failed_event = RunFailedEvent(run_id=run_id, trace_id=trace_id, error=message, agent_name=agent.name)
+            failed_event = RunFailedEvent(
+                run_id=run_id,
+                trace_id=trace_id,
+                error=message,
+                agent_name=agent.name,
+                session_id=event_session_id,
+            )
             capture_event(failed_event)
             raw_result = AgentResult(status=AgentStatus.FAILED, messages=[], cycles=[], error=message)
             ended_run_span = cls._end_span(trace_processors, run_span, metadata={"status": "failed", "error": message})
@@ -210,7 +219,6 @@ class Runner:
             if run_config.initial_messages is not None
             else cls._session_initial_messages(run_config)
         )
-        session_id = getattr(run_config.session, "session_id", None)
         ctx = ExecutionContext(
             cancellation_token=run_config.cancellation_token,
             stream_callback=stream_callback,
@@ -223,7 +231,7 @@ class Runner:
                 "_vv_agent_model_settings": resolved_model_settings,
                 "_vv_agent_run_context": guardrail_context,
                 "_vv_agent_session": run_config.session,
-                "_vv_agent_session_id": str(session_id) if session_id is not None else None,
+                "_vv_agent_session_id": event_session_id,
                 "_vv_agent_memory_providers": list(run_config.memory_providers),
                 "_vv_agent_approval_provider": run_config.approval_provider,
                 "_vv_agent_approval_broker": run_config.approval_broker,
@@ -268,6 +276,7 @@ class Runner:
                     run_id=run_id,
                     trace_id=trace_id,
                     agent_name=agent.name,
+                    session_id=event_session_id,
                     cycle_index=len(raw_result.cycles) or None,
                     final_output=str(final_output) if final_output is not None else None,
                     status=raw_result.status.value,
@@ -806,6 +815,15 @@ class Runner:
         tracing = run_config.tracing or {}
         candidate = tracing.get("trace_id") if isinstance(tracing, dict) else None
         return str(candidate) if candidate else new_trace_id()
+
+    @staticmethod
+    def _resolve_event_session_id(run_config: RunConfig) -> str | None:
+        session = getattr(run_config.session, "session_id", None)
+        candidate = session if session is not None else run_config.metadata.get("session_id")
+        if candidate is None:
+            return None
+        normalized = str(candidate).strip()
+        return normalized or None
 
     @staticmethod
     def _workflow_name(run_config: RunConfig) -> str | None:

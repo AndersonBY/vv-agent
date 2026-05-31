@@ -1149,6 +1149,7 @@ def event_from_stream_payload(
     run_id: str,
     trace_id: str,
     agent_name: str,
+    session_id: str | None = None,
 ) -> RunEvent | None:
     raw_type = payload.get("type") or payload.get("event")
     if raw_type == "assistant_delta":
@@ -1157,6 +1158,7 @@ def event_from_stream_payload(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             delta=str(delta),
         )
     return RunEvent(
@@ -1164,6 +1166,7 @@ def event_from_stream_payload(
         run_id=run_id,
         trace_id=trace_id,
         agent_name=agent_name,
+        session_id=session_id,
         metadata=dict(payload),
     )
 
@@ -1176,6 +1179,7 @@ def event_from_runtime_log(
     trace_id: str,
     agent_name: str,
     user_input: str,
+    session_id: str | None = None,
 ) -> RunEvent | None:
     cycle_index = payload.get("cycle")
     if not isinstance(cycle_index, int):
@@ -1186,6 +1190,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             input=user_input,
             metadata=dict(payload),
         )
@@ -1194,6 +1199,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             metadata=dict(payload),
         )
@@ -1202,6 +1208,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             model=str(payload.get("model") or ""),
             metadata=dict(payload),
@@ -1213,6 +1220,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             before_count=before_count if isinstance(before_count, int) else None,
             after_count=after_count if isinstance(after_count, int) else None,
@@ -1225,6 +1233,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             message_count=message_count if isinstance(message_count, int) else 0,
             estimated_tokens=estimated_tokens if isinstance(estimated_tokens, int) else None,
@@ -1238,6 +1247,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             before_count=before_count if isinstance(before_count, int) else 0,
             after_count=after_count if isinstance(after_count, int) else 0,
@@ -1251,6 +1261,7 @@ def event_from_runtime_log(
                 run_id=run_id,
                 trace_id=trace_id,
                 agent_name=agent_name,
+                session_id=session_id,
                 cycle_index=cycle_index,
                 request_id=str(metadata.get("request_id") or ""),
                 tool_name=str(metadata.get("tool_name") or payload.get("tool_name") or ""),
@@ -1265,6 +1276,7 @@ def event_from_runtime_log(
                 source_agent=str(metadata.get("handoff_from") or agent_name),
                 target_agent=str(metadata.get("handoff_to") or metadata.get("agent") or ""),
                 tool_call_id=str(payload.get("tool_call_id") or ""),
+                session_id=session_id,
                 cycle_index=cycle_index,
                 metadata=dict(payload),
             )
@@ -1272,6 +1284,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
@@ -1283,6 +1296,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
@@ -1293,6 +1307,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             final_output=payload.get("final_answer"),
             status="completed",
@@ -1303,6 +1318,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             final_output=payload.get("wait_reason"),
             status="wait_user",
@@ -1313,6 +1329,7 @@ def event_from_runtime_log(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
+            session_id=session_id,
             cycle_index=cycle_index,
             error=str(payload.get("error") or event),
             metadata=dict(payload),
