@@ -24,7 +24,7 @@ def save_note(path: str, content: str) -> str:
 def print_event(event: RunEvent) -> None:
     if event.type == "assistant_delta":
         print(event.to_dict().get("delta", ""), end="", flush=True)
-    elif event.type in {"tool_finished", "run_completed", "run_failed"}:
+    elif event.type in {"tool_call_completed", "run_completed", "run_failed"}:
         print(f"\n[{event.type}] {event.to_dict()}", flush=True)
 
 

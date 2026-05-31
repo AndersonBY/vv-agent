@@ -37,7 +37,7 @@ def main() -> None:
     )
     print(result.status.value, result.final_output)
     for event in result.events:
-        if event.type == "tool_approval_requested":
+        if event.type == "approval_requested":
             print(event.to_dict())
 
 

@@ -67,16 +67,18 @@ def _set_run_event_fields(
     session_id: str | None = None,
     parent_event_id: str | None = None,
     parent_run_id: str | None = None,
+    event_id: str | None = None,
+    created_at: float | None = None,
 ) -> None:
     object.__setattr__(event, "type", type)
     object.__setattr__(event, "run_id", run_id)
     object.__setattr__(event, "trace_id", trace_id)
     object.__setattr__(event, "version", RUN_EVENT_VERSION)
-    object.__setattr__(event, "event_id", new_event_id())
+    object.__setattr__(event, "event_id", event_id or new_event_id())
     object.__setattr__(event, "session_id", session_id)
     object.__setattr__(event, "parent_event_id", parent_event_id)
     object.__setattr__(event, "parent_run_id", parent_run_id)
-    object.__setattr__(event, "created_at", event_created_at())
+    object.__setattr__(event, "created_at", event_created_at() if created_at is None else created_at)
     object.__setattr__(event, "cycle_index", cycle_index)
     object.__setattr__(event, "agent_name", agent_name)
     object.__setattr__(event, "metadata", dict(metadata or {}))
@@ -96,6 +98,8 @@ class RunStartedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -107,6 +111,8 @@ class RunStartedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "input", input)
@@ -129,6 +135,8 @@ class AgentStartedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -141,6 +149,8 @@ class AgentStartedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
 
@@ -160,6 +170,8 @@ class LLMStartedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -172,6 +184,8 @@ class LLMStartedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "model", model)
@@ -199,6 +213,8 @@ class MemoryCompactedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -211,6 +227,8 @@ class MemoryCompactedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "before_count", before_count)
@@ -240,6 +258,8 @@ class AssistantDeltaEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -252,6 +272,8 @@ class AssistantDeltaEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "delta", delta)
@@ -279,6 +301,8 @@ class ToolCallStartedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -291,6 +315,8 @@ class ToolCallStartedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "tool_name", tool_name)
@@ -322,6 +348,8 @@ class ToolCallCompletedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -334,6 +362,8 @@ class ToolCallCompletedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "tool_name", tool_name)
@@ -367,6 +397,8 @@ class ApprovalRequestedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -379,6 +411,8 @@ class ApprovalRequestedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "tool_name", tool_name)
@@ -412,6 +446,8 @@ class ApprovalResolvedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -424,6 +460,8 @@ class ApprovalResolvedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "tool_name", tool_name)
@@ -462,6 +500,8 @@ class HandoffEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -474,6 +514,8 @@ class HandoffEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "source_agent", source_agent)
@@ -505,6 +547,8 @@ class RunCompletedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -517,6 +561,8 @@ class RunCompletedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "final_output", final_output)
@@ -544,6 +590,8 @@ class RunFailedEvent(RunEvent):
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         _set_run_event_fields(
@@ -556,6 +604,8 @@ class RunFailedEvent(RunEvent):
             session_id=session_id,
             parent_event_id=parent_event_id,
             parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
             metadata=metadata,
         )
         object.__setattr__(self, "error", error)

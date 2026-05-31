@@ -13,7 +13,7 @@ from vv_agent.runtime.backends.thread import ThreadBackend
 def print_event(event) -> None:
     if event.type == "assistant_delta":
         print(event.delta, end="", flush=True)
-    elif event.type in {"tool_started", "tool_finished", "run_completed"}:
+    elif event.type in {"tool_call_started", "tool_call_completed", "run_completed"}:
         print(f"\n[{event.type}] {event.to_dict()}", flush=True)
 
 

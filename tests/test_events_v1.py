@@ -1,7 +1,23 @@
 from __future__ import annotations
 
-from vv_agent import RunEvent
-from vv_agent.events import RunStartedEvent, ToolCallStartedEvent
+from vv_agent import (
+    AgentStartedEvent,
+    ApprovalRequestedEvent,
+    ApprovalResolvedEvent,
+    AssistantDeltaEvent,
+    HandoffEvent,
+    LLMStartedEvent,
+    MemoryCompactedEvent,
+    RunCompletedEvent,
+    RunEvent,
+    RunFailedEvent,
+    RunStartedEvent,
+    ToolApprovalRequestedEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+    ToolFinishedEvent,
+    ToolStartedEvent,
+)
 
 
 def test_run_event_v1_has_stable_identity_and_timing() -> None:
@@ -53,5 +69,96 @@ def test_tool_event_can_point_to_parent_event_and_run() -> None:
     assert payload["tool_call_id"] == "call_1"
 
 
+def test_concrete_event_constructors_can_preserve_replayed_identity_and_timing() -> None:
+    events = [
+        RunStartedEvent(run_id="run_replay", trace_id="trace_replay", input="hello", **_replay_fields()),
+        AgentStartedEvent(run_id="run_replay", trace_id="trace_replay", **_replay_fields()),
+        LLMStartedEvent(run_id="run_replay", trace_id="trace_replay", model="model", **_replay_fields()),
+        MemoryCompactedEvent(
+            run_id="run_replay",
+            trace_id="trace_replay",
+            before_count=2,
+            after_count=1,
+            **_replay_fields(),
+        ),
+        AssistantDeltaEvent(run_id="run_replay", trace_id="trace_replay", delta="hi", **_replay_fields()),
+        ToolCallStartedEvent(
+            run_id="run_replay",
+            trace_id="trace_replay",
+            tool_name="browser",
+            tool_call_id="call_replay",
+            **_replay_fields(),
+        ),
+        ToolCallCompletedEvent(
+            run_id="run_replay",
+            trace_id="trace_replay",
+            tool_name="browser",
+            tool_call_id="call_replay",
+            status="completed",
+            **_replay_fields(),
+        ),
+        ApprovalRequestedEvent(
+            run_id="run_replay",
+            trace_id="trace_replay",
+            tool_name="browser",
+            tool_call_id="call_replay",
+            message="approve",
+            **_replay_fields(),
+        ),
+        ApprovalResolvedEvent(
+            run_id="run_replay",
+            trace_id="trace_replay",
+            tool_name="browser",
+            tool_call_id="call_replay",
+            approved=True,
+            **_replay_fields(),
+        ),
+        HandoffEvent(
+            run_id="run_replay",
+            trace_id="trace_replay",
+            source_agent="assistant",
+            target_agent="researcher",
+            tool_call_id="call_replay",
+            **_replay_fields(),
+        ),
+        RunCompletedEvent(
+            run_id="run_replay",
+            trace_id="trace_replay",
+            final_output="done",
+            status="completed",
+            **_replay_fields(),
+        ),
+        RunFailedEvent(run_id="run_replay", trace_id="trace_replay", error="boom", **_replay_fields()),
+    ]
+
+    for event in events:
+        payload = event.to_dict()
+        assert payload["version"] == "v1"
+        assert payload["event_id"] == "evt_replayed"
+        assert payload["created_at"] == 123.45
+        assert payload["session_id"] == "session_replay"
+        assert payload["parent_event_id"] == "evt_parent"
+        assert payload["parent_run_id"] == "run_parent"
+
+
+def _replay_fields() -> dict[str, object]:
+    return {
+        "event_id": "evt_replayed",
+        "created_at": 123.45,
+        "session_id": "session_replay",
+        "parent_event_id": "evt_parent",
+        "parent_run_id": "run_parent",
+    }
+
+
+def test_legacy_event_aliases_point_to_canonical_classes() -> None:
+    assert ToolStartedEvent is ToolCallStartedEvent
+    assert ToolFinishedEvent is ToolCallCompletedEvent
+    assert ToolApprovalRequestedEvent is ApprovalRequestedEvent
+
+
 def test_base_run_event_is_public() -> None:
     assert RunEvent.__name__ == "RunEvent"
+    assert ToolCallStartedEvent.__name__ == "ToolCallStartedEvent"
+    assert ToolCallCompletedEvent.__name__ == "ToolCallCompletedEvent"
+    assert ApprovalRequestedEvent.__name__ == "ApprovalRequestedEvent"
