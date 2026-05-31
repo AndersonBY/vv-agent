@@ -61,7 +61,7 @@ def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
         ]
     )
 
-    def model_provider(_agent: Agent, _config: RunConfig):
+    def model_provider(agent: Agent, run_config: RunConfig):
         return llm, _resolved_model()
 
     handle = Runner.start(
@@ -91,7 +91,7 @@ def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
 def test_run_handle_state_reports_completed_result() -> None:
     agent = Agent(name="assistant", instructions="Answer.", model="test-model")
 
-    def model_provider(_agent: Agent, _config: RunConfig):
+    def model_provider(agent: Agent, run_config: RunConfig):
         return _finish_llm("ok"), _resolved_model()
 
     handle = Runner.start(agent, "say hi", run_config=RunConfig(model_provider=model_provider))
@@ -132,7 +132,7 @@ def test_runner_start_preserves_default_no_tool_continue_policy() -> None:
         ]
     )
 
-    def model_provider(_agent: Agent, _config: RunConfig):
+    def model_provider(agent: Agent, run_config: RunConfig):
         return llm, _resolved_model()
 
     handle = Runner.start(
@@ -153,7 +153,7 @@ def test_run_handle_state_keeps_result_status_when_cancel_was_requested() -> Non
 
     agent = Agent(name="assistant", instructions="Answer.", model="test-model")
 
-    def model_provider(_agent: Agent, _config: RunConfig):
+    def model_provider(agent: Agent, run_config: RunConfig):
         ready.wait(timeout=2)
         return _finish_llm("ok"), _resolved_model()
 
@@ -202,7 +202,7 @@ def test_stream_sync_is_backed_by_live_handle() -> None:
         ]
     )
 
-    def model_provider(_agent: Agent, _config: RunConfig):
+    def model_provider(agent: Agent, run_config: RunConfig):
         return llm, _resolved_model()
 
     stream = Runner.stream_sync(
@@ -244,7 +244,7 @@ def test_stream_sync_is_backed_by_live_handle() -> None:
 def test_stream_sync_raises_worker_exception_after_yielding_events() -> None:
     agent = Agent(name="assistant", instructions="Return JSON.", model="test-model", output_type=dict)
 
-    def model_provider(_agent: Agent, _config: RunConfig):
+    def model_provider(agent: Agent, run_config: RunConfig):
         return _finish_llm("not json"), _resolved_model()
 
     events = []
