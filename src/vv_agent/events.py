@@ -765,6 +765,7 @@ class HandoffStartedEvent(RunEvent):
     source_agent: str = ""
     target_agent: str = ""
     tool_call_id: str = ""
+    status: str = "started"
     child_session_id: str | None = None
 
     def __init__(
@@ -775,6 +776,7 @@ class HandoffStartedEvent(RunEvent):
         source_agent: str,
         target_agent: str,
         tool_call_id: str,
+        status: str = "started",
         child_session_id: str | None = None,
         cycle_index: int | None = None,
         session_id: str | None = None,
@@ -801,6 +803,7 @@ class HandoffStartedEvent(RunEvent):
         object.__setattr__(self, "source_agent", source_agent)
         object.__setattr__(self, "target_agent", target_agent)
         object.__setattr__(self, "tool_call_id", tool_call_id)
+        object.__setattr__(self, "status", status)
         object.__setattr__(self, "child_session_id", child_session_id)
 
     def to_dict(self) -> dict[str, Any]:
@@ -808,6 +811,7 @@ class HandoffStartedEvent(RunEvent):
         payload["source_agent"] = self.source_agent
         payload["target_agent"] = self.target_agent
         payload["tool_call_id"] = self.tool_call_id
+        payload["status"] = self.status
         if self.child_session_id:
             payload["child_session_id"] = self.child_session_id
         return payload
@@ -820,6 +824,7 @@ class HandoffCompletedEvent(RunEvent):
     tool_call_id: str = ""
     status: str = ""
     child_session_id: str | None = None
+    child_run_id: str | None = None
 
     def __init__(
         self,
@@ -831,6 +836,7 @@ class HandoffCompletedEvent(RunEvent):
         tool_call_id: str,
         status: str,
         child_session_id: str | None = None,
+        child_run_id: str | None = None,
         cycle_index: int | None = None,
         session_id: str | None = None,
         parent_event_id: str | None = None,
@@ -858,6 +864,7 @@ class HandoffCompletedEvent(RunEvent):
         object.__setattr__(self, "tool_call_id", tool_call_id)
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "child_session_id", child_session_id)
+        object.__setattr__(self, "child_run_id", child_run_id)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -867,6 +874,8 @@ class HandoffCompletedEvent(RunEvent):
         payload["status"] = self.status
         if self.child_session_id:
             payload["child_session_id"] = self.child_session_id
+        if self.child_run_id:
+            payload["child_run_id"] = self.child_run_id
         return payload
 
 
@@ -1091,6 +1100,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             source_agent=str(payload.get("source_agent") or payload.get("agent_name") or ""),
             target_agent=str(payload.get("target_agent") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
+            status=str(payload.get("status") or "started"),
             child_session_id=payload.get("child_session_id"),
             run_id=common["run_id"],
             trace_id=common["trace_id"],
@@ -1109,6 +1119,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             tool_call_id=str(payload.get("tool_call_id") or ""),
             status=str(payload.get("status") or ""),
             child_session_id=payload.get("child_session_id"),
+            child_run_id=payload.get("child_run_id"),
             run_id=common["run_id"],
             trace_id=common["trace_id"],
             cycle_index=payload.get("cycle_index") if isinstance(payload.get("cycle_index"), int) else None,

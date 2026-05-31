@@ -20,7 +20,9 @@ from vv_agent.config import (
 from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
+    HandoffCompletedEvent,
     HandoffEvent,
+    HandoffStartedEvent,
     RunEvent,
     RunFailedEvent,
     ToolFinishedEvent,
@@ -386,9 +388,70 @@ class Runner:
                 arguments: dict[str, Any],
                 *,
                 _target: Agent = transfer.agent,
+                _tool_name: str = transfer.tool_name,
             ) -> ToolExecutionResult:
-                del context
-                child = cls._run_child_agent(_target, arguments=arguments, parent_config=run_config)
+                runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
+                event_sink = runtime_metadata.get("_vv_agent_emit_event")
+                run_id = str(runtime_metadata.get("_vv_agent_run_id") or "")
+                trace_id = str(runtime_metadata.get("_vv_agent_trace_id") or runtime_metadata.get("trace_id") or "")
+                session_id = runtime_metadata.get("_vv_agent_session_id")
+                parent_run_id = runtime_metadata.get("_vv_agent_parent_run_id")
+
+                def emit(event: RunEvent) -> None:
+                    if callable(event_sink):
+                        event_sink(event)
+
+                event_metadata = {
+                    "arguments": dict(arguments),
+                    "tool_name": context.tool_name or _tool_name,
+                }
+                emit(
+                    HandoffStartedEvent(
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        source_agent=agent.name,
+                        target_agent=_target.name,
+                        tool_call_id=context.tool_call_id,
+                        status="started",
+                        cycle_index=context.cycle_index,
+                        session_id=str(session_id) if session_id is not None else None,
+                        parent_run_id=str(parent_run_id) if parent_run_id is not None else None,
+                        metadata=event_metadata,
+                    )
+                )
+                try:
+                    child = cls._run_child_agent(_target, arguments=arguments, parent_config=run_config)
+                except Exception as exc:
+                    emit(
+                        HandoffCompletedEvent(
+                            run_id=run_id,
+                            trace_id=trace_id,
+                            source_agent=agent.name,
+                            target_agent=_target.name,
+                            tool_call_id=context.tool_call_id,
+                            status=AgentStatus.FAILED.value,
+                            cycle_index=context.cycle_index,
+                            session_id=str(session_id) if session_id is not None else None,
+                            parent_run_id=str(parent_run_id) if parent_run_id is not None else None,
+                            metadata={**event_metadata, "error": str(exc)},
+                        )
+                    )
+                    raise
+                emit(
+                    HandoffCompletedEvent(
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        source_agent=agent.name,
+                        target_agent=_target.name,
+                        tool_call_id=context.tool_call_id,
+                        status=child.status.value,
+                        child_run_id=child.run_id,
+                        cycle_index=context.cycle_index,
+                        session_id=str(session_id) if session_id is not None else None,
+                        parent_run_id=str(parent_run_id) if parent_run_id is not None else None,
+                        metadata=event_metadata,
+                    )
+                )
                 return ToolExecutionResult(
                     tool_call_id="",
                     content=child.final_output or "",
