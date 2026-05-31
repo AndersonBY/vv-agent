@@ -23,8 +23,7 @@ class JsonlRunEventStore:
     def append(self, event: RunEvent) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True))
-            file.write("\n")
+            file.write(f"{json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True)}\n")
 
     def replay(self, *, run_id: str) -> Iterator[RunEvent]:
         if not self.path.exists():

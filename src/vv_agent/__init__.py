@@ -26,6 +26,7 @@ from vv_agent.events import (
     ToolCallStartedEvent,
     ToolFinishedEvent,
     ToolStartedEvent,
+    event_from_dict,
 )
 from vv_agent.guardrails import GuardrailResult, input_guardrail, output_guardrail
 from vv_agent.handoffs import Handoff, handoff
@@ -125,6 +126,7 @@ __all__ = [
     "build_default_registry",
     "build_openai_llm_from_local_settings",
     "create_agent_session",
+    "event_from_dict",
     "function_tool",
     "handoff",
     "input_guardrail",
