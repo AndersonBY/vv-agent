@@ -10,7 +10,7 @@ from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalReques
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
-from vv_agent.runtime.cancellation import CancelledError
+from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.types import LLMResponse, ToolCall
 
 
@@ -292,6 +292,60 @@ def test_cancel_unblocks_pending_approval_without_running_tool() -> None:
         if isinstance(event, ApprovalRequestedEvent):
             request_id = event.request_id
             assert handle.cancel()
+            break
+
+    assert request_id
+    caught: BaseException | None = None
+    try:
+        handle.result(timeout=0.2)
+    except BaseException as exc:
+        caught = exc
+
+    if isinstance(caught, TimeoutError):
+        handle.approve(request_id, ApprovalDecision.deny("cleanup"))
+        with suppress(CancelledError):
+            handle.result(timeout=2)
+
+    assert not isinstance(caught, TimeoutError)
+    assert isinstance(caught, CancelledError)
+    assert calls == []
+
+
+def test_direct_cancellation_token_unblocks_pending_approval_without_running_tool() -> None:
+    calls: list[str] = []
+    token = CancellationToken()
+
+    @function_tool(needs_approval=True)
+    def dangerous() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
+            _finish_response(),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        agent,
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            approval_provider=AlwaysAskApprovalProvider(),
+            cancellation_token=token,
+        ),
+    )
+
+    request_id = ""
+    for event in handle.events():
+        if isinstance(event, ApprovalRequestedEvent):
+            request_id = event.request_id
+            token.cancel()
             break
 
     assert request_id

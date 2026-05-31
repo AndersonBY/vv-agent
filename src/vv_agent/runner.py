@@ -71,6 +71,12 @@ class Runner:
     ) -> RunResult:
         if run_config.approval_provider is not None and run_config.approval_broker is None:
             run_config = replace(run_config, approval_broker=ApprovalBroker())
+        approval_broker = run_config.approval_broker
+        if run_config.approval_provider is not None and run_config.cancellation_token is not None and approval_broker is not None:
+            def cancel_approval_waits(broker: ApprovalBroker = approval_broker) -> None:
+                broker.cancel_pending("Run was cancelled.")
+
+            run_config.cancellation_token.on_cancel(cancel_approval_waits)
         run_id = f"run_{uuid.uuid4().hex}"
         trace_id = cls._resolve_trace_id(run_config)
         collected_events: list[RunEvent] = []
