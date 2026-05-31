@@ -11,17 +11,19 @@ from vv_agent.events import RunEvent
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig
 from vv_agent.runtime.cancellation import CancellationToken
+from vv_agent.types import AgentStatus
 
 if TYPE_CHECKING:
     from vv_agent.runner import Runner
 
 
 ApprovalDecision = Literal["approve", "reject", "approved", "rejected", "allow", "deny"]
+RunHandleStatus = Literal["pending", "running", "wait_user", "completed", "failed", "max_cycles", "cancelled"]
 
 
 @dataclass(frozen=True, slots=True)
 class RunHandleState:
-    status: Literal["running", "completed", "failed", "cancelled"]
+    status: RunHandleStatus
     done: bool
     cancelled: bool = False
     error: str | None = None
@@ -132,8 +134,19 @@ class RunHandle:
         with self._lock:
             if self._exception is not None:
                 return RunHandleState(status="failed", done=True, cancelled=self._cancel_requested, error=str(self._exception))
+            if self._result is not None:
+                return RunHandleState(
+                    status=self._status_from_result(self._result.status),
+                    done=True,
+                    cancelled=self._cancel_requested,
+                    error=self._result.raw_result.error,
+                )
         if not self.done():
             return RunHandleState(status="running", done=False, cancelled=self._cancel_requested)
         if self._cancel_requested:
             return RunHandleState(status="cancelled", done=True, cancelled=True)
         return RunHandleState(status="completed", done=True)
+
+    @staticmethod
+    def _status_from_result(status: AgentStatus) -> RunHandleStatus:
+        return status.value

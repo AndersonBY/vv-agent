@@ -4,7 +4,7 @@ from threading import Event, Thread
 
 import pytest
 
-from vv_agent import Agent, RunConfig, Runner, function_tool
+from vv_agent import Agent, GuardrailResult, RunConfig, Runner, function_tool, input_guardrail
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
@@ -19,6 +19,17 @@ def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
         selected_model=model,
         model_id=model,
         endpoint_options=[EndpointOption(endpoint=endpoint, model_id=model)],
+    )
+
+
+def _finish_llm(message: str = "done") -> ScriptedLLM:
+    return ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content=message,
+                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": message})],
+            )
+        ]
     )
 
 
@@ -77,6 +88,41 @@ def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
     assert "tool_call_started" in first_types
 
 
+def test_run_handle_state_reports_completed_result() -> None:
+    agent = Agent(name="assistant", instructions="Answer.", model="test-model")
+
+    def model_provider(_agent: Agent, _config: RunConfig):
+        return _finish_llm("ok"), _resolved_model()
+
+    handle = Runner.start(agent, "say hi", run_config=RunConfig(model_provider=model_provider))
+    assert handle.result(timeout=2).status == AgentStatus.COMPLETED
+
+    state = handle.state()
+    assert state.status == "completed"
+    assert state.done is True
+    assert state.cancelled is False
+
+
+def test_run_handle_state_reports_failed_result_from_guardrail() -> None:
+    @input_guardrail
+    def reject(_ctx, _input_text: str) -> GuardrailResult:
+        return GuardrailResult.block("blocked")
+
+    agent = Agent(
+        name="assistant",
+        instructions="Answer.",
+        model="test-model",
+        input_guardrails=[reject],
+    )
+    handle = Runner.start(agent, "say hi")
+    assert handle.result(timeout=2).status == AgentStatus.FAILED
+
+    state = handle.state()
+    assert state.status == "failed"
+    assert state.done is True
+    assert state.cancelled is False
+
+
 def test_runner_start_preserves_default_no_tool_continue_policy() -> None:
     agent = Agent(name="assistant", instructions="Answer.", model="test-model")
     llm = ScriptedLLM(
@@ -89,14 +135,44 @@ def test_runner_start_preserves_default_no_tool_continue_policy() -> None:
     def model_provider(_agent: Agent, _config: RunConfig):
         return llm, _resolved_model()
 
-    result = Runner.start(
+    handle = Runner.start(
         agent,
         "say hi",
         run_config=RunConfig(model_provider=model_provider, max_cycles=2),
-    ).result(timeout=2)
+    )
+    result = handle.result(timeout=2)
 
     assert result.status == AgentStatus.MAX_CYCLES
     assert result.final_output == "Reached max cycles without finish signal."
+    assert handle.state().status == "max_cycles"
+
+
+def test_run_handle_state_keeps_result_status_when_cancel_was_requested() -> None:
+    ready = Event()
+    handle_ref = {}
+
+    agent = Agent(name="assistant", instructions="Answer.", model="test-model")
+
+    def model_provider(_agent: Agent, _config: RunConfig):
+        ready.wait(timeout=2)
+        return _finish_llm("ok"), _resolved_model()
+
+    def stream(event) -> None:
+        if event.type == "run_completed":
+            assert handle_ref["handle"].cancel()
+
+    handle = Runner.start(
+        agent,
+        "say hi",
+        run_config=RunConfig(model_provider=model_provider, stream=stream),
+    )
+    handle_ref["handle"] = handle
+    ready.set()
+
+    assert handle.result(timeout=2).status == AgentStatus.COMPLETED
+    state = handle.state()
+    assert state.status == "completed"
+    assert state.cancelled is True
 
 
 def test_stream_sync_is_backed_by_live_handle() -> None:
@@ -162,4 +238,23 @@ def test_stream_sync_is_backed_by_live_handle() -> None:
     assert events[0].type == "run_started"
     assert not consumer.is_alive()
     assert errors == []
+    assert events[-1].type == "run_completed"
+
+
+def test_stream_sync_raises_worker_exception_after_yielding_events() -> None:
+    agent = Agent(name="assistant", instructions="Return JSON.", model="test-model", output_type=dict)
+
+    def model_provider(_agent: Agent, _config: RunConfig):
+        return _finish_llm("not json"), _resolved_model()
+
+    events = []
+    with pytest.raises(ValueError):
+        for event in Runner.stream_sync(
+            agent,
+            "say hi",
+            run_config=RunConfig(model_provider=model_provider),
+        ):
+            events.append(event)
+
+    assert events[0].type == "run_started"
     assert events[-1].type == "run_completed"
