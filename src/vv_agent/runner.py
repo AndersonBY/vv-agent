@@ -524,7 +524,16 @@ class Runner:
             cycle_index=context.cycle_index,
             metadata={"tool_metadata": dict(tool.metadata)},
         )
-        if provider is None or not provider.should_request(request):
+
+        def check_cancelled() -> None:
+            if context.ctx is not None:
+                context.ctx.check_cancelled()
+
+        if provider is None:
+            return None
+        should_request = provider.should_request(request)
+        check_cancelled()
+        if not should_request:
             return None
         if broker is None:
             broker = ApprovalBroker()
@@ -554,6 +563,7 @@ class Runner:
         )
 
         decision = provider.decide(request)
+        check_cancelled()
         if decision is None:
             decision = broker.wait(request.request_id, timeout=run_config.approval_timeout_seconds)
         else:

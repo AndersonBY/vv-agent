@@ -42,16 +42,17 @@ class DenyApprovalProvider(ApprovalProvider):
 
 
 class BlockingShouldRequestApprovalProvider(ApprovalProvider):
-    def __init__(self) -> None:
+    def __init__(self, *, should_request_result: bool = True) -> None:
         self.entered = Event()
         self.proceed = Event()
         self.request_id = ""
+        self.should_request_result = should_request_result
 
     def should_request(self, request: ApprovalRequest) -> bool:
         self.request_id = request.request_id
         self.entered.set()
         self.proceed.wait(timeout=2)
-        return True
+        return self.should_request_result
 
     def decide(self, request: ApprovalRequest) -> ApprovalDecision | None:
         return None
@@ -355,5 +356,48 @@ def test_cancel_during_should_request_does_not_lose_cancellation() -> None:
             handle.result(timeout=2)
 
     assert not isinstance(caught, TimeoutError)
+    assert isinstance(caught, CancelledError)
+    assert calls == []
+
+
+def test_cancel_during_should_request_false_prevents_tool_side_effect() -> None:
+    calls: list[str] = []
+    provider = BlockingShouldRequestApprovalProvider(should_request_result=False)
+
+    @function_tool(needs_approval=True)
+    def dangerous() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
+            _finish_response(),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        agent,
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            approval_provider=provider,
+        ),
+    )
+
+    assert provider.entered.wait(timeout=2)
+    assert handle.cancel()
+    provider.proceed.set()
+
+    caught: BaseException | None = None
+    try:
+        handle.result(timeout=0.6)
+    except BaseException as exc:
+        caught = exc
+
     assert isinstance(caught, CancelledError)
     assert calls == []
