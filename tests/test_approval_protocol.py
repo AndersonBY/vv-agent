@@ -116,6 +116,51 @@ def test_approval_request_pauses_tool_until_handle_approves() -> None:
     assert handle.result().final_output == "finished"
 
 
+def test_function_tool_approval_policy_always_requests_once() -> None:
+    calls: list[str] = []
+
+    @function_tool
+    def guarded_function() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[guarded_function])
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="guarded_function", arguments={})]),
+            _finish_response(),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        agent,
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            approval_provider=AlwaysAskApprovalProvider(),
+            tool_policy=ToolPolicy(approval="always"),
+        ),
+    )
+
+    request_ids: list[str] = []
+    for event in handle.events():
+        if isinstance(event, ApprovalRequestedEvent):
+            if event.tool_name == "guarded_function":
+                request_ids.append(event.request_id)
+                assert calls == []
+            handle.approve(event.request_id, ApprovalDecision.allow())
+        if event.type == "run_completed":
+            break
+
+    assert request_ids
+    assert len(request_ids) == 1
+    assert calls == ["ran"]
+    assert handle.result().final_output == "finished"
+
+
 def test_executor_registered_tool_approval_can_be_approved_from_run_handle() -> None:
     calls: list[str] = []
 

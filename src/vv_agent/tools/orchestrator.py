@@ -116,6 +116,8 @@ class ToolOrchestrator:
         call: ToolCall,
         context: ToolContext,
     ) -> ToolExecutionResult | None:
+        if executor.metadata.get("policy_managed_by_handler"):
+            return None
         metadata = _runtime_metadata(context)
         approval_mode = str(metadata.get("_vv_agent_tool_policy_approval") or "default")
         if approval_mode == "never":
