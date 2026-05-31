@@ -19,7 +19,9 @@ def test_run_event_v1_has_stable_identity_and_timing() -> None:
     assert payload["type"] == "run_started"
     assert payload["event_id"].startswith("evt_")
     assert payload["run_id"] == "run_1"
+    assert payload["trace_id"] == "trace_1"
     assert payload["session_id"] == "session_1"
+    assert payload["agent_name"] == "assistant"
     assert payload["created_at"] > 0
     assert payload["input"] == "hello"
 
@@ -39,10 +41,16 @@ def test_tool_event_can_point_to_parent_event_and_run() -> None:
     payload = event.to_dict()
 
     assert payload["version"] == "v1"
+    assert payload["type"] == "tool_call_started"
+    assert payload["event_id"].startswith("evt_")
+    assert payload["run_id"] == "run_child"
+    assert payload["trace_id"] == "trace_1"
+    assert payload["session_id"] == "session_1"
     assert payload["parent_run_id"] == "run_parent"
     assert payload["parent_event_id"] == "evt_parent"
     assert payload["cycle_index"] == 2
     assert payload["tool_name"] == "browser"
+    assert payload["tool_call_id"] == "call_1"
 
 
 def test_base_run_event_is_public() -> None:

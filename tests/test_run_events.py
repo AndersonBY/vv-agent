@@ -103,7 +103,20 @@ def test_memory_compacted_event_dict_includes_counts() -> None:
         after_count=5,
     )
 
-    assert event.to_dict() == {
+    payload = event.to_dict()
+
+    assert payload["version"] == "v1"
+    assert payload["event_id"].startswith("evt_")
+    assert payload["created_at"] > 0
+    assert {key: payload[key] for key in (
+        "type",
+        "run_id",
+        "trace_id",
+        "cycle_index",
+        "agent_name",
+        "before_count",
+        "after_count",
+    )} == {
         "type": "memory_compacted",
         "run_id": "run",
         "trace_id": "trace",
