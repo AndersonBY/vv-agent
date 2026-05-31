@@ -10,6 +10,8 @@ from vv_agent.config import (
 )
 from vv_agent.events import (
     AgentStartedEvent,
+    ApprovalRequestedEvent,
+    ApprovalResolvedEvent,
     AssistantDeltaEvent,
     HandoffEvent,
     LLMStartedEvent,
@@ -19,6 +21,8 @@ from vv_agent.events import (
     RunFailedEvent,
     RunStartedEvent,
     ToolApprovalRequestedEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
     ToolFinishedEvent,
     ToolStartedEvent,
 )
@@ -63,6 +67,8 @@ __all__ = [
     "AgentSessionState",
     "AgentStartedEvent",
     "AgentStatus",
+    "ApprovalRequestedEvent",
+    "ApprovalResolvedEvent",
     "AssistantDeltaEvent",
     "ConfigError",
     "EndpointConfig",
@@ -95,6 +101,8 @@ __all__ = [
     "Span",
     "Tool",
     "ToolApprovalRequestedEvent",
+    "ToolCallCompletedEvent",
+    "ToolCallStartedEvent",
     "ToolContext",
     "ToolFinishedEvent",
     "ToolOutput",

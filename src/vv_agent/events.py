@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+RUN_EVENT_VERSION = "v1"
+
+
+def new_event_id() -> str:
+    return f"evt_{uuid.uuid4().hex}"
+
+
+def event_created_at() -> float:
+    return time.time()
 
 
 @dataclass(frozen=True, slots=True)
@@ -10,16 +21,31 @@ class RunEvent:
     type: str
     run_id: str
     trace_id: str
+    version: str = RUN_EVENT_VERSION
+    event_id: str = field(default_factory=new_event_id)
+    session_id: str | None = None
+    parent_event_id: str | None = None
+    parent_run_id: str | None = None
+    created_at: float = field(default_factory=event_created_at)
     cycle_index: int | None = None
     agent_name: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
+            "version": self.version,
             "type": self.type,
+            "event_id": self.event_id,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
+            "created_at": self.created_at,
         }
+        if self.session_id:
+            payload["session_id"] = self.session_id
+        if self.parent_event_id:
+            payload["parent_event_id"] = self.parent_event_id
+        if self.parent_run_id:
+            payload["parent_run_id"] = self.parent_run_id
         if self.cycle_index is not None:
             payload["cycle_index"] = self.cycle_index
         if self.agent_name is not None:
@@ -27,6 +53,33 @@ class RunEvent:
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         return payload
+
+
+def _set_run_event_fields(
+    event: RunEvent,
+    *,
+    type: str,
+    run_id: str,
+    trace_id: str,
+    cycle_index: int | None = None,
+    agent_name: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    session_id: str | None = None,
+    parent_event_id: str | None = None,
+    parent_run_id: str | None = None,
+) -> None:
+    object.__setattr__(event, "type", type)
+    object.__setattr__(event, "run_id", run_id)
+    object.__setattr__(event, "trace_id", trace_id)
+    object.__setattr__(event, "version", RUN_EVENT_VERSION)
+    object.__setattr__(event, "event_id", new_event_id())
+    object.__setattr__(event, "session_id", session_id)
+    object.__setattr__(event, "parent_event_id", parent_event_id)
+    object.__setattr__(event, "parent_run_id", parent_run_id)
+    object.__setattr__(event, "created_at", event_created_at())
+    object.__setattr__(event, "cycle_index", cycle_index)
+    object.__setattr__(event, "agent_name", agent_name)
+    object.__setattr__(event, "metadata", dict(metadata or {}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,14 +93,22 @@ class RunStartedEvent(RunEvent):
         trace_id: str,
         input: str,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "run_started")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", None)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="run_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "input", input)
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,14 +126,23 @@ class AgentStartedEvent(RunEvent):
         trace_id: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "agent_started")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="agent_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,14 +157,23 @@ class LLMStartedEvent(RunEvent):
         model: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "llm_started")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="llm_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "model", model)
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,14 +196,23 @@ class MemoryCompactedEvent(RunEvent):
         agent_name: str | None = None,
         before_count: int | None = None,
         after_count: int | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "memory_compacted")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="memory_compacted",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "before_count", before_count)
         object.__setattr__(self, "after_count", after_count)
 
@@ -149,14 +237,23 @@ class AssistantDeltaEvent(RunEvent):
         delta: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "assistant_delta")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="assistant_delta",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "delta", delta)
 
     def to_dict(self) -> dict[str, Any]:
@@ -166,7 +263,7 @@ class AssistantDeltaEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolStartedEvent(RunEvent):
+class ToolCallStartedEvent(RunEvent):
     tool_name: str = ""
     tool_call_id: str = ""
 
@@ -179,14 +276,23 @@ class ToolStartedEvent(RunEvent):
         tool_call_id: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "tool_started")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="tool_call_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "tool_call_id", tool_call_id)
 
@@ -198,7 +304,7 @@ class ToolStartedEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolFinishedEvent(RunEvent):
+class ToolCallCompletedEvent(RunEvent):
     tool_name: str = ""
     tool_call_id: str = ""
     status: str = ""
@@ -213,14 +319,23 @@ class ToolFinishedEvent(RunEvent):
         status: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "tool_finished")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="tool_call_completed",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "tool_call_id", tool_call_id)
         object.__setattr__(self, "status", status)
@@ -234,7 +349,7 @@ class ToolFinishedEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolApprovalRequestedEvent(RunEvent):
+class ApprovalRequestedEvent(RunEvent):
     tool_name: str = ""
     tool_call_id: str = ""
     message: str = ""
@@ -249,14 +364,23 @@ class ToolApprovalRequestedEvent(RunEvent):
         message: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "tool_approval_requested")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="approval_requested",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "tool_call_id", tool_call_id)
         object.__setattr__(self, "message", message)
@@ -267,6 +391,57 @@ class ToolApprovalRequestedEvent(RunEvent):
         payload["tool_call_id"] = self.tool_call_id
         payload["message"] = self.message
         return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalResolvedEvent(RunEvent):
+    tool_name: str = ""
+    tool_call_id: str = ""
+    approved: bool | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        tool_name: str,
+        tool_call_id: str,
+        approved: bool | None = None,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="approval_resolved",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "tool_name", tool_name)
+        object.__setattr__(self, "tool_call_id", tool_call_id)
+        object.__setattr__(self, "approved", approved)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["tool_name"] = self.tool_name
+        payload["tool_call_id"] = self.tool_call_id
+        if self.approved is not None:
+            payload["approved"] = self.approved
+        return payload
+
+
+ToolStartedEvent = ToolCallStartedEvent
+ToolFinishedEvent = ToolCallCompletedEvent
+ToolApprovalRequestedEvent = ApprovalRequestedEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,14 +459,23 @@ class HandoffEvent(RunEvent):
         target_agent: str,
         tool_call_id: str,
         cycle_index: int | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "handoff")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", source_agent)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="handoff",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=source_agent,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "source_agent", source_agent)
         object.__setattr__(self, "target_agent", target_agent)
         object.__setattr__(self, "tool_call_id", tool_call_id)
@@ -318,14 +502,23 @@ class RunCompletedEvent(RunEvent):
         status: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "run_completed")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="run_completed",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "final_output", final_output)
         object.__setattr__(self, "status", status)
 
@@ -348,14 +541,23 @@ class RunFailedEvent(RunEvent):
         error: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        object.__setattr__(self, "type", "run_failed")
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "trace_id", trace_id)
-        object.__setattr__(self, "cycle_index", cycle_index)
-        object.__setattr__(self, "agent_name", agent_name)
-        object.__setattr__(self, "metadata", dict(metadata or {}))
+        _set_run_event_fields(
+            self,
+            type="run_failed",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
         object.__setattr__(self, "error", error)
 
     def to_dict(self) -> dict[str, Any]:
@@ -446,7 +648,7 @@ def event_from_runtime_log(
     if event == "tool_result":
         metadata = payload.get("metadata")
         if isinstance(metadata, dict) and metadata.get("mode") == "approval_requested":
-            return ToolApprovalRequestedEvent(
+            return ApprovalRequestedEvent(
                 run_id=run_id,
                 trace_id=trace_id,
                 agent_name=agent_name,
@@ -466,7 +668,7 @@ def event_from_runtime_log(
                 cycle_index=cycle_index,
                 metadata=dict(payload),
             )
-        return ToolFinishedEvent(
+        return ToolCallCompletedEvent(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
@@ -477,7 +679,7 @@ def event_from_runtime_log(
             metadata=dict(payload),
         )
     if event == "tool_started":
-        return ToolStartedEvent(
+        return ToolCallStartedEvent(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
