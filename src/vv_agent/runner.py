@@ -185,6 +185,10 @@ class Runner:
             default_workspace=cls._resolve_workspace(run_config.workspace),
             log_handler=log_handler,
             log_preview_chars=run_config.log_preview_chars,
+            settings_file=run_config.settings_file,
+            default_backend=run_config.default_backend,
+            llm_builder=run_config.llm_builder,
+            tool_registry_factory=run_config.tool_registry_factory,
             execution_backend=run_config.execution_backend,
             hooks=list(run_config.runtime_hooks),
         )

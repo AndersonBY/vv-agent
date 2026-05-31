@@ -34,6 +34,18 @@ class ModelProvider(Protocol):
         ...
 
 
+class RuntimeLLMBuilder(Protocol):
+    def __call__(
+        self,
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[LLMClient, ResolvedModelConfig]:
+        ...
+
+
 @dataclass(slots=True)
 class ToolPolicy:
     allowed_tools: list[str] | None = None
@@ -68,6 +80,7 @@ class RunConfig:
     metadata: dict[str, Any] = field(default_factory=dict)
     settings_file: str | Path = "local_settings.py"
     default_backend: str | None = None
+    llm_builder: RuntimeLLMBuilder | None = None
     timeout_seconds: float = 90.0
     tool_registry_factory: ToolRegistryFactory | None = None
     runtime_hooks: list[RuntimeHook] = field(default_factory=list)

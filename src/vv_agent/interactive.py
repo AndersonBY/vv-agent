@@ -629,6 +629,7 @@ class InteractiveAgentClient:
             debug_dump_dir=self.options.debug_dump_dir,
             settings_file=self.options.settings_file,
             default_backend=backend,
+            llm_builder=llm_builder,
             timeout_seconds=self.options.timeout_seconds,
             metadata=dict(task.metadata),
             runtime_task=task,
