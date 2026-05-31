@@ -365,6 +365,54 @@ def test_direct_cancellation_token_unblocks_pending_approval_without_running_too
     assert calls == []
 
 
+def test_cancel_after_approval_resolved_prevents_tool_side_effect() -> None:
+    calls: list[str] = []
+    token = CancellationToken()
+
+    @function_tool(needs_approval=True)
+    def dangerous() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    def stream(event) -> None:
+        if event.type == "approval_resolved":
+            token.cancel()
+
+    agent = Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous])
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
+            _finish_response(),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        agent,
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            approval_provider=AlwaysAskApprovalProvider(),
+            cancellation_token=token,
+            stream=stream,
+        ),
+    )
+
+    request_id = ""
+    for event in handle.events():
+        if isinstance(event, ApprovalRequestedEvent):
+            request_id = event.request_id
+            handle.approve(request_id, ApprovalDecision.allow())
+            break
+
+    assert request_id
+    with pytest.raises(CancelledError):
+        handle.result(timeout=2)
+    assert calls == []
+
+
 def test_cancel_during_should_request_does_not_lose_cancellation() -> None:
     calls: list[str] = []
     provider = BlockingShouldRequestApprovalProvider()

@@ -593,6 +593,7 @@ class Runner:
                 },
             )
         )
+        check_cancelled()
         if approved:
             return None
         if decision.action == "timeout":
