@@ -206,9 +206,7 @@ class SubTaskManager:
                 record.latest_cycle = latest_cycle
 
             summary_text = (
-                _preview_text(outcome.final_answer)
-                or _preview_text(outcome.wait_reason)
-                or _preview_text(outcome.error)
+                _preview_text(outcome.final_answer) or _preview_text(outcome.wait_reason) or _preview_text(outcome.error)
             )
             if summary_text:
                 record.recent_activity = summary_text
@@ -233,11 +231,7 @@ class SubTaskManager:
 
             removed_messages = self._sanitize_resumable_session_messages(record.session)
             if removed_messages > 0:
-                logger.info(
-                    "Sanitized %s stale message(s) before resuming sub-task %s",
-                    removed_messages,
-                    task_id,
-                )
+                logger.info(f"Sanitized {removed_messages} stale message(s) before resuming sub-task {task_id}")
 
             record.task_title = prompt_text
             record.outcome = None

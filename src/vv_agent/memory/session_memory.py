@@ -100,11 +100,7 @@ class SessionMemoryState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionMemoryState:
         raw_entries = data.get("entries", [])
-        entries = [
-            SessionMemoryEntry.from_dict(item)
-            for item in raw_entries
-            if isinstance(item, dict)
-        ]
+        entries = [SessionMemoryEntry.from_dict(item) for item in raw_entries if isinstance(item, dict)]
         return cls(
             entries=entries,
             last_extracted_message_index=int(data.get("last_extracted_message_index", -1) or -1),
@@ -135,10 +131,7 @@ class SessionMemory:
             return False
 
         if not self.state.initialized:
-            return (
-                current_tokens >= self.config.min_tokens_before_extraction
-                and message_count >= self.config.min_text_messages
-            )
+            return current_tokens >= self.config.min_tokens_before_extraction and message_count >= self.config.min_text_messages
 
         growth_threshold = max(int(self.config.min_tokens_before_extraction * self.config.growth_ratio), 1)
         growth = current_tokens - self.state.tokens_at_last_extraction
@@ -163,9 +156,7 @@ class SessionMemory:
             start_index = self.state.last_extracted_message_index + 1
 
         new_messages = [
-            message
-            for index, message in enumerate(messages)
-            if index >= start_index and not self._should_skip_message(message)
+            message for index, message in enumerate(messages) if index >= start_index and not self._should_skip_message(message)
         ]
 
         if not new_messages:
@@ -200,14 +191,8 @@ class SessionMemory:
         for entry in self.state.entries:
             grouped.setdefault(entry.category, []).append(entry.content)
 
-        ordered_categories = [
-            category for category in _SESSION_MEMORY_CATEGORIES if grouped.get(category)
-        ]
-        ordered_categories.extend(
-            category
-            for category in sorted(grouped)
-            if category not in _SESSION_MEMORY_CATEGORIES
-        )
+        ordered_categories = [category for category in _SESSION_MEMORY_CATEGORIES if grouped.get(category)]
+        ordered_categories.extend(category for category in sorted(grouped) if category not in _SESSION_MEMORY_CATEGORIES)
 
         parts = ["<Session Memory>"]
         for category in ordered_categories:
@@ -234,7 +219,7 @@ class SessionMemory:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            logger.warning("Failed to load session memory from %s", path, exc_info=True)
+            logger.warning(f"Failed to load session memory from {path}", exc_info=True)
             return
         if isinstance(data, dict):
             self.state = SessionMemoryState.from_dict(data)
@@ -248,7 +233,7 @@ class SessionMemory:
         if self.storage_scope:
             safe_scope = self._sanitize_storage_scope(self.storage_scope)
             if safe_scope is None:
-                logger.warning("Session memory storage scope is invalid, refusing: %s", self.storage_scope)
+                logger.warning(f"Session memory storage scope is invalid, refusing: {self.storage_scope}")
                 return None
             resolved = (base / safe_scope / _SESSION_MEMORY_FILENAME).resolve()
         else:
@@ -256,7 +241,7 @@ class SessionMemory:
         try:
             resolved.relative_to(workspace_root)
         except ValueError:
-            logger.warning("Session memory storage_dir escapes workspace, refusing: %s", resolved)
+            logger.warning(f"Session memory storage_dir escapes workspace, refusing: {resolved}")
             return None
         return resolved
 
@@ -271,7 +256,7 @@ class SessionMemory:
                 encoding="utf-8",
             )
         except OSError:
-            logger.warning("Failed to persist session memory to %s", path, exc_info=True)
+            logger.warning(f"Failed to persist session memory to {path}", exc_info=True)
 
     def _record_extraction(self, last_message_index: int, current_tokens: int) -> None:
         self.state.last_extracted_message_index = last_message_index
@@ -356,10 +341,7 @@ class SessionMemory:
             return 0
 
         merged = 0
-        existing_keys = {
-            self._entry_key(entry): index
-            for index, entry in enumerate(self.state.entries)
-        }
+        existing_keys = {self._entry_key(entry): index for index, entry in enumerate(self.state.entries)}
         for entry in entries:
             key = self._entry_key(entry)
             existing_index = existing_keys.get(key)

@@ -10,6 +10,7 @@ Supports two modes:
 Requires ``celery`` to be installed.  Import will fail gracefully if celery
 is not available.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -100,9 +101,7 @@ class CeleryBackend:
         cycle_task_name: str = "vv_agent.celery_tasks.run_single_cycle",
     ) -> None:
         if not _CELERY_AVAILABLE:
-            raise ImportError(
-                "celery is required for CeleryBackend. Install with: pip install celery"
-            )
+            raise ImportError("celery is required for CeleryBackend. Install with: pip install celery")
         self.celery_app = celery_app
         self.state_store = state_store
         self.runtime_recipe = runtime_recipe
@@ -167,7 +166,11 @@ class CeleryBackend:
                     )
 
             result = cycle_executor(
-                cycle_index, messages, cycles, shared_state, ctx,
+                cycle_index,
+                messages,
+                cycles,
+                shared_state,
+                ctx,
             )
             if result is not None:
                 return result
@@ -220,10 +223,7 @@ class CeleryBackend:
             try:
                 self.state_store.delete_checkpoint(task.task_id)
             except Exception:
-                logger.debug(
-                    "Failed to clean up checkpoint for %s", task.task_id,
-                    exc_info=True,
-                )
+                logger.debug(f"Failed to clean up checkpoint for {task.task_id}", exc_info=True)
 
     def _distributed_loop(
         self,
@@ -322,6 +322,7 @@ class CeleryBackend:
 # ------------------------------------------------------------------
 # Helper: register the worker-side cycle task on a Celery app
 # ------------------------------------------------------------------
+
 
 def register_cycle_task(
     celery_app: Any,

@@ -6,6 +6,7 @@ This module provides ``run_single_cycle`` which:
 3. Executes exactly one cycle via the runtime's cycle executor
 4. Saves the updated checkpoint (or returns the terminal result)
 """
+
 from __future__ import annotations
 
 import importlib
@@ -46,14 +47,14 @@ def _load_hooks(class_paths: list[str]) -> list[RuntimeHook]:
     for path in class_paths:
         module_path, _, class_name = path.rpartition(".")
         if not module_path:
-            logger.warning("Invalid hook class path: %s", path)
+            logger.warning(f"Invalid hook class path: {path}")
             continue
         try:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, class_name)
             hooks.append(cls())
         except Exception:
-            logger.warning("Failed to load hook %s", path, exc_info=True)
+            logger.warning(f"Failed to load hook {path}", exc_info=True)
     return hooks
 
 
@@ -116,7 +117,8 @@ def run_single_cycle(
     # Build the cycle executor closure on the worker side.
     workspace_path = Path(recipe.workspace).resolve()
     memory_manager = runtime._build_memory_manager(
-        task=task, workspace_path=workspace_path,
+        task=task,
+        workspace_path=workspace_path,
     )
     sub_task_manager = SubTaskManager(
         register_session=register_sub_agent_session,
@@ -138,7 +140,11 @@ def run_single_cycle(
 
     # Execute exactly one cycle.
     result = cycle_executor(
-        cycle_index, messages, cycles, shared_state, None,
+        cycle_index,
+        messages,
+        cycles,
+        shared_state,
+        None,
     )
 
     if result is not None:

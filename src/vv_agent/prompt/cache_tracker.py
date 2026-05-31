@@ -62,12 +62,7 @@ class CacheBreakTracker:
         if reasons:
             self._cache_breaks += 1
             self._break_reasons.extend(reasons)
-            logger.info(
-                "Prompt cache break detected: %s (breaks=%s/%s)",
-                reasons,
-                self._cache_breaks,
-                self._total_requests,
-            )
+            logger.info(f"Prompt cache break detected: {reasons} (breaks={self._cache_breaks}/{self._total_requests})")
         return reasons
 
     @property
