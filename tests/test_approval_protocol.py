@@ -5,7 +5,7 @@ from threading import Event
 
 import pytest
 
-from vv_agent import Agent, AgentStatus, ApprovalRequestedEvent, RunConfig, Runner, function_tool
+from vv_agent import Agent, AgentStatus, ApprovalRequestedEvent, RunConfig, Runner, build_default_registry, function_tool
 from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
@@ -90,6 +90,54 @@ def test_approval_request_pauses_tool_until_handle_approves() -> None:
         run_config=RunConfig(
             model_provider=model_provider,
             approval_provider=AlwaysAskApprovalProvider(),
+        ),
+    )
+
+    request_id = ""
+    for event in handle.events():
+        if isinstance(event, ApprovalRequestedEvent):
+            request_id = event.request_id
+            assert calls == []
+            handle.approve(request_id, ApprovalDecision.allow())
+        if event.type == "run_completed":
+            break
+
+    assert request_id
+    assert calls == ["ran"]
+    assert handle.result().final_output == "finished"
+
+
+def test_executor_registered_tool_approval_can_be_approved_from_run_handle() -> None:
+    calls: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def dangerous_executor() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    def registry_factory():
+        registry = build_default_registry()
+        registry.register_executor(dangerous_executor.to_executor())
+        return registry
+
+    agent = Agent(name="assistant", instructions="Use tool.", model="test-model")
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous_executor", arguments={})]),
+            _finish_response(),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        agent,
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            approval_provider=AlwaysAskApprovalProvider(),
+            tool_registry_factory=registry_factory,
         ),
     )
 

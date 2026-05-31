@@ -54,6 +54,9 @@ class ToolRegistry:
     def has_tool(self, name: str) -> bool:
         return name in self._tools
 
+    def list_tool_names(self) -> list[str]:
+        return list(self._tools.keys())
+
     def has_executor(self, name: str) -> bool:
         return name in self._executors
 

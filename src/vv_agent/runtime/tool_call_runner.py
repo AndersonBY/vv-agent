@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from vv_agent.runtime.hooks import RuntimeHookManager
+from vv_agent.runtime.tool_planner import plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import AgentTask, CycleRecord, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
@@ -42,6 +43,7 @@ class ToolCallRunner:
         latest_directive_result: ToolExecutionResult | None = None
         interruption_messages: list[Message] = []
         image_notifications: list[Message] = []
+        allowed_tool_names = set(plan_tool_names(task))
 
         for index, call in enumerate(tool_calls):
             if ctx is not None:
@@ -68,6 +70,7 @@ class ToolCallRunner:
                 result = self.tool_orchestrator.run_one(
                     patched_call,
                     context=call_context,
+                    allowed_tool_names=allowed_tool_names,
                 )
                 if ctx is not None:
                     ctx.check_cancelled()

@@ -5,7 +5,7 @@ from typing import cast
 
 from vv_agent import Agent, RunConfig, Runner, ToolPolicy, function_tool
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.constants import TASK_FINISH_TOOL_NAME, WRITE_FILE_TOOL_NAME
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 
@@ -100,6 +100,31 @@ def test_tool_policy_disallowed_tools_filters_custom_tool_schema(tmp_path: Path)
     )
 
     assert "blocked" not in llm.tool_names
+
+
+def test_tool_policy_disallowed_default_tool_cannot_execute_even_if_model_calls_it(tmp_path: Path) -> None:
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return (
+            CapturingLLMWithToolCall(
+                WRITE_FILE_TOOL_NAME,
+                {"path": "secret.txt", "content": "leak"},
+            ),
+            _resolved(),
+        )
+
+    result = Runner.run_sync(
+        Agent(name="assistant", instructions="Use tools.", model="m"),
+        "write",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            tool_policy=ToolPolicy(disallowed_tools=[WRITE_FILE_TOOL_NAME]),
+        ),
+    )
+
+    assert not (tmp_path / "secret.txt").exists()
+    assert result.raw_result.cycles[0].tool_results[0].error_code == "tool_not_allowed"
 
 
 def test_function_tool_is_enabled_false_hides_schema(tmp_path: Path) -> None:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools import ToolContext
 from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.function import function_tool
@@ -104,3 +107,22 @@ def test_orchestrator_emits_tool_started_and_completed_events(tmp_path) -> None:
     assert [event.type for event in events] == ["tool_call_started", "tool_call_completed"]
     assert events[0].tool_name == "echo"
     assert events[1].tool_call_id == "call_1"
+
+
+def test_orchestrator_propagates_cancelled_error(tmp_path) -> None:
+    @function_tool
+    def cancelled() -> str:
+        raise CancelledError("stop")
+
+    context = ToolContext(
+        workspace=tmp_path,
+        shared_state={},
+        cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
+    )
+
+    with pytest.raises(CancelledError):
+        ToolOrchestrator.from_tools([cancelled]).run_one(
+            ToolCall(id="call_1", name="cancelled", arguments={}),
+            context=context,
+        )

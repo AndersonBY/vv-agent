@@ -188,6 +188,11 @@ class Runner:
             resolved=resolved,
             trace_id=trace_id,
         )
+        if run_config.tool_registry_factory is not None:
+            task.extra_tool_names = [
+                *task.extra_tool_names,
+                *[name for name in registry.list_tool_names() if name not in task.extra_tool_names],
+            ]
         initial_messages = cls._session_initial_messages(run_config)
         ctx = ExecutionContext(
             cancellation_token=run_config.cancellation_token,
@@ -201,6 +206,9 @@ class Runner:
                 "_vv_agent_model_settings": resolved_model_settings,
                 "_vv_agent_run_context": guardrail_context,
                 "_vv_agent_session": run_config.session,
+                "_vv_agent_approval_provider": run_config.approval_provider,
+                "_vv_agent_approval_broker": run_config.approval_broker,
+                "_vv_agent_approval_timeout_seconds": run_config.approval_timeout_seconds,
                 **dict(run_config.metadata),
             },
         )
