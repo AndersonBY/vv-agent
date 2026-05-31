@@ -129,7 +129,8 @@ class RunHandle:
         raise NotImplementedError("RunHandle.follow_up() is not supported by the synchronous runner yet.")
 
     def approve(self, request_id: str, decision: ApprovalInput) -> None:
-        self._approval_broker.resolve(request_id, decision)
+        if not self._approval_broker.resolve(request_id, decision):
+            raise KeyError(f"Unknown approval request: {request_id}")
 
     def resume(self, resume_token: str, payload: dict[str, Any] | None = None) -> None:
         del resume_token, payload

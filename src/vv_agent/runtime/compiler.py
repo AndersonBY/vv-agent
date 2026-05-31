@@ -32,7 +32,7 @@ class AgentCompiler:
                 metadata["_vv_agent_disallowed_tools"] = list(run_config.tool_policy.disallowed_tools)
 
         no_tool_policy = "continue"
-        if agent.tool_use_behavior == "stop_on_first_tool" or run_config.approval_provider is not None:
+        if agent.tool_use_behavior == "stop_on_first_tool":
             no_tool_policy = "finish"
 
         handoff_tool_names = [transfer.tool_name for transfer in agent.handoffs if transfer.tool_name]

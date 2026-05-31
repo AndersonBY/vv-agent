@@ -97,12 +97,13 @@ class ApprovalBroker:
             self._pending[request.request_id] = request
 
     def resolve(self, request_id: str, decision: ApprovalDecision | str) -> bool:
-        normalized = ApprovalDecision.from_input(decision)
         with self._condition:
-            known = request_id in self._pending
+            if request_id not in self._pending:
+                return False
+            normalized = ApprovalDecision.from_input(decision)
             self._decisions[request_id] = normalized
             self._condition.notify_all()
-            return known
+            return True
 
     def wait(self, request_id: str, timeout: float | None) -> ApprovalDecision:
         with self._condition:
