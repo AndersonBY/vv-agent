@@ -11,7 +11,7 @@ from vv_agent.memory import sanitize_for_resume
 from vv_agent.types import AgentStatus, SubTaskOutcome
 
 if TYPE_CHECKING:
-    from vv_agent.sdk.types import AgentRun
+    from vv_agent.interactive import AgentSessionRun
     from vv_agent.workspace.base import WorkspaceBackend
 
 logger = logging.getLogger(__name__)
@@ -333,7 +333,7 @@ class SubTaskManager:
         session_any._messages = sanitized
         return max(len(original) - len(sanitized), 0)
 
-    def _build_outcome_from_run(self, *, task_id: str, run: AgentRun) -> SubTaskOutcome:
+    def _build_outcome_from_run(self, *, task_id: str, run: AgentSessionRun) -> SubTaskOutcome:
         with self._lock:
             record = self._tasks.get(task_id)
             if record is None:

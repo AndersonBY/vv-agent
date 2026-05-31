@@ -109,7 +109,7 @@ def subscribe_sub_agent_session(
     return subscribe(listener)
 
 
-def _register_sub_agent_session(session_id: str, session: Any) -> None:
+def register_sub_agent_session(session_id: str, session: Any) -> None:
     normalized_session_id = str(session_id or "").strip()
     if not normalized_session_id:
         return
@@ -117,7 +117,7 @@ def _register_sub_agent_session(session_id: str, session: Any) -> None:
         _ACTIVE_SUB_AGENT_SESSIONS[normalized_session_id] = session
 
 
-def _unregister_sub_agent_session(session_id: str, session: Any | None = None) -> None:
+def unregister_sub_agent_session(session_id: str, session: Any | None = None) -> None:
     normalized_session_id = str(session_id or "").strip()
     if not normalized_session_id:
         return
@@ -128,6 +128,14 @@ def _unregister_sub_agent_session(session_id: str, session: Any | None = None) -
         if session is not None and registered is not session:
             return
         _ACTIVE_SUB_AGENT_SESSIONS.pop(normalized_session_id, None)
+
+
+def _register_sub_agent_session(session_id: str, session: Any) -> None:
+    register_sub_agent_session(session_id, session)
+
+
+def _unregister_sub_agent_session(session_id: str, session: Any | None = None) -> None:
+    unregister_sub_agent_session(session_id, session)
 
 
 class LLMBuilder(Protocol):
@@ -229,8 +237,8 @@ class AgentRuntime:
         effective_sub_task_manager = sub_task_manager
         if effective_sub_task_manager is None:
             effective_sub_task_manager = SubTaskManager(
-                register_session=_register_sub_agent_session,
-                unregister_session=_unregister_sub_agent_session,
+                register_session=register_sub_agent_session,
+                unregister_session=unregister_sub_agent_session,
             )
 
         cycle_executor = self._build_cycle_executor(
@@ -888,8 +896,7 @@ class AgentRuntime:
         sub_task_manager: SubTaskManager | None = None,
         ctx: ExecutionContext | None = None,
     ) -> SubTaskOutcome:
-        from vv_agent.sdk.session import create_agent_session
-        from vv_agent.sdk.types import AgentRun, LegacyAgentDefinition
+        from vv_agent.interactive import AgentSessionRun, InteractiveAgentDefinition, create_agent_session
 
         request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
         sub_task_id = str(request_metadata.get("task_id") or "").strip()
@@ -947,7 +954,7 @@ class AgentRuntime:
                 sub_agent_timeout_seconds=self.sub_agent_timeout_seconds,
             )
 
-            sub_agent_definition = LegacyAgentDefinition(
+            sub_agent_definition = InteractiveAgentDefinition(
                 description=sub_agent.description,
                 model=sub_task.model,
                 backend=sub_agent.backend or self.default_backend,
@@ -978,7 +985,7 @@ class AgentRuntime:
                 interruption_messages: InterruptionMessageProvider | None = None,
                 log_handler: RuntimeLogHandler | None = None,
                 **_: Any,
-            ) -> AgentRun:
+            ) -> AgentSessionRun:
                 run_task = replace(
                     sub_task,
                     task_id=sub_task_id,
@@ -1023,7 +1030,7 @@ class AgentRuntime:
                     )
                 finally:
                     sub_runtime.log_handler = previous_log_handler
-                return AgentRun(
+                return AgentSessionRun(
                     agent_name=task_name,
                     result=sub_result,
                     resolved=resolved_config,
@@ -1053,7 +1060,7 @@ class AgentRuntime:
                 sub_session.subscribe(_emit_sub_session_event)
 
             try:
-                _register_sub_agent_session(sub_session_id, sub_session)
+                register_sub_agent_session(sub_session_id, sub_session)
                 _emit_sub_session_event(
                     "session_created",
                     {
@@ -1065,7 +1072,7 @@ class AgentRuntime:
                 )
                 sub_run = sub_session.prompt(sub_task.user_prompt, auto_follow_up=False)
             finally:
-                _unregister_sub_agent_session(sub_session_id, sub_session)
+                unregister_sub_agent_session(sub_session_id, sub_session)
         except Exception as exc:
             outcome = SubTaskOutcome(
                 task_id=sub_task_id,

@@ -20,6 +20,18 @@ Public SDK
       -> ExecutionBackend
   -> RunResult / RunEvent
 
+Interactive session SDK
+  -> InteractiveAgentDefinition / AgentSessionOptions
+  -> InteractiveAgentClient
+  -> AgentSession
+  -> runtime.AgentRuntime
+      -> CycleRunner
+      -> MemoryManager
+      -> ToolPlanner
+      -> ToolCallRunner
+      -> ExecutionBackend
+  -> AgentSessionRun / AgentSessionState
+
 CLI / legacy runtime API
   -> config.load_llm_settings_from_file
   -> config.resolve_model_endpoint
@@ -49,6 +61,7 @@ from the assistant's last message.
 | `src/vv_agent/model_settings.py` | Model call parameters and override merging. |
 | `src/vv_agent/events.py` | Typed run events and dict conversion for UI consumers. |
 | `src/vv_agent/guardrails.py` | Public guardrail result contract and decorators. |
+| `src/vv_agent/interactive.py` | Public stateful session/client API for desktop runtimes, interruptions, follow-ups, cancellation, and shared tool state. |
 | `src/vv_agent/result.py` | Public `RunResult` wrapper around runtime results. |
 | `src/vv_agent/sessions/` | Public `Session` protocol plus memory, SQLite, and Redis implementations. |
 | `src/vv_agent/tracing.py` | Public trace spans and processor protocol. |
@@ -133,7 +146,8 @@ and `tests/test_tools.py`.
   provider models.
 - Runtime terminal states are explicit tool outcomes, not prose heuristics.
 - Public SDK code should enter through `Agent`, `Runner`, `RunConfig`,
-  `ModelSettings`, tools, sessions, and typed `RunEvent` objects.
+  `ModelSettings`, tools, sessions, typed `RunEvent` objects, or
+  `InteractiveAgentClient` for stateful host-controlled runtimes.
 - Long outputs should keep structured data in metadata and model-facing text in
   content.
 - Cancellation, streaming, hooks, memory compaction, and execution backends must

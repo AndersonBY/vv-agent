@@ -24,6 +24,15 @@ from vv_agent.events import (
 )
 from vv_agent.guardrails import GuardrailResult, input_guardrail, output_guardrail
 from vv_agent.handoffs import Handoff, handoff
+from vv_agent.interactive import (
+    AgentSession,
+    AgentSessionOptions,
+    AgentSessionRun,
+    AgentSessionState,
+    InteractiveAgentClient,
+    InteractiveAgentDefinition,
+    create_agent_session,
+)
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.result import RunResult
 from vv_agent.run_config import ModelProvider, RunConfig, ToolPolicy
@@ -48,6 +57,10 @@ from vv_agent.types import AgentStatus, Message
 
 __all__ = [
     "Agent",
+    "AgentSession",
+    "AgentSessionOptions",
+    "AgentSessionRun",
+    "AgentSessionState",
     "AgentStartedEvent",
     "AgentStatus",
     "AssistantDeltaEvent",
@@ -58,6 +71,8 @@ __all__ = [
     "GuardrailResult",
     "Handoff",
     "HandoffEvent",
+    "InteractiveAgentClient",
+    "InteractiveAgentDefinition",
     "LLMStartedEvent",
     "MemoryCompactedEvent",
     "MemorySession",
@@ -94,6 +109,7 @@ __all__ = [
     "TraceProcessor",
     "build_default_registry",
     "build_openai_llm_from_local_settings",
+    "create_agent_session",
     "function_tool",
     "handoff",
     "input_guardrail",

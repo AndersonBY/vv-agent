@@ -18,10 +18,10 @@ Agent / RunConfig / ModelSettings
 ```
 
 The public SDK entry points are exported from `vv_agent`: `Agent`, `Runner`,
-`RunConfig`, `ModelSettings`, `function_tool`, `Session`, and typed `RunEvent`
-objects. Runtime internals still use `RuntimeTask` (`AgentTask` during the
-remaining internal migration), `AgentResult`, `Message`, `CycleRecord`, and
-`ToolCall`.
+`RunConfig`, `ModelSettings`, `function_tool`, `Session`, typed `RunEvent`
+objects, and the interactive session API for desktop/runtime integrations.
+Runtime internals still use `RuntimeTask` (`AgentTask` during the remaining
+internal migration), `AgentResult`, `Message`, `CycleRecord`, and `ToolCall`.
 
 Task completion is tool-driven: the agent calls `task_finish` or `ask_user` to signal terminal states. No implicit "last message = answer" heuristics.
 
@@ -106,6 +106,52 @@ that need direct cycle-loop control.
 
 Install Redis support with `uv sync --extra redis` or inject a Redis-compatible
 client when constructing `RedisSession`.
+
+### Interactive Sessions
+
+Use `Runner` for one-shot runs, streamed runs, and conversation history managed
+by `RunConfig.session`. Use `InteractiveAgentClient` when the host application
+needs a stateful, bidirectional runtime session with stable session ids,
+runtime listeners, queued steering prompts, follow-up turns, cancellation, and
+shared tool state.
+
+```python
+from pathlib import Path
+
+from vv_agent import (
+    AgentSessionOptions,
+    InteractiveAgentClient,
+    InteractiveAgentDefinition,
+)
+from vv_agent.runtime.backends import ThreadBackend
+
+client = InteractiveAgentClient(
+    options=AgentSessionOptions(
+        settings_file=Path("local_settings.py"),
+        default_backend="moonshot",
+        workspace=Path("./workspace/thread-001"),
+        execution_backend=ThreadBackend(max_workers=4),
+    )
+)
+
+session = client.create_session(
+    session_id="thread-001",
+    agent=InteractiveAgentDefinition(
+        description="Operate in the user's workspace and report progress.",
+        model="kimi-k2.6",
+        no_tool_policy="finish",
+    ),
+)
+unsubscribe = session.subscribe(lambda event, payload: print(event, payload))
+try:
+    run = session.prompt("Inspect the workspace")
+    print(run.result.status, run.result.final_answer)
+finally:
+    unsubscribe()
+```
+
+Interactive sessions are additive to the normal SDK facade; they do not
+reintroduce the old 0.1 `AgentSDKClient` or `AgentSDKOptions` names.
 
 ### Agent As Tool, Handoff, And Policy
 

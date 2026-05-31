@@ -15,7 +15,7 @@ from typing import Any
 
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.runtime.backends.celery import RuntimeRecipe
-from vv_agent.runtime.engine import AgentRuntime, _register_sub_agent_session, _unregister_sub_agent_session
+from vv_agent.runtime.engine import AgentRuntime, register_sub_agent_session, unregister_sub_agent_session
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.runtime.state import Checkpoint
 from vv_agent.runtime.stores.sqlite import SqliteStateStore
@@ -119,8 +119,8 @@ def run_single_cycle(
         task=task, workspace_path=workspace_path,
     )
     sub_task_manager = SubTaskManager(
-        register_session=_register_sub_agent_session,
-        unregister_session=_unregister_sub_agent_session,
+        register_session=register_sub_agent_session,
+        unregister_session=unregister_sub_agent_session,
     )
     cycle_executor = runtime._build_cycle_executor(
         task=task,

@@ -18,8 +18,9 @@ Agent / RunConfig / ModelSettings
 ```
 
 公开 SDK 入口从 `vv_agent` 顶层导出：`Agent`、`Runner`、`RunConfig`、
-`ModelSettings`、`function_tool`、`Session` 和强类型 `RunEvent`。底层 runtime
-仍然使用 `RuntimeTask`、`AgentResult`、`Message`、`CycleRecord`、`ToolCall`。
+`ModelSettings`、`function_tool`、`Session`、强类型 `RunEvent`，以及面向桌面
+runtime 集成的 interactive session API。底层 runtime 仍然使用 `RuntimeTask`、
+`AgentResult`、`Message`、`CycleRecord`、`ToolCall`。
 
 任务完成由工具显式触发：agent 调用 `task_finish` 或 `ask_user` 来标记终态，不做"最后一条消息即答案"的隐式推断。
 
@@ -101,6 +102,50 @@ for event in Runner.stream_sync(agent, "继续刚才的话题并汇报进度", r
 
 Redis 支持可通过 `uv sync --extra redis` 安装，也可以在构造 `RedisSession`
 时注入 Redis 兼容 client。
+
+### Interactive Session
+
+普通一次性运行、流式运行，以及由 `RunConfig.session` 管理历史的会话，优先使用
+`Runner`。宿主应用需要稳定 `session_id`、运行时监听、运行中 steering、follow-up、
+取消和共享工具状态时，使用 `InteractiveAgentClient`。
+
+```python
+from pathlib import Path
+
+from vv_agent import (
+    AgentSessionOptions,
+    InteractiveAgentClient,
+    InteractiveAgentDefinition,
+)
+from vv_agent.runtime.backends import ThreadBackend
+
+client = InteractiveAgentClient(
+    options=AgentSessionOptions(
+        settings_file=Path("local_settings.py"),
+        default_backend="moonshot",
+        workspace=Path("./workspace/thread-001"),
+        execution_backend=ThreadBackend(max_workers=4),
+    )
+)
+
+session = client.create_session(
+    session_id="thread-001",
+    agent=InteractiveAgentDefinition(
+        description="在用户工作区内操作并汇报进度。",
+        model="kimi-k2.6",
+        no_tool_policy="finish",
+    ),
+)
+unsubscribe = session.subscribe(lambda event, payload: print(event, payload))
+try:
+    run = session.prompt("检查工作区")
+    print(run.result.status, run.result.final_answer)
+finally:
+    unsubscribe()
+```
+
+Interactive session 是 0.2 SDK 的增量能力，不会重新暴露旧版
+`AgentSDKClient` 或 `AgentSDKOptions` 命名。
 
 ### Agent as Tool、Handoff 与工具策略
 
