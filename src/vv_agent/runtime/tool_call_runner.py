@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.tools import ToolContext, ToolRegistry
-from vv_agent.tools.dispatcher import dispatch_tool_call
+from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import AgentTask, CycleRecord, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 if TYPE_CHECKING:
@@ -24,6 +24,7 @@ class ToolCallRunner:
     def __init__(self, *, tool_registry: ToolRegistry, hook_manager: RuntimeHookManager | None = None) -> None:
         self.tool_registry = tool_registry
         self.hook_manager = hook_manager or RuntimeHookManager()
+        self.tool_orchestrator = ToolOrchestrator.from_registry(tool_registry)
 
     def run(
         self,
@@ -64,10 +65,9 @@ class ToolCallRunner:
                 )
                 if on_tool_start is not None:
                     on_tool_start(patched_call)
-                result = dispatch_tool_call(
-                    registry=self.tool_registry,
+                result = self.tool_orchestrator.run_one(
+                    patched_call,
                     context=call_context,
-                    call=patched_call,
                 )
                 if ctx is not None:
                     ctx.check_cancelled()
