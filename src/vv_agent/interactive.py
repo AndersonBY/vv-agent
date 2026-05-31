@@ -9,10 +9,11 @@ from threading import RLock
 from typing import Any, Protocol, cast
 
 from vv_agent.agent import Agent
+from vv_agent.approval import ApprovalProvider
 from vv_agent.config import ResolvedModelConfig, build_openai_llm_from_local_settings
 from vv_agent.llm.base import LLMClient
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
-from vv_agent.run_config import RunConfig
+from vv_agent.run_config import RunConfig, ToolPolicy
 from vv_agent.runner import Runner
 from vv_agent.runtime import CancellationToken
 from vv_agent.runtime.backends import ExecutionBackend
@@ -78,6 +79,9 @@ class AgentSessionOptions:
     execution_backend: ExecutionBackend | None = None
     stream_callback: StreamCallback | None = None
     debug_dump_dir: str | None = None
+    approval_provider: ApprovalProvider | None = None
+    approval_timeout_seconds: float | None = None
+    tool_policy: ToolPolicy | None = None
     bash_shell: str | None = None
     windows_shell_priority: list[str] = field(default_factory=list)
     bash_env: dict[str, str] = field(default_factory=dict)
@@ -145,6 +149,7 @@ class AgentSession:
         self._steering_queue: deque[str] = deque()
         self._follow_up_queue: deque[str] = deque()
         self._active_cancellation_token: CancellationToken | None = None
+        self._active_run_handle: Any | None = None
         self._lock = RLock()
 
     @property
@@ -209,6 +214,16 @@ class AgentSession:
             self._follow_up_queue.clear()
         self._emit("session_cancel_requested")
         return True
+
+    def approve(self, request_id: str, decision: Any) -> None:
+        normalized_request_id = str(request_id or "").strip()
+        if not normalized_request_id:
+            raise ValueError("approval request_id cannot be empty")
+        with self._lock:
+            handle = self._active_run_handle
+        if handle is None:
+            raise RuntimeError("No active run handle is available for approval.")
+        handle.approve(normalized_request_id, decision)
 
     def prompt(self, prompt: str, *, auto_follow_up: bool = True) -> AgentSessionRun:
         text = prompt.strip()
@@ -294,9 +309,11 @@ class AgentSession:
                 "interruption_messages": self._interruption_messages,
                 "log_handler": self._session_log_handler,
                 "cancellation_token": self._active_cancellation_token,
+                "active_handle_callback": self._set_active_run_handle,
             }
             run = self._execute_run(**run_kwargs)
         finally:
+            self._set_active_run_handle(None)
             with self._lock:
                 self._running = False
                 self._active_cancellation_token = None
@@ -315,6 +332,10 @@ class AgentSession:
             error=run.result.error,
         )
         return run
+
+    def _set_active_run_handle(self, handle: Any | None) -> None:
+        with self._lock:
+            self._active_run_handle = handle
 
     def _drain_next_queued_prompt(self) -> str | None:
         with self._lock:
@@ -580,6 +601,7 @@ class InteractiveAgentClient:
         cancellation_token: CancellationToken | None = None,
         sub_task_manager: SubTaskManager | None = None,
         session_id: str | None = None,
+        active_handle_callback: Callable[[Any | None], None] | None = None,
         **_: Any,
     ) -> AgentSessionRun:
         definition = self._apply_startup_shell_defaults(agent)
@@ -621,8 +643,11 @@ class InteractiveAgentClient:
             model_provider=model_provider,
             workspace=effective_workspace,
             max_cycles=task.max_cycles,
+            tool_policy=self.options.tool_policy,
             execution_backend=self.options.execution_backend,
             cancellation_token=cancellation_token,
+            approval_provider=self.options.approval_provider,
+            approval_timeout_seconds=self.options.approval_timeout_seconds,
             tool_registry_factory=tool_registry_factory,
             runtime_hooks=list(self.options.runtime_hooks),
             log_preview_chars=self.options.log_preview_chars,
@@ -642,10 +667,16 @@ class InteractiveAgentClient:
             runtime_stream_callback=self.options.stream_callback,
         )
         handle = Runner.start(sdk_agent, prompt, run_config=run_config)
-        if log_handler is not None:
-            for event in handle.events():
-                log_handler(event.type, event.to_dict())
-        result = handle.result()
+        if active_handle_callback is not None:
+            active_handle_callback(handle)
+        try:
+            if log_handler is not None:
+                for event in handle.events():
+                    log_handler(event.type, event.to_dict())
+            result = handle.result()
+        finally:
+            if active_handle_callback is not None:
+                active_handle_callback(None)
         return AgentSessionRun(agent_name=run_name, result=result.raw_result, resolved=resolved)
 
     def _apply_startup_shell_defaults(self, definition: InteractiveAgentDefinition) -> InteractiveAgentDefinition:

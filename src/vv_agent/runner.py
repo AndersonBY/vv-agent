@@ -647,7 +647,10 @@ class Runner:
             trace_id=trace_id,
             agent_name=agent_name,
             cycle_index=context.cycle_index,
-            metadata={"tool_metadata": dict(tool.metadata)},
+            metadata={
+                "tool_metadata": dict(tool.metadata),
+                "session_id": str(runtime_metadata.get("session_id") or runtime_metadata.get("_vv_agent_session_id") or ""),
+            },
         )
 
         def check_cancelled() -> None:

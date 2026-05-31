@@ -135,7 +135,10 @@ class ToolOrchestrator:
             trace_id=str(metadata.get("_vv_agent_trace_id") or metadata.get("trace_id") or ""),
             agent_name=str(metadata.get("_vv_agent_agent_name") or ""),
             cycle_index=context.cycle_index,
-            metadata={"tool_metadata": dict(executor.metadata)},
+            metadata={
+                "tool_metadata": dict(executor.metadata),
+                "session_id": str(metadata.get("session_id") or metadata.get("_vv_agent_session_id") or ""),
+            },
         )
         provider = metadata.get("_vv_agent_approval_provider")
         if provider is not None:
