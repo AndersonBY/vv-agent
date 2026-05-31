@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.events import RunEvent
 from vv_agent.llm.base import LLMClient
 from vv_agent.memory import CompactionExhaustedError, MemoryManager
-from vv_agent.memory.provider import MemoryCompactCompleted, MemoryCompactStarted, MemoryProvider
+from vv_agent.memory.provider import MemoryCompactCompleted, MemoryCompactStarted, MemoryProvider, MemoryProviderResult
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime.hooks import RuntimeHookManager
@@ -330,8 +331,17 @@ class CycleRunner:
             message_count=len(messages),
             estimated_tokens=estimated_tokens,
         )
-        for provider in providers:
-            provider.before_compact(event)
+        metadata = self._call_before_memory_providers(providers, event)
+        if metadata:
+            event = MemoryCompactStarted(
+                **self._memory_event_context(ctx),
+                cycle_index=cycle_index,
+                message_count=len(messages),
+                estimated_tokens=estimated_tokens,
+                event_id=event.event_id,
+                created_at=event.created_at,
+                metadata=metadata,
+            )
         if emit_event is not None:
             emit_event(event)
 
@@ -359,10 +369,109 @@ class CycleRunner:
                 total_tokens=None,
             ),
         )
+        metadata = self._call_after_memory_providers(providers, event)
+        if metadata:
+            event = MemoryCompactCompleted(
+                **self._memory_event_context(ctx),
+                cycle_index=cycle_index,
+                before_count=len(before_messages),
+                after_count=len(after_messages),
+                summary_tokens=event.summary_tokens,
+                event_id=event.event_id,
+                created_at=event.created_at,
+                metadata=metadata,
+            )
         if emit_event is not None:
             emit_event(event)
-        for provider in providers:
-            provider.after_compact(event)
+
+    def _call_before_memory_providers(
+        self,
+        providers: list[MemoryProvider],
+        event: MemoryCompactStarted,
+    ) -> dict[str, Any]:
+        results: dict[str, dict[str, Any]] = {}
+        errors: list[dict[str, str]] = []
+        for index, provider in enumerate(providers):
+            provider_name = self._memory_provider_name(provider, index=index, existing=results)
+            try:
+                result = provider.before_compact(event)
+            except Exception as exc:
+                self._record_memory_provider_error(
+                    provider_name=provider_name,
+                    stage="before_compact",
+                    error=exc,
+                    errors=errors,
+                )
+                continue
+            if isinstance(result, MemoryProviderResult) and result.metadata:
+                results[provider_name] = dict(result.metadata)
+        return self._memory_provider_metadata(results=results, errors=errors)
+
+    def _call_after_memory_providers(
+        self,
+        providers: list[MemoryProvider],
+        event: MemoryCompactCompleted,
+    ) -> dict[str, Any]:
+        errors: list[dict[str, str]] = []
+        for index, provider in enumerate(providers):
+            provider_name = self._memory_provider_name(provider, index=index, existing={})
+            try:
+                provider.after_compact(event)
+            except Exception as exc:
+                self._record_memory_provider_error(
+                    provider_name=provider_name,
+                    stage="after_compact",
+                    error=exc,
+                    errors=errors,
+                )
+        return self._memory_provider_metadata(results={}, errors=errors)
+
+    @staticmethod
+    def _record_memory_provider_error(
+        *,
+        provider_name: str,
+        stage: str,
+        error: Exception,
+        errors: list[dict[str, str]],
+    ) -> None:
+        warnings.warn(
+            f"Memory provider {provider_name} {stage} failed: {error}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        errors.append(
+            {
+                "provider": provider_name,
+                "stage": stage,
+                "error": str(error),
+                "error_type": type(error).__name__,
+            }
+        )
+
+    @staticmethod
+    def _memory_provider_metadata(
+        *,
+        results: dict[str, dict[str, Any]],
+        errors: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        if results:
+            metadata["memory_provider_results"] = results
+        if errors:
+            metadata["memory_provider_errors"] = errors
+        return metadata
+
+    @staticmethod
+    def _memory_provider_name(
+        provider: MemoryProvider,
+        *,
+        index: int,
+        existing: dict[str, Any],
+    ) -> str:
+        base_name = provider.__class__.__name__
+        if base_name not in existing:
+            return base_name
+        return f"{base_name}#{index + 1}"
 
     @staticmethod
     def _memory_providers_from_context(ctx: ExecutionContext | None) -> list[MemoryProvider]:
