@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from threading import Event, Thread
 
+import pytest
+
 from vv_agent import Agent, RunConfig, Runner, function_tool
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
@@ -25,7 +27,7 @@ def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
 
     @function_tool
     def slow_tool() -> str:
-        gate.wait(timeout=2)
+        gate.wait(timeout=5)
         return "slow done"
 
     agent = Agent(
@@ -60,8 +62,13 @@ def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
     first_types: list[str] = []
     for event in handle.events():
         first_types.append(event.type)
-        if event.type == "tool_call_started":
-            gate.set()
+        if event.type == "tool_call_started" and getattr(event, "tool_name", "") == "slow_tool":
+            try:
+                assert not handle.done()
+                with pytest.raises(TimeoutError):
+                    handle.result(timeout=0.05)
+            finally:
+                gate.set()
         if event.type == "run_completed":
             break
 
