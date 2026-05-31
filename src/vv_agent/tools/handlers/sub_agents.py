@@ -92,6 +92,18 @@ def _build_single_request(
     )
 
 
+def _parent_lineage_metadata(context: ToolContext) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    parent_tool_call_id = str(context.tool_call_id or "").strip()
+    if parent_tool_call_id:
+        metadata["parent_tool_call_id"] = parent_tool_call_id
+    runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
+    parent_run_id = str(runtime_metadata.get("_vv_agent_run_id") or "").strip()
+    if parent_run_id:
+        metadata["parent_run_id"] = parent_run_id
+    return metadata
+
+
 def _run_requests_in_parallel_if_possible(
     *,
     context: ToolContext,
@@ -144,6 +156,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
 
     include_main_summary, exclude_files_pattern = _extract_shared_flags(arguments)
     wait_for_completion = _coerce_bool(arguments.get("wait_for_completion"), default=True)
+    parent_lineage = _parent_lineage_metadata(context)
 
     task_description = str(arguments.get("task_description", "")).strip()
     raw_tasks = arguments.get("tasks")
@@ -168,6 +181,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             output_requirements=str(arguments.get("output_requirements", "")).strip(),
             include_main_summary=include_main_summary,
             exclude_files_pattern=exclude_files_pattern,
+            metadata=parent_lineage,
         )
         if wait_for_completion:
             outcome = sub_task_runner(single_request)
@@ -183,6 +197,8 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             agent_name=agent_name,
             task_title=single_request.task_description,
             workspace_backend=context.workspace_backend,
+            parent_run_id=parent_lineage.get("parent_run_id"),
+            parent_tool_call_id=parent_lineage.get("parent_tool_call_id"),
             runner=lambda: sub_task_runner(single_request),
         )
         return _success(
@@ -217,7 +233,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
                     output_requirements=str(raw_item.get("output_requirements", "")).strip(),
                     include_main_summary=include_main_summary,
                     exclude_files_pattern=exclude_files_pattern,
-                    metadata={"batch_index": index},
+                    metadata={"batch_index": index, **parent_lineage},
                 ),
                 None,
             )
@@ -289,6 +305,8 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             agent_name=agent_name,
             task_title=request.task_description,
             workspace_backend=context.workspace_backend,
+            parent_run_id=parent_lineage.get("parent_run_id"),
+            parent_tool_call_id=parent_lineage.get("parent_tool_call_id"),
             runner=lambda _request=request: sub_task_runner(_request),
         )
         started += 1

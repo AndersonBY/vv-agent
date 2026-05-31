@@ -635,6 +635,242 @@ class HandoffEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class SubRunStartedEvent(RunEvent):
+    parent_tool_call_id: str = ""
+    child_session_id: str | None = None
+    task_id: str | None = None
+    status: str = "running"
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        parent_tool_call_id: str,
+        agent_name: str | None = None,
+        child_session_id: str | None = None,
+        task_id: str | None = None,
+        status: str = "running",
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="sub_run_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "parent_tool_call_id", parent_tool_call_id)
+        object.__setattr__(self, "child_session_id", child_session_id)
+        object.__setattr__(self, "task_id", task_id)
+        object.__setattr__(self, "status", status)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["parent_tool_call_id"] = self.parent_tool_call_id
+        payload["status"] = self.status
+        if self.child_session_id:
+            payload["child_session_id"] = self.child_session_id
+        if self.task_id:
+            payload["task_id"] = self.task_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class SubRunCompletedEvent(RunEvent):
+    parent_tool_call_id: str = ""
+    child_session_id: str | None = None
+    task_id: str | None = None
+    status: str = ""
+    final_output: str | None = None
+    wait_reason: str | None = None
+    error: str | None = None
+    token_usage: dict[str, Any] | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        parent_tool_call_id: str,
+        status: str,
+        agent_name: str | None = None,
+        child_session_id: str | None = None,
+        task_id: str | None = None,
+        final_output: str | None = None,
+        wait_reason: str | None = None,
+        error: str | None = None,
+        token_usage: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="sub_run_completed",
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "parent_tool_call_id", parent_tool_call_id)
+        object.__setattr__(self, "child_session_id", child_session_id)
+        object.__setattr__(self, "task_id", task_id)
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "final_output", final_output)
+        object.__setattr__(self, "wait_reason", wait_reason)
+        object.__setattr__(self, "error", error)
+        object.__setattr__(self, "token_usage", dict(token_usage) if token_usage is not None else None)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["parent_tool_call_id"] = self.parent_tool_call_id
+        payload["status"] = self.status
+        if self.child_session_id:
+            payload["child_session_id"] = self.child_session_id
+        if self.task_id:
+            payload["task_id"] = self.task_id
+        if self.final_output is not None:
+            payload["final_output"] = self.final_output
+        if self.wait_reason is not None:
+            payload["wait_reason"] = self.wait_reason
+        if self.error is not None:
+            payload["error"] = self.error
+        if self.token_usage is not None:
+            payload["token_usage"] = dict(self.token_usage)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffStartedEvent(RunEvent):
+    source_agent: str = ""
+    target_agent: str = ""
+    tool_call_id: str = ""
+    child_session_id: str | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        source_agent: str,
+        target_agent: str,
+        tool_call_id: str,
+        child_session_id: str | None = None,
+        cycle_index: int | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="handoff_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=source_agent,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "source_agent", source_agent)
+        object.__setattr__(self, "target_agent", target_agent)
+        object.__setattr__(self, "tool_call_id", tool_call_id)
+        object.__setattr__(self, "child_session_id", child_session_id)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["source_agent"] = self.source_agent
+        payload["target_agent"] = self.target_agent
+        payload["tool_call_id"] = self.tool_call_id
+        if self.child_session_id:
+            payload["child_session_id"] = self.child_session_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffCompletedEvent(RunEvent):
+    source_agent: str = ""
+    target_agent: str = ""
+    tool_call_id: str = ""
+    status: str = ""
+    child_session_id: str | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        source_agent: str,
+        target_agent: str,
+        tool_call_id: str,
+        status: str,
+        child_session_id: str | None = None,
+        cycle_index: int | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="handoff_completed",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=source_agent,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "source_agent", source_agent)
+        object.__setattr__(self, "target_agent", target_agent)
+        object.__setattr__(self, "tool_call_id", tool_call_id)
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "child_session_id", child_session_id)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["source_agent"] = self.source_agent
+        payload["target_agent"] = self.target_agent
+        payload["tool_call_id"] = self.tool_call_id
+        payload["status"] = self.status
+        if self.child_session_id:
+            payload["child_session_id"] = self.child_session_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class RunCompletedEvent(RunEvent):
     final_output: str | None = None
     status: str = ""
@@ -817,6 +1053,62 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             source_agent=str(payload.get("source_agent") or payload.get("agent_name") or ""),
             target_agent=str(payload.get("target_agent") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
+            run_id=common["run_id"],
+            trace_id=common["trace_id"],
+            cycle_index=payload.get("cycle_index") if isinstance(payload.get("cycle_index"), int) else None,
+            session_id=common["session_id"],
+            parent_event_id=common["parent_event_id"],
+            parent_run_id=common["parent_run_id"],
+            event_id=common["event_id"],
+            created_at=common["created_at"],
+            metadata=common["metadata"],
+        )
+    if event_type == "sub_run_started":
+        return SubRunStartedEvent(
+            parent_tool_call_id=str(payload.get("parent_tool_call_id") or ""),
+            agent_name=payload.get("agent_name"),
+            child_session_id=payload.get("child_session_id"),
+            task_id=payload.get("task_id"),
+            status=str(payload.get("status") or "running"),
+            **common,
+        )
+    if event_type == "sub_run_completed":
+        token_usage = payload.get("token_usage")
+        return SubRunCompletedEvent(
+            parent_tool_call_id=str(payload.get("parent_tool_call_id") or ""),
+            agent_name=payload.get("agent_name"),
+            child_session_id=payload.get("child_session_id"),
+            task_id=payload.get("task_id"),
+            status=str(payload.get("status") or ""),
+            final_output=payload.get("final_output") if payload.get("final_output") is not None else None,
+            wait_reason=payload.get("wait_reason") if payload.get("wait_reason") is not None else None,
+            error=payload.get("error") if payload.get("error") is not None else None,
+            token_usage=token_usage if isinstance(token_usage, dict) else None,
+            **common,
+        )
+    if event_type == "handoff_started":
+        return HandoffStartedEvent(
+            source_agent=str(payload.get("source_agent") or payload.get("agent_name") or ""),
+            target_agent=str(payload.get("target_agent") or ""),
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            child_session_id=payload.get("child_session_id"),
+            run_id=common["run_id"],
+            trace_id=common["trace_id"],
+            cycle_index=payload.get("cycle_index") if isinstance(payload.get("cycle_index"), int) else None,
+            session_id=common["session_id"],
+            parent_event_id=common["parent_event_id"],
+            parent_run_id=common["parent_run_id"],
+            event_id=common["event_id"],
+            created_at=common["created_at"],
+            metadata=common["metadata"],
+        )
+    if event_type == "handoff_completed":
+        return HandoffCompletedEvent(
+            source_agent=str(payload.get("source_agent") or payload.get("agent_name") or ""),
+            target_agent=str(payload.get("target_agent") or ""),
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            status=str(payload.get("status") or ""),
+            child_session_id=payload.get("child_session_id"),
             run_id=common["run_id"],
             trace_id=common["trace_id"],
             cycle_index=payload.get("cycle_index") if isinstance(payload.get("cycle_index"), int) else None,

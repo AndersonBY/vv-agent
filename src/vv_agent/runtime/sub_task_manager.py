@@ -71,6 +71,8 @@ class ManagedSubTask:
     latest_cycle: dict[str, Any] | None = None
     latest_tool_call: dict[str, Any] | None = None
     updated_at: str | None = None
+    parent_run_id: str | None = None
+    parent_tool_call_id: str | None = None
     thread: ThreadHandle | None = None
     manager_listener_attached: bool = False
     forward_listener_attached: bool = False
@@ -100,6 +102,8 @@ class SubTaskManager:
         task_title: str,
         workspace_backend: WorkspaceBackend,
         runner: SubTaskRunnerCallable,
+        parent_run_id: str | None = None,
+        parent_tool_call_id: str | None = None,
     ) -> ManagedSubTask:
         with self._lock:
             record = self._tasks.get(task_id)
@@ -117,6 +121,8 @@ class SubTaskManager:
             record.agent_name = agent_name
             record.task_title = task_title or record.task_title
             record.workspace_backend = workspace_backend
+            record.parent_run_id = parent_run_id
+            record.parent_tool_call_id = parent_tool_call_id
             record.outcome = None
             record.updated_at = _now_iso()
             thread = threading.Thread(
@@ -140,6 +146,8 @@ class SubTaskManager:
         workspace_backend: WorkspaceBackend,
         session: SubTaskSession,
         resolved: dict[str, str] | None = None,
+        parent_run_id: str | None = None,
+        parent_tool_call_id: str | None = None,
         event_forwarder: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> ManagedSubTask:
         with self._lock:
@@ -157,6 +165,10 @@ class SubTaskManager:
             record.task_title = task_title or record.task_title
             record.workspace_backend = workspace_backend
             record.session = session
+            if parent_run_id is not None:
+                record.parent_run_id = parent_run_id
+            if parent_tool_call_id is not None:
+                record.parent_tool_call_id = parent_tool_call_id
             if resolved:
                 record.resolved = dict(resolved)
             record.updated_at = _now_iso()
