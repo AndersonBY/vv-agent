@@ -9,6 +9,14 @@ from vv_agent.config import (
     load_llm_settings_from_file,
     resolve_model_endpoint,
 )
+from vv_agent.context_providers import (
+    ContextBundle,
+    ContextFragment,
+    ContextProvider,
+    ContextRequest,
+    ContextSection,
+    assemble_context_fragments,
+)
 from vv_agent.event_store import JsonlRunEventStore, RunEventStore
 from vv_agent.events import (
     AgentStartedEvent,
@@ -78,6 +86,11 @@ __all__ = [
     "ApprovalResolvedEvent",
     "AssistantDeltaEvent",
     "ConfigError",
+    "ContextBundle",
+    "ContextFragment",
+    "ContextProvider",
+    "ContextRequest",
+    "ContextSection",
     "EndpointConfig",
     "EndpointOption",
     "FunctionTool",
@@ -126,6 +139,7 @@ __all__ = [
     "ToolRegistry",
     "ToolStartedEvent",
     "TraceProcessor",
+    "assemble_context_fragments",
     "build_default_registry",
     "build_openai_llm_from_local_settings",
     "create_agent_session",

@@ -7,6 +7,7 @@ from typing import Any, Literal, Protocol
 
 from vv_agent.approval import ApprovalBroker, ApprovalProvider
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.context_providers import ContextProvider
 from vv_agent.event_store import RunEventStore
 from vv_agent.llm.base import LLMClient
 from vv_agent.model_settings import ModelSettings
@@ -55,6 +56,7 @@ class RunConfig:
     hooks: Any | None = None
     tracing: dict[str, Any] | None = None
     context: Any | None = None
+    context_providers: list[ContextProvider] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     settings_file: str | Path = "local_settings.py"
     default_backend: str | None = None
