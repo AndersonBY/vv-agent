@@ -11,6 +11,7 @@ by setting ``endpoint_url``.
 from __future__ import annotations
 
 import fnmatch
+import importlib
 import importlib.util
 import posixpath
 from datetime import UTC, datetime
@@ -27,8 +28,7 @@ def _require_boto3() -> Any:
             "boto3 is required for S3WorkspaceBackend. "
             "Install it with: uv pip install 'vv-agent[s3]'"
         )
-    import boto3
-    return boto3
+    return importlib.import_module("boto3")
 
 
 class S3WorkspaceBackend:
@@ -69,7 +69,7 @@ class S3WorkspaceBackend:
         addressing_style: str = "virtual",
     ) -> None:
         boto3 = _require_boto3()
-        from botocore.config import Config
+        Config = importlib.import_module("botocore.config").Config
 
         kwargs: dict[str, Any] = {
             "config": Config(

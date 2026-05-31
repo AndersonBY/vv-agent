@@ -23,7 +23,9 @@ class StreamCapturingLLM:
         messages: list[Message],
         tools: list[dict[str, object]],
         stream_callback=None,
+        model_settings=None,
     ) -> LLMResponse:
+        del model, messages, tools, model_settings
         content_parts = []
         for token in self.tokens:
             content_parts.append(token)

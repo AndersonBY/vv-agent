@@ -309,10 +309,11 @@ class CeleryBackend:
         build a :func:`celery.group` and execute it.  Otherwise we fall back
         to serial execution so plain callables still work.
         """
-        if hasattr(fn, "s"):
+        signature = getattr(fn, "s", None)
+        if callable(signature):
             from celery import group
 
-            job = group(fn.s(item) for item in items)  # type: ignore[attr-defined]
+            job = group(signature(item) for item in items)
             result = job.apply_async()
             return result.get(timeout=timeout)
         return [fn(item) for item in items]

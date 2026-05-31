@@ -10,6 +10,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from vv_agent.constants import TODO_WRITE_TOOL_NAME
 from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
 from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
+from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.types import Message
 
 
@@ -494,6 +495,30 @@ def test_should_use_stream_is_case_insensitive_for_minimax() -> None:
 def test_should_use_stream_includes_deepseek_v4_reasoning_models() -> None:
     assert VVLlmClient._should_use_stream("deepseek-v4-flash") is True
     assert VVLlmClient._should_use_stream("deepseek-v4-pro") is True
+
+
+def test_vv_llm_request_options_apply_public_model_settings() -> None:
+    llm = VVLlmClient(endpoint_targets=[], backend="openai", selected_model="gpt-4o")
+
+    options = llm._resolve_request_options(
+        "gpt-4o",
+        stream=False,
+        endpoint_type="openai",
+        model_settings=ModelSettings(
+            temperature=0.3,
+            max_tokens=512,
+            reasoning={"effort": "low"},
+            extra_body={"seed": 7},
+            retry=RetrySettings(max_attempts=5, backoff_seconds=0.25),
+        ),
+    )
+
+    assert options.temperature == 0.3
+    assert options.max_tokens == 512
+    assert options.reasoning_effort == "low"
+    assert options.extra_body == {"seed": 7}
+    assert llm.max_retries_per_endpoint == 5
+    assert llm.backoff_seconds == 0.25
 
 
 def test_build_message_payload_keeps_reasoning_only_for_last_assistant_by_default() -> None:

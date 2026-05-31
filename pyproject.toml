@@ -1,6 +1,6 @@
 [project]
 name = "vv-agent"
-version = "0.1.63"
+version = "0.2.0"
 description = "Vector Vein inspired agent framework with cycle runtime, tools and memory management"
 readme = "README.md"
 authors = [
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 celery = ["celery[redis]>=5.4"]
+redis = ["redis>=5.0"]
 s3 = ["boto3>=1.35"]
 
 [dependency-groups]

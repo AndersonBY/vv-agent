@@ -43,6 +43,12 @@ class ToolContext:
     sub_task_manager: SubTaskManager | None = None
     ctx: ExecutionContext | None = None
     task_metadata: dict[str, Any] = field(default_factory=dict)
+    run_context: Any | None = None
+    tool_call_id: str = ""
+    tool_name: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
+    session: Any | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def allow_outside_workspace_paths(self) -> bool:
         sources: list[dict[str, Any]] = []

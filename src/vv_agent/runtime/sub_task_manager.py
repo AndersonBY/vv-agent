@@ -329,7 +329,8 @@ class SubTaskManager:
         sanitized = sanitize_for_resume(original)
         if [_message_snapshot(message) for message in sanitized] == [_message_snapshot(message) for message in original]:
             return 0
-        session._messages = sanitized  # type: ignore[attr-defined]
+        session_any: Any = session
+        session_any._messages = sanitized
         return max(len(original) - len(sanitized), 0)
 
     def _build_outcome_from_run(self, *, task_id: str, run: AgentRun) -> SubTaskOutcome:

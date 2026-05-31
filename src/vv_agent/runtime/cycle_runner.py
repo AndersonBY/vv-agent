@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import inspect
 import json
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.llm.base import LLMClient
 from vv_agent.memory import CompactionExhaustedError, MemoryManager
+from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.runtime.token_usage import normalize_token_usage
 from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools import ToolRegistry
-from vv_agent.types import AgentTask, CycleRecord, Message, ToolCall
+from vv_agent.types import AgentTask, CycleRecord, LLMResponse, Message, ToolCall
 
 if TYPE_CHECKING:
     from vv_agent.runtime.context import ExecutionContext
@@ -106,11 +108,12 @@ class CycleRunner:
 
             stream_callback = ctx.stream_callback if ctx is not None else None
             try:
-                llm_response = self.llm_client.complete(
+                llm_response = self._complete_llm(
                     model=task.model,
                     messages=request_messages,
                     tools=request_tool_schemas,
                     stream_callback=stream_callback,
+                    model_settings=self._model_settings_from_context(ctx),
                 )
                 break
             except Exception as exc:
@@ -195,6 +198,50 @@ class CycleRunner:
             if isinstance(args, tuple):
                 stack.extend(arg for arg in args if isinstance(arg, BaseException))
         return False
+
+    def _complete_llm(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        tools: list[dict[str, object]],
+        stream_callback: Any,
+        model_settings: ModelSettings | None,
+    ) -> LLMResponse:
+        if model_settings is not None and self._llm_accepts_model_settings():
+            return self.llm_client.complete(
+                model=model,
+                messages=messages,
+                tools=tools,
+                stream_callback=stream_callback,
+                model_settings=model_settings,
+            )
+        return self.llm_client.complete(
+            model=model,
+            messages=messages,
+            tools=tools,
+            stream_callback=stream_callback,
+        )
+
+    def _llm_accepts_model_settings(self) -> bool:
+        try:
+            signature = inspect.signature(self.llm_client.complete)
+        except (TypeError, ValueError):
+            return False
+        for parameter in signature.parameters.values():
+            if parameter.name == "model_settings":
+                return True
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+        return False
+
+    @staticmethod
+    def _model_settings_from_context(ctx: ExecutionContext | None) -> ModelSettings | None:
+        metadata = getattr(ctx, "metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        value = metadata.get("_vv_agent_model_settings")
+        return value if isinstance(value, ModelSettings) else None
 
     @staticmethod
     def _serialize_tool_calls(tool_calls: list[ToolCall]) -> list[dict[str, Any]]:

@@ -301,6 +301,7 @@ class AgentRuntime:
                 max_cycles=task.max_cycles,
                 message_count=len(messages),
             )
+            cycle_start_message_count = len(messages)
             previous_prompt_tokens: int | None = None
             recent_tool_call_ids: set[str] | None = None
             if cycles:
@@ -316,6 +317,12 @@ class AgentRuntime:
                 if candidate_ids:
                     recent_tool_call_ids = candidate_ids
             try:
+                self._emit_log(
+                    "llm_started",
+                    cycle=cycle_index,
+                    model=task.model,
+                    message_count=len(messages),
+                )
                 updated_messages, cycle_record = self.cycle_runner.run_cycle(
                     task=task,
                     messages=messages,
@@ -351,6 +358,13 @@ class AgentRuntime:
                 memory_compacted=cycle_record.memory_compacted,
                 token_usage=cycle_record.token_usage.to_dict(),
             )
+            if cycle_record.memory_compacted:
+                self._emit_log(
+                    "memory_compacted",
+                    cycle=cycle_index,
+                    before_count=cycle_start_message_count,
+                    after_count=len(updated_messages),
+                )
 
             if cycle_record.tool_calls:
                 context = ToolContext(
@@ -370,6 +384,9 @@ class AgentRuntime:
                     sub_task_manager=sub_task_manager,
                     ctx=ctx,
                     task_metadata=dict(task.metadata),
+                    run_context=(ctx.metadata.get("_vv_agent_run_context") if ctx is not None else None),
+                    session=(ctx.metadata.get("_vv_agent_session") if ctx is not None else None),
+                    metadata=dict(task.metadata),
                 )
 
                 def _on_tool_result(call: ToolCall, result: ToolExecutionResult, *, _cycle: int = cycle_index) -> None:
@@ -387,6 +404,15 @@ class AgentRuntime:
                         content_preview=self._preview_text(result.content),
                     )
 
+                def _on_tool_start(call: ToolCall, *, _cycle: int = cycle_index) -> None:
+                    self._emit_log(
+                        "tool_started",
+                        cycle=_cycle,
+                        tool_name=call.name,
+                        tool_arguments=call.arguments,
+                        tool_call_id=call.id,
+                    )
+
                 tool_outcome = self.tool_call_runner.run(
                     task=task,
                     tool_calls=cycle_record.tool_calls,
@@ -394,6 +420,7 @@ class AgentRuntime:
                     messages=messages,
                     cycle_record=cycle_record,
                     interruption_provider=interruption_messages,
+                    on_tool_start=_on_tool_start,
                     on_tool_result=_on_tool_result,
                     ctx=ctx,
                 )
@@ -862,7 +889,7 @@ class AgentRuntime:
         ctx: ExecutionContext | None = None,
     ) -> SubTaskOutcome:
         from vv_agent.sdk.session import create_agent_session
-        from vv_agent.sdk.types import AgentDefinition, AgentRun
+        from vv_agent.sdk.types import AgentRun, LegacyAgentDefinition
 
         request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
         sub_task_id = str(request_metadata.get("task_id") or "").strip()
@@ -920,7 +947,7 @@ class AgentRuntime:
                 sub_agent_timeout_seconds=self.sub_agent_timeout_seconds,
             )
 
-            sub_agent_definition = AgentDefinition(
+            sub_agent_definition = LegacyAgentDefinition(
                 description=sub_agent.description,
                 model=sub_task.model,
                 backend=sub_agent.backend or self.default_backend,

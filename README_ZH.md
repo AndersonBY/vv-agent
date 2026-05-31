@@ -7,18 +7,19 @@
 ## 架构
 
 ```
-AgentRuntime
-├── CycleRunner          # 单轮 LLM 调用：上下文 -> 补全 -> 工具调用
-├── ToolCallRunner       # 工具分发，directive 收敛（finish/wait_user/continue）
-├── RuntimeHookManager   # before/after 钩子：LLM、工具调用、上下文压缩
-├── MemoryManager        # 上下文超阈值时自动压缩历史
-└── ExecutionBackend     # cycle 循环调度
-    ├── InlineBackend    # 同步执行（默认）
-    ├── ThreadBackend    # 线程池 + Future
-    └── CeleryBackend    # 分布式，每轮 cycle 作为独立 Celery task
+Agent / RunConfig / ModelSettings
+└── Runner
+    └── AgentRuntime
+        ├── CycleRunner          # 单轮 LLM 调用：上下文 -> 补全 -> 工具调用
+        ├── ToolCallRunner       # 工具分发与 directive 收敛
+        ├── RuntimeHookManager   # before/after 钩子
+        ├── MemoryManager        # 上下文超阈值时自动压缩历史
+        └── ExecutionBackend     # inline、thread 或 Celery 调度
 ```
 
-核心类型定义在 `vv_agent.types`：`AgentTask`、`AgentResult`、`Message`、`CycleRecord`、`ToolCall`。
+公开 SDK 入口从 `vv_agent` 顶层导出：`Agent`、`Runner`、`RunConfig`、
+`ModelSettings`、`function_tool`、`Session` 和强类型 `RunEvent`。底层 runtime
+仍然使用 `RuntimeTask`、`AgentResult`、`Message`、`CycleRecord`、`ToolCall`。
 
 任务完成由工具显式触发：agent 调用 `task_finish` 或 `ask_user` 来标记终态，不做"最后一条消息即答案"的隐式推断。
 
@@ -47,109 +48,161 @@ uv run vv-agent --prompt "概述一下这个框架" --backend moonshot --model k
 
 参数：`--settings-file`、`--backend`、`--model`、`--verbose`。
 
-### 代码调用
+### 代码调用 SDK
 
 ```python
-from vv_agent.config import build_openai_llm_from_local_settings
-from vv_agent.runtime import AgentRuntime
-from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentTask
+from vv_agent import Agent, RunConfig, Runner, function_tool
 
-llm, resolved = build_openai_llm_from_local_settings("local_settings.py", backend="moonshot", model="kimi-k2.6")
-runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
+@function_tool
+def read_order(order_id: str) -> str:
+    """读取订单信息。"""
+    return "订单详情"
 
-result = runtime.run(AgentTask(
-    task_id="demo",
-    model=resolved.model_id,
-    system_prompt="你是一个有用的助手。",
-    user_prompt="1+1 等于几？",
-))
-print(result.status, result.final_answer)
-```
+agent = Agent(
+    name="ops",
+    instructions="先查证，再回答。",
+    model="kimi-k2.6",
+    tools=[read_order],
+)
 
-### SDK
-
-```python
-from vv_agent.sdk import AgentSDKClient, AgentSDKOptions
-
-client = AgentSDKClient(options=AgentSDKOptions(
-    settings_file="local_settings.py",
+result = Runner.run_sync(agent, "分析订单 123", run_config=RunConfig(
     default_backend="moonshot",
-    default_model="kimi-k2.6",
 ))
-result = client.run("用一句话解释 Python 的 GIL。")
-print(result.final_answer)
+print(result.status, result.final_output)
 ```
 
-### SDK 工作区覆盖（会话/任务级）
+`Agent.output_type` 可以把 JSON 终态输出转换为 `dict`、`list`、dataclass
+或 Pydantic 风格 model。`@function_tool` 包装的函数也可以把 `ToolContext`
+作为第一个参数；运行时会在调用时传入它，但不会把它暴露到工具 JSON schema。
 
-`AgentSDKOptions.workspace` 是 SDK 默认工作区。你可以在单次调用时覆盖它，也可以在创建会话时绑定固定工作区。
+### 流式输出与 Session
 
-工作区优先级：
-
-1. `run(...)` / `query(...)` / `create_session(...)` 显式传入的 `workspace`
-2. `AgentSDKOptions.workspace`
+`RunConfig.workspace` 控制本次运行的工作区。`RunConfig.session` 可传入
+`MemorySession`、`SQLiteSession` 或 `RedisSession`，用于跨多次运行保留消息历史。
 
 ```python
-from vv_agent.sdk import AgentSDKClient, AgentSDKOptions
+from vv_agent import Agent, MemorySession, RunConfig, Runner
 
-client = AgentSDKClient(options=AgentSDKOptions(
-    settings_file="local_settings.py",
+agent = Agent(name="assistant", instructions="记住上下文。", model="kimi-k2.6")
+session = MemorySession("thread-001")
+config = RunConfig(
     default_backend="moonshot",
-    default_model="kimi-k2.6",
-    workspace="./workspace/default",
-))
+    workspace="./workspace/thread-001",
+    session=session,
+)
 
-# 单次覆盖：本轮运行使用 ./workspace/task-a
-run = client.run(prompt="创建 notes.md", workspace="./workspace/task-a")
-
-# 会话覆盖：这个 session 的所有轮次固定在 ./workspace/session-b
-session = client.create_session(workspace="./workspace/session-b")
-session.prompt("创建 todo.md")
-session.follow_up("再追加一条待办")
-session.continue_run()
+Runner.run_sync(agent, "先分析项目", run_config=config)
+for event in Runner.stream_sync(agent, "继续刚才的话题并汇报进度", run_config=config):
+    if event.type == "assistant_delta":
+        print(event.delta, end="")
 ```
 
-说明：
+需要直接控制 cycle loop 的后端集成仍可使用底层 `AgentRuntime` API。
 
-- `AgentSession.workspace` 在会话创建后固定。
-- `prompt()/continue_run()/follow_up()` 都在同一个会话工作区执行。
-- `session.cancel()` 可请求取消当前会话里正在执行的运行。
-- 顶层 SDK 辅助函数 `vv_agent.sdk.run(...)` 和 `vv_agent.sdk.query(...)` 也支持 `workspace=...`。
+Redis 支持可通过 `uv sync --extra redis` 安装，也可以在构造 `RedisSession`
+时注入 Redis 兼容 client。
+
+### Agent as Tool、Handoff 与工具策略
+
+子 Agent 的结果要回到父 Agent 并让父 Agent 继续时，使用 `agent.as_tool()`。
+需要把控制权转交给目标 Agent，并用目标 Agent 的输出结束本次运行时，使用
+`handoff()`。
+
+```python
+from vv_agent import Agent, RunConfig, Runner, ToolPolicy, handoff
+from vv_agent.constants import TASK_FINISH_TOOL_NAME
+
+researcher = Agent(name="researcher", instructions="负责收集事实。", model="kimi-k2.6")
+writer = Agent(
+    name="writer",
+    instructions="根据资料写作。",
+    model="kimi-k2.6",
+    tools=[researcher.as_tool(name="research", description="收集事实。")],
+)
+triage = Agent(
+    name="triage",
+    instructions="把写作任务转交给 writer。",
+    model="kimi-k2.6",
+    handoffs=[handoff(agent=writer, description="需要写作时使用。")],
+)
+
+result = Runner.run_sync(
+    triage,
+    "写一份简短报告。",
+    run_config=RunConfig(
+        default_backend="moonshot",
+        tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "transfer_to_writer"]),
+    ),
+)
+```
+
+工具可通过 `@function_tool(needs_approval=True)` 请求审批。默认情况下，
+运行会在工具函数真正执行前进入 `WAIT_USER`，并发出
+`ToolApprovalRequestedEvent`。可信运行可用 `ToolPolicy(approval="never")`
+关闭这道审批门。
+
+### Guardrails 与 Trace
+
+Input guardrail 会在调用模型前执行。Output guardrail 会在得到最终输出后执行。
+Trace processor 会收到轻量级 run span 和 tool span。
+
+```python
+from vv_agent import Agent, GuardrailResult, RunConfig, Runner, input_guardrail
+
+@input_guardrail
+def reject_empty(ctx, input_text: str) -> GuardrailResult:
+    del ctx
+    if not input_text.strip():
+        return GuardrailResult.block("input is required")
+    return GuardrailResult.allow()
+
+agent = Agent(
+    name="assistant",
+    instructions="谨慎回答。",
+    model="kimi-k2.6",
+    input_guardrails=[reject_empty],
+)
+
+result = Runner.run_sync(
+    agent,
+    "总结这个项目。",
+    run_config=RunConfig(default_backend="moonshot", tracing={"workflow_name": "summary"}),
+)
+```
 
 ### Windows Shell 运行时配置
 
 `bash` 运行时默认配置属于**启动/会话配置**，不是工具参数。
 
-- 全局默认：`AgentSDKOptions.bash_shell`、`AgentSDKOptions.windows_shell_priority`、`AgentSDKOptions.bash_env`
-- Agent 级覆盖：`AgentDefinition.bash_shell`、`AgentDefinition.windows_shell_priority`、`AgentDefinition.bash_env`
+- Run 级默认：通过 `RunConfig.metadata` 传入 `bash_shell`、`windows_shell_priority`、`bash_env`
+- Agent 级默认：通过 `Agent.metadata` 传入同名字段
 - Windows 推荐优先级：`["git-bash", "powershell", "cmd"]`
 - 在 Windows 上，`bash` 工具启动的子进程会默认注入 `PYTHONUTF8=1` 与 `PYTHONIOENCODING=utf-8`；若父进程环境或 `bash_env` 已显式设置，则以显式值为准。
 - 在 Windows 上，`bash` 工具启动子进程时还会附带隐藏控制台窗口的启动参数，方便 GUI 宿主调用 `bash` / `powershell` 时不再闪出额外终端窗口。
-- `run(...)` 与 `create_session(...)` 都会继承 startup shell 默认配置。
+- `Runner.run_sync(...)` 与 `Runner.stream_sync(...)` 都会继承编译后的 shell 元数据。
 - `bash` 工具 schema 的 description 会注入运行时 shell 提示（解析后的 shell 类型与调用前缀），模型在调用前即可知道应使用哪种命令风格。
 - 该运行时 shell 提示会在单个 task/session-run 内固化，确保跨 cycles 的 tool schema 文本稳定，保护 LLM prompt cache 命中率。
 - SDK/CLI 自动生成的任务现在还会把 `system_prompt_sections` 元数据挂到 system message 上，Anthropic prompt cache 可以据此把稳定前缀长期缓存，同时把当前时间、Session Memory 这类易变段落视为 volatile。
 
 ```python
-from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent import Agent, RunConfig, Runner
 
-client = AgentSDKClient(
-    options=AgentSDKOptions(
-        settings_file="local_settings.py",
+agent = Agent(
+    name="desktop",
+    instructions="桌面助手",
+    model="kimi-k2.6",
+    metadata={"bash_env": {"HTTP_PROXY": "http://127.0.0.1:7890"}},
+)
+result = Runner.run_sync(
+    agent,
+    "检查工作区。",
+    run_config=RunConfig(
         default_backend="moonshot",
-        windows_shell_priority=["git-bash", "powershell", "cmd"],
-        bash_env={"PIP_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple"},
+        metadata={
+            "windows_shell_priority": ["git-bash", "powershell", "cmd"],
+            "bash_env": {"PIP_INDEX_URL": "https://pypi.tuna.tsinghua.edu.cn/simple"},
+        },
     ),
-    agents={
-        "desktop": AgentDefinition(
-            description="桌面助手",
-            model="kimi-k2.6",
-            # 仅对该 Agent 强制指定 shell（可选）
-            bash_shell=None,
-            bash_env={"HTTP_PROXY": "http://127.0.0.1:7890"},
-        )
-    },
 )
 ```
 
@@ -215,11 +268,9 @@ result = runtime.run(task, ctx=ctx)
 如果你希望限制预览长度（例如节省传输），可以显式配置：
 
 ```python
-from vv_agent.sdk import AgentSDKOptions
+from vv_agent import RunConfig
 
-options = AgentSDKOptions(
-    settings_file="local_settings.py",
-    default_backend="moonshot",
+config = RunConfig(
     log_preview_chars=220,  # 可选：显式开启预览截断
 )
 ```
@@ -304,8 +355,9 @@ class MyBackend:
 | `vv_agent.runtime.StateStore` | Checkpoint 持久化协议（`InMemoryStateStore` / `SqliteStateStore` / `RedisStateStore`） |
 | `vv_agent.memory.MemoryManager` | 历史超阈值时自动压缩 |
 | `vv_agent.workspace` | 可插拔文件存储：`LocalWorkspaceBackend`、`MemoryWorkspaceBackend`、`S3WorkspaceBackend` |
-| `vv_agent.tools` | 内建工具：workspace I/O、todo、bash、image、sub-agent、skills |
-| `vv_agent.sdk` | 高层 SDK：`AgentSDKClient`、`AgentSession`、`AgentResourceLoader` |
+| `vv_agent.tools` | 内建工具，以及 `function_tool`、`FunctionTool`、结构化工具输出 |
+| `vv_agent` | 公开 SDK：`Agent`、`Runner`、`RunConfig`、`ModelSettings`、tools、sessions、typed events |
+| `vv_agent.sdk` | 迁移期内部命名空间；新代码不要从这里导入 |
 | `vv_agent.skills` | Agent Skills 支持（`SKILL.md` 解析、校验、统一 normalize、带预算管理的 prompt 渲染、`activate_skill` 工具） |
 | `vv_agent.llm.VVLlmClient` | 统一 LLM 接口，基于 `vv-llm`（端点轮询、重试、流式） |
 | `vv_agent.config` | 从 `local_settings.py` 解析模型/端点/Key |
@@ -345,7 +397,7 @@ class MyBackend:
 
 ### Runtime metadata 参数
 
-通过 `AgentTask.metadata` 传入：
+通过 `Agent.metadata` 或 `RunConfig.metadata` 传入；compiler 会转发到 `RuntimeTask.metadata`：
 
 - `memory_keep_recent_messages`
 - `model_context_window`
@@ -374,7 +426,7 @@ class MyBackend:
 
 优先级严格如下：
 
-1. `AgentTask.metadata`
+1. `RuntimeTask.metadata`
    - `memory_summary_backend` / `memory_summary_model`
    - 别名：`compress_memory_summary_backend` / `compress_memory_summary_model`
    - 别名：`memory_compress_backend` / `memory_compress_model`
@@ -399,13 +451,13 @@ class MyBackend:
 
 ## 子 Agent
 
-在 `AgentTask.sub_agents` 上配置命名子 Agent。父 Agent 通过 `create_sub_task` 委派任务：用 `agent_id` 指定目标子 Agent，单任务用 `task_description`，批量模式用 `tasks`，后台子任务用 `wait_for_completion=false`。每个子 Agent 有独立的 runtime、模型和工具集。默认 system prompt 会自动注入可调用子 Agent 列表（含 `agent_id` 与描述），方便模型直接选择。
+使用 `Agent.as_tool()` 时，子 Agent 的结果会作为工具结果回到父 Agent，父 Agent 继续控制流程。使用 `handoff()` 时，控制权转交给目标 Agent，并由目标 Agent 的输出结束本次运行。旧 runtime 的 `create_sub_task` / `sub_task_status` 仍保留给迁移期内部流程，但不再是公开 SDK 的主路径。
 
 现在每个子任务都会创建真实 `AgentSession`（默认 `session_id == task_id`）。工具返回结果会包含 `session_id`，运行事件会携带稳定标识（`task_id` / `session_id`），宿主应用可以按子任务独立订阅、持久化与流式展示进度，包括 `sub_agent_assistant_delta` 和 `sub_agent_tool_call_progress` 事件。
 
 `create_sub_task` 的批量模式现在会通过 runtime 执行后端的 `parallel_map` 分发有效子任务；当后端支持并行时，同步批量任务会并发执行。
 
-使用 `sub_task_status` 可以查询子任务状态、查看轻量级进度快照（`detail_level=snapshot`），或向运行中/已完成的子任务追加消息。通过 `AgentSDKClient.create_session()` 运行时，子任务注册表会绑定在该会话上，因此同一主会话的后续轮次仍然可以查询前面创建的后台子任务。
+使用 `sub_task_status` 可以查询旧 runtime 子任务状态、查看轻量级进度快照（`detail_level=snapshot`），或向运行中/已完成的子任务追加消息。
 
 已完成的子任务在续传前会先清洗保存下来的会话 transcript：空 assistant、只有 thinking 的 assistant、孤儿 tool result、以及未完成的尾部 tool call 都会被移除，避免把无效历史再次注入下一轮上下文。
 
@@ -417,7 +469,7 @@ class MyBackend:
 
 ## 示例
 
-`examples/` 下有 24 个编号示例。完整列表见 [`examples/README.md`](examples/README.md)。
+`examples/` 下保留公开 SDK cookbook 和低层 runtime 集成示例。完整列表见 [`examples/README.md`](examples/README.md)。
 
 ```bash
 uv run python examples/01_quick_start.py

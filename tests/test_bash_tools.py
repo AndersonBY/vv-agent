@@ -145,10 +145,11 @@ def test_background_command_listener_receives_terminal_event(tmp_path: Path) -> 
     command = f'"{sys.executable}" -c "import time; time.sleep(0.2); print(\'done\')"'
     session_id = manager.start(command=command, cwd=tmp_path, timeout_seconds=5)
 
-    manager.subscribe(
-        session_id,
-        lambda payload: (received.update(payload), notified.set()),
-    )
+    def listener(payload: dict[str, object]) -> None:
+        received.update(payload)
+        notified.set()
+
+    manager.subscribe(session_id, listener)
 
     assert notified.wait(timeout=5.0) is True
     assert received["session_id"] == session_id

@@ -11,7 +11,7 @@ from typing import Any
 
 from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.cancellation import CancellationToken
-from vv_agent.sdk.types import AgentDefinition, AgentRun
+from vv_agent.sdk.types import AgentRun, LegacyAgentDefinition
 from vv_agent.types import AgentStatus, Message
 
 SessionEventHandler = Callable[[str, dict[str, Any]], None]
@@ -35,7 +35,7 @@ class AgentSession:
         execute_run: Callable[..., AgentRun],
         session_id: str | None = None,
         agent_name: str,
-        definition: AgentDefinition,
+        definition: LegacyAgentDefinition,
         workspace: Path,
         shared_state: dict[str, Any] | None = None,
     ) -> None:
@@ -371,7 +371,7 @@ def create_agent_session(
     execute_run: Callable[..., AgentRun],
     session_id: str | None = None,
     agent_name: str,
-    definition: AgentDefinition,
+    definition: LegacyAgentDefinition,
     workspace: Path,
     shared_state: dict[str, Any] | None = None,
 ) -> AgentSession:

@@ -1,39 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any
 
 from vv_agent.config import ResolvedModelConfig
-from vv_agent.llm.base import LLMClient
-from vv_agent.runtime.backends.base import ExecutionBackend
-from vv_agent.runtime.context import StreamCallback
-from vv_agent.runtime.hooks import RuntimeHook
-from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import AgentResult, NoToolPolicy, SubAgentConfig
-
-if TYPE_CHECKING:
-    from vv_agent.sdk.resources import AgentResourceLoader
-
-RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
-ToolRegistryFactory = Callable[[], ToolRegistry]
-
-
-class LLMBuilder(Protocol):
-    def __call__(
-        self,
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[LLMClient, ResolvedModelConfig]:
-        ...
 
 
 @dataclass(slots=True)
-class AgentDefinition:
+class LegacyAgentDefinition:
     description: str
     model: str
     backend: str | None = None
@@ -58,27 +33,6 @@ class AgentDefinition:
     metadata: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None
     system_prompt_template: str | None = None
-
-
-@dataclass(slots=True)
-class AgentSDKOptions:
-    settings_file: Path
-    default_backend: str
-    workspace: Path = field(default_factory=lambda: Path("./workspace"))
-    timeout_seconds: float = 90.0
-    log_preview_chars: int | None = None
-    llm_builder: LLMBuilder | None = None
-    tool_registry_factory: ToolRegistryFactory | None = None
-    log_handler: RuntimeLogHandler | None = None
-    runtime_hooks: list[RuntimeHook] = field(default_factory=list)
-    resource_loader: AgentResourceLoader | None = None
-    auto_discover_resources: bool = True
-    execution_backend: ExecutionBackend | None = None
-    stream_callback: StreamCallback | None = None
-    debug_dump_dir: str | None = None
-    bash_shell: str | None = None
-    windows_shell_priority: list[str] = field(default_factory=list)
-    bash_env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

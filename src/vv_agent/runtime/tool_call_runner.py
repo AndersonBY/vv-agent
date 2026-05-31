@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from vv_agent.runtime.hooks import RuntimeHookManager
@@ -34,6 +34,7 @@ class ToolCallRunner:
         messages: list[Message],
         cycle_record: CycleRecord,
         interruption_provider: Callable[[], list[Message]] | None = None,
+        on_tool_start: Callable[[ToolCall], None] | None = None,
         on_tool_result: Callable[[ToolCall, ToolExecutionResult], None] | None = None,
         ctx: ExecutionContext | None = None,
     ) -> ToolRunOutcome:
@@ -55,16 +56,29 @@ class ToolCallRunner:
                 if not result.tool_call_id:
                     result.tool_call_id = call.id
             else:
+                call_context = replace(
+                    context,
+                    tool_call_id=patched_call.id,
+                    tool_name=patched_call.name,
+                    arguments=dict(patched_call.arguments),
+                )
+                if on_tool_start is not None:
+                    on_tool_start(patched_call)
                 result = dispatch_tool_call(
                     registry=self.tool_registry,
-                    context=context,
+                    context=call_context,
                     call=patched_call,
                 )
             result = self.hook_manager.apply_after_tool_call(
                 task=task,
                 cycle_index=context.cycle_index,
                 call=patched_call,
-                context=context,
+                context=replace(
+                    context,
+                    tool_call_id=patched_call.id,
+                    tool_name=patched_call.name,
+                    arguments=dict(patched_call.arguments),
+                ),
                 result=result,
             )
             if self._needs_tool_call_id(result.tool_call_id):

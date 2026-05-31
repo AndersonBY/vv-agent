@@ -22,6 +22,7 @@ from vv_agent.llm.anthropic_prompt_cache import (
     apply_claude_prompt_cache,
 )
 from vv_agent.llm.base import LLMClient
+from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash_tool_payload
 from vv_agent.runtime.context import StreamCallback
 from vv_agent.types import LLMResponse, Message, ToolCall
@@ -140,10 +141,16 @@ _TOOL_CALL_INCREMENTAL_ENDPOINT_PREFIXES = (
 class _RequestOptions:
     model: str
     temperature: float | None = None
+    top_p: float | None = None
     max_tokens: int | None = None
+    tool_choice: str | None = None
+    parallel_tool_calls: bool | None = None
+    response_format: dict[str, Any] | None = None
+    timeout_seconds: float | None = None
     thinking: dict[str, Any] | None = None
     reasoning_effort: str | None = None
     extra_body: dict[str, Any] | None = None
+    extra_args: dict[str, Any] | None = None
     is_gemini_3_model: bool = False
     tool_call_incremental: bool = True
 
@@ -179,6 +186,7 @@ class VVLlmClient(LLMClient):
         messages: list[Message],
         tools: list[dict[str, object]],
         stream_callback: StreamCallback | None = None,
+        model_settings: ModelSettings | None = None,
     ) -> LLMResponse:
         if not self.endpoint_targets:
             raise RuntimeError("No endpoint targets configured")
@@ -204,6 +212,7 @@ class VVLlmClient(LLMClient):
                 selected_model_id,
                 stream=should_stream,
                 endpoint_type=target.endpoint_type,
+                model_settings=model_settings,
             )
             request_messages = self._prepare_messages_for_model(message_payload, request_options.model)
             formatted_messages = self._format_messages_for_request(
@@ -230,10 +239,16 @@ class VVLlmClient(LLMClient):
             request_options = _RequestOptions(
                 model=request_options.model,
                 temperature=request_options.temperature,
+                top_p=request_options.top_p,
                 max_tokens=request_options.max_tokens,
+                tool_choice=request_options.tool_choice,
+                parallel_tool_calls=request_options.parallel_tool_calls,
+                response_format=request_options.response_format,
+                timeout_seconds=request_options.timeout_seconds,
                 thinking=request_options.thinking,
                 reasoning_effort=request_options.reasoning_effort,
                 extra_body=request_extra_body,
+                extra_args=request_options.extra_args,
                 is_gemini_3_model=request_options.is_gemini_3_model,
                 tool_call_incremental=request_options.tool_call_incremental,
             )
@@ -527,14 +542,27 @@ class VVLlmClient(LLMClient):
 
         return prepared
 
-    def _resolve_request_options(self, model: str, *, stream: bool, endpoint_type: str | None) -> _RequestOptions:
+    def _resolve_request_options(
+        self,
+        model: str,
+        *,
+        stream: bool,
+        endpoint_type: str | None,
+        model_settings: ModelSettings | None = None,
+    ) -> _RequestOptions:
         resolved_model = model
         normalized_model = resolved_model.lower()
         temperature: float | None = None
+        top_p: float | None = None
         max_tokens: int | None = None
+        tool_choice: str | None = None
+        parallel_tool_calls: bool | None = None
+        response_format: dict[str, Any] | None = None
+        timeout_seconds: float | None = None
         thinking: dict[str, Any] | None = None
         reasoning_effort: str | None = None
         extra_body: dict[str, Any] | None = None
+        extra_args: dict[str, Any] | None = None
 
         if normalized_model in _DEEPSEEK_REASONING_MODELS:
             temperature = 0.6
@@ -601,13 +629,51 @@ class VVLlmClient(LLMClient):
                 }
             }
 
+        if model_settings is not None:
+            if model_settings.temperature is not None:
+                temperature = model_settings.temperature
+            if model_settings.top_p is not None:
+                top_p = model_settings.top_p
+            if model_settings.max_tokens is not None:
+                max_tokens = model_settings.max_tokens
+            if model_settings.tool_choice is not None:
+                tool_choice = str(model_settings.tool_choice)
+            if model_settings.parallel_tool_calls is not None:
+                parallel_tool_calls = model_settings.parallel_tool_calls
+            if model_settings.response_format is not None:
+                response_format = dict(model_settings.response_format)
+            if model_settings.timeout_seconds is not None:
+                timeout_seconds = model_settings.timeout_seconds
+            if model_settings.reasoning is not None:
+                reasoning = dict(model_settings.reasoning)
+                effort = reasoning.pop("effort", reasoning.pop("reasoning_effort", None))
+                if effort is not None:
+                    reasoning_effort = str(effort)
+                if reasoning:
+                    thinking = reasoning
+            if model_settings.extra_body is not None:
+                merged_extra_body = dict(extra_body or {})
+                merged_extra_body.update(model_settings.extra_body)
+                extra_body = merged_extra_body
+            if model_settings.extra_args is not None:
+                extra_args = dict(model_settings.extra_args)
+            if model_settings.retry is not None:
+                self.max_retries_per_endpoint = max(1, int(model_settings.retry.max_attempts))
+                self.backoff_seconds = max(0.0, float(model_settings.retry.backoff_seconds))
+
         return _RequestOptions(
             model=resolved_model,
             temperature=temperature,
+            top_p=top_p,
             max_tokens=max_tokens,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            response_format=response_format,
+            timeout_seconds=timeout_seconds,
             thinking=thinking,
             reasoning_effort=reasoning_effort,
             extra_body=extra_body,
+            extra_args=extra_args,
             is_gemini_3_model=is_gemini_3_model,
             tool_call_incremental=self._tool_call_incremental_enabled(
                 model=resolved_model,
@@ -647,7 +713,7 @@ class VVLlmClient(LLMClient):
             "model": model_name,
             "stream": stream,
             "skip_cutoff": True,
-            "timeout": self.timeout_seconds,
+            "timeout": options.timeout_seconds if options.timeout_seconds is not None else self.timeout_seconds,
         }
         if tool_payload:
             payload["tools"] = tool_payload
@@ -655,14 +721,24 @@ class VVLlmClient(LLMClient):
             payload["stream_options"] = {"include_usage": True}
         if options.temperature is not None:
             payload["temperature"] = options.temperature
+        if options.top_p is not None:
+            payload["top_p"] = options.top_p
         if options.max_tokens is not None:
             payload["max_tokens"] = options.max_tokens
+        if options.tool_choice is not None:
+            payload["tool_choice"] = options.tool_choice
+        if options.parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = options.parallel_tool_calls
+        if options.response_format is not None:
+            payload["response_format"] = options.response_format
         if options.thinking is not None:
             payload["thinking"] = options.thinking
         if options.reasoning_effort is not None:
             payload["reasoning_effort"] = options.reasoning_effort
         if options.extra_body is not None:
             payload["extra_body"] = options.extra_body
+        if options.extra_args is not None:
+            payload.update(options.extra_args)
         return payload
 
     def _non_stream_completion(

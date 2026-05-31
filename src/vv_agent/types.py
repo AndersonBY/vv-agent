@@ -183,6 +183,20 @@ class TokenUsage:
             "raw": dict(self.raw),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TokenUsage:
+        return cls(
+            prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(data.get("completion_tokens", 0) or 0),
+            total_tokens=int(data.get("total_tokens", 0) or 0),
+            cached_tokens=int(data.get("cached_tokens", 0) or 0),
+            reasoning_tokens=int(data.get("reasoning_tokens", 0) or 0),
+            input_tokens=int(data.get("input_tokens", 0) or 0),
+            output_tokens=int(data.get("output_tokens", 0) or 0),
+            cache_creation_tokens=int(data.get("cache_creation_tokens", 0) or 0),
+            raw=dict(data.get("raw", {})),
+        )
+
 
 @dataclass(slots=True)
 class CycleTokenUsage:
@@ -193,6 +207,13 @@ class CycleTokenUsage:
         payload = self.usage.to_dict()
         payload["cycle_index"] = self.cycle_index
         return payload
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CycleTokenUsage:
+        return cls(
+            cycle_index=int(data.get("cycle_index", 0) or 0),
+            usage=TokenUsage.from_dict(data),
+        )
 
 
 @dataclass(slots=True)
@@ -232,6 +253,23 @@ class TaskTokenUsage:
             "cache_creation_tokens": self.cache_creation_tokens,
             "cycles": [item.to_dict() for item in self.cycles],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TaskTokenUsage:
+        usage = cls(
+            prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(data.get("completion_tokens", 0) or 0),
+            total_tokens=int(data.get("total_tokens", 0) or 0),
+            cached_tokens=int(data.get("cached_tokens", 0) or 0),
+            reasoning_tokens=int(data.get("reasoning_tokens", 0) or 0),
+            input_tokens=int(data.get("input_tokens", 0) or 0),
+            output_tokens=int(data.get("output_tokens", 0) or 0),
+            cache_creation_tokens=int(data.get("cache_creation_tokens", 0) or 0),
+        )
+        cycles = data.get("cycles", [])
+        if isinstance(cycles, list):
+            usage.cycles = [CycleTokenUsage.from_dict(item) for item in cycles if isinstance(item, dict)]
+        return usage
 
 
 @dataclass(slots=True)
@@ -333,6 +371,7 @@ class CycleRecord:
             tool_calls=[ToolCall.from_dict(tc) for tc in data.get("tool_calls", [])],
             tool_results=[ToolExecutionResult.from_dict(tr) for tr in data.get("tool_results", [])],
             memory_compacted=data.get("memory_compacted", False),
+            token_usage=TokenUsage.from_dict(data.get("token_usage", {})),
         )
 
 
@@ -345,6 +384,29 @@ class SubAgentConfig:
     max_cycles: int = 8
     exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "description": self.description,
+            "backend": self.backend,
+            "system_prompt": self.system_prompt,
+            "max_cycles": self.max_cycles,
+            "exclude_tools": list(self.exclude_tools),
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SubAgentConfig:
+        return cls(
+            model=data["model"],
+            description=data.get("description", ""),
+            backend=data.get("backend"),
+            system_prompt=data.get("system_prompt"),
+            max_cycles=data.get("max_cycles", 8),
+            exclude_tools=list(data.get("exclude_tools", [])),
+            metadata=dict(data.get("metadata", {})),
+        )
 
 
 @dataclass(slots=True)
@@ -367,6 +429,7 @@ class AgentTask:
     extra_tool_names: list[str] = field(default_factory=list)
     exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    runtime_metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def sub_agents_enabled(self) -> bool:
@@ -387,9 +450,11 @@ class AgentTask:
             "has_sub_agents": self.has_sub_agents,
             "agent_type": self.agent_type,
             "native_multimodal": self.native_multimodal,
+            "sub_agents": {name: config.to_dict() for name, config in self.sub_agents.items()},
             "extra_tool_names": list(self.extra_tool_names),
             "exclude_tools": list(self.exclude_tools),
             "metadata": dict(self.metadata),
+            "runtime_metadata": dict(self.runtime_metadata),
         }
 
     @classmethod
@@ -406,11 +471,17 @@ class AgentTask:
             allow_interruption=data.get("allow_interruption", True),
             use_workspace=data.get("use_workspace", True),
             has_sub_agents=data.get("has_sub_agents", False),
+            sub_agents={
+                name: SubAgentConfig.from_dict(payload)
+                for name, payload in data.get("sub_agents", {}).items()
+                if isinstance(payload, dict)
+            },
             agent_type=data.get("agent_type"),
             native_multimodal=data.get("native_multimodal", False),
             extra_tool_names=list(data.get("extra_tool_names", [])),
             exclude_tools=list(data.get("exclude_tools", [])),
             metadata=dict(data.get("metadata", {})),
+            runtime_metadata=dict(data.get("runtime_metadata", {})),
         )
 
 
@@ -487,14 +558,7 @@ class AgentResult:
         token_usage_raw = data.get("token_usage")
         token_usage = TaskTokenUsage()
         if isinstance(token_usage_raw, dict):
-            token_usage.prompt_tokens = token_usage_raw.get("prompt_tokens", 0)
-            token_usage.completion_tokens = token_usage_raw.get("completion_tokens", 0)
-            token_usage.total_tokens = token_usage_raw.get("total_tokens", 0)
-            token_usage.cached_tokens = token_usage_raw.get("cached_tokens", 0)
-            token_usage.reasoning_tokens = token_usage_raw.get("reasoning_tokens", 0)
-            token_usage.input_tokens = token_usage_raw.get("input_tokens", 0)
-            token_usage.output_tokens = token_usage_raw.get("output_tokens", 0)
-            token_usage.cache_creation_tokens = token_usage_raw.get("cache_creation_tokens", 0)
+            token_usage = TaskTokenUsage.from_dict(token_usage_raw)
         return cls(
             status=AgentStatus(data["status"]),
             messages=[Message.from_dict(m) for m in data.get("messages", [])],

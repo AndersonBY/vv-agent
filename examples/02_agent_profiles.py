@@ -1,67 +1,41 @@
 #!/usr/bin/env python3
-"""Programmatic profile examples built on vv-agent SDK primitives."""
+"""Select between reusable Agent profiles."""
 
 from __future__ import annotations
 
-import json
 import os
-import sys
 from pathlib import Path
 
-from vv_agent.sdk import AgentDefinition, AgentSDKClient, AgentSDKOptions
+from vv_agent import Agent, ModelSettings, RunConfig, Runner
 
-profiles: dict[str, AgentDefinition] = {
-    "researcher": AgentDefinition(
-        description="你是研究助理, 先检索材料再输出结构化结论.",
-        backend="moonshot",
+profiles = {
+    "researcher": Agent(
+        name="researcher",
+        instructions="Collect facts first, then call task_finish with a sourced summary.",
         model="kimi-k2.6",
-        max_cycles=12,
-        enable_todo_management=True,
+        model_settings=ModelSettings(temperature=0.2),
     ),
-    "translator": AgentDefinition(
-        description="你是专业翻译助理, 按段翻译并持续写入目标文件.",
-        backend="minimax",
+    "translator": Agent(
+        name="translator",
+        instructions="Translate the user input into natural Chinese and call task_finish.",
         model="MiniMax-M2.5",
-        max_cycles=20,
-        enable_todo_management=True,
-    ),
-    "computer": AgentDefinition(
-        description="你是桌面执行代理, 优先使用工具完成任务.",
-        backend="moonshot",
-        model="kimi-k2.6",
-        max_cycles=16,
-        agent_type="computer",
+        model_settings=ModelSettings(temperature=0.1),
     ),
 }
 
 
 def main() -> None:
-    settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-    default_backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    profile_name = os.getenv("V_AGENT_EXAMPLE_PROFILE", "researcher")
-    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "分析 workspace 下这个文档的核心结论")
-
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    if profile_name not in profiles:
-        profile_name = "researcher"
-
-    client = AgentSDKClient(
-        options=AgentSDKOptions(
-            settings_file=settings_file,
-            default_backend=default_backend,
-            workspace=workspace,
-        ),
-        agents=profiles,
+    profile = os.getenv("V_AGENT_EXAMPLE_PROFILE", "researcher")
+    agent = profiles.get(profile, profiles["researcher"])
+    backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "minimax" if profile == "translator" else "moonshot")
+    config = RunConfig(
+        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=backend,
+        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
     )
-
-    try:
-        run = client.run(agent=profile_name, prompt=prompt)
-        print(json.dumps(run.to_dict(), ensure_ascii=False, indent=2))
-    except Exception as e:
-        print(f"Error running agent: {e}", file=sys.stderr)
-        sys.exit(1)
+    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "Explain what this package is for.")
+    result = Runner.run_sync(agent, prompt, run_config=config)
+    print(result.final_output)
 
 
 if __name__ == "__main__":

@@ -1,22 +1,8 @@
-from vv_agent.sdk.client import AgentSDKClient, query, run
-from vv_agent.sdk.resources import AgentResourceLoader, DiscoveredResources
-from vv_agent.sdk.session import AgentSession, AgentSessionState, SessionEventHandler, create_agent_session
-from vv_agent.sdk.types import AgentDefinition, AgentRun, AgentSDKOptions, LLMBuilder, RuntimeLogHandler, ToolRegistryFactory
+"""Legacy SDK internals.
 
-__all__ = [
-    "AgentDefinition",
-    "AgentResourceLoader",
-    "AgentRun",
-    "AgentSDKClient",
-    "AgentSDKOptions",
-    "AgentSession",
-    "AgentSessionState",
-    "DiscoveredResources",
-    "LLMBuilder",
-    "RuntimeLogHandler",
-    "SessionEventHandler",
-    "ToolRegistryFactory",
-    "create_agent_session",
-    "query",
-    "run",
-]
+The 0.2 public API is exported from :mod:`vv_agent`. This package is kept only
+as an internal migration namespace for runtime modules that have not been moved
+yet; it intentionally does not re-export the old 0.1 entry points.
+"""
+
+__all__: list[str] = []

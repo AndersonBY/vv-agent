@@ -132,6 +132,16 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
         excluded = set(task.exclude_tools)
         tool_names = [name for name in tool_names if name not in excluded]
 
+    disallowed_tools = task.metadata.get("_vv_agent_disallowed_tools")
+    if isinstance(disallowed_tools, list):
+        disallowed = {str(name) for name in disallowed_tools}
+        tool_names = [name for name in tool_names if name not in disallowed]
+
+    allowed_tools = task.metadata.get("_vv_agent_allowed_tools")
+    if isinstance(allowed_tools, list):
+        allowed = {str(name) for name in allowed_tools}
+        tool_names = [name for name in tool_names if name in allowed]
+
     deduped: list[str] = []
     seen: set[str] = set()
     for tool_name in tool_names:
