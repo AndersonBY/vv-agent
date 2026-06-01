@@ -11,6 +11,13 @@ from typing import Any, Protocol, cast
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalProvider
 from vv_agent.config import ResolvedModelConfig, build_openai_llm_from_local_settings
+from vv_agent.context_providers import (
+    ContextFragment,
+    ContextProvider,
+    ContextRequest,
+    assemble_context_fragments,
+    collect_context_fragments,
+)
 from vv_agent.llm.base import LLMClient
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
 from vv_agent.run_config import RunConfig, ToolPolicy
@@ -63,6 +70,7 @@ class InteractiveAgentDefinition:
     metadata: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None
     system_prompt_template: str | None = None
+    context_providers: list[ContextProvider] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -85,6 +93,7 @@ class AgentSessionOptions:
     bash_shell: str | None = None
     windows_shell_priority: list[str] = field(default_factory=list)
     bash_env: dict[str, str] = field(default_factory=dict)
+    context_providers: list[ContextProvider] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -538,7 +547,7 @@ class InteractiveAgentClient:
             else:
                 available_skills = None
 
-        if definition.system_prompt:
+        if definition.system_prompt is not None:
             system_prompt = definition.system_prompt
             generated_sections = build_raw_system_prompt_sections(system_prompt)
         else:
@@ -627,6 +636,18 @@ class InteractiveAgentClient:
             workspace=effective_workspace,
             session_id=session_id,
         )
+        context_providers = [
+            *self.options.context_providers,
+            *definition.context_providers,
+        ]
+        if context_providers:
+            self._apply_context_providers_to_task(
+                task=task,
+                input=prompt,
+                model=str(resolved.model_id or definition.model),
+                workspace=effective_workspace,
+                context_providers=context_providers,
+            )
 
         sdk_agent = Agent(
             name=run_name,
@@ -656,6 +677,7 @@ class InteractiveAgentClient:
             default_backend=backend,
             llm_builder=llm_builder,
             timeout_seconds=self.options.timeout_seconds,
+            context_providers=context_providers,
             metadata=dict(task.metadata),
             runtime_task=task,
             shared_state=shared_state,
@@ -678,6 +700,42 @@ class InteractiveAgentClient:
             if active_handle_callback is not None:
                 active_handle_callback(None)
         return AgentSessionRun(agent_name=run_name, result=result.raw_result, resolved=resolved)
+
+    def _apply_context_providers_to_task(
+        self,
+        *,
+        task: AgentTask,
+        input: str,
+        model: str,
+        workspace: Path,
+        context_providers: list[ContextProvider],
+    ) -> None:
+        request = ContextRequest(
+            agent_name=task.task_id.rsplit("_", 1)[0],
+            input=input,
+            model=model,
+            workspace=workspace,
+            metadata=dict(task.metadata),
+        )
+        fragments = [
+            ContextFragment(
+                id="agent_instructions",
+                text=task.system_prompt,
+                stable=True,
+                priority=0,
+                source="agent.instructions",
+            )
+        ]
+        fragments.extend(collect_context_fragments(request, context_providers))
+        bundle = assemble_context_fragments(request, fragments)
+        task.system_prompt = bundle.prompt
+        if bundle.sections:
+            task.metadata["system_prompt_sections"] = bundle.metadata_sections()
+        if bundle.sources:
+            task.metadata["system_prompt_sources"] = bundle.sources
+        if bundle.omitted_section_ids:
+            task.metadata["system_prompt_omitted_sections"] = list(bundle.omitted_section_ids)
+        task.metadata["system_prompt_stable_hash"] = bundle.stable_hash
 
     def _apply_startup_shell_defaults(self, definition: InteractiveAgentDefinition) -> InteractiveAgentDefinition:
         effective_definition = definition
