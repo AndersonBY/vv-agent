@@ -1213,6 +1213,16 @@ def event_from_runtime_log(
             model=str(payload.get("model") or ""),
             metadata=dict(payload),
         )
+    if event == "cycle_llm_response":
+        return RunEvent(
+            type="cycle_llm_response",
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            cycle_index=cycle_index,
+            metadata=dict(payload),
+        )
     if event == "memory_compacted":
         before_count = payload.get("before_count")
         after_count = payload.get("after_count")

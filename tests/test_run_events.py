@@ -8,12 +8,14 @@ from vv_agent import (
     LLMStartedEvent,
     MemoryCompactedEvent,
     RunConfig,
+    RunEvent,
     Runner,
     ToolFinishedEvent,
     ToolStartedEvent,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.events import event_from_runtime_log
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -91,6 +93,28 @@ def test_runner_emits_agent_and_llm_started_events(tmp_path: Path) -> None:
     assert isinstance(result.events[1], AgentStartedEvent)
     assert isinstance(result.events[2], LLMStartedEvent)
     assert result.events[2].to_dict()["model"] == "m"
+
+
+def test_cycle_llm_response_runtime_log_becomes_typed_run_event() -> None:
+    event = event_from_runtime_log(
+        "cycle_llm_response",
+        {
+            "cycle": 1,
+            "assistant_message": "typed answer",
+            "tool_calls": [{"id": "call_1", "name": "browser"}],
+        },
+        run_id="run_1",
+        trace_id="trace_1",
+        agent_name="assistant",
+        user_input="hello",
+        session_id="session_1",
+    )
+
+    assert isinstance(event, RunEvent)
+    assert event.type == "cycle_llm_response"
+    assert event.cycle_index == 1
+    assert event.metadata["assistant_message"] == "typed answer"
+    assert event.metadata["tool_calls"][0]["id"] == "call_1"
 
 
 def test_memory_compacted_event_dict_includes_counts() -> None:

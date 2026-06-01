@@ -182,11 +182,14 @@ def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
         "llm_started",
         "assistant_delta",
         "assistant_delta",
+        "cycle_llm_response",
         "tool_call_started",
         "tool_call_completed",
         "run_completed",
     ]
     assert [event.delta for event in events if isinstance(event, AssistantDeltaEvent)] == ["hel", "lo"]
+    cycle_response = next(event for event in events if event.type == "cycle_llm_response")
+    assert cycle_response.metadata["assistant_message"] == "hello"
     completed = events[-1]
     assert isinstance(completed, RunCompletedEvent)
     assert completed.final_output == "done"
