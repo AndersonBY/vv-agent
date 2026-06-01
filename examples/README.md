@@ -9,10 +9,10 @@ runtime examples are kept separately for backend integration work.
 
 For host-product migrations, prefer provider and executor extension points over
 runtime patches: `ApprovalProvider` for UI/rules, `ContextProvider` for product
-prompt fragments, `MemoryProvider` for product persistence, `ToolExecutor` or
-`FunctionTool` groups for product tools, and `RunEventStore` for app history.
-Use `Runner.start()` when the host needs live typed events plus cancellation or
-approval control through `RunHandle`.
+prompt fragments, `vv_agent.memory.MemoryProvider` for product persistence,
+`vv_agent.tools.ToolExecutor` or `FunctionTool` groups for product tools, and
+`RunEventStore` for app history. Use `Runner.start()` when the host needs live
+typed events plus cancellation or approval control through `RunHandle`.
 
 ## Common Environment Variables
 

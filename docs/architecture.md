@@ -60,8 +60,9 @@ from the assistant's last message.
   interruption, cancellation, memory compaction, and runtime hooks.
 - Replayable app history through `RunEventStore`; `JsonlRunEventStore` is the
   built-in file-backed implementation.
-- Tool execution through `ToolExecutor` and `ToolOrchestrator`, with
-  `FunctionTool` and `@function_tool` as the normal public path.
+- Tool execution through `vv_agent.tools.ToolExecutor` and
+  `vv_agent.tools.ToolOrchestrator`, with `FunctionTool` and `@function_tool`
+  as the normal public path.
 
 Host products own product concerns outside the framework: product UI, account
 and profile resolution, workspace selection, product persistence, browser or IM
@@ -71,9 +72,10 @@ implementing providers instead of patching runtime internals:
 - `ApprovalProvider` for UI prompts, policy checks, and allow/deny decisions.
 - `ContextProvider` for product prompt fragments such as profile, workspace,
   policy, and feature context.
-- `MemoryProvider` for product memory search/save and compaction lifecycle
-  integration.
-- `ToolExecutor` or `FunctionTool` collections for product tools.
+- `vv_agent.memory.MemoryProvider` for product memory search/save and
+  compaction lifecycle integration.
+- `vv_agent.tools.ToolExecutor` or `FunctionTool` collections for product
+  tools.
 - `RunEventStore` for app history and parent/child run graph replay.
 
 Raw runtime logs remain available for compatibility, but typed `RunEvent` is

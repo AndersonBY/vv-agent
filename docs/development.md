@@ -76,9 +76,10 @@ Useful live-test environment variables:
   public types. New user-facing SDK concepts should be importable from
   `vv_agent`; do not add new public imports under `vv_agent.sdk`.
 - Keep the runtime boundary explicit. Host integrations should implement
-  `ApprovalProvider`, `ContextProvider`, `MemoryProvider`, `ToolExecutor` or
-  `FunctionTool`, and `RunEventStore` instead of patching runner, compiler,
-  memory, or tool-dispatch internals.
+  top-level `ApprovalProvider`, `ContextProvider`, and `RunEventStore`, plus
+  package extension points such as `vv_agent.memory.MemoryProvider` and
+  `vv_agent.tools.ToolExecutor` or `FunctionTool`, instead of patching runner,
+  compiler, memory, or tool-dispatch internals.
 - Treat typed `RunEvent` objects as the app-state contract. Runtime log payloads
   can remain as compatibility fallbacks, but new host UI behavior should stream
   or replay events through `Runner.start()`, `RunHandle.events()`, and

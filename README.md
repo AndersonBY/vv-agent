@@ -19,8 +19,10 @@ Agent / RunConfig / ModelSettings
 
 The public SDK entry points are exported from `vv_agent`: `Agent`, `Runner`,
 `RunConfig`, `RunHandle`, `ModelSettings`, `function_tool`, `Session`,
-typed `RunEvent` objects, provider protocols, and the interactive session API
-for desktop/runtime integrations.
+typed `RunEvent` objects, `ApprovalProvider`, `ContextProvider`,
+`RunEventStore`, and the interactive session API for desktop/runtime
+integrations. Extension points that live in package modules include
+`vv_agent.memory.MemoryProvider` and `vv_agent.tools.ToolExecutor`.
 Runtime internals still use `RuntimeTask` (`AgentTask` during the remaining
 internal migration), `AgentResult`, `Message`, `CycleRecord`, and `ToolCall`.
 
@@ -453,11 +455,12 @@ internals:
   allow, deny, session-allow, or timeout decision from product UI or rules.
 - `ContextProvider` contributes product prompt fragments such as profile,
   workspace, policy, or feature context before each run is compiled.
-- `MemoryProvider` connects product memory stores to memory search/save hooks
-  and compaction lifecycle events.
-- `ToolExecutor` exposes product tools with schema, approval, timeout, error,
-  and execution behavior. `FunctionTool` and `@function_tool` cover normal
-  Python functions; custom executors are routed by `ToolOrchestrator`.
+- `vv_agent.memory.MemoryProvider` connects product memory stores to memory
+  search/save hooks and compaction lifecycle events.
+- `vv_agent.tools.ToolExecutor` exposes product tools with schema, approval,
+  timeout, error, and execution behavior. `FunctionTool` and `@function_tool`
+  cover normal Python functions; custom executors are routed by
+  `ToolOrchestrator`.
 - `RunEventStore` persists typed `RunEvent` history so app views can replay
   completed runs and parent/child run graphs.
 
