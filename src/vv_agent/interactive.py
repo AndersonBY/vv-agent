@@ -19,6 +19,7 @@ from vv_agent.context_providers import (
     collect_context_fragments,
 )
 from vv_agent.llm.base import LLMClient
+from vv_agent.memory.provider import MemoryProvider
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
 from vv_agent.run_config import RunConfig, ToolPolicy
 from vv_agent.runner import Runner
@@ -71,6 +72,7 @@ class InteractiveAgentDefinition:
     system_prompt: str | None = None
     system_prompt_template: str | None = None
     context_providers: list[ContextProvider] = field(default_factory=list)
+    memory_providers: list[MemoryProvider] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -94,6 +96,7 @@ class AgentSessionOptions:
     windows_shell_priority: list[str] = field(default_factory=list)
     bash_env: dict[str, str] = field(default_factory=dict)
     context_providers: list[ContextProvider] = field(default_factory=list)
+    memory_providers: list[MemoryProvider] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -640,6 +643,10 @@ class InteractiveAgentClient:
             *self.options.context_providers,
             *definition.context_providers,
         ]
+        memory_providers = [
+            *self.options.memory_providers,
+            *definition.memory_providers,
+        ]
         if context_providers:
             self._apply_context_providers_to_task(
                 task=task,
@@ -678,6 +685,7 @@ class InteractiveAgentClient:
             llm_builder=llm_builder,
             timeout_seconds=self.options.timeout_seconds,
             context_providers=context_providers,
+            memory_providers=memory_providers,
             metadata=dict(task.metadata),
             runtime_task=task,
             shared_state=shared_state,

@@ -155,9 +155,11 @@ def test_cycle_runner_calls_memory_providers_and_emits_compact_events() -> None:
     assert cycle_record.memory_compacted is True
     assert provider.started[0].to_dict()["estimated_tokens"] == 160
     assert provider.started[0].message_count == 4
+    assert provider.started[0].metadata["messages"][1].content == "u" * 80
     assert provider.completed[0].before_count == 4
     assert provider.completed[0].after_count < 4
     assert [event.type for event in emitted] == ["memory_compact_started", "memory_compact_completed"]
+    assert "messages" not in emitted[0].metadata
     assert emitted[0].metadata["memory_provider_results"]["RecordingMemoryProvider"]["phase"] == "before"
 
 

@@ -331,7 +331,16 @@ class CycleRunner:
             message_count=len(messages),
             estimated_tokens=estimated_tokens,
         )
-        metadata = self._call_before_memory_providers(providers, event)
+        provider_event = MemoryCompactStarted(
+            **self._memory_event_context(ctx),
+            cycle_index=cycle_index,
+            message_count=len(messages),
+            estimated_tokens=estimated_tokens,
+            event_id=event.event_id,
+            created_at=event.created_at,
+            metadata={"messages": list(messages)},
+        )
+        metadata = self._call_before_memory_providers(providers, provider_event)
         if metadata:
             event = MemoryCompactStarted(
                 **self._memory_event_context(ctx),
