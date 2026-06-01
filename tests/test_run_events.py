@@ -117,6 +117,28 @@ def test_cycle_llm_response_runtime_log_becomes_typed_run_event() -> None:
     assert event.metadata["tool_calls"][0]["id"] == "call_1"
 
 
+def test_cycle_failed_runtime_log_becomes_typed_run_event() -> None:
+    event = event_from_runtime_log(
+        "cycle_failed",
+        {
+            "cycle": 1,
+            "error": "ValueError: bad endpoint",
+            "details": "Traceback...",
+        },
+        run_id="run_1",
+        trace_id="trace_1",
+        agent_name="assistant",
+        user_input="hello",
+        session_id="session_1",
+    )
+
+    assert isinstance(event, RunEvent)
+    assert event.type == "cycle_failed"
+    assert event.cycle_index == 1
+    assert event.metadata["error"] == "ValueError: bad endpoint"
+    assert event.metadata["details"] == "Traceback..."
+
+
 def test_memory_compacted_event_dict_includes_counts() -> None:
     event = MemoryCompactedEvent(
         run_id="run",
