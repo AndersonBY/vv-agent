@@ -11,6 +11,7 @@ finishes or asks the user for input.
 Public SDK
   -> Agent / RunConfig / ModelSettings
   -> Runner
+  -> RunHandle for live runs
   -> RuntimeTask
   -> runtime.AgentRuntime
       -> CycleRunner
@@ -18,7 +19,7 @@ Public SDK
       -> ToolPlanner
       -> ToolCallRunner
       -> ExecutionBackend
-  -> RunResult / RunEvent
+  -> RunResult / RunEvent / RunEventStore replay
 
 Interactive session SDK
   -> InteractiveAgentDefinition / AgentSessionOptions
@@ -49,6 +50,35 @@ Task completion is tool-driven. The model must call `task_finish` or `ask_user`
 to end the run or wait for user input; the runtime does not infer completion
 from the assistant's last message.
 
+## Runtime Boundary
+
+`vv-agent` is the framework boundary. It owns the portable agent contract:
+
+- `Agent`, `Runner`, `RunConfig`, `RunHandle`, `RunResult`, and typed
+  `RunEvent` objects.
+- Prompt assembly, model calls, tool planning, tool dispatch, approval
+  interruption, cancellation, memory compaction, and runtime hooks.
+- Replayable app history through `RunEventStore`; `JsonlRunEventStore` is the
+  built-in file-backed implementation.
+- Tool execution through `ToolExecutor` and `ToolOrchestrator`, with
+  `FunctionTool` and `@function_tool` as the normal public path.
+
+Host products own product concerns outside the framework: product UI, account
+and profile resolution, workspace selection, product persistence, browser or IM
+integration, and product-specific tools. They should connect those concerns by
+implementing providers instead of patching runtime internals:
+
+- `ApprovalProvider` for UI prompts, policy checks, and allow/deny decisions.
+- `ContextProvider` for product prompt fragments such as profile, workspace,
+  policy, and feature context.
+- `MemoryProvider` for product memory search/save and compaction lifecycle
+  integration.
+- `ToolExecutor` or `FunctionTool` collections for product tools.
+- `RunEventStore` for app history and parent/child run graph replay.
+
+Raw runtime logs remain available for compatibility, but typed `RunEvent` is
+the primary state contract for host UIs.
+
 ## Module Map
 
 | Path | Responsibility |
@@ -57,9 +87,13 @@ from the assistant's last message.
 | `src/vv_agent/cli.py` | Command-line argument parsing and one-shot runtime execution. |
 | `src/vv_agent/agent.py` | Public `Agent` definition and agent-as-tool helpers. |
 | `src/vv_agent/runner.py` | Public synchronous run and stream entry points. |
+| `src/vv_agent/run_handle.py` | Live `Runner.start()` handle for event streaming, cancellation, approvals, and final result retrieval. |
 | `src/vv_agent/run_config.py` | Per-run configuration, model provider binding, tool policy, workspace, session, and tracing options. |
 | `src/vv_agent/model_settings.py` | Model call parameters and override merging. |
 | `src/vv_agent/events.py` | Typed run events and dict conversion for UI consumers. |
+| `src/vv_agent/event_store.py` | Run event persistence and replay protocol plus JSONL implementation. |
+| `src/vv_agent/approval.py` | Approval provider protocol, request/decision objects, and in-process approval broker. |
+| `src/vv_agent/context_providers.py` | Context provider protocol and deterministic prompt-fragment assembly. |
 | `src/vv_agent/guardrails.py` | Public guardrail result contract and decorators. |
 | `src/vv_agent/interactive.py` | Public stateful session/client API for desktop runtimes, interruptions, follow-ups, cancellation, and shared tool state. |
 | `src/vv_agent/result.py` | Public `RunResult` wrapper around runtime results. |

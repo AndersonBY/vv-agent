@@ -18,8 +18,9 @@ Agent / RunConfig / ModelSettings
 ```
 
 The public SDK entry points are exported from `vv_agent`: `Agent`, `Runner`,
-`RunConfig`, `ModelSettings`, `function_tool`, `Session`, typed `RunEvent`
-objects, and the interactive session API for desktop/runtime integrations.
+`RunConfig`, `RunHandle`, `ModelSettings`, `function_tool`, `Session`,
+typed `RunEvent` objects, provider protocols, and the interactive session API
+for desktop/runtime integrations.
 Runtime internals still use `RuntimeTask` (`AgentTask` during the remaining
 internal migration), `AgentResult`, `Message`, `CycleRecord`, and `ToolCall`.
 
@@ -100,6 +101,20 @@ for event in Runner.stream_sync(agent, "Continue and report progress", run_confi
     if event.type == "assistant_delta":
         print(event.delta, end="")
 ```
+
+Use `Runner.start()` when the host needs a live handle instead of blocking for
+the final result. `RunHandle.events()` yields the same typed `RunEvent` stream
+as `Runner.stream_sync()`, `RunHandle.result()` waits for the final
+`RunResult`, `RunHandle.cancel()` cancels the run, and `RunHandle.approve()`
+resolves pending approval requests. The current synchronous handle does not
+implement steering or follow-up prompts; use `InteractiveAgentClient` for those
+stateful host runtime workflows.
+
+`RunConfig.event_store` can persist every typed event. `JsonlRunEventStore`
+stores event dictionaries and replays events by `run_id`, including child runs
+whose `parent_run_id` points at the requested run. Raw runtime logs remain
+available for compatibility through the runtime log callbacks, but `RunEvent`
+is the primary UI and app-state contract.
 
 The lower-level `AgentRuntime` API remains available for backend integrations
 that need direct cycle-loop control.
@@ -422,6 +437,33 @@ class MyBackend:
 | `vv_agent.skills` | Agent Skills support (`SKILL.md` parsing, validation, unified normalization, prompt rendering with budget management, `activate_skill` tool) |
 | `vv_agent.llm.VVLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
 | `vv_agent.config` | Model/endpoint/key resolution from `local_settings.py` |
+
+## Runtime Boundary
+
+`vv-agent` owns the portable agent runtime: prompt assembly, model calls, tool
+planning, tool execution, memory compaction, typed events, cancellation,
+approval interruption, and replayable run history. Host products own product
+UI, user and workspace resolution, product storage, browser or IM integration,
+and the product-specific tools exposed to the model.
+
+Host products should implement providers instead of patching `vv-agent`
+internals:
+
+- `ApprovalProvider` decides whether a tool call needs approval and returns the
+  allow, deny, session-allow, or timeout decision from product UI or rules.
+- `ContextProvider` contributes product prompt fragments such as profile,
+  workspace, policy, or feature context before each run is compiled.
+- `MemoryProvider` connects product memory stores to memory search/save hooks
+  and compaction lifecycle events.
+- `ToolExecutor` exposes product tools with schema, approval, timeout, error,
+  and execution behavior. `FunctionTool` and `@function_tool` cover normal
+  Python functions; custom executors are routed by `ToolOrchestrator`.
+- `RunEventStore` persists typed `RunEvent` history so app views can replay
+  completed runs and parent/child run graphs.
+
+This boundary keeps `Agent`, `Runner`, `RunConfig`, `RunHandle`, and
+`RunEvent` stable while allowing each host to keep its own account model,
+workspace model, storage backend, and UI workflow outside the framework.
 
 ## Memory Compaction
 

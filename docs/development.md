@@ -61,8 +61,10 @@ Useful live-test environment variables:
 | CLI | `tests/test_config.py`, CLI-specific assertions in existing tests |
 | Runtime loop and statuses | `tests/test_runtime.py`, `tests/test_cycle_runner.py` |
 | Public SDK contract | `tests/test_public_agent.py`, `tests/test_runner.py`, `tests/test_model_settings.py`, `tests/test_function_tool.py`, `tests/test_sessions.py`, `tests/test_run_events.py`, `tests/test_agent_as_tool.py`, `tests/test_handoffs.py`, `tests/test_tool_policy.py`, `tests/test_tool_approval.py`, `tests/test_guardrails.py`, `tests/test_tracing.py`, `tests/test_compiler.py` |
+| Live handles and event replay | `tests/test_run_handle_live_stream.py`, `tests/test_event_store.py`, `tests/test_events_v1.py`, `tests/test_session_graph_events.py` |
+| Provider contracts | `tests/test_approval_protocol.py`, `tests/test_context_providers.py`, `tests/test_memory_provider.py`, `tests/test_interactive_approval_bridge.py`, `tests/test_interactive_memory_provider_bridge.py` |
 | Hooks | `tests/test_runtime_hooks.py` |
-| Tools and schemas | `tests/test_tools.py`, `tests/test_tool_schemas.py`, `tests/test_tool_planner.py` |
+| Tools and schemas | `tests/test_tools.py`, `tests/test_tool_schemas.py`, `tests/test_tool_planner.py`, `tests/test_tool_orchestrator.py` |
 | Memory and compaction | `tests/test_memory.py`, `tests/test_microcompact.py`, `tests/test_session_memory.py` |
 | Execution backends | `tests/test_backends.py`, `tests/test_state_store.py` |
 | Workspace backends | `tests/test_workspace_backends.py` |
@@ -73,6 +75,14 @@ Useful live-test environment variables:
 - Keep public API exports in `src/vv_agent/__init__.py` synchronized with new
   public types. New user-facing SDK concepts should be importable from
   `vv_agent`; do not add new public imports under `vv_agent.sdk`.
+- Keep the runtime boundary explicit. Host integrations should implement
+  `ApprovalProvider`, `ContextProvider`, `MemoryProvider`, `ToolExecutor` or
+  `FunctionTool`, and `RunEventStore` instead of patching runner, compiler,
+  memory, or tool-dispatch internals.
+- Treat typed `RunEvent` objects as the app-state contract. Runtime log payloads
+  can remain as compatibility fallbacks, but new host UI behavior should stream
+  or replay events through `Runner.start()`, `RunHandle.events()`, and
+  `RunEventStore`.
 - Update README/examples when user-facing defaults, environment variables, or
   command examples change.
 - Keep `local_settings.example.py` as the only checked-in settings template.
