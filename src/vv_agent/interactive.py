@@ -184,6 +184,11 @@ class AgentSession:
         with self._lock:
             return self._running
 
+    @property
+    def active_run_handle(self) -> Any | None:
+        with self._lock:
+            return self._active_run_handle
+
     def subscribe(self, listener: SessionEventHandler) -> Callable[[], None]:
         with self._lock:
             self._listeners.append(listener)
@@ -347,7 +352,10 @@ class AgentSession:
 
     def _set_active_run_handle(self, handle: Any | None) -> None:
         with self._lock:
+            if self._active_run_handle is handle:
+                return
             self._active_run_handle = handle
+        self._emit("session_active_run_handle_changed", handle=handle)
 
     def _drain_next_queued_prompt(self) -> str | None:
         with self._lock:

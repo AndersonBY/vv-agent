@@ -116,3 +116,43 @@ def test_interactive_session_routes_approval_to_active_run_handle(tmp_path) -> N
     assert run_error == []
     assert calls == ["ran"]
     assert provider.requests[0].metadata["session_id"] == "session-a"
+
+
+def test_interactive_session_exposes_active_run_handle_lifecycle(tmp_path) -> None:
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="finished",
+                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "finished"})],
+            ),
+        ]
+    )
+
+    def model_provider(settings_file, **kwargs):
+        del settings_file, kwargs
+        return llm, _resolved_model()
+
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="test",
+            llm_builder=model_provider,
+        )
+    )
+    session = client.create_session(
+        agent=InteractiveAgentDefinition(description="Finish immediately.", model="test-model"),
+        session_id="session-a",
+    )
+    active_handles: list[object | None] = []
+
+    def listener(event: str, payload: dict[str, object]) -> None:
+        if event == "session_active_run_handle_changed":
+            active_handles.append(payload.get("handle"))
+
+    session.subscribe(listener)
+    session.prompt("go")
+
+    assert len(active_handles) >= 2
+    assert active_handles[0] is not None
+    assert active_handles[-1] is None
+    assert session.active_run_handle is None
