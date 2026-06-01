@@ -23,8 +23,8 @@ typed `RunEvent` objects, `ApprovalProvider`, `ContextProvider`,
 `RunEventStore`, and the interactive session API for desktop/runtime
 integrations. Extension points that live in package modules include
 `vv_agent.memory.MemoryProvider` and `vv_agent.tools.ToolExecutor`.
-Runtime internals still use `RuntimeTask` (`AgentTask` during the remaining
-internal migration), `AgentResult`, `Message`, `CycleRecord`, and `ToolCall`.
+Lower-level runtime implementation details include `RuntimeTask`, `AgentResult`,
+`Message`, `CycleRecord`, and `ToolCall`.
 
 Task completion is tool-driven: the agent calls `task_finish` or `ask_user` to signal terminal states. No implicit "last message = answer" heuristics.
 
@@ -435,7 +435,7 @@ class MyBackend:
 | `vv_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
 | `vv_agent.tools` | Built-in tools plus `function_tool`, `FunctionTool`, and structured tool outputs |
 | `vv_agent` | Public SDK: `Agent`, `Runner`, `RunConfig`, `ModelSettings`, tools, sessions, typed events |
-| `vv_agent.sdk` | Legacy migration internals; new user code should not use this as the main entry point |
+| `vv_agent.sdk` | Lower-level runtime compatibility helpers; new user code should not use this as the main entry point |
 | `vv_agent.skills` | Agent Skills support (`SKILL.md` parsing, validation, unified normalization, prompt rendering with budget management, `activate_skill` tool) |
 | `vv_agent.llm.VVLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
 | `vv_agent.config` | Model/endpoint/key resolution from `local_settings.py` |
@@ -563,8 +563,8 @@ The `bash` tool supports two background paths:
 
 Use `Agent.as_tool()` when the parent agent should call a child agent and then
 continue. Use `handoff()` when the child agent should take over and finish the
-run. Legacy `create_sub_task` tools still exist in the runtime while migration
-continues, but they are no longer the primary public SDK contract.
+run. The lower-level `create_sub_task` tools remain available for runtime
+compatibility, but they are no longer the primary public SDK contract.
 
 Each delegated sub-task now runs in a real `AgentSession` (session id defaults to the sub-task id). Tool payloads include `session_id`, and runtime events include stable identifiers (`task_id` / `session_id`) so host apps can subscribe, persist, and stream sub-task progress independently, including `sub_agent_assistant_delta` and `sub_agent_tool_call_progress` events.
 
