@@ -8,10 +8,22 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol, cast
 
+from vv_agent.agent import Agent
+from vv_agent.approval import ApprovalProvider
 from vv_agent.config import ResolvedModelConfig, build_openai_llm_from_local_settings
+from vv_agent.context_providers import (
+    ContextFragment,
+    ContextProvider,
+    ContextRequest,
+    assemble_context_fragments,
+    collect_context_fragments,
+)
 from vv_agent.llm.base import LLMClient
+from vv_agent.memory.provider import MemoryProvider
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
-from vv_agent.runtime import AgentRuntime, CancellationToken, ExecutionContext
+from vv_agent.run_config import RunConfig, ToolPolicy
+from vv_agent.runner import Runner
+from vv_agent.runtime import CancellationToken
 from vv_agent.runtime.backends import ExecutionBackend
 from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.engine import register_sub_agent_session, unregister_sub_agent_session
@@ -59,6 +71,8 @@ class InteractiveAgentDefinition:
     metadata: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None
     system_prompt_template: str | None = None
+    context_providers: list[ContextProvider] = field(default_factory=list)
+    memory_providers: list[MemoryProvider] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -75,9 +89,14 @@ class AgentSessionOptions:
     execution_backend: ExecutionBackend | None = None
     stream_callback: StreamCallback | None = None
     debug_dump_dir: str | None = None
+    approval_provider: ApprovalProvider | None = None
+    approval_timeout_seconds: float | None = None
+    tool_policy: ToolPolicy | None = None
     bash_shell: str | None = None
     windows_shell_priority: list[str] = field(default_factory=list)
     bash_env: dict[str, str] = field(default_factory=dict)
+    context_providers: list[ContextProvider] = field(default_factory=list)
+    memory_providers: list[MemoryProvider] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -142,6 +161,7 @@ class AgentSession:
         self._steering_queue: deque[str] = deque()
         self._follow_up_queue: deque[str] = deque()
         self._active_cancellation_token: CancellationToken | None = None
+        self._active_run_handle: Any | None = None
         self._lock = RLock()
 
     @property
@@ -163,6 +183,11 @@ class AgentSession:
     def running(self) -> bool:
         with self._lock:
             return self._running
+
+    @property
+    def active_run_handle(self) -> Any | None:
+        with self._lock:
+            return self._active_run_handle
 
     def subscribe(self, listener: SessionEventHandler) -> Callable[[], None]:
         with self._lock:
@@ -206,6 +231,16 @@ class AgentSession:
             self._follow_up_queue.clear()
         self._emit("session_cancel_requested")
         return True
+
+    def approve(self, request_id: str, decision: Any) -> None:
+        normalized_request_id = str(request_id or "").strip()
+        if not normalized_request_id:
+            raise ValueError("approval request_id cannot be empty")
+        with self._lock:
+            handle = self._active_run_handle
+        if handle is None:
+            raise RuntimeError("No active run handle is available for approval.")
+        handle.approve(normalized_request_id, decision)
 
     def prompt(self, prompt: str, *, auto_follow_up: bool = True) -> AgentSessionRun:
         text = prompt.strip()
@@ -291,9 +326,11 @@ class AgentSession:
                 "interruption_messages": self._interruption_messages,
                 "log_handler": self._session_log_handler,
                 "cancellation_token": self._active_cancellation_token,
+                "active_handle_callback": self._set_active_run_handle,
             }
             run = self._execute_run(**run_kwargs)
         finally:
+            self._set_active_run_handle(None)
             with self._lock:
                 self._running = False
                 self._active_cancellation_token = None
@@ -312,6 +349,13 @@ class AgentSession:
             error=run.result.error,
         )
         return run
+
+    def _set_active_run_handle(self, handle: Any | None) -> None:
+        with self._lock:
+            if self._active_run_handle is handle:
+                return
+            self._active_run_handle = handle
+        self._emit("session_active_run_handle_changed", handle=handle)
 
     def _drain_next_queued_prompt(self) -> str | None:
         with self._lock:
@@ -514,7 +558,7 @@ class InteractiveAgentClient:
             else:
                 available_skills = None
 
-        if definition.system_prompt:
+        if definition.system_prompt is not None:
             system_prompt = definition.system_prompt
             generated_sections = build_raw_system_prompt_sections(system_prompt)
         else:
@@ -577,6 +621,7 @@ class InteractiveAgentClient:
         cancellation_token: CancellationToken | None = None,
         sub_task_manager: SubTaskManager | None = None,
         session_id: str | None = None,
+        active_handle_callback: Callable[[Any | None], None] | None = None,
         **_: Any,
     ) -> AgentSessionRun:
         definition = self._apply_startup_shell_defaults(agent)
@@ -594,20 +639,6 @@ class InteractiveAgentClient:
             cast(_SupportsDebugDumpDir, llm).debug_dump_dir = self.options.debug_dump_dir
 
         tool_registry_factory = self.options.tool_registry_factory or build_default_registry
-        runtime = AgentRuntime(
-            llm_client=llm,
-            tool_registry=tool_registry_factory(),
-            default_workspace=effective_workspace,
-            log_handler=self._compose_log_handlers(self.options.log_handler, log_handler),
-            log_preview_chars=self.options.log_preview_chars,
-            settings_file=self.options.settings_file,
-            default_backend=backend,
-            llm_builder=llm_builder,
-            tool_registry_factory=tool_registry_factory,
-            hooks=list(self.options.runtime_hooks),
-            execution_backend=self.options.execution_backend,
-        )
-
         task = self.prepare_task(
             prompt=prompt,
             resolved_model_id=resolved.model_id,
@@ -616,26 +647,111 @@ class InteractiveAgentClient:
             workspace=effective_workspace,
             session_id=session_id,
         )
-
-        ctx: ExecutionContext | None = None
-        if self.options.stream_callback is not None or cancellation_token is not None:
-            ctx = ExecutionContext(
-                cancellation_token=cancellation_token,
-                stream_callback=self.options.stream_callback,
+        context_providers = [
+            *self.options.context_providers,
+            *definition.context_providers,
+        ]
+        memory_providers = [
+            *self.options.memory_providers,
+            *definition.memory_providers,
+        ]
+        if context_providers:
+            self._apply_context_providers_to_task(
+                task=task,
+                input=prompt,
+                model=str(resolved.model_id or definition.model),
+                workspace=effective_workspace,
+                context_providers=context_providers,
             )
 
-        result = runtime.run(
-            task,
+        sdk_agent = Agent(
+            name=run_name,
+            instructions=task.system_prompt,
+            model=definition.model,
+            metadata=dict(task.metadata),
+        )
+
+        def model_provider(agent: Agent[Any], run_config: RunConfig) -> tuple[LLMClient, ResolvedModelConfig]:
+            del agent, run_config
+            return llm, resolved
+
+        run_config = RunConfig(
+            model_provider=model_provider,
             workspace=effective_workspace,
+            max_cycles=task.max_cycles,
+            tool_policy=self.options.tool_policy,
+            execution_backend=self.options.execution_backend,
+            cancellation_token=cancellation_token,
+            approval_provider=self.options.approval_provider,
+            approval_timeout_seconds=self.options.approval_timeout_seconds,
+            tool_registry_factory=tool_registry_factory,
+            runtime_hooks=list(self.options.runtime_hooks),
+            log_preview_chars=self.options.log_preview_chars,
+            debug_dump_dir=self.options.debug_dump_dir,
+            settings_file=self.options.settings_file,
+            default_backend=backend,
+            llm_builder=llm_builder,
+            timeout_seconds=self.options.timeout_seconds,
+            context_providers=context_providers,
+            memory_providers=memory_providers,
+            metadata=dict(task.metadata),
+            runtime_task=task,
             shared_state=shared_state,
             initial_messages=initial_messages,
-            user_message=prompt,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
-            ctx=ctx,
             sub_task_manager=sub_task_manager,
+            runtime_log_handler=self._compose_log_handlers(self.options.log_handler, log_handler),
+            runtime_stream_callback=self.options.stream_callback,
         )
-        return AgentSessionRun(agent_name=run_name, result=result, resolved=resolved)
+        handle = Runner.start(sdk_agent, prompt, run_config=run_config)
+        if active_handle_callback is not None:
+            active_handle_callback(handle)
+        try:
+            if log_handler is not None:
+                for event in handle.events():
+                    log_handler(event.type, event.to_dict())
+            result = handle.result()
+        finally:
+            if active_handle_callback is not None:
+                active_handle_callback(None)
+        return AgentSessionRun(agent_name=run_name, result=result.raw_result, resolved=resolved)
+
+    def _apply_context_providers_to_task(
+        self,
+        *,
+        task: AgentTask,
+        input: str,
+        model: str,
+        workspace: Path,
+        context_providers: list[ContextProvider],
+    ) -> None:
+        request = ContextRequest(
+            agent_name=task.task_id.rsplit("_", 1)[0],
+            input=input,
+            model=model,
+            workspace=workspace,
+            metadata=dict(task.metadata),
+        )
+        fragments = [
+            ContextFragment(
+                id="agent_instructions",
+                text=task.system_prompt,
+                stable=True,
+                priority=0,
+                source="agent.instructions",
+            )
+        ]
+        fragments.extend(collect_context_fragments(request, context_providers))
+        bundle = assemble_context_fragments(request, fragments)
+        task.system_prompt = bundle.prompt
+        if bundle.sections:
+            task.metadata["system_prompt_sections"] = bundle.metadata_sections()
+        if bundle.sources:
+            task.metadata["system_prompt_sources"] = bundle.sources
+        if bundle.omitted_section_ids:
+            task.metadata["system_prompt_omitted_sections"] = list(bundle.omitted_section_ids)
+        task.metadata["system_prompt_stable_hash"] = bundle.stable_hash
 
     def _apply_startup_shell_defaults(self, definition: InteractiveAgentDefinition) -> InteractiveAgentDefinition:
         effective_definition = definition

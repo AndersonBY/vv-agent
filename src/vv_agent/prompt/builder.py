@@ -27,6 +27,9 @@ class PromptSection:
     id: str
     compute: Callable[[], str]
     stable: bool = True
+    source: str = ""
+    cache_hint: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     _cached_value: str | None = field(default=None, init=False, repr=False)
     _cache_valid: bool = field(default=False, init=False, repr=False)
 
@@ -47,7 +50,14 @@ class PromptSection:
         text = self.get_value().strip()
         if not text:
             return None
-        return {"id": self.id, "text": text, "stable": self.stable}
+        payload: dict[str, Any] = {"id": self.id, "text": text, "stable": self.stable}
+        if self.source:
+            payload["source"] = self.source
+        if self.cache_hint is not None:
+            payload["cache_hint"] = self.cache_hint
+        if self.metadata:
+            payload["metadata"] = dict(self.metadata)
+        return payload
 
 
 @dataclass(slots=True)
@@ -102,7 +112,14 @@ class SystemPromptBuilder:
             if not value:
                 continue
             prompt_parts.append(value)
-            sections.append({"id": section.id, "text": value, "stable": section.stable})
+            section_payload: dict[str, Any] = {"id": section.id, "text": value, "stable": section.stable}
+            if section.source:
+                section_payload["source"] = section.source
+            if section.cache_hint is not None:
+                section_payload["cache_hint"] = section.cache_hint
+            if section.metadata:
+                section_payload["metadata"] = dict(section.metadata)
+            sections.append(section_payload)
             if section.stable:
                 stable_parts.append(value)
         return BuiltSystemPrompt(

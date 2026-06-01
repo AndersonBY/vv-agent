@@ -18,9 +18,11 @@ Agent / RunConfig / ModelSettings
 ```
 
 公开 SDK 入口从 `vv_agent` 顶层导出：`Agent`、`Runner`、`RunConfig`、
-`ModelSettings`、`function_tool`、`Session`、强类型 `RunEvent`，以及面向桌面
-runtime 集成的 interactive session API。底层 runtime 仍然使用 `RuntimeTask`、
-`AgentResult`、`Message`、`CycleRecord`、`ToolCall`。
+`RunHandle`、`ModelSettings`、`function_tool`、`Session`、强类型 `RunEvent`、
+`ApprovalProvider`、`ContextProvider`、`RunEventStore`，以及面向桌面 runtime 集成的
+interactive session API。位于包模块中的扩展点包括 `vv_agent.memory.MemoryProvider`
+和 `vv_agent.tools.ToolExecutor`。底层 runtime 实现细节包括 `RuntimeTask`、
+`AgentResult`、`Message`、`CycleRecord` 和 `ToolCall`。
 
 任务完成由工具显式触发：agent 调用 `task_finish` 或 `ask_user` 来标记终态，不做"最后一条消息即答案"的隐式推断。
 
@@ -97,6 +99,16 @@ for event in Runner.stream_sync(agent, "继续刚才的话题并汇报进度", r
     if event.type == "assistant_delta":
         print(event.delta, end="")
 ```
+
+宿主需要活跃运行句柄而不是阻塞等待结果时，使用 `Runner.start()`。
+`RunHandle.events()` 会产生与 `Runner.stream_sync()` 相同的强类型 `RunEvent`
+流，`RunHandle.result()` 等待最终 `RunResult`，`RunHandle.cancel()` 取消运行，
+`RunHandle.approve()` 处理待审批请求。当前同步 handle 不支持 steering 和 follow-up；
+这些有状态宿主 runtime 流程请使用 `InteractiveAgentClient`。
+
+`RunConfig.event_store` 可以持久化每个强类型事件。`JsonlRunEventStore` 会保存事件
+字典，并按 `run_id` 回放事件，包括 `parent_run_id` 指向该 run 的子 run。原始
+runtime log 仍通过回调保留兼容，但应用状态和 UI 展示应优先使用 `RunEvent`。
 
 需要直接控制 cycle loop 的后端集成仍可使用底层 `AgentRuntime` API。
 
@@ -402,10 +414,33 @@ class MyBackend:
 | `vv_agent.workspace` | 可插拔文件存储：`LocalWorkspaceBackend`、`MemoryWorkspaceBackend`、`S3WorkspaceBackend` |
 | `vv_agent.tools` | 内建工具，以及 `function_tool`、`FunctionTool`、结构化工具输出 |
 | `vv_agent` | 公开 SDK：`Agent`、`Runner`、`RunConfig`、`ModelSettings`、tools、sessions、typed events |
-| `vv_agent.sdk` | 迁移期内部命名空间；新代码不要从这里导入 |
+| `vv_agent.sdk` | 底层 runtime 兼容辅助模块；新代码不要从这里导入 |
 | `vv_agent.skills` | Agent Skills 支持（`SKILL.md` 解析、校验、统一 normalize、带预算管理的 prompt 渲染、`activate_skill` 工具） |
 | `vv_agent.llm.VVLlmClient` | 统一 LLM 接口，基于 `vv-llm`（端点轮询、重试、流式） |
 | `vv_agent.config` | 从 `local_settings.py` 解析模型/端点/Key |
+
+## Runtime 边界
+
+`vv-agent` 负责可移植的 agent runtime：prompt 组装、模型调用、工具规划、工具执行、
+memory 压缩、强类型事件、取消、审批中断，以及可回放的运行历史。宿主产品负责产品
+UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及暴露给模型的产品工具。
+
+宿主产品应实现 provider，而不是 patch `vv-agent` 内部：
+
+- `ApprovalProvider` 根据产品 UI 或规则决定工具调用是否需要审批，并返回允许、拒绝、
+  本 session 允许或超时决策。
+- `ContextProvider` 在每次 run 编译前注入产品 prompt 片段，例如 profile、workspace、
+  policy 或功能上下文。
+- `vv_agent.memory.MemoryProvider` 把产品 memory 存储接入 memory search/save hook
+  和压缩生命周期事件。
+- `vv_agent.tools.ToolExecutor` 暴露产品工具的 schema、审批、超时、错误和执行行为。
+  普通 Python 函数使用 `FunctionTool` 或 `@function_tool`；自定义 executor 由
+  `ToolOrchestrator` 路由。
+- `RunEventStore` 持久化强类型 `RunEvent` 历史，让应用视图可以回放已完成 run 和父子
+  run 图。
+
+这个边界让 `Agent`、`Runner`、`RunConfig`、`RunHandle` 和 `RunEvent` 保持稳定，
+同时允许每个宿主把账号模型、工作区模型、存储后端和 UI 流程留在框架之外。
 
 ## Memory 压缩与配置
 
@@ -496,7 +531,7 @@ class MyBackend:
 
 ## 子 Agent
 
-使用 `Agent.as_tool()` 时，子 Agent 的结果会作为工具结果回到父 Agent，父 Agent 继续控制流程。使用 `handoff()` 时，控制权转交给目标 Agent，并由目标 Agent 的输出结束本次运行。旧 runtime 的 `create_sub_task` / `sub_task_status` 仍保留给迁移期内部流程，但不再是公开 SDK 的主路径。
+使用 `Agent.as_tool()` 时，子 Agent 的结果会作为工具结果回到父 Agent，父 Agent 继续控制流程。使用 `handoff()` 时，控制权转交给目标 Agent，并由目标 Agent 的输出结束本次运行。底层 runtime 的 `create_sub_task` / `sub_task_status` 仍保留用于兼容，但不再是公开 SDK 的主路径。
 
 现在每个子任务都会创建真实 `AgentSession`（默认 `session_id == task_id`）。工具返回结果会包含 `session_id`，运行事件会携带稳定标识（`task_id` / `session_id`），宿主应用可以按子任务独立订阅、持久化与流式展示进度，包括 `sub_agent_assistant_delta` 和 `sub_agent_tool_call_progress` 事件。
 

@@ -1,4 +1,5 @@
 from vv_agent.agent import Agent, RunContext
+from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import (
     ConfigError,
     EndpointConfig,
@@ -8,19 +9,39 @@ from vv_agent.config import (
     load_llm_settings_from_file,
     resolve_model_endpoint,
 )
+from vv_agent.context_providers import (
+    ContextBundle,
+    ContextFragment,
+    ContextProvider,
+    ContextRequest,
+    ContextSection,
+    assemble_context_fragments,
+)
+from vv_agent.event_store import JsonlRunEventStore, RunEventStore
 from vv_agent.events import (
     AgentStartedEvent,
+    ApprovalRequestedEvent,
+    ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    HandoffCompletedEvent,
     HandoffEvent,
+    HandoffStartedEvent,
     LLMStartedEvent,
+    MemoryCompactCompleted,
     MemoryCompactedEvent,
+    MemoryCompactStarted,
     RunCompletedEvent,
     RunEvent,
     RunFailedEvent,
     RunStartedEvent,
+    SubRunCompletedEvent,
+    SubRunStartedEvent,
     ToolApprovalRequestedEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
     ToolFinishedEvent,
     ToolStartedEvent,
+    event_from_dict,
 )
 from vv_agent.guardrails import GuardrailResult, input_guardrail, output_guardrail
 from vv_agent.handoffs import Handoff, handoff
@@ -36,6 +57,7 @@ from vv_agent.interactive import (
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.result import RunResult
 from vv_agent.run_config import ModelProvider, RunConfig, ToolPolicy
+from vv_agent.run_handle import RunHandle, RunHandleState
 from vv_agent.runner import Runner
 from vv_agent.sessions import MemorySession, RedisSession, Session, SQLiteSession
 from vv_agent.tools import (
@@ -63,17 +85,32 @@ __all__ = [
     "AgentSessionState",
     "AgentStartedEvent",
     "AgentStatus",
+    "ApprovalDecision",
+    "ApprovalProvider",
+    "ApprovalRequest",
+    "ApprovalRequestedEvent",
+    "ApprovalResolvedEvent",
     "AssistantDeltaEvent",
     "ConfigError",
+    "ContextBundle",
+    "ContextFragment",
+    "ContextProvider",
+    "ContextRequest",
+    "ContextSection",
     "EndpointConfig",
     "EndpointOption",
     "FunctionTool",
     "GuardrailResult",
     "Handoff",
+    "HandoffCompletedEvent",
     "HandoffEvent",
+    "HandoffStartedEvent",
     "InteractiveAgentClient",
     "InteractiveAgentDefinition",
+    "JsonlRunEventStore",
     "LLMStartedEvent",
+    "MemoryCompactCompleted",
+    "MemoryCompactStarted",
     "MemoryCompactedEvent",
     "MemorySession",
     "Message",
@@ -86,15 +123,22 @@ __all__ = [
     "RunConfig",
     "RunContext",
     "RunEvent",
+    "RunEventStore",
     "RunFailedEvent",
+    "RunHandle",
+    "RunHandleState",
     "RunResult",
     "RunStartedEvent",
     "Runner",
     "SQLiteSession",
     "Session",
     "Span",
+    "SubRunCompletedEvent",
+    "SubRunStartedEvent",
     "Tool",
     "ToolApprovalRequestedEvent",
+    "ToolCallCompletedEvent",
+    "ToolCallStartedEvent",
     "ToolContext",
     "ToolFinishedEvent",
     "ToolOutput",
@@ -107,9 +151,11 @@ __all__ = [
     "ToolRegistry",
     "ToolStartedEvent",
     "TraceProcessor",
+    "assemble_context_fragments",
     "build_default_registry",
     "build_openai_llm_from_local_settings",
     "create_agent_session",
+    "event_from_dict",
     "function_tool",
     "handoff",
     "input_guardrail",

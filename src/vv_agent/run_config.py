@@ -1,26 +1,48 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from vv_agent.approval import ApprovalBroker, ApprovalProvider
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.context_providers import ContextProvider
+from vv_agent.event_store import RunEventStore
 from vv_agent.llm.base import LLMClient
 from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.tools.registry import ToolRegistry
+from vv_agent.types import Message
+
+if TYPE_CHECKING:
+    from vv_agent.memory.provider import MemoryProvider
 
 StreamHandler = Callable[[Any], None]
 ToolRegistryFactory = Callable[[], ToolRegistry]
 ApprovalPolicy = Literal["default", "always", "never"]
 CanUseTool = Callable[[str, dict[str, Any]], bool]
+RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
+BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
+InterruptionMessageProvider = Callable[[], list[Message]]
 
 
 class ModelProvider(Protocol):
     def __call__(self, agent: Any, run_config: RunConfig) -> tuple[LLMClient, ResolvedModelConfig]:
+        ...
+
+
+class RuntimeLLMBuilder(Protocol):
+    def __call__(
+        self,
+        settings_path: str | Path,
+        *,
+        backend: str,
+        model: str,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[LLMClient, ResolvedModelConfig]:
         ...
 
 
@@ -44,15 +66,34 @@ class RunConfig:
     tool_policy: ToolPolicy | None = None
     execution_backend: ExecutionBackend | None = None
     cancellation_token: CancellationToken | None = None
+    approval_provider: ApprovalProvider | None = None
+    approval_timeout_seconds: float | None = None
+    approval_broker: ApprovalBroker | None = None
+    event_store: RunEventStore | None = None
+    event_store_fail_closed: bool = False
     stream: StreamHandler | None = None
     hooks: Any | None = None
     tracing: dict[str, Any] | None = None
     context: Any | None = None
+    context_providers: list[ContextProvider] = field(default_factory=list)
+    memory_providers: list[MemoryProvider] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     settings_file: str | Path = "local_settings.py"
     default_backend: str | None = None
+    llm_builder: RuntimeLLMBuilder | None = None
     timeout_seconds: float = 90.0
     tool_registry_factory: ToolRegistryFactory | None = None
     runtime_hooks: list[RuntimeHook] = field(default_factory=list)
     log_preview_chars: int | None = None
     debug_dump_dir: str | None = None
+    runtime_task: Any | None = None
+    shared_state: dict[str, Any] | None = None
+    initial_messages: list[Message] | None = None
+    before_cycle_messages: BeforeCycleMessageProvider | None = None
+    interruption_messages: InterruptionMessageProvider | None = None
+    sub_task_manager: Any | None = None
+    runtime_log_handler: RuntimeLogHandler | None = None
+    runtime_stream_callback: StreamHandler | None = None
+
+    def with_cancellation_token(self, cancellation_token: CancellationToken) -> RunConfig:
+        return replace(self, cancellation_token=cancellation_token)

@@ -8,12 +8,14 @@ from vv_agent import (
     LLMStartedEvent,
     MemoryCompactedEvent,
     RunConfig,
+    RunEvent,
     Runner,
     ToolFinishedEvent,
     ToolStartedEvent,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.events import event_from_runtime_log
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -93,6 +95,50 @@ def test_runner_emits_agent_and_llm_started_events(tmp_path: Path) -> None:
     assert result.events[2].to_dict()["model"] == "m"
 
 
+def test_cycle_llm_response_runtime_log_becomes_typed_run_event() -> None:
+    event = event_from_runtime_log(
+        "cycle_llm_response",
+        {
+            "cycle": 1,
+            "assistant_message": "typed answer",
+            "tool_calls": [{"id": "call_1", "name": "browser"}],
+        },
+        run_id="run_1",
+        trace_id="trace_1",
+        agent_name="assistant",
+        user_input="hello",
+        session_id="session_1",
+    )
+
+    assert isinstance(event, RunEvent)
+    assert event.type == "cycle_llm_response"
+    assert event.cycle_index == 1
+    assert event.metadata["assistant_message"] == "typed answer"
+    assert event.metadata["tool_calls"][0]["id"] == "call_1"
+
+
+def test_cycle_failed_runtime_log_becomes_typed_run_event() -> None:
+    event = event_from_runtime_log(
+        "cycle_failed",
+        {
+            "cycle": 1,
+            "error": "ValueError: bad endpoint",
+            "details": "Traceback...",
+        },
+        run_id="run_1",
+        trace_id="trace_1",
+        agent_name="assistant",
+        user_input="hello",
+        session_id="session_1",
+    )
+
+    assert isinstance(event, RunEvent)
+    assert event.type == "cycle_failed"
+    assert event.cycle_index == 1
+    assert event.metadata["error"] == "ValueError: bad endpoint"
+    assert event.metadata["details"] == "Traceback..."
+
+
 def test_memory_compacted_event_dict_includes_counts() -> None:
     event = MemoryCompactedEvent(
         run_id="run",
@@ -103,7 +149,20 @@ def test_memory_compacted_event_dict_includes_counts() -> None:
         after_count=5,
     )
 
-    assert event.to_dict() == {
+    payload = event.to_dict()
+
+    assert payload["version"] == "v1"
+    assert payload["event_id"].startswith("evt_")
+    assert payload["created_at"] > 0
+    assert {key: payload[key] for key in (
+        "type",
+        "run_id",
+        "trace_id",
+        "cycle_index",
+        "agent_name",
+        "before_count",
+        "after_count",
+    )} == {
         "type": "memory_compacted",
         "run_id": "run",
         "trace_id": "trace",

@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.events import RunEvent, SubRunCompletedEvent, SubRunStartedEvent
 from vv_agent.llm.base import LLMClient
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.token_utils import resolve_model_token_limits
@@ -42,6 +43,7 @@ from vv_agent.types import (
 from vv_agent.workspace import LocalWorkspaceBackend, WorkspaceBackend
 
 RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
+RunEventHandler = Callable[[RunEvent], None]
 BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
 InterruptionMessageProvider = Callable[[], list[Message]]
 
@@ -532,6 +534,24 @@ class AgentRuntime:
         self.log_handler(event, payload)
 
     @staticmethod
+    def _event_emitter_from_context(ctx: ExecutionContext | None) -> RunEventHandler | None:
+        if ctx is None:
+            return None
+        emitter = ctx.metadata.get("_vv_agent_emit_event")
+        return emitter if callable(emitter) else None
+
+    @staticmethod
+    def _metadata_str(metadata: dict[str, Any], *keys: str) -> str | None:
+        for key in keys:
+            value = metadata.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
     def _copy_message(message: Message) -> Message:
         return Message(
             role=message.role,
@@ -892,6 +912,17 @@ class AgentRuntime:
         if not sub_task_id:
             sub_task_id = f"{parent_task.task_id}_sub_{request.agent_name}_{uuid.uuid4().hex[:8]}"
         sub_session_id = str(request_metadata.get("session_id") or "").strip() or sub_task_id
+        parent_metadata = ctx.metadata if ctx is not None else {}
+        parent_run_id = self._metadata_str(parent_metadata, "_vv_agent_run_id")
+        trace_id = (
+            self._metadata_str(parent_metadata, "_vv_agent_trace_id", "trace_id")
+            or self._metadata_str(parent_task.metadata, "trace_id")
+            or ""
+        )
+        parent_tool_call_id = str(request_metadata.get("parent_tool_call_id") or "").strip()
+        child_run_id = str(request_metadata.get("run_id") or "").strip() or f"run_{uuid.uuid4().hex}"
+        event_emitter = self._event_emitter_from_context(ctx)
+        sub_run_started = False
         sub_agent = parent_task.sub_agents.get(request.agent_name)
         if sub_agent is None:
             available = ", ".join(sorted(parent_task.sub_agents))
@@ -913,6 +944,10 @@ class AgentRuntime:
             enriched.setdefault("task_id", sub_task_id)
             enriched.setdefault("session_id", sub_session_id)
             enriched.setdefault("sub_agent_name", request.agent_name)
+            if parent_tool_call_id:
+                enriched.setdefault("parent_tool_call_id", parent_tool_call_id)
+            if parent_run_id:
+                enriched.setdefault("parent_run_id", parent_run_id)
             self.log_handler(f"sub_agent_{event}", enriched)
 
         try:
@@ -984,6 +1019,16 @@ class AgentRuntime:
                 run_shared_state.setdefault("todo_list", [])
 
                 child_ctx = self._build_child_ctx(ctx)
+                if child_ctx is not None:
+                    child_ctx.metadata["_vv_agent_run_id"] = child_run_id
+                    child_ctx.metadata["_vv_agent_trace_id"] = trace_id
+                    child_ctx.metadata["trace_id"] = trace_id
+                    child_ctx.metadata["_vv_agent_agent_name"] = request.agent_name
+                    child_ctx.metadata["_vv_agent_session_id"] = sub_session_id
+                    if parent_run_id:
+                        child_ctx.metadata["_vv_agent_parent_run_id"] = parent_run_id
+                    if parent_tool_call_id:
+                        child_ctx.metadata["_vv_agent_parent_tool_call_id"] = parent_tool_call_id
                 if log_handler is not None:
                     parent_stream_callback = child_ctx.stream_callback if child_ctx is not None else None
 
@@ -1043,6 +1088,8 @@ class AgentRuntime:
                     workspace_backend=workspace_backend,
                     session=sub_session,
                     resolved=resolved_payload,
+                    parent_run_id=parent_run_id,
+                    parent_tool_call_id=parent_tool_call_id or None,
                     event_forwarder=_emit_sub_session_event,
                 )
             else:
@@ -1059,6 +1106,24 @@ class AgentRuntime:
                         "max_cycles": sub_task.max_cycles,
                     },
                 )
+                if event_emitter is not None:
+                    event_emitter(
+                        SubRunStartedEvent(
+                            run_id=child_run_id,
+                            trace_id=trace_id,
+                            session_id=sub_session_id,
+                            child_session_id=sub_session_id,
+                            parent_run_id=parent_run_id,
+                            parent_tool_call_id=parent_tool_call_id,
+                            agent_name=request.agent_name,
+                            task_id=sub_task_id,
+                            metadata={
+                                "parent_task_id": parent_task.task_id,
+                                "model": sub_task.model,
+                            },
+                        )
+                    )
+                    sub_run_started = True
                 sub_run = sub_session.prompt(sub_task.user_prompt, auto_follow_up=False)
             finally:
                 unregister_sub_agent_session(sub_session_id, sub_session)
@@ -1072,6 +1137,21 @@ class AgentRuntime:
             )
             if sub_task_manager is not None:
                 sub_task_manager.record_outcome(sub_task_id, outcome)
+            if sub_run_started and event_emitter is not None:
+                event_emitter(
+                    SubRunCompletedEvent(
+                        run_id=child_run_id,
+                        trace_id=trace_id,
+                        session_id=sub_session_id,
+                        child_session_id=sub_session_id,
+                        parent_run_id=parent_run_id,
+                        parent_tool_call_id=parent_tool_call_id,
+                        agent_name=request.agent_name,
+                        task_id=sub_task_id,
+                        status=AgentStatus.FAILED.value,
+                        error=str(exc),
+                    )
+                )
             return outcome
 
         outcome = SubTaskOutcome(
@@ -1088,6 +1168,25 @@ class AgentRuntime:
         )
         if sub_task_manager is not None:
             sub_task_manager.record_outcome(sub_task_id, outcome)
+        if event_emitter is not None:
+            event_emitter(
+                SubRunCompletedEvent(
+                    run_id=child_run_id,
+                    trace_id=trace_id,
+                    session_id=sub_session_id,
+                    child_session_id=sub_session_id,
+                    parent_run_id=parent_run_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    agent_name=request.agent_name,
+                    task_id=sub_task_id,
+                    status=outcome.status.value,
+                    final_output=outcome.final_answer,
+                    wait_reason=outcome.wait_reason,
+                    error=outcome.error,
+                    token_usage=sub_run.result.token_usage.to_dict(),
+                    metadata={"cycles": outcome.cycles},
+                )
+            )
         return outcome
 
     def _resolve_sub_agent_client(

@@ -6,11 +6,14 @@ from collections.abc import Callable
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from types import NoneType
-from typing import Any, Protocol, Union, get_args, get_origin, get_type_hints, overload
+from typing import TYPE_CHECKING, Any, Protocol, Union, get_args, get_origin, get_type_hints, overload
 
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.outputs import ToolOutput, ToolOutputError, ToolOutputFile, ToolOutputImage, ToolOutputJson, ToolOutputText
 from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
+
+if TYPE_CHECKING:
+    from vv_agent.tools.executor import FunctionToolExecutor
 
 ApprovalPredicate = Callable[[Any, Any], bool]
 ToolErrorFormatter = Callable[[Exception], str]
@@ -47,6 +50,11 @@ class FunctionTool:
                 "parameters": dict(self.params_json_schema),
             },
         }
+
+    def to_executor(self) -> FunctionToolExecutor:
+        from vv_agent.tools.executor import FunctionToolExecutor
+
+        return FunctionToolExecutor(self)
 
     def to_tool_execution_result(
         self,

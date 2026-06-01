@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
+from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor
 from vv_agent.types import ToolCall, ToolExecutionResult
 
 
@@ -16,11 +17,20 @@ class ToolNotFoundError(KeyError):
 class ToolRegistry:
     _tools: dict[str, ToolSpec] = field(default_factory=dict)
     _schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _executors: dict[str, ToolExecutor] = field(default_factory=dict)
+    _planner_extra_tool_names: set[str] = field(default_factory=set)
 
     def register(self, spec: ToolSpec) -> None:
         if spec.name in self._tools:
             raise ValueError(f"Tool already registered: {spec.name}")
         self._tools[spec.name] = spec
+        if spec.name not in self._executors:
+            schema = self._schemas.get(spec.name)
+            self._executors[spec.name] = RegistryToolExecutor(
+                name=spec.name,
+                handler=spec.handler,
+                schema=deepcopy(schema) if schema else None,
+            )
 
     def register_many(self, specs: list[ToolSpec]) -> None:
         for spec in specs:
@@ -28,6 +38,9 @@ class ToolRegistry:
 
     def register_schema(self, tool_name: str, schema: dict[str, Any]) -> None:
         self._schemas[tool_name] = deepcopy(schema)
+        executor = self._executors.get(tool_name)
+        if isinstance(executor, RegistryToolExecutor):
+            executor.schema = deepcopy(schema)
 
     def register_schemas(self, schemas: dict[str, dict[str, Any]]) -> None:
         for tool_name, schema in schemas.items():
@@ -41,6 +54,34 @@ class ToolRegistry:
 
     def has_tool(self, name: str) -> bool:
         return name in self._tools
+
+    def list_tool_names(self) -> list[str]:
+        return list(self._tools.keys())
+
+    def list_planner_extra_tool_names(self) -> list[str]:
+        return list(self._planner_extra_tool_names)
+
+    def has_executor(self, name: str) -> bool:
+        return name in self._executors
+
+    def get_executor(self, name: str) -> ToolExecutor:
+        executor = self._executors.get(name)
+        if executor is None:
+            raise ToolNotFoundError(name)
+        return executor
+
+    def mark_policy_managed_by_handler(self, name: str) -> None:
+        executor = self.get_executor(name)
+        if isinstance(executor, RegistryToolExecutor):
+            executor.metadata["policy_managed_by_handler"] = True
+
+    def register_executor(self, executor: ToolExecutor) -> None:
+        if executor.name in self._executors or executor.name in self._tools:
+            raise ValueError(f"Tool already registered: {executor.name}")
+        self._executors[executor.name] = executor
+        self.register_schema(executor.name, executor.openai_schema(None))
+        self._tools[executor.name] = executor.spec(None)
+        self._planner_extra_tool_names.add(executor.name)
 
     def has_schema(self, name: str) -> bool:
         return name in self._schemas
@@ -73,6 +114,7 @@ class ToolRegistry:
         }
         self.register_schema(name, schema)
         self.register(ToolSpec(name=name, handler=handler))
+        self._planner_extra_tool_names.add(name)
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
         tool = self.get(call.name)

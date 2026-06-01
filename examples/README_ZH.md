@@ -6,6 +6,12 @@
 `Agent`、`Runner`、`RunConfig`、`ModelSettings`、`function_tool`、Session、
 handoff、强类型事件和工具策略。低层 runtime 示例单独保留，用于后端集成场景。
 
+宿主产品迁移时，优先使用 provider 和 executor 扩展点，不要 patch runtime 内部：
+`ApprovalProvider` 负责 UI/规则审批，`ContextProvider` 负责产品 prompt 片段，
+`vv_agent.memory.MemoryProvider` 负责产品持久化，`vv_agent.tools.ToolExecutor`
+或 `FunctionTool` 组合负责产品工具，`RunEventStore` 负责应用历史。宿主需要实时
+强类型事件、取消或审批控制时，使用 `Runner.start()` 和 `RunHandle`。
+
 ## 通用环境变量
 
 | 变量 | 默认值 | 说明 |

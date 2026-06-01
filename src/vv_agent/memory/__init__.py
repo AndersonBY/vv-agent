@@ -4,13 +4,31 @@ from .manager import MemoryManager
 from .message_sanitizer import sanitize_for_resume
 from .microcompact import CLEARED_MARKER, COMPACTABLE_TOOLS, MicrocompactConfig, microcompact
 from .post_compact_restore import PostCompactRestoreConfig, restore_key_files
+from .provider import (
+    MemoryCompactCompleted,
+    MemoryCompactStarted,
+    MemoryProvider,
+    MemoryProviderResult,
+    MemorySaveRequest,
+    MemorySaveResult,
+    MemorySearchRequest,
+    MemorySearchResult,
+)
 from .session_memory import SessionMemory, SessionMemoryConfig, SessionMemoryEntry, SessionMemoryState
 
 __all__ = [
     "CLEARED_MARKER",
     "COMPACTABLE_TOOLS",
     "CompactionExhaustedError",
+    "MemoryCompactCompleted",
+    "MemoryCompactStarted",
     "MemoryManager",
+    "MemoryProvider",
+    "MemoryProviderResult",
+    "MemorySaveRequest",
+    "MemorySaveResult",
+    "MemorySearchRequest",
+    "MemorySearchResult",
     "MicrocompactConfig",
     "PostCompactRestoreConfig",
     "SessionMemory",

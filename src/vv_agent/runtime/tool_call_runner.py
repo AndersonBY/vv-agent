@@ -6,8 +6,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from vv_agent.runtime.hooks import RuntimeHookManager
+from vv_agent.runtime.tool_planner import plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
-from vv_agent.tools.dispatcher import dispatch_tool_call
+from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import AgentTask, CycleRecord, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ class ToolCallRunner:
     def __init__(self, *, tool_registry: ToolRegistry, hook_manager: RuntimeHookManager | None = None) -> None:
         self.tool_registry = tool_registry
         self.hook_manager = hook_manager or RuntimeHookManager()
+        self.tool_orchestrator = ToolOrchestrator.from_registry(tool_registry)
 
     def run(
         self,
@@ -41,6 +43,7 @@ class ToolCallRunner:
         latest_directive_result: ToolExecutionResult | None = None
         interruption_messages: list[Message] = []
         image_notifications: list[Message] = []
+        allowed_tool_names = set(plan_tool_names(task))
 
         for index, call in enumerate(tool_calls):
             if ctx is not None:
@@ -64,11 +67,13 @@ class ToolCallRunner:
                 )
                 if on_tool_start is not None:
                     on_tool_start(patched_call)
-                result = dispatch_tool_call(
-                    registry=self.tool_registry,
+                result = self.tool_orchestrator.run_one(
+                    patched_call,
                     context=call_context,
-                    call=patched_call,
+                    allowed_tool_names=allowed_tool_names,
                 )
+                if ctx is not None:
+                    ctx.check_cancelled()
             result = self.hook_manager.apply_after_tool_call(
                 task=task,
                 cycle_index=context.cycle_index,
