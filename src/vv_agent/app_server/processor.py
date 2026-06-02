@@ -17,7 +17,7 @@ from vv_agent.app_server.protocol import (
 )
 from vv_agent.app_server.run_adapter import RunAdapter
 from vv_agent.app_server.thread_state import ThreadStateManager
-from vv_agent.app_server.thread_store import ThreadStore
+from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
 
 CLIENT_METHODS: tuple[str, ...] = (
@@ -109,6 +109,15 @@ class MessageProcessor:
         if request.method == "thread/resume":
             self._handle_thread_resume(connection_id, request)
             return
+        if request.method == "thread/list":
+            self._handle_thread_list(connection_id, request)
+            return
+        if request.method == "thread/archive":
+            self._handle_thread_archive(connection_id, request)
+            return
+        if request.method == "thread/unsubscribe":
+            self._handle_thread_unsubscribe(connection_id, request)
+            return
         if request.method == "turn/start":
             self._handle_turn_start(connection_id, request)
             return
@@ -189,7 +198,12 @@ class MessageProcessor:
         if not thread_id:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
             return
-        self._router.send_response(connection_id, request.id, self._snapshot_to_dict(thread_id))
+        try:
+            snapshot = self._snapshot_to_dict(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._router.send_response(connection_id, request.id, snapshot)
 
     def _handle_thread_resume(self, connection_id: str, request: JsonRpcRequest) -> None:
         thread_id = self._thread_id_from_request(request)
@@ -197,7 +211,55 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
             return
         self._state_manager.subscribe(thread_id, connection_id)
-        self._router.send_response(connection_id, request.id, self._snapshot_to_dict(thread_id))
+        try:
+            snapshot = self._snapshot_to_dict(thread_id)
+        except KeyError:
+            self._state_manager.unsubscribe(thread_id, connection_id)
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._router.send_response(connection_id, request.id, snapshot)
+
+    def _handle_thread_list(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = request.params if isinstance(request.params, dict) else {}
+        include_archived = bool(params.get("includeArchived", False))
+        records = self._store.list_threads(include_archived=include_archived)
+        self._router.send_response(
+            connection_id,
+            request.id,
+            {"threads": [self._thread_record_to_dict(record) for record in records]},
+        )
+
+    def _handle_thread_archive(self, connection_id: str, request: JsonRpcRequest) -> None:
+        thread_id = self._thread_id_from_request(request)
+        if not thread_id:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return
+        try:
+            self._store.archive_thread(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._state_manager.set_status(thread_id, "archived")
+        payload = {"threadId": thread_id, "archived": True}
+        self._router.send_response(connection_id, request.id, payload)
+        for subscriber in self._state_manager.subscribers(thread_id) | {connection_id}:
+            self._router.send_notification(subscriber, "thread/archived", payload)
+
+    def _handle_thread_unsubscribe(self, connection_id: str, request: JsonRpcRequest) -> None:
+        thread_id = self._thread_id_from_request(request)
+        if not thread_id:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return
+        try:
+            self._store.read_thread(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._state_manager.unsubscribe(thread_id, connection_id)
+        closed = self._state_manager.close_if_idle(thread_id)
+        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "subscribed": False, "closed": closed})
+        if closed:
+            self._router.send_notification(connection_id, "thread/closed", {"threadId": thread_id})
 
     def _handle_turn_start(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -206,6 +268,14 @@ class MessageProcessor:
         input_items = [dict(item) for item in raw_input] if isinstance(raw_input, list) else []
         if not thread_id:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return
+        try:
+            snapshot = self._store.read_thread(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        if snapshot.thread.archived_at is not None:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
             return
         self._run_adapter.start_turn(connection_id=connection_id, thread_id=thread_id, input=input_items, request_id=request.id)
 
@@ -264,15 +334,7 @@ class MessageProcessor:
     def _snapshot_to_dict(self, thread_id: str) -> dict[str, Any]:
         snapshot = self._store.read_thread(thread_id)
         return {
-            "thread": {
-                "threadId": snapshot.thread.thread_id,
-                "agentKey": snapshot.thread.agent_key,
-                "cwd": snapshot.thread.cwd,
-                "createdAt": snapshot.thread.created_at,
-                "updatedAt": snapshot.thread.updated_at,
-                "archivedAt": snapshot.thread.archived_at,
-                "metadata": dict(snapshot.thread.metadata),
-            },
+            "thread": self._thread_record_to_dict(snapshot.thread),
             "turns": [
                 {
                     "turnId": turn.turn_id,
@@ -287,4 +349,17 @@ class MessageProcessor:
                 for turn in snapshot.turns
             ],
             "items": [item.to_dict() for item in snapshot.items],
+        }
+
+    def _thread_record_to_dict(self, record: ThreadRecord) -> dict[str, Any]:
+        archived = record.archived_at is not None
+        return {
+            "threadId": record.thread_id,
+            "agentKey": record.agent_key,
+            "cwd": record.cwd,
+            "createdAt": record.created_at,
+            "updatedAt": record.updated_at,
+            "archivedAt": record.archived_at,
+            "status": self._state_manager.status(record.thread_id, archived=archived),
+            "metadata": dict(record.metadata),
         }

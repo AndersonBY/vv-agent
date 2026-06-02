@@ -15,10 +15,12 @@ class ActiveTurn:
 @dataclass(slots=True)
 class ThreadState:
     thread_id: str
+    status: str = "idle"
     active_turn: ActiveTurn | None = None
     subscribers: set[str] = field(default_factory=set)
     pending_steering: list[list[dict[str, Any]]] = field(default_factory=list)
     pending_follow_ups: list[list[dict[str, Any]]] = field(default_factory=list)
+    listener_generation: int = 0
 
 
 class ThreadStateManager:
@@ -45,6 +47,29 @@ class ThreadStateManager:
     def subscribers(self, thread_id: str) -> set[str]:
         with self._lock:
             return set(self.load(thread_id).subscribers)
+
+    def status(self, thread_id: str, *, archived: bool = False) -> str:
+        if archived:
+            return "archived"
+        with self._lock:
+            state = self._states.get(thread_id)
+            if state is None:
+                return "notLoaded"
+            if state.active_turn is not None:
+                return "running"
+            return state.status
+
+    def set_status(self, thread_id: str, status: str) -> None:
+        with self._lock:
+            self.load(thread_id).status = status
+
+    def close_if_idle(self, thread_id: str) -> bool:
+        with self._lock:
+            state = self.load(thread_id)
+            if state.subscribers or state.active_turn is not None:
+                return False
+            state.status = "closed"
+            return True
 
     def set_active_turn(self, *, thread_id: str, turn_id: str, handle: Any) -> None:
         with self._lock:

@@ -14,6 +14,7 @@ class AppServerErrorCode:
     NOT_INITIALIZED: ClassVar[int] = -32010
     ALREADY_INITIALIZED: ClassVar[int] = -32011
     THREAD_NOT_FOUND: ClassVar[int] = -32020
+    THREAD_ARCHIVED: ClassVar[int] = -32021
     ACTIVE_TURN_NOT_FOUND: ClassVar[int] = -32030
     TURN_ID_MISMATCH: ClassVar[int] = -32031
 
@@ -43,6 +44,14 @@ class AppServerError:
     @classmethod
     def active_turn_not_found(cls) -> AppServerError:
         return cls(code=AppServerErrorCode.ACTIVE_TURN_NOT_FOUND, message="Active turn not found")
+
+    @classmethod
+    def thread_not_found(cls) -> AppServerError:
+        return cls(code=AppServerErrorCode.THREAD_NOT_FOUND, message="Thread not found")
+
+    @classmethod
+    def thread_archived(cls) -> AppServerError:
+        return cls(code=AppServerErrorCode.THREAD_ARCHIVED, message="Thread archived")
 
     @classmethod
     def turn_id_mismatch(cls) -> AppServerError:
