@@ -110,7 +110,11 @@ class MessageProcessor:
             self._serialize_or_run(
                 connection_id,
                 request,
-                lambda: self._router.send_response(connection_id, request.id, self._host.list_models(ModelListRequest()).to_dict()),
+                lambda: self._router.send_response(
+                    connection_id,
+                    request.id,
+                    self._host.list_models(ModelListRequest()).to_dict(),
+                ),
             )
             return
         if request.method == "thread/start":
@@ -185,19 +189,29 @@ class MessageProcessor:
         raw_capabilities = params.get("capabilities")
         capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
         raw_opt_out = capabilities.get("optOutNotificationMethods", [])
-        if not isinstance(raw_opt_out, list) or any(not isinstance(method, str) for method in raw_opt_out):
+        if not isinstance(raw_opt_out, list):
             self._router.send_error(
                 connection_id,
                 request.id,
                 AppServerError.invalid_params("optOutNotificationMethods must be a list of strings"),
             )
             return
+        opt_out_methods: list[str] = []
+        for method in raw_opt_out:
+            if not isinstance(method, str):
+                self._router.send_error(
+                    connection_id,
+                    request.id,
+                    AppServerError.invalid_params("optOutNotificationMethods must be a list of strings"),
+                )
+                return
+            opt_out_methods.append(method)
         state.initialized = True
         state.client_name = str(client_info.get("name") or "")
         state.client_title = str(client_info["title"]) if client_info.get("title") is not None else None
         state.client_version = str(client_info["version"]) if client_info.get("version") is not None else None
         state.experimental_api = bool(capabilities.get("experimentalApi", False))
-        state.opt_out_notification_methods = set(raw_opt_out)
+        state.opt_out_notification_methods = set(opt_out_methods)
         response = InitializeResponse(
             user_agent="vv-agent-app-server",
             protocol_version="v1",

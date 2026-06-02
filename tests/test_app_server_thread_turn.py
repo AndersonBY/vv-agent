@@ -89,11 +89,13 @@ def test_turn_start_and_completion_emit_thread_status_changes() -> None:
     )
 
     outbound = _drain_until_turn_completed(transport)
-    status_changes = [
-        message.get("params", {}).get("status")
-        for message in outbound
-        if message.get("method") == "thread/status/changed"
-    ]
+    status_changes: list[object] = []
+    for message in outbound:
+        if message.get("method") != "thread/status/changed":
+            continue
+        params = message.get("params")
+        if isinstance(params, dict):
+            status_changes.append(cast(dict[str, object], params).get("status"))
 
     assert status_changes == ["running", "idle"]
 

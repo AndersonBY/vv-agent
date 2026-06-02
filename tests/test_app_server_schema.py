@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 
 from vv_agent.app_server.processor import CLIENT_METHODS
-from vv_agent.app_server.schema import _schema_bundle
-from vv_agent.app_server.schema import generate_json_schema
+from vv_agent.app_server.schema import _schema_bundle, generate_json_schema
 
 
 def test_generate_json_schema_writes_expected_files(tmp_path) -> None:
