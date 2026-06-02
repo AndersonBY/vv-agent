@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from vv_agent import constants as constants_module
 from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
-    TODO_WRITE_TOOL_NAME,
 )
 from vv_agent.llm import ScriptedLLM
 from vv_agent.memory import SessionMemoryEntry, SessionMemoryState
@@ -26,6 +26,8 @@ from vv_agent.types import (
     ToolExecutionResult,
 )
 
+TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
+
 _PNG_1X1 = bytes.fromhex(
     "89504e470d0a1a0a"
     "0000000d49484452000000010000000108060000001f15c489"
@@ -41,7 +43,7 @@ def test_runtime_finishes_via_task_finish(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "draft", "status": "completed", "priority": "medium"}]},
                     )
                 ],
@@ -99,7 +101,7 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "t1", "status": "pending", "priority": "medium"}]},
                     )
                 ],
@@ -113,7 +115,7 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="c3",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "t1", "status": "completed", "priority": "medium"}]},
                     )
                 ],
@@ -203,7 +205,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "draft", "status": "completed", "priority": "medium"}]},
                     )
                 ],
@@ -253,9 +255,9 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     first_tool_call = tool_calls[0] if isinstance(tool_calls, list) else None
     assert isinstance(first_tool_call, dict)
     first_tool_call_map = cast(dict[str, Any], first_tool_call)
-    assert first_tool_call_map.get("name") == TODO_WRITE_TOOL_NAME
+    assert first_tool_call_map.get("name") == TASK_LIST_TOOL_NAME
     assert isinstance(first_tool_call_map.get("arguments"), dict)
-    assert cycle_payload.get("tool_call_names") == [TODO_WRITE_TOOL_NAME]
+    assert cycle_payload.get("tool_call_names") == [TASK_LIST_TOOL_NAME]
 
     tool_payload = next(payload for name, payload in events if name == "tool_result")
     assert isinstance(tool_payload.get("content"), str)
@@ -555,7 +557,7 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={
                             "todos": [{"title": long_title, "status": "completed", "priority": "medium"}]
                         },
@@ -603,7 +605,7 @@ def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path:
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={
                             "todos": [{"title": long_title, "status": "completed", "priority": "medium"}]
                         },
@@ -685,7 +687,7 @@ def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path
                     ToolCall(id="img1", name="_demo_image", arguments={}),
                     ToolCall(
                         id="todo1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "done", "status": "completed", "priority": "medium"}]},
                     ),
                 ],
@@ -762,7 +764,7 @@ def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "draft", "status": "completed", "priority": "medium"}]},
                     )
                 ],

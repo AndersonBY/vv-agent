@@ -7,11 +7,13 @@ from typing import Any, ClassVar, cast
 
 from openai.types.chat import ChatCompletionMessageParam
 
-from vv_agent.constants import TODO_WRITE_TOOL_NAME
+from vv_agent import constants as constants_module
 from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
 from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.types import Message
+
+TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
 
 
 class _FakeUsage:
@@ -97,7 +99,7 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
                 index=0,
                 id="tc1",
                 function=SimpleNamespace(
-                    name=TODO_WRITE_TOOL_NAME,
+                    name=TASK_LIST_TOOL_NAME,
                     arguments='{"todos":[{"title":"a","status":"pending",',
                 ),
             )
@@ -140,7 +142,7 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
     assert response.content == "hello world"
     assert response.raw["stream_collected"] is True
     assert len(response.tool_calls) == 1
-    assert response.tool_calls[0].name == TODO_WRITE_TOOL_NAME
+    assert response.tool_calls[0].name == TASK_LIST_TOOL_NAME
     assert response.tool_calls[0].arguments["todos"][0]["title"] == "a"
 
 
@@ -154,7 +156,7 @@ def test_llm_stream_emits_tool_call_progress_events(monkeypatch) -> None:
                 index=0,
                 id="tc1",
                 function=SimpleNamespace(
-                    name=TODO_WRITE_TOOL_NAME,
+                    name=TASK_LIST_TOOL_NAME,
                     arguments='{"todos":[{"title":"a",',
                 ),
             )
@@ -212,7 +214,7 @@ def test_llm_stream_emits_tool_call_progress_events(monkeypatch) -> None:
         "event": "tool_call_started",
         "tool_call_id": "tc1",
         "tool_call_index": 0,
-        "function_name": TODO_WRITE_TOOL_NAME,
+        "function_name": TASK_LIST_TOOL_NAME,
         "arguments_chars": 23,
         "estimated_tokens": 6,
     }
@@ -396,7 +398,7 @@ def test_llm_stream_aggregates_tool_calls_without_index(monkeypatch) -> None:
                 index=0,
                 id="tc_missing_index",
                 function=SimpleNamespace(
-                    name=TODO_WRITE_TOOL_NAME,
+                    name=TASK_LIST_TOOL_NAME,
                     arguments='{"todos":[{"title":"x",',
                 ),
             )

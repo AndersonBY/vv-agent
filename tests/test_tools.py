@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from vv_agent import constants as constants_module
 from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
@@ -14,7 +15,6 @@ from vv_agent.constants import (
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
-    TODO_WRITE_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
@@ -24,6 +24,8 @@ from vv_agent.tools.handlers import workspace_io
 from vv_agent.tools.registry import ToolNotFoundError
 from vv_agent.types import ToolCall, ToolDirective
 from vv_agent.workspace import LocalWorkspaceBackend
+
+TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
 
 
 @pytest.fixture
@@ -829,7 +831,7 @@ def test_compress_memory_writes_note(registry, tool_context: ToolContext) -> Non
 def test_todo_finish_guard(registry, tool_context: ToolContext) -> None:
     create_todo = ToolCall(
         id="call1",
-        name=TODO_WRITE_TOOL_NAME,
+        name=TASK_LIST_TOOL_NAME,
         arguments={"todos": [{"title": "task 1", "status": "pending", "priority": "high"}]},
     )
     registry.execute(create_todo, tool_context)

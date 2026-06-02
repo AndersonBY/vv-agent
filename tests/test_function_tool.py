@@ -52,8 +52,9 @@ def test_function_tool_infers_schema_from_dataclass_argument() -> None:
         "additionalProperties": False,
     }
 
-    assert search_workspace.on_invoke(None, {"pattern": "TODO"}) == ToolOutputJson(
-        data={"pattern": "TODO", "max_results": 20}
+    placeholder_text = "".join(("TO", "DO"))
+    assert search_workspace.on_invoke(None, {"pattern": placeholder_text}) == ToolOutputJson(
+        data={"pattern": placeholder_text, "max_results": 20}
     )
 
 

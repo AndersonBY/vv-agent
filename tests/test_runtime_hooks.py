@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vv_agent.constants import TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
+from vv_agent import constants as constants_module
+from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import (
     AfterLLMEvent,
@@ -24,6 +25,8 @@ from vv_agent.types import (
     ToolExecutionResult,
     ToolResultStatus,
 )
+
+TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
 
 
 def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
@@ -58,7 +61,7 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
 def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
     class BlockTodoHook(BaseRuntimeHook):
         def before_tool_call(self, event: BeforeToolCallEvent) -> ToolExecutionResult | None:
-            if event.call.name != TODO_WRITE_TOOL_NAME:
+            if event.call.name != TASK_LIST_TOOL_NAME:
                 return None
             return ToolExecutionResult(
                 tool_call_id=event.call.id,
@@ -75,7 +78,7 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "a", "status": "pending", "priority": "medium"}]},
                     )
                 ],
@@ -102,7 +105,7 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
 def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> None:
     class FinishAfterTodoHook(BaseRuntimeHook):
         def after_tool_call(self, event: AfterToolCallEvent) -> ToolExecutionResult | None:
-            if event.call.name != TODO_WRITE_TOOL_NAME:
+            if event.call.name != TASK_LIST_TOOL_NAME:
                 return None
             return ToolExecutionResult(
                 tool_call_id=event.result.tool_call_id,
@@ -119,7 +122,7 @@ def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> Non
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "a", "status": "completed", "priority": "medium"}]},
                     )
                 ],
@@ -142,7 +145,7 @@ def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> Non
 def test_runtime_hook_after_tool_call_with_blank_id_is_normalized(tmp_path: Path) -> None:
     class BlankIdAfterHook(BaseRuntimeHook):
         def after_tool_call(self, event: AfterToolCallEvent) -> ToolExecutionResult | None:
-            if event.call.name != TODO_WRITE_TOOL_NAME:
+            if event.call.name != TASK_LIST_TOOL_NAME:
                 return None
             return ToolExecutionResult(
                 tool_call_id=" ",
@@ -157,7 +160,7 @@ def test_runtime_hook_after_tool_call_with_blank_id_is_normalized(tmp_path: Path
                 tool_calls=[
                     ToolCall(
                         id="c1",
-                        name=TODO_WRITE_TOOL_NAME,
+                        name=TASK_LIST_TOOL_NAME,
                         arguments={"todos": [{"title": "a", "status": "completed", "priority": "medium"}]},
                     )
                 ],

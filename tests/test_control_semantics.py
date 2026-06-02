@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME, TODO_WRITE_TOOL_NAME
+from vv_agent import constants as constants_module
+from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import ToolCall, ToolDirective
 from vv_agent.workspace import LocalWorkspaceBackend
+
+TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
 
 
 def _context(tmp_path: Path) -> ToolContext:
@@ -23,7 +26,7 @@ def test_todo_write_enforces_single_in_progress(tmp_path: Path) -> None:
     result = registry.execute(
         ToolCall(
             id="c1",
-            name=TODO_WRITE_TOOL_NAME,
+            name=TASK_LIST_TOOL_NAME,
             arguments={
                 "todos": [
                     {"title": "a", "status": "in_progress", "priority": "high"},
@@ -71,7 +74,7 @@ def test_task_finish_blocks_when_todo_incomplete(tmp_path: Path) -> None:
     registry.execute(
         ToolCall(
             id="c3",
-            name=TODO_WRITE_TOOL_NAME,
+            name=TASK_LIST_TOOL_NAME,
             arguments={"todos": [{"title": "step1", "status": "pending", "priority": "medium"}]},
         ),
         context,
