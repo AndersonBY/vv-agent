@@ -152,6 +152,37 @@ class ThreadStore:
             self._touch_thread(item.thread_id, time.time())
             self._connection.commit()
 
+    def update_turn(
+        self,
+        turn_id: str,
+        *,
+        status: str,
+        run_id: str | None = None,
+        completed_at: float | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> TurnRecord:
+        with self._lock:
+            existing = self._fetch_turn(turn_id)
+            completed = time.time() if completed_at is None else completed_at
+            merged_result = dict(result or {})
+            self._connection.execute(
+                """
+                UPDATE turns
+                SET run_id = ?, status = ?, completed_at = ?, result_json = ?
+                WHERE turn_id = ?
+                """,
+                (
+                    run_id if run_id is not None else existing.run_id,
+                    status,
+                    completed,
+                    json.dumps(merged_result, ensure_ascii=False, sort_keys=True),
+                    turn_id,
+                ),
+            )
+            self._touch_thread(existing.thread_id, completed)
+            self._connection.commit()
+            return self._fetch_turn(turn_id)
+
     def read_thread(self, thread_id: str) -> ThreadSnapshot:
         with self._lock:
             thread = self._fetch_thread(thread_id)
@@ -236,6 +267,12 @@ class ThreadStore:
         if row is None:
             raise KeyError(f"Unknown App Server thread: {thread_id}")
         return self._thread_from_row(row)
+
+    def _fetch_turn(self, turn_id: str) -> TurnRecord:
+        row = self._connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown App Server turn: {turn_id}")
+        return self._turn_from_row(row)
 
     def _thread_from_row(self, row: sqlite3.Row) -> ThreadRecord:
         return ThreadRecord(
