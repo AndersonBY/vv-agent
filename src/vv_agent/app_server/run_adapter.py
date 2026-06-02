@@ -81,6 +81,12 @@ class RunAdapter:
             "turn/started",
             {"threadId": thread.thread_id, "turnId": turn.turn_id},
         )
+        self._notify_subscribers(
+            thread.thread_id,
+            "turn/started",
+            {"threadId": thread.thread_id, "turnId": turn.turn_id},
+            exclude={connection_id},
+        )
         threading.Thread(target=self._pump_events, args=(connection_id, started), daemon=True).start()
         return started
 
@@ -93,7 +99,11 @@ class RunAdapter:
                 if projection.item is not None:
                     self._store.append_item(projection.item, run_event_id=event.event_id)
                 if projection.notification_method is not None:
-                    self._router.send_notification(connection_id, projection.notification_method, projection.notification_params)
+                    self._notify_subscribers(
+                        started.thread.thread_id,
+                        projection.notification_method,
+                        projection.notification_params,
+                    )
             result = started.handle.result(timeout=0)
         except BaseException as exc:
             error = exc
@@ -135,7 +145,7 @@ class RunAdapter:
             }
             self._store.update_turn(started.turn.turn_id, status=status, result={"error": payload["error"]})
         self._state_manager.clear_active_turn(started.thread.thread_id, started.turn.turn_id)
-        self._router.send_notification(connection_id, "turn/completed", payload)
+        self._notify_subscribers(started.thread.thread_id, "turn/completed", payload)
         follow_up = self._state_manager.pop_next_follow_up(started.thread.thread_id)
         if follow_up is not None and status == "completed":
             self.start_turn(connection_id=connection_id, thread_id=started.thread.thread_id, input=follow_up)
@@ -179,3 +189,16 @@ class RunAdapter:
         if not prompt:
             return []
         return [Message(role="user", content=prompt)]
+
+    def _notify_subscribers(
+        self,
+        thread_id: str,
+        method: str,
+        params: dict[str, Any],
+        *,
+        exclude: set[str] | None = None,
+    ) -> None:
+        excluded = exclude or set()
+        for subscriber in self._state_manager.subscribers(thread_id):
+            if subscriber not in excluded:
+                self._router.send_notification(subscriber, method, params)

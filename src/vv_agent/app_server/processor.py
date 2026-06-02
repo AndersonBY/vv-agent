@@ -82,6 +82,12 @@ class MessageProcessor:
         if request.method == "thread/start":
             self._handle_thread_start(connection_id, request)
             return
+        if request.method == "thread/read":
+            self._handle_thread_read(connection_id, request)
+            return
+        if request.method == "thread/resume":
+            self._handle_thread_resume(connection_id, request)
+            return
         if request.method == "turn/start":
             self._handle_turn_start(connection_id, request)
             return
@@ -129,6 +135,21 @@ class MessageProcessor:
         payload = {"threadId": thread.thread_id, "agentKey": thread.agent_key, "cwd": thread.cwd, "status": "idle"}
         self._router.send_notification(connection_id, "thread/started", payload)
         self._router.send_response(connection_id, request.id, payload)
+
+    def _handle_thread_read(self, connection_id: str, request: JsonRpcRequest) -> None:
+        thread_id = self._thread_id_from_request(request)
+        if not thread_id:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return
+        self._router.send_response(connection_id, request.id, self._snapshot_to_dict(thread_id))
+
+    def _handle_thread_resume(self, connection_id: str, request: JsonRpcRequest) -> None:
+        thread_id = self._thread_id_from_request(request)
+        if not thread_id:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return
+        self._state_manager.subscribe(thread_id, connection_id)
+        self._router.send_response(connection_id, request.id, self._snapshot_to_dict(thread_id))
 
     def _handle_turn_start(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -187,3 +208,35 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.turn_id_mismatch())
             return None
         return thread_id, active.turn_id, reason, input_items
+
+    def _thread_id_from_request(self, request: JsonRpcRequest) -> str:
+        params = request.params if isinstance(request.params, dict) else {}
+        return str(params.get("threadId") or "")
+
+    def _snapshot_to_dict(self, thread_id: str) -> dict[str, Any]:
+        snapshot = self._store.read_thread(thread_id)
+        return {
+            "thread": {
+                "threadId": snapshot.thread.thread_id,
+                "agentKey": snapshot.thread.agent_key,
+                "cwd": snapshot.thread.cwd,
+                "createdAt": snapshot.thread.created_at,
+                "updatedAt": snapshot.thread.updated_at,
+                "archivedAt": snapshot.thread.archived_at,
+                "metadata": dict(snapshot.thread.metadata),
+            },
+            "turns": [
+                {
+                    "turnId": turn.turn_id,
+                    "threadId": turn.thread_id,
+                    "runId": turn.run_id,
+                    "status": turn.status,
+                    "startedAt": turn.started_at,
+                    "completedAt": turn.completed_at,
+                    "input": [dict(item) for item in turn.input],
+                    "result": dict(turn.result),
+                }
+                for turn in snapshot.turns
+            ],
+            "items": [item.to_dict() for item in snapshot.items],
+        }

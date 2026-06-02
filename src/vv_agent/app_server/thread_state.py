@@ -42,6 +42,10 @@ class ThreadStateManager:
         with self._lock:
             self.load(thread_id).subscribers.discard(connection_id)
 
+    def subscribers(self, thread_id: str) -> set[str]:
+        with self._lock:
+            return set(self.load(thread_id).subscribers)
+
     def set_active_turn(self, *, thread_id: str, turn_id: str, handle: Any) -> None:
         with self._lock:
             self.load(thread_id).active_turn = ActiveTurn(thread_id=thread_id, turn_id=turn_id, handle=handle)

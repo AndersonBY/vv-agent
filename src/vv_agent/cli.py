@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from vv_agent.app_server import AppServer, StdioJsonlTransport
+from vv_agent.app_server.client import run_debug_message
+from vv_agent.app_server.schema import generate_json_schema
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.prompt import build_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
@@ -72,6 +74,14 @@ def _build_cli_log_handler(*, enabled: bool):
 
 
 def _run_app_server_cli(argv: list[str]) -> None:
+    if argv and argv[0] == "generate-json-schema":
+        parser = argparse.ArgumentParser(prog="vv-agent app-server generate-json-schema")
+        parser.add_argument("--out", required=True, help="Directory for generated JSON Schema files")
+        args = parser.parse_args(argv[1:])
+        generate_json_schema(args.out)
+        print(args.out)
+        return
+
     parser = argparse.ArgumentParser(
         prog="vv-agent app-server",
         description="Run the vv-agent App Server. Use --listen stdio for JSONL over stdin/stdout.",
@@ -87,6 +97,17 @@ def _run_app_server_cli(argv: list[str]) -> None:
 
     if args.listen == "stdio":
         AppServer(transport=StdioJsonlTransport()).run_forever()
+
+
+def _run_debug_cli(argv: list[str]) -> None:
+    if len(argv) >= 3 and argv[0] == "app-server" and argv[1] == "send-message":
+        for message in run_debug_message(" ".join(argv[2:])):
+            print(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+        return
+    parser = argparse.ArgumentParser(prog="vv-agent debug")
+    parser.add_argument("args", nargs="*")
+    parser.parse_args(argv)
+    raise SystemExit("Supported debug command: vv-agent debug app-server send-message <message>")
 
 
 def _run_task_cli(argv: list[str]) -> None:
@@ -166,6 +187,9 @@ def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "app-server":
         _run_app_server_cli(args[1:])
+        return
+    if args and args[0] == "debug":
+        _run_debug_cli(args[1:])
         return
     _run_task_cli(args)
 
