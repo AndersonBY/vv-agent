@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,11 +45,12 @@ class PendingServerRequest:
 
 
 class OutgoingRouter:
-    def __init__(self) -> None:
+    def __init__(self, *, should_send_notification: Callable[[str, str], bool] | None = None) -> None:
         self._transports: dict[str, AppServerTransport] = {}
         self._pending: dict[str | int, PendingServerRequest] = {}
         self._server_request_ids = itertools.count(1)
         self._lock = threading.Lock()
+        self._should_send_notification = should_send_notification or (lambda _connection_id, _method: True)
 
     def register_transport(self, transport: AppServerTransport) -> None:
         self._transports[transport.connection_id] = transport
@@ -56,6 +58,9 @@ class OutgoingRouter:
     def unregister_transport(self, connection_id: str) -> None:
         self._transports.pop(connection_id, None)
         self._resolve_connection_error(connection_id, AppServerError(AppServerErrorCode.INTERNAL_ERROR, "client_disconnected"))
+
+    def set_notification_filter(self, callback: Callable[[str, str], bool]) -> None:
+        self._should_send_notification = callback
 
     def send_response(
         self,
@@ -73,13 +78,16 @@ class OutgoingRouter:
             transport.write_outbound(JsonRpcError(id=request_id, error=error).to_dict())
 
     def send_notification(self, connection_id: str, method: str, params: dict[str, Any] | None = None) -> None:
+        if not self._should_send_notification(connection_id, method):
+            return
         transport = self._transport_or_none(connection_id)
         if transport is not None:
             transport.write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
 
     def broadcast_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
-        for transport in list(self._transports.values()):
-            transport.write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
+        for connection_id, transport in list(self._transports.items()):
+            if self._should_send_notification(connection_id, method):
+                transport.write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
 
     def send_server_request(self, connection_id: str, method: str, params: dict[str, Any] | None = None) -> PendingServerRequest:
         request_id = RequestId(f"srv_{next(self._server_request_ids)}")

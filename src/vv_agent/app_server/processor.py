@@ -67,6 +67,7 @@ class MessageProcessor:
             router=self._router,
         )
         self._connections: dict[str, ConnectionState] = {}
+        self._router.set_notification_filter(self._should_send_notification)
 
     def process_next(self, transport: ChannelTransport) -> None:
         self.process_message(transport.connection_id, transport.receive_inbound())
@@ -154,6 +155,12 @@ class MessageProcessor:
 
     def connection_state(self, connection_id: str) -> ConnectionState:
         return self._state(connection_id)
+
+    def _should_send_notification(self, connection_id: str, method: str) -> bool:
+        state = self._connections.get(connection_id)
+        if state is None:
+            return True
+        return method not in state.opt_out_notification_methods
 
     def _state(self, connection_id: str) -> ConnectionState:
         state = self._connections.get(connection_id)
