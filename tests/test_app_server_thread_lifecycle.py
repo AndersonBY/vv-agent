@@ -37,6 +37,7 @@ def test_thread_archive_hides_thread_and_emits_notification() -> None:
     processor.process_message("conn_1", {"id": 2, "method": "thread/archive", "params": {"threadId": "thread_1"}})
     archive_response = transport.receive_outbound(timeout=1)
     archived_notification = transport.receive_outbound(timeout=1)
+    status_notification = transport.receive_outbound(timeout=1)
     processor.process_message("conn_1", {"id": 3, "method": "thread/list"})
     list_response = transport.receive_outbound(timeout=1)
     processor.process_message("conn_1", {"id": 4, "method": "thread/list", "params": {"includeArchived": True}})
@@ -44,6 +45,7 @@ def test_thread_archive_hides_thread_and_emits_notification() -> None:
 
     assert archive_response == {"id": 2, "result": {"threadId": "thread_1", "archived": True}}
     assert archived_notification["method"] == "thread/archived"
+    assert status_notification == {"method": "thread/status/changed", "params": {"threadId": "thread_1", "status": "archived"}}
     assert list_response["result"]["threads"] == []
     assert archived_list_response["result"]["threads"][0]["status"] == "archived"
 
@@ -54,6 +56,7 @@ def test_turn_start_rejects_archived_thread() -> None:
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
     processor.process_message("conn_1", {"id": 2, "method": "thread/archive", "params": {"threadId": "thread_1"}})
+    transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
 
@@ -76,9 +79,11 @@ def test_thread_unsubscribe_closes_idle_thread() -> None:
     processor.process_message("conn_1", {"id": 2, "method": "thread/unsubscribe", "params": {"threadId": "thread_1"}})
     response = transport.receive_outbound(timeout=1)
     closed_notification = transport.receive_outbound(timeout=1)
+    status_notification = transport.receive_outbound(timeout=1)
     processor.process_message("conn_1", {"id": 3, "method": "thread/read", "params": {"threadId": "thread_1"}})
     read_response = transport.receive_outbound(timeout=1)
 
     assert response == {"id": 2, "result": {"threadId": "thread_1", "subscribed": False, "closed": True}}
     assert closed_notification == {"method": "thread/closed", "params": {"threadId": "thread_1"}}
+    assert status_notification == {"method": "thread/status/changed", "params": {"threadId": "thread_1", "status": "closed"}}
     assert read_response["result"]["thread"]["status"] == "closed"

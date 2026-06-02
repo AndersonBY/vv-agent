@@ -253,9 +253,12 @@ class MessageProcessor:
         if not thread_id:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
             return
-        self._state_manager.subscribe(thread_id, connection_id)
         try:
-            snapshot = self._snapshot_to_dict(thread_id)
+            snapshot = self._state_manager.subscribe_and_snapshot(
+                thread_id,
+                connection_id,
+                lambda: self._snapshot_to_dict(thread_id),
+            )
         except KeyError:
             self._state_manager.unsubscribe(thread_id, connection_id)
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
@@ -287,6 +290,11 @@ class MessageProcessor:
         self._router.send_response(connection_id, request.id, payload)
         for subscriber in self._state_manager.subscribers(thread_id) | {connection_id}:
             self._router.send_notification(subscriber, "thread/archived", payload)
+            self._router.send_notification(
+                subscriber,
+                "thread/status/changed",
+                {"threadId": thread_id, "status": "archived"},
+            )
 
     def _handle_thread_unsubscribe(self, connection_id: str, request: JsonRpcRequest) -> None:
         thread_id = self._thread_id_from_request(request)
@@ -303,6 +311,7 @@ class MessageProcessor:
         self._router.send_response(connection_id, request.id, {"threadId": thread_id, "subscribed": False, "closed": closed})
         if closed:
             self._router.send_notification(connection_id, "thread/closed", {"threadId": thread_id})
+            self._router.send_notification(connection_id, "thread/status/changed", {"threadId": thread_id, "status": "closed"})
 
     def _handle_turn_start(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = request.params if isinstance(request.params, dict) else {}

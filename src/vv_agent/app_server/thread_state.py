@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any
+from typing import Any, TypeVar
+
+T = TypeVar("T")
 
 
 @dataclass(slots=True)
@@ -70,6 +73,11 @@ class ThreadStateManager:
                 return False
             state.status = "closed"
             return True
+
+    def subscribe_and_snapshot(self, thread_id: str, connection_id: str, snapshot_fn: Callable[[], T]) -> T:
+        with self._lock:
+            self.load(thread_id).subscribers.add(connection_id)
+            return snapshot_fn()
 
     def set_active_turn(self, *, thread_id: str, turn_id: str, handle: Any) -> None:
         with self._lock:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import cast
 
@@ -10,7 +11,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import LLMResponse, Message, ToolCall
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -58,6 +59,48 @@ def test_thread_resume_replays_timeline_and_subscribes_to_live_events() -> None:
     assert "turn/started" in methods
     assert "item/completed" in methods
     assert methods[-1] == "turn/completed"
+
+
+def test_resume_during_active_turn_subscribes_before_later_notifications() -> None:
+    first_step_ready = threading.Event()
+    first_step_can_finish = threading.Event()
+
+    def first_step(_model: str, _messages: list[Message]) -> LLMResponse:
+        first_step_ready.set()
+        assert first_step_can_finish.wait(timeout=2)
+        return LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+        )
+
+    server, first_transport = _server_with_steps([first_step])
+    _send(first_transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "first"}}})
+    _send(first_transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        first_transport,
+        server,
+        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+    )
+    assert first_step_ready.wait(timeout=2)
+
+    second_transport = ChannelTransport(connection_id="conn_2")
+    server.router.register_transport(second_transport)
+    server.processor.process_message("conn_2", {"id": 10, "method": "initialize", "params": {"clientInfo": {"name": "second"}}})
+    second_transport.receive_outbound(timeout=1)
+    server.processor.process_message("conn_2", {"id": 11, "method": "thread/resume", "params": {"threadId": "thread_1"}})
+    resume_response = second_transport.receive_outbound(timeout=1)
+
+    first_step_can_finish.set()
+    messages = []
+    while True:
+        message = second_transport.receive_outbound(timeout=10)
+        messages.append(message)
+        if message.get("method") == "turn/completed":
+            break
+
+    assert resume_response["id"] == 11
+    assert resume_response["result"]["thread"]["threadId"] == "thread_1"
+    assert any(message.get("method") == "turn/completed" for message in messages)
 
 
 def _server_with_steps(steps: list[ScriptStep]) -> tuple[AppServer, ChannelTransport]:
