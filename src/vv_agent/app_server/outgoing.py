@@ -15,7 +15,7 @@ from vv_agent.app_server.protocol import (
     JsonRpcResponse,
     RequestId,
 )
-from vv_agent.app_server.transport import AppServerTransport
+from vv_agent.app_server.transport import AppServerOverloadedError, AppServerTransport
 
 
 @dataclass(slots=True)
@@ -68,33 +68,27 @@ class OutgoingRouter:
         request_id: RequestId,
         result: dict[str, Any] | list[Any] | str | int | bool | None,
     ) -> None:
-        transport = self._transport_or_none(connection_id)
-        if transport is not None:
-            transport.write_outbound(JsonRpcResponse(id=request_id, result=result).to_dict())
+        self._write_or_disconnect(connection_id, JsonRpcResponse(id=request_id, result=result).to_dict())
 
     def send_error(self, connection_id: str, request_id: RequestId, error: AppServerError) -> None:
-        transport = self._transport_or_none(connection_id)
-        if transport is not None:
-            transport.write_outbound(JsonRpcError(id=request_id, error=error).to_dict())
+        self._write_or_disconnect(connection_id, JsonRpcError(id=request_id, error=error).to_dict())
 
     def send_notification(self, connection_id: str, method: str, params: dict[str, Any] | None = None) -> None:
         if not self._should_send_notification(connection_id, method):
             return
-        transport = self._transport_or_none(connection_id)
-        if transport is not None:
-            transport.write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
+        self._write_or_disconnect(connection_id, JsonRpcNotification(method=method, params=params).to_dict())
 
     def broadcast_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
-        for connection_id, transport in list(self._transports.items()):
+        for connection_id, _transport in list(self._transports.items()):
             if self._should_send_notification(connection_id, method):
-                transport.write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
+                self._write_or_disconnect(connection_id, JsonRpcNotification(method=method, params=params).to_dict())
 
     def send_server_request(self, connection_id: str, method: str, params: dict[str, Any] | None = None) -> PendingServerRequest:
         request_id = RequestId(f"srv_{next(self._server_request_ids)}")
         pending = PendingServerRequest(connection_id=connection_id, request_id=request_id, method=method, params=params)
         with self._lock:
             self._pending[request_id.to_wire()] = pending
-        self._transport(connection_id).write_outbound(JsonRpcRequest(id=request_id, method=method, params=params).to_dict())
+        self._write_or_disconnect(connection_id, JsonRpcRequest(id=request_id, method=method, params=params).to_dict())
         return pending
 
     def cancel_server_request(self, request_id: RequestId, error: AppServerError | None = None) -> bool:
@@ -130,6 +124,15 @@ class OutgoingRouter:
 
     def _transport_or_none(self, connection_id: str) -> AppServerTransport | None:
         return self._transports.get(connection_id)
+
+    def _write_or_disconnect(self, connection_id: str, payload: dict[str, Any]) -> None:
+        transport = self._transport_or_none(connection_id)
+        if transport is None:
+            return
+        try:
+            transport.write_outbound(payload)
+        except AppServerOverloadedError:
+            self.unregister_transport(connection_id)
 
     def _resolve_connection_error(self, connection_id: str, error: AppServerError) -> None:
         with self._lock:

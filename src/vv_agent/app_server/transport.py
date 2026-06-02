@@ -9,6 +9,10 @@ from typing import Any, Protocol, TextIO
 OVERLOADED_MESSAGE = "Server overloaded; retry later."
 
 
+class AppServerOverloadedError(RuntimeError):
+    pass
+
+
 class AppServerTransport(Protocol):
     connection_id: str
 
@@ -37,7 +41,7 @@ class ChannelTransport:
         try:
             self._outbound.put_nowait(payload)
         except queue.Full as exc:
-            raise RuntimeError(OVERLOADED_MESSAGE) from exc
+            raise AppServerOverloadedError(OVERLOADED_MESSAGE) from exc
 
     def receive_outbound(self, *, timeout: float | None = None) -> dict[str, Any]:
         return self._outbound.get(timeout=timeout)
