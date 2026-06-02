@@ -4,7 +4,7 @@ import threading
 from dataclasses import dataclass, replace
 from typing import Any
 
-from vv_agent.app_server.host import AgentResolutionRequest, AppServerHost, RunConfigResolutionRequest
+from vv_agent.app_server.host import AgentResolutionRequest, AppServerApprovalProvider, AppServerHost, RunConfigResolutionRequest
 from vv_agent.app_server.item_mapper import map_run_event
 from vv_agent.app_server.outgoing import OutgoingRouter
 from vv_agent.app_server.protocol import RequestId
@@ -60,8 +60,13 @@ class RunAdapter:
         )
         agent = self._host.resolve_agent(agent_request)
         run_config = self._host.build_run_config(config_request)
-        run_config = self._with_app_server_controls(run_config, thread.thread_id)
         turn = self._store.create_turn(thread_id=thread.thread_id, input=input, status="running")
+        run_config = self._with_app_server_controls(
+            run_config,
+            connection_id=connection_id,
+            thread_id=thread.thread_id,
+            turn_id=turn.turn_id,
+        )
         handle = Runner.start(agent, self._prompt_from_input(input), run_config=run_config)
         self._state_manager.set_active_turn(thread_id=thread.thread_id, turn_id=turn.turn_id, handle=handle)
         started = StartedTurn(thread=thread, turn=turn, handle=handle)
@@ -144,7 +149,7 @@ class RunAdapter:
                 parts.append(str(item))
         return "\n".join(part for part in parts if part)
 
-    def _with_app_server_controls(self, run_config, thread_id: str):
+    def _with_app_server_controls(self, run_config, *, connection_id: str, thread_id: str, turn_id: str):
         existing_before_cycle = run_config.before_cycle_messages
 
         def before_cycle_messages(cycle_index: int, messages: list[Message], shared_state: dict[str, Any]) -> list[Message]:
@@ -159,6 +164,14 @@ class RunAdapter:
             run_config,
             metadata={**run_config.metadata, "session_id": thread_id},
             before_cycle_messages=before_cycle_messages,
+            approval_provider=run_config.approval_provider
+            or AppServerApprovalProvider(
+                connection_id=connection_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                router=self._router,
+                timeout_seconds=run_config.approval_timeout_seconds,
+            ),
         )
 
     def _messages_from_input(self, input: list[dict[str, Any]]) -> list[Message]:

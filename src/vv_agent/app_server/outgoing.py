@@ -7,6 +7,7 @@ from typing import Any
 
 from vv_agent.app_server.protocol import (
     AppServerError,
+    AppServerErrorCode,
     JsonRpcError,
     JsonRpcNotification,
     JsonRpcRequest,
@@ -54,6 +55,7 @@ class OutgoingRouter:
 
     def unregister_transport(self, connection_id: str) -> None:
         self._transports.pop(connection_id, None)
+        self._resolve_connection_error(connection_id, AppServerError(AppServerErrorCode.INTERNAL_ERROR, "client_disconnected"))
 
     def send_response(
         self,
@@ -61,13 +63,19 @@ class OutgoingRouter:
         request_id: RequestId,
         result: dict[str, Any] | list[Any] | str | int | bool | None,
     ) -> None:
-        self._transport(connection_id).write_outbound(JsonRpcResponse(id=request_id, result=result).to_dict())
+        transport = self._transport_or_none(connection_id)
+        if transport is not None:
+            transport.write_outbound(JsonRpcResponse(id=request_id, result=result).to_dict())
 
     def send_error(self, connection_id: str, request_id: RequestId, error: AppServerError) -> None:
-        self._transport(connection_id).write_outbound(JsonRpcError(id=request_id, error=error).to_dict())
+        transport = self._transport_or_none(connection_id)
+        if transport is not None:
+            transport.write_outbound(JsonRpcError(id=request_id, error=error).to_dict())
 
     def send_notification(self, connection_id: str, method: str, params: dict[str, Any] | None = None) -> None:
-        self._transport(connection_id).write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
+        transport = self._transport_or_none(connection_id)
+        if transport is not None:
+            transport.write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
 
     def broadcast_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
         for transport in list(self._transports.values()):
@@ -80,6 +88,14 @@ class OutgoingRouter:
             self._pending[request_id.to_wire()] = pending
         self._transport(connection_id).write_outbound(JsonRpcRequest(id=request_id, method=method, params=params).to_dict())
         return pending
+
+    def cancel_server_request(self, request_id: RequestId, error: AppServerError | None = None) -> bool:
+        with self._lock:
+            pending = self._pending.pop(request_id.to_wire(), None)
+        if pending is None:
+            return False
+        pending.resolve_error(error or AppServerError(AppServerErrorCode.INTERNAL_ERROR, "cancelled"))
+        return True
 
     def resolve_response(self, response: JsonRpcResponse) -> bool:
         with self._lock:
@@ -103,3 +119,17 @@ class OutgoingRouter:
             return self._transports[connection_id]
         except KeyError as exc:
             raise KeyError(f"Unknown App Server connection: {connection_id}") from exc
+
+    def _transport_or_none(self, connection_id: str) -> AppServerTransport | None:
+        return self._transports.get(connection_id)
+
+    def _resolve_connection_error(self, connection_id: str, error: AppServerError) -> None:
+        with self._lock:
+            request_ids = [
+                request_id
+                for request_id, pending in self._pending.items()
+                if pending.connection_id == connection_id
+            ]
+            pending_requests = [self._pending.pop(request_id) for request_id in request_ids]
+        for pending in pending_requests:
+            pending.resolve_error(error)
