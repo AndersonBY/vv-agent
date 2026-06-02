@@ -50,10 +50,17 @@ class _ScopeState:
     running_shared_reads: int = 0
 
 
+class RequestQueueOverloaded(RuntimeError):
+    pass
+
+
 class RequestSerializationQueues:
-    def __init__(self) -> None:
+    def __init__(self, *, max_queued_per_scope: int = 100, max_total_queued: int = 1000) -> None:
         self._states: dict[str, _ScopeState] = {}
         self._lock = threading.Lock()
+        self._max_queued_per_scope = max_queued_per_scope
+        self._max_total_queued = max_total_queued
+        self._total_queued = 0
 
     def enqueue(self, *, key: RequestScope, access: RequestAccess, fn: Callable[[], T]) -> Future[T]:
         if access not in {"exclusive", "shared_read"}:
@@ -62,7 +69,10 @@ class RequestSerializationQueues:
         work = _QueuedWork(access=access, fn=fn, future=future)
         with self._lock:
             state = self._states.setdefault(key.key, _ScopeState())
+            if len(state.queue) >= self._max_queued_per_scope or self._total_queued >= self._max_total_queued:
+                raise RequestQueueOverloaded("Server overloaded; retry later.")
             state.queue.append(work)
+            self._total_queued += 1
             self._drain_locked(key.key, state)
         return future
 
@@ -71,16 +81,21 @@ class RequestSerializationQueues:
             return
         if state.running_shared_reads > 0:
             while state.queue and state.queue[0].access == "shared_read":
-                self._start_shared_read_locked(scope_key, state, state.queue.popleft())
+                self._start_shared_read_locked(scope_key, state, self._pop_queued_locked(state))
             return
         if not state.queue:
             self._states.pop(scope_key, None)
             return
         if state.queue[0].access == "exclusive":
-            self._start_exclusive_locked(scope_key, state, state.queue.popleft())
+            self._start_exclusive_locked(scope_key, state, self._pop_queued_locked(state))
             return
         while state.queue and state.queue[0].access == "shared_read":
-            self._start_shared_read_locked(scope_key, state, state.queue.popleft())
+            self._start_shared_read_locked(scope_key, state, self._pop_queued_locked(state))
+
+    def _pop_queued_locked(self, state: _ScopeState) -> _QueuedWork:
+        work = state.queue.popleft()
+        self._total_queued -= 1
+        return work
 
     def _start_exclusive_locked(self, scope_key: str, state: _ScopeState, work: _QueuedWork) -> None:
         state.running_exclusive = True

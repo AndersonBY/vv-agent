@@ -42,6 +42,14 @@ class AppServerError:
         return cls(code=AppServerErrorCode.INVALID_PARAMS, message=message, data=data)
 
     @classmethod
+    def internal_error(cls, message: str = "Internal error") -> AppServerError:
+        return cls(code=AppServerErrorCode.INTERNAL_ERROR, message=message)
+
+    @classmethod
+    def server_overloaded(cls) -> AppServerError:
+        return cls(code=AppServerErrorCode.SERVER_OVERLOADED, message="Server overloaded; retry later.")
+
+    @classmethod
     def active_turn_not_found(cls) -> AppServerError:
         return cls(code=AppServerErrorCode.ACTIVE_TURN_NOT_FOUND, message="Active turn not found")
 

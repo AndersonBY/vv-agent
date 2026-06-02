@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +15,12 @@ from vv_agent.app_server.protocol import (
     JsonRpcRequest,
     JsonRpcResponse,
     ModelListRequest,
+)
+from vv_agent.app_server.request_serialization import (
+    RequestAccess,
+    RequestQueueOverloaded,
+    RequestScope,
+    RequestSerializationQueues,
 )
 from vv_agent.app_server.run_adapter import RunAdapter
 from vv_agent.app_server.thread_state import ThreadStateManager
@@ -55,11 +62,13 @@ class MessageProcessor:
         store: ThreadStore | None = None,
         state_manager: ThreadStateManager | None = None,
         run_adapter: RunAdapter | None = None,
+        serialization_queues: RequestSerializationQueues | None = None,
     ) -> None:
         self._router = router
         self._host = host or DefaultAppServerHost()
         self._store = store or ThreadStore()
         self._state_manager = state_manager or ThreadStateManager()
+        self._serialization_queues = serialization_queues or RequestSerializationQueues()
         self._run_adapter = run_adapter or RunAdapter(
             host=self._host,
             store=self._store,
@@ -98,39 +107,73 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.not_initialized())
             return
         if request.method == "model/list":
-            self._router.send_response(connection_id, request.id, self._host.list_models(ModelListRequest()).to_dict())
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda: self._router.send_response(connection_id, request.id, self._host.list_models(ModelListRequest()).to_dict()),
+            )
             return
         if request.method == "thread/start":
-            self._handle_thread_start(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_start(connection_id, request))
             return
         if request.method == "thread/read":
-            self._handle_thread_read(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_read(connection_id, request))
             return
         if request.method == "thread/resume":
-            self._handle_thread_resume(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_resume(connection_id, request))
             return
         if request.method == "thread/list":
-            self._handle_thread_list(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_list(connection_id, request))
             return
         if request.method == "thread/archive":
-            self._handle_thread_archive(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_archive(connection_id, request))
             return
         if request.method == "thread/unsubscribe":
-            self._handle_thread_unsubscribe(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_unsubscribe(connection_id, request))
             return
         if request.method == "turn/start":
-            self._handle_turn_start(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_start(connection_id, request))
             return
         if request.method == "turn/steer":
-            self._handle_turn_steer(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_steer(connection_id, request))
             return
         if request.method == "turn/followUp":
-            self._handle_turn_follow_up(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_follow_up(connection_id, request))
             return
         if request.method == "turn/interrupt":
-            self._handle_turn_interrupt(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_interrupt(connection_id, request))
             return
         self._router.send_error(connection_id, request.id, AppServerError.method_not_found(request.method))
+
+    def _serialize_or_run(self, connection_id: str, request: JsonRpcRequest, handler: Callable[[], None]) -> None:
+        try:
+            future = self._serialization_queues.enqueue(
+                key=self._request_scope(request),
+                access=self._request_access(request.method),
+                fn=handler,
+            )
+        except RequestQueueOverloaded:
+            self._router.send_error(connection_id, request.id, AppServerError.server_overloaded())
+            return
+        try:
+            future.result()
+        except Exception as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.internal_error(str(exc)))
+
+    def _request_scope(self, request: JsonRpcRequest) -> RequestScope:
+        if request.method == "model/list":
+            return RequestScope.global_read("model")
+        if request.method == "thread/start":
+            return RequestScope.global_scope("thread-create")
+        if request.method == "thread/list":
+            return RequestScope.global_read("thread-list")
+        thread_id = self._thread_id_from_request(request)
+        return RequestScope.thread(thread_id or "missing-thread")
+
+    def _request_access(self, method: str) -> RequestAccess:
+        if method in {"model/list", "thread/list", "thread/read"}:
+            return "shared_read"
+        return "exclusive"
 
     def _handle_initialize(self, connection_id: str, request: JsonRpcRequest, state: ConnectionState) -> None:
         if state.initialized:
