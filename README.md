@@ -108,9 +108,11 @@ Use `Runner.start()` when the host needs a live handle instead of blocking for
 the final result. `RunHandle.events()` yields the same typed `RunEvent` stream
 as `Runner.stream_sync()`, `RunHandle.result()` waits for the final
 `RunResult`, `RunHandle.cancel()` cancels the run, and `RunHandle.approve()`
-resolves pending approval requests. The current synchronous handle does not
-implement steering or follow-up prompts; use `InteractiveAgentClient` for those
-stateful host runtime workflows.
+resolves pending approval requests. When the handle is attached to an
+`AgentSession`, `RunHandle.steer()` queues context for the active run and
+`RunHandle.follow_up()` queues the next session turn. Plain one-shot
+`Runner.start()` handles do not own session queues, so those methods require an
+interactive session controller.
 
 `RunConfig.event_store` can persist every typed event. `JsonlRunEventStore`
 stores event dictionaries and replays events by `run_id`, including child runs
@@ -130,7 +132,9 @@ Use `Runner` for one-shot runs, streamed runs, and conversation history managed
 by `RunConfig.session`. Use `InteractiveAgentClient` when the host application
 needs a stateful, bidirectional runtime session with stable session ids,
 runtime listeners, queued steering prompts, follow-up turns, cancellation, and
-shared tool state.
+shared tool state. During a running session, `session.active_run_handle` exposes
+the unified `RunHandle` control surface for approval, cancellation, steering,
+and follow-up.
 
 ```python
 from pathlib import Path

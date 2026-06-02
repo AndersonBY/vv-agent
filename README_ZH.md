@@ -103,8 +103,10 @@ for event in Runner.stream_sync(agent, "继续刚才的话题并汇报进度", r
 宿主需要活跃运行句柄而不是阻塞等待结果时，使用 `Runner.start()`。
 `RunHandle.events()` 会产生与 `Runner.stream_sync()` 相同的强类型 `RunEvent`
 流，`RunHandle.result()` 等待最终 `RunResult`，`RunHandle.cancel()` 取消运行，
-`RunHandle.approve()` 处理待审批请求。当前同步 handle 不支持 steering 和 follow-up；
-这些有状态宿主 runtime 流程请使用 `InteractiveAgentClient`。
+`RunHandle.approve()` 处理待审批请求。当 handle 挂接到 `AgentSession` 时，
+`RunHandle.steer()` 会为当前运行排入 steering 上下文，`RunHandle.follow_up()`
+会排入下一个 session turn。普通一次性 `Runner.start()` handle 不拥有 session
+队列，因此这些方法需要交互式 session controller。
 
 `RunConfig.event_store` 可以持久化每个强类型事件。`JsonlRunEventStore` 会保存事件
 字典，并按 `run_id` 回放事件，包括 `parent_run_id` 指向该 run 的子 run。原始
@@ -119,7 +121,9 @@ Redis 支持可通过 `uv sync --extra redis` 安装，也可以在构造 `Redis
 
 普通一次性运行、流式运行，以及由 `RunConfig.session` 管理历史的会话，优先使用
 `Runner`。宿主应用需要稳定 `session_id`、运行时监听、运行中 steering、follow-up、
-取消和共享工具状态时，使用 `InteractiveAgentClient`。
+取消和共享工具状态时，使用 `InteractiveAgentClient`。session 运行期间，
+`session.active_run_handle` 会暴露统一的 `RunHandle` 控制面，可用于审批、取消、
+steering 和 follow-up。
 
 ```python
 from pathlib import Path

@@ -354,7 +354,12 @@ class AgentSession:
         with self._lock:
             if self._active_run_handle is handle:
                 return
+            previous_handle = self._active_run_handle
             self._active_run_handle = handle
+        if previous_handle is not None and hasattr(previous_handle, "detach_controller"):
+            previous_handle.detach_controller(self)
+        if handle is not None and hasattr(handle, "attach_controller"):
+            handle.attach_controller(self)
         self._emit("session_active_run_handle_changed", handle=handle)
 
     def _drain_next_queued_prompt(self) -> str | None:

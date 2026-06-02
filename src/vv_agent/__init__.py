@@ -57,7 +57,7 @@ from vv_agent.interactive import (
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.result import RunResult
 from vv_agent.run_config import ModelProvider, RunConfig, ToolPolicy
-from vv_agent.run_handle import RunHandle, RunHandleState
+from vv_agent.run_handle import RunHandle, RunHandleController, RunHandleState
 from vv_agent.runner import Runner
 from vv_agent.sessions import MemorySession, RedisSession, Session, SQLiteSession
 from vv_agent.tools import (
@@ -126,6 +126,7 @@ __all__ = [
     "RunEventStore",
     "RunFailedEvent",
     "RunHandle",
+    "RunHandleController",
     "RunHandleState",
     "RunResult",
     "RunStartedEvent",

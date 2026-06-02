@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
+import time
 from typing import Any
 
 from vv_agent import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
@@ -80,6 +83,128 @@ def test_interactive_session_steering_queue_reaches_run_handle_runtime(tmp_path)
 
     assert run.result.final_answer == "done"
     assert seen_user_messages == [["hello", "queued context"]]
+
+
+def test_active_run_handle_steer_queues_session_context(tmp_path) -> None:
+    first_step_ready = threading.Event()
+    first_step_can_finish = threading.Event()
+    seen_user_messages: list[list[str]] = []
+    steps: list[Any] = []
+
+    def first_step(_: str, __: list[Message]) -> LLMResponse:
+        first_step_ready.set()
+        assert first_step_can_finish.wait(timeout=3)
+        return LLMResponse(content="continue", tool_calls=[])
+
+    def second_step(_: str, messages: list[Message]) -> LLMResponse:
+        seen_user_messages.append([message.content for message in messages if message.role == "user"])
+        return LLMResponse(
+            content="finish",
+            tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+        )
+
+    steps.extend([first_step, second_step])
+
+    def llm_builder(*_: Any, **__: Any):
+        return ScriptedLLM(steps=steps), _resolved()
+
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="test",
+            workspace=tmp_path,
+            llm_builder=llm_builder,
+        )
+    )
+    session = client.create_session(
+        session_id="session_1",
+        agent=InteractiveAgentDefinition(description="assistant", model="test-model", max_cycles=3),
+    )
+    result_queue: queue.Queue[Any] = queue.Queue()
+    worker = threading.Thread(
+        target=lambda: result_queue.put(session.prompt("hello", auto_follow_up=False)),
+        daemon=True,
+    )
+    worker.start()
+    assert first_step_ready.wait(timeout=3)
+
+    handle = _wait_for_active_handle(session)
+    handle.steer("queued from handle")
+    first_step_can_finish.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert result_queue.get_nowait().result.final_answer == "done"
+    assert seen_user_messages == [
+        [
+            "hello",
+            "No tool call was produced. Continue the task and call `task_finish` when all todo items are done.",
+            "queued from handle",
+        ]
+    ]
+
+
+def test_active_run_handle_follow_up_queues_next_session_turn(tmp_path) -> None:
+    first_step_ready = threading.Event()
+    first_step_can_finish = threading.Event()
+    seen_user_messages: list[list[str]] = []
+    steps: list[Any] = []
+
+    def first_step(_: str, __: list[Message]) -> LLMResponse:
+        first_step_ready.set()
+        assert first_step_can_finish.wait(timeout=3)
+        return LLMResponse(
+            content="finish first",
+            tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "first done"})],
+        )
+
+    def second_step(_: str, messages: list[Message]) -> LLMResponse:
+        seen_user_messages.append([message.content for message in messages if message.role == "user"])
+        return LLMResponse(
+            content="finish second",
+            tool_calls=[ToolCall(id="finish-2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "second done"})],
+        )
+
+    steps.extend([first_step, second_step])
+
+    def llm_builder(*_: Any, **__: Any):
+        return ScriptedLLM(steps=steps), _resolved()
+
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="test",
+            workspace=tmp_path,
+            llm_builder=llm_builder,
+        )
+    )
+    session = client.create_session(
+        session_id="session_1",
+        agent=InteractiveAgentDefinition(description="assistant", model="test-model", max_cycles=2),
+    )
+    result_queue: queue.Queue[Any] = queue.Queue()
+    worker = threading.Thread(target=lambda: result_queue.put(session.prompt("hello")), daemon=True)
+    worker.start()
+    assert first_step_ready.wait(timeout=3)
+
+    handle = _wait_for_active_handle(session)
+    handle.follow_up("continue from handle")
+    first_step_can_finish.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert result_queue.get_nowait().result.final_answer == "second done"
+    assert seen_user_messages == [["hello", "continue from handle"]]
+
+
+def _wait_for_active_handle(session) -> Any:
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        handle = session.active_run_handle
+        if handle is not None:
+            return handle
+        time.sleep(0.01)
+    raise AssertionError("session did not expose an active run handle")
 
 
 def test_interactive_sub_agent_uses_bridge_llm_builder_for_child_model(tmp_path) -> None:
