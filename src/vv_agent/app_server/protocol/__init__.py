@@ -13,7 +13,7 @@ from vv_agent.app_server.protocol.jsonrpc import (
 )
 from vv_agent.app_server.protocol.model import ModelListRequest, ModelListResponse, ModelSummary
 from vv_agent.app_server.protocol.thread import ThreadStartParams
-from vv_agent.app_server.protocol.turn import TurnStartParams
+from vv_agent.app_server.protocol.turn import TurnFollowUpParams, TurnInterruptParams, TurnStartParams, TurnSteerParams
 
 __all__ = [
     "AppServerError",
@@ -35,5 +35,8 @@ __all__ = [
     "RequestId",
     "ThreadItem",
     "ThreadStartParams",
+    "TurnFollowUpParams",
+    "TurnInterruptParams",
     "TurnStartParams",
+    "TurnSteerParams",
 ]

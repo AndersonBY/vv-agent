@@ -13,6 +13,7 @@ from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore, TurnReco
 from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
 from vv_agent.runner import Runner
+from vv_agent.types import Message
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +43,7 @@ class RunAdapter:
         connection_id: str,
         thread_id: str,
         input: list[dict[str, Any]],
-        request_id: RequestId,
+        request_id: RequestId | None = None,
     ) -> StartedTurn:
         thread = self._store.read_thread(thread_id).thread
         agent_request = AgentResolutionRequest(
@@ -59,16 +60,17 @@ class RunAdapter:
         )
         agent = self._host.resolve_agent(agent_request)
         run_config = self._host.build_run_config(config_request)
-        run_config = replace(run_config, metadata={**run_config.metadata, "session_id": thread.thread_id})
+        run_config = self._with_app_server_controls(run_config, thread.thread_id)
         turn = self._store.create_turn(thread_id=thread.thread_id, input=input, status="running")
         handle = Runner.start(agent, self._prompt_from_input(input), run_config=run_config)
         self._state_manager.set_active_turn(thread_id=thread.thread_id, turn_id=turn.turn_id, handle=handle)
         started = StartedTurn(thread=thread, turn=turn, handle=handle)
-        self._router.send_response(
-            connection_id,
-            request_id,
-            {"threadId": thread.thread_id, "turnId": turn.turn_id, "status": "running"},
-        )
+        if request_id is not None:
+            self._router.send_response(
+                connection_id,
+                request_id,
+                {"threadId": thread.thread_id, "turnId": turn.turn_id, "status": "running"},
+            )
         self._router.send_notification(
             connection_id,
             "turn/started",
@@ -129,6 +131,9 @@ class RunAdapter:
             self._store.update_turn(started.turn.turn_id, status=status, result={"error": payload["error"]})
         self._state_manager.clear_active_turn(started.thread.thread_id, started.turn.turn_id)
         self._router.send_notification(connection_id, "turn/completed", payload)
+        follow_up = self._state_manager.pop_next_follow_up(started.thread.thread_id)
+        if follow_up is not None and status == "completed":
+            self.start_turn(connection_id=connection_id, thread_id=started.thread.thread_id, input=follow_up)
 
     def _prompt_from_input(self, input: list[dict[str, Any]]) -> str:
         parts: list[str] = []
@@ -138,3 +143,26 @@ class RunAdapter:
             else:
                 parts.append(str(item))
         return "\n".join(part for part in parts if part)
+
+    def _with_app_server_controls(self, run_config, thread_id: str):
+        existing_before_cycle = run_config.before_cycle_messages
+
+        def before_cycle_messages(cycle_index: int, messages: list[Message], shared_state: dict[str, Any]) -> list[Message]:
+            injected: list[Message] = []
+            if existing_before_cycle is not None:
+                injected.extend(existing_before_cycle(cycle_index, messages, shared_state))
+            for queued_input in self._state_manager.drain_steering(thread_id):
+                injected.extend(self._messages_from_input(queued_input))
+            return injected
+
+        return replace(
+            run_config,
+            metadata={**run_config.metadata, "session_id": thread_id},
+            before_cycle_messages=before_cycle_messages,
+        )
+
+    def _messages_from_input(self, input: list[dict[str, Any]]) -> list[Message]:
+        prompt = self._prompt_from_input(input)
+        if not prompt:
+            return []
+        return [Message(role="user", content=prompt)]

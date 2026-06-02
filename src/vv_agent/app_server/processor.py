@@ -85,6 +85,15 @@ class MessageProcessor:
         if request.method == "turn/start":
             self._handle_turn_start(connection_id, request)
             return
+        if request.method == "turn/steer":
+            self._handle_turn_steer(connection_id, request)
+            return
+        if request.method == "turn/followUp":
+            self._handle_turn_follow_up(connection_id, request)
+            return
+        if request.method == "turn/interrupt":
+            self._handle_turn_interrupt(connection_id, request)
+            return
         self._router.send_error(connection_id, request.id, AppServerError.method_not_found(request.method))
 
     def _handle_initialize(self, connection_id: str, request: JsonRpcRequest, state: ConnectionState) -> None:
@@ -130,3 +139,51 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
             return
         self._run_adapter.start_turn(connection_id=connection_id, thread_id=thread_id, input=input_items, request_id=request.id)
+
+    def _handle_turn_steer(self, connection_id: str, request: JsonRpcRequest) -> None:
+        control = self._validated_active_turn(connection_id, request)
+        if control is None:
+            return
+        thread_id, turn_id, _reason, input_items = control
+        self._state_manager.queue_steering(thread_id, input_items)
+        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "queued": True})
+
+    def _handle_turn_follow_up(self, connection_id: str, request: JsonRpcRequest) -> None:
+        control = self._validated_active_turn(connection_id, request)
+        if control is None:
+            return
+        thread_id, turn_id, _reason, input_items = control
+        self._state_manager.queue_follow_up(thread_id, input_items)
+        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "queued": True})
+
+    def _handle_turn_interrupt(self, connection_id: str, request: JsonRpcRequest) -> None:
+        control = self._validated_active_turn(connection_id, request)
+        if control is None:
+            return
+        thread_id, turn_id, reason, _input_items = control
+        active = self._state_manager.active_turn(thread_id)
+        cancelled = bool(active is not None and active.handle.cancel(reason or "Interrupted by App Server client."))
+        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "cancelled": cancelled})
+
+    def _validated_active_turn(
+        self,
+        connection_id: str,
+        request: JsonRpcRequest,
+    ) -> tuple[str, str, str, list[dict[str, Any]]] | None:
+        params = request.params if isinstance(request.params, dict) else {}
+        thread_id = str(params.get("threadId") or "")
+        expected_turn_id = str(params.get("expectedTurnId") or "")
+        reason = str(params.get("reason") or "")
+        raw_input = params.get("input")
+        input_items = [dict(item) for item in raw_input] if isinstance(raw_input, list) else []
+        if not thread_id:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return None
+        active = self._state_manager.active_turn(thread_id)
+        if active is None:
+            self._router.send_error(connection_id, request.id, AppServerError.active_turn_not_found())
+            return None
+        if expected_turn_id and active.turn_id != expected_turn_id:
+            self._router.send_error(connection_id, request.id, AppServerError.turn_id_mismatch())
+            return None
+        return thread_id, active.turn_id, reason, input_items

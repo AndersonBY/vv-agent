@@ -40,6 +40,14 @@ class AppServerError:
     def invalid_params(cls, message: str, data: dict[str, Any] | None = None) -> AppServerError:
         return cls(code=AppServerErrorCode.INVALID_PARAMS, message=message, data=data)
 
+    @classmethod
+    def active_turn_not_found(cls) -> AppServerError:
+        return cls(code=AppServerErrorCode.ACTIVE_TURN_NOT_FOUND, message="Active turn not found")
+
+    @classmethod
+    def turn_id_mismatch(cls) -> AppServerError:
+        return cls(code=AppServerErrorCode.TURN_ID_MISMATCH, message="Turn id mismatch")
+
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"code": self.code, "message": self.message}
         if self.data is not None:
