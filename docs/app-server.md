@@ -30,7 +30,7 @@ The server responds to `initialize` with the user agent, protocol version, and
 capabilities:
 
 ```json
-{"id":1,"result":{"userAgent":"vv-agent-app-server","protocolVersion":"v1","capabilities":{"modelList":true}}}
+{"id":1,"result":{"userAgent":"vv-agent-app-server","protocolVersion":"v1","capabilities":{"modelList":true,"threadLifecycle":true,"notificationOptOut":true}}}
 ```
 
 Requests other than `initialize` are rejected until the connection has been
@@ -68,6 +68,34 @@ returns the same snapshot shape:
 ```
 
 Snapshots contain a `thread` object, ordered `turns`, and replayable `items`.
+
+## Thread Lifecycle
+
+Use `thread/list` to list active threads. Archived threads are hidden by
+default; pass `includeArchived: true` to include them.
+
+```jsonl
+{"id":10,"method":"thread/list","params":{"includeArchived":true}}
+```
+
+Use `thread/archive` to mark a thread archived. The server rejects future
+`turn/start` requests for archived threads with error code `-32021`.
+
+```jsonl
+{"id":11,"method":"thread/archive","params":{"threadId":"thread_1"}}
+```
+
+Use `thread/unsubscribe` to remove the current connection from a thread
+subscription. If the loaded thread has no subscribers and no active turn, the
+server emits `thread/closed`.
+
+```jsonl
+{"id":12,"method":"thread/unsubscribe","params":{"threadId":"thread_1"}}
+```
+
+`thread/status/changed` reports stable lifecycle changes: `running`, `idle`,
+`archived`, and `closed`. Treat these notifications as the source of truth for
+loaded-thread state.
 
 ## Turns
 
@@ -120,10 +148,23 @@ Important notification methods:
 | `item/started` | Create or mark an item as started. |
 | `item/agentMessage/delta` | Append assistant text delta to the active agent message. |
 | `item/completed` | Mark an item completed and merge its final payload. |
+| `thread/status/changed` | Update loaded-thread status such as running, idle, archived, or closed. |
+| `thread/archived` | Mark a thread archived in the client. |
+| `thread/closed` | Mark a loaded thread closed after the last subscriber leaves. |
 | `turn/completed` | Mark the turn terminal and persist final output or error. |
 
 Every item carries `itemId`, `threadId`, `turnId`, `type`, `status`, `payload`,
 `createdAt`, and `updatedAt`.
+
+## Notification Opt-Out
+
+`initialize.params.capabilities.optOutNotificationMethods` accepts exact
+notification method names. The server suppresses only exact matches for that
+connection.
+
+```jsonl
+{"id":1,"method":"initialize","params":{"clientInfo":{"name":"desktop-host"},"capabilities":{"optOutNotificationMethods":["item/agentMessage/delta"]}}}
+```
 
 ## Approval Requests
 
@@ -157,13 +198,23 @@ The default host returns the models passed to `DefaultAppServerHost`. Product
 hosts should implement `AppServerHost.list_models()` from their normal model
 settings.
 
+## Overload Handling
+
+When the server cannot accept more work, it returns JSON-RPC error code
+`-32001` with message `Server overloaded; retry later.` Clients should retry
+with bounded backoff. Stdio clients must keep reading stdout; if a bounded
+transport cannot write outbound messages, the App Server disconnects that
+transport and clears pending server-to-client requests.
+
 ## Schema Export
 
 Generate JSON Schema files for client bindings and drift checks:
 
 ```bash
-uv run vv-agent app-server generate-json-schema --out ./app-server-schema
+uv run vv-agent app-server schema --out ./app-server-schema
 ```
+
+`generate-json-schema` remains available as a compatibility alias.
 
 The command writes:
 
