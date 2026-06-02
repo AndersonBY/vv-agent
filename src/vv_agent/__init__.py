@@ -1,4 +1,5 @@
 from vv_agent.agent import Agent, RunContext
+from vv_agent.app_server import AppServer, MessageProcessor, OutgoingRouter
 from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import (
     ConfigError,
@@ -85,6 +86,7 @@ __all__ = [
     "AgentSessionState",
     "AgentStartedEvent",
     "AgentStatus",
+    "AppServer",
     "ApprovalDecision",
     "ApprovalProvider",
     "ApprovalRequest",
@@ -114,8 +116,10 @@ __all__ = [
     "MemoryCompactedEvent",
     "MemorySession",
     "Message",
+    "MessageProcessor",
     "ModelProvider",
     "ModelSettings",
+    "OutgoingRouter",
     "RedisSession",
     "ResolvedModelConfig",
     "RetrySettings",

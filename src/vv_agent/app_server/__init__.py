@@ -1,3 +1,5 @@
+from vv_agent.app_server.outgoing import OutgoingRouter, PendingServerRequest
+from vv_agent.app_server.processor import MessageProcessor
 from vv_agent.app_server.protocol import (
     ApprovalRequestParams,
     AppServerError,
@@ -18,11 +20,15 @@ from vv_agent.app_server.protocol import (
     ThreadStartParams,
     TurnStartParams,
 )
+from vv_agent.app_server.server import AppServer
+from vv_agent.app_server.transport import ChannelTransport, StdioJsonlTransport
 
 __all__ = [
+    "AppServer",
     "AppServerError",
     "AppServerErrorCode",
     "ApprovalRequestParams",
+    "ChannelTransport",
     "ClientInfo",
     "InitializeParams",
     "InitializeResponse",
@@ -31,10 +37,14 @@ __all__ = [
     "JsonRpcNotification",
     "JsonRpcRequest",
     "JsonRpcResponse",
+    "MessageProcessor",
     "ModelListRequest",
     "ModelListResponse",
     "ModelSummary",
+    "OutgoingRouter",
+    "PendingServerRequest",
     "RequestId",
+    "StdioJsonlTransport",
     "ThreadItem",
     "ThreadStartParams",
     "TurnStartParams",

@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import itertools
+import threading
+from dataclasses import dataclass, field
+from typing import Any
+
+from vv_agent.app_server.protocol import (
+    AppServerError,
+    JsonRpcError,
+    JsonRpcNotification,
+    JsonRpcRequest,
+    JsonRpcResponse,
+    RequestId,
+)
+from vv_agent.app_server.transport import AppServerTransport
+
+
+@dataclass(slots=True)
+class PendingServerRequest:
+    connection_id: str
+    request_id: RequestId
+    method: str
+    params: dict[str, Any] | None = None
+    _event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _result: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _error: AppServerError | None = field(default=None, init=False, repr=False)
+
+    def resolve_result(self, result: dict[str, Any] | None) -> None:
+        self._result = result
+        self._event.set()
+
+    def resolve_error(self, error: AppServerError) -> None:
+        self._error = error
+        self._event.set()
+
+    def result(self, timeout: float | None = None) -> dict[str, Any] | None:
+        if not self._event.wait(timeout):
+            raise TimeoutError(f"Timed out waiting for server request {self.request_id.to_wire()}")
+        if self._error is not None:
+            raise RuntimeError(self._error.message)
+        return self._result
+
+
+class OutgoingRouter:
+    def __init__(self) -> None:
+        self._transports: dict[str, AppServerTransport] = {}
+        self._pending: dict[str | int, PendingServerRequest] = {}
+        self._server_request_ids = itertools.count(1)
+        self._lock = threading.Lock()
+
+    def register_transport(self, transport: AppServerTransport) -> None:
+        self._transports[transport.connection_id] = transport
+
+    def unregister_transport(self, connection_id: str) -> None:
+        self._transports.pop(connection_id, None)
+
+    def send_response(
+        self,
+        connection_id: str,
+        request_id: RequestId,
+        result: dict[str, Any] | list[Any] | str | int | bool | None,
+    ) -> None:
+        self._transport(connection_id).write_outbound(JsonRpcResponse(id=request_id, result=result).to_dict())
+
+    def send_error(self, connection_id: str, request_id: RequestId, error: AppServerError) -> None:
+        self._transport(connection_id).write_outbound(JsonRpcError(id=request_id, error=error).to_dict())
+
+    def send_notification(self, connection_id: str, method: str, params: dict[str, Any] | None = None) -> None:
+        self._transport(connection_id).write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
+
+    def broadcast_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
+        for transport in list(self._transports.values()):
+            transport.write_outbound(JsonRpcNotification(method=method, params=params).to_dict())
+
+    def send_server_request(self, connection_id: str, method: str, params: dict[str, Any] | None = None) -> PendingServerRequest:
+        request_id = RequestId(f"srv_{next(self._server_request_ids)}")
+        pending = PendingServerRequest(connection_id=connection_id, request_id=request_id, method=method, params=params)
+        with self._lock:
+            self._pending[request_id.to_wire()] = pending
+        self._transport(connection_id).write_outbound(JsonRpcRequest(id=request_id, method=method, params=params).to_dict())
+        return pending
+
+    def resolve_response(self, response: JsonRpcResponse) -> bool:
+        with self._lock:
+            pending = self._pending.pop(response.id.to_wire(), None)
+        if pending is None:
+            return False
+        result = response.result if isinstance(response.result, dict) else {"value": response.result}
+        pending.resolve_result(result)
+        return True
+
+    def resolve_error(self, error: JsonRpcError) -> bool:
+        with self._lock:
+            pending = self._pending.pop(error.id.to_wire(), None)
+        if pending is None:
+            return False
+        pending.resolve_error(error.error)
+        return True
+
+    def _transport(self, connection_id: str) -> AppServerTransport:
+        try:
+            return self._transports[connection_id]
+        except KeyError as exc:
+            raise KeyError(f"Unknown App Server connection: {connection_id}") from exc

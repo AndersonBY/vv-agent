@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from vv_agent.app_server import AppServer, StdioJsonlTransport
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.prompt import build_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
@@ -69,7 +71,25 @@ def _build_cli_log_handler(*, enabled: bool):
     return handler
 
 
-def main() -> None:
+def _run_app_server_cli(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="vv-agent app-server",
+        description="Run the vv-agent App Server. Use --listen stdio for JSONL over stdin/stdout.",
+    )
+    parser.add_argument(
+        "--listen",
+        choices=["stdio"],
+        default="stdio",
+        metavar="stdio",
+        help="Listen transport. Use --listen stdio for JSONL over stdin/stdout.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.listen == "stdio":
+        AppServer(transport=StdioJsonlTransport()).run_forever()
+
+
+def _run_task_cli(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Run a vv-agent task against configured LLM endpoint")
     parser.add_argument("--prompt", required=True, help="Task prompt")
     parser.add_argument("--backend", default="moonshot", help="Provider backend key in LLM_SETTINGS")
@@ -84,7 +104,7 @@ def main() -> None:
     parser.add_argument("--language", default="zh-CN", help="System prompt language (en-US / zh-CN)")
     parser.add_argument("--agent-type", default=None, help="Agent type, e.g. computer")
     parser.add_argument("--verbose", action="store_true", help="Show per-cycle runtime logs")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     llm, resolved = build_openai_llm_from_local_settings(
         Path(args.settings_file),
@@ -140,6 +160,14 @@ def main() -> None:
         },
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "app-server":
+        _run_app_server_cli(args[1:])
+        return
+    _run_task_cli(args)
 
 
 if __name__ == "__main__":
