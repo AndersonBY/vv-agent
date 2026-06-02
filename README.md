@@ -126,6 +126,30 @@ that need direct cycle-loop control.
 Install Redis support with `uv sync --extra redis` or inject a Redis-compatible
 client when constructing `RedisSession`.
 
+### App Server
+
+Use the App Server when a desktop app, worker, IDE, or other host process needs
+to drive `vv-agent` through a stable protocol instead of embedding the Python
+SDK directly. It runs JSONL over stdio, exposes Thread / Turn / Item lifecycle
+events, routes tool approval as server-to-client requests, supports
+`thread/read` and `thread/resume` replay, and exports JSON Schema files for
+client bindings.
+
+```bash
+uv run vv-agent app-server --listen stdio
+uv run vv-agent app-server generate-json-schema --out ./app-server-schema
+uv run vv-agent debug app-server send-message "hello"
+```
+
+Product hosts implement `AppServerHost` to map product profiles, workspace
+context, tools, approval UI, memory, and model settings into framework
+`Agent` and `RunConfig` objects. The App Server remains a runtime boundary; it
+does not import product UI, account, billing, browser, or IM modules.
+
+See [docs/app-server.md](docs/app-server.md) for protocol details and the
+host migration checklists for [v-claw](docs/app-server-vclaw-migration.md) and
+[backend services](docs/app-server-backend-migration.md).
+
 ### Interactive Sessions
 
 Use `Runner` for one-shot runs, streamed runs, and conversation history managed
@@ -439,6 +463,7 @@ class MyBackend:
 | `vv_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
 | `vv_agent.tools` | Built-in tools plus `function_tool`, `FunctionTool`, and structured tool outputs |
 | `vv_agent` | Public SDK: `Agent`, `Runner`, `RunConfig`, `ModelSettings`, tools, sessions, typed events |
+| `vv_agent.app_server` | JSONL App Server protocol, transport, thread state, replay, approval callbacks, schema export, and host provider boundary |
 | `vv_agent.sdk` | Lower-level runtime compatibility helpers; new user code should not use this as the main entry point |
 | `vv_agent.skills` | Agent Skills support (`SKILL.md` parsing, validation, unified normalization, prompt rendering with budget management, `activate_skill` tool) |
 | `vv_agent.llm.VVLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
@@ -455,6 +480,9 @@ and the product-specific tools exposed to the model.
 Host products should implement providers instead of patching `vv-agent`
 internals:
 
+- `AppServerHost` maps product profiles, workspaces, tools, approval UI,
+  memory, context, and model settings into App Server `Agent` and `RunConfig`
+  objects when the host uses JSONL process integration.
 - `ApprovalProvider` decides whether a tool call needs approval and returns the
   allow, deny, session-allow, or timeout decision from product UI or rules.
 - `ContextProvider` contributes product prompt fragments such as profile,
