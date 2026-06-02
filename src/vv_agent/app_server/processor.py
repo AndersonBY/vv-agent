@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vv_agent.app_server.host import AppServerHost, DefaultAppServerHost
@@ -20,10 +20,30 @@ from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
 
+CLIENT_METHODS: tuple[str, ...] = (
+    "initialize",
+    "model/list",
+    "thread/start",
+    "thread/resume",
+    "thread/read",
+    "thread/list",
+    "thread/archive",
+    "thread/unsubscribe",
+    "turn/start",
+    "turn/steer",
+    "turn/followUp",
+    "turn/interrupt",
+)
+
 
 @dataclass(slots=True)
 class ConnectionState:
     initialized: bool = False
+    client_name: str | None = None
+    client_title: str | None = None
+    client_version: str | None = None
+    experimental_api: bool = False
+    opt_out_notification_methods: set[str] = field(default_factory=set)
 
 
 class MessageProcessor:
@@ -106,13 +126,34 @@ class MessageProcessor:
         if state.initialized:
             self._router.send_error(connection_id, request.id, AppServerError.already_initialized())
             return
+        params = request.params if isinstance(request.params, dict) else {}
+        raw_client_info = params.get("clientInfo")
+        client_info = raw_client_info if isinstance(raw_client_info, dict) else {}
+        raw_capabilities = params.get("capabilities")
+        capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
+        raw_opt_out = capabilities.get("optOutNotificationMethods", [])
+        if not isinstance(raw_opt_out, list) or any(not isinstance(method, str) for method in raw_opt_out):
+            self._router.send_error(
+                connection_id,
+                request.id,
+                AppServerError.invalid_params("optOutNotificationMethods must be a list of strings"),
+            )
+            return
         state.initialized = True
+        state.client_name = str(client_info.get("name") or "")
+        state.client_title = str(client_info["title"]) if client_info.get("title") is not None else None
+        state.client_version = str(client_info["version"]) if client_info.get("version") is not None else None
+        state.experimental_api = bool(capabilities.get("experimentalApi", False))
+        state.opt_out_notification_methods = set(raw_opt_out)
         response = InitializeResponse(
             user_agent="vv-agent-app-server",
             protocol_version="v1",
-            capabilities={"modelList": True},
+            capabilities={"modelList": True, "threadLifecycle": True, "notificationOptOut": True},
         )
         self._router.send_response(connection_id, request.id, response.to_dict())
+
+    def connection_state(self, connection_id: str) -> ConnectionState:
+        return self._state(connection_id)
 
     def _state(self, connection_id: str) -> ConnectionState:
         state = self._connections.get(connection_id)
