@@ -79,3 +79,24 @@ V_AGENT_EXAMPLE_DB=./workspace/agent.db uv run python examples/21_state_checkpoi
 uv run python examples/22_sdk_advanced.py
 uv run python examples/24_workspace_backends.py
 ```
+
+## App Server Integration
+
+These examples use the JSON-RPC App Server boundary for product hosts,
+subprocess clients, lifecycle replay, notification filtering, schema export,
+and overload handling. They use scripted or local protocol flows and do not
+require live model credentials.
+
+| # | File | Shows |
+| --- | --- | --- |
+| 26 | `26_app_server_channel_lifecycle.py` | In-process `ChannelTransport` lifecycle: initialize, thread, turn, list, archive |
+| 27 | `27_app_server_stdio_client.py` | Minimal stdio JSONL subprocess client |
+| 28 | `28_app_server_notification_opt_out.py` | Per-connection notification opt-out with two clients |
+| 29 | `29_app_server_schema_backpressure.py` | Schema export, transport overload, and request backlog overload |
+
+```bash
+uv run python examples/26_app_server_channel_lifecycle.py
+uv run python examples/27_app_server_stdio_client.py
+uv run python examples/28_app_server_notification_opt_out.py
+uv run python examples/29_app_server_schema_backpressure.py
+```
