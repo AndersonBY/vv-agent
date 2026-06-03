@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from vv_agent.app_server.processor import CLIENT_METHODS
+
 
 def generate_json_schema(out_dir: str | Path) -> None:
     root = Path(out_dir)
@@ -18,23 +20,12 @@ def generate_json_schema(out_dir: str | Path) -> None:
 
 
 def _schema_bundle() -> dict[str, Any]:
-    client_methods = [
-        "initialize",
-        "thread/start",
-        "thread/resume",
-        "thread/read",
-        "thread/list",
-        "thread/archive",
-        "thread/unsubscribe",
-        "turn/start",
-        "turn/steer",
-        "turn/followUp",
-        "turn/interrupt",
-        "model/list",
-    ]
+    client_methods = list(CLIENT_METHODS)
     server_notifications = [
         "thread/started",
         "thread/status/changed",
+        "thread/archived",
+        "thread/closed",
         "turn/started",
         "item/started",
         "item/agentMessage/delta",

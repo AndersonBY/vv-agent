@@ -74,8 +74,8 @@ def _build_cli_log_handler(*, enabled: bool):
 
 
 def _run_app_server_cli(argv: list[str]) -> None:
-    if argv and argv[0] == "generate-json-schema":
-        parser = argparse.ArgumentParser(prog="vv-agent app-server generate-json-schema")
+    if argv and argv[0] in {"generate-json-schema", "schema"}:
+        parser = argparse.ArgumentParser(prog=f"vv-agent app-server {argv[0]}")
         parser.add_argument("--out", required=True, help="Directory for generated JSON Schema files")
         args = parser.parse_args(argv[1:])
         generate_json_schema(args.out)

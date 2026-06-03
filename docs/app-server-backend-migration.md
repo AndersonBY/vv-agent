@@ -37,6 +37,14 @@ This checklist describes how a backend service or worker can host the
 - [ ] Use `thread/read` or `thread/resume` after worker restart to rebuild the
   persisted timeline before accepting new user input.
 
+## v0.5 Overload Retry
+
+- [ ] Treat JSON-RPC error code `-32001` as retryable.
+- [ ] Use bounded exponential backoff and keep the original business job id so
+  retry attempts remain idempotent at the product layer.
+- [ ] Continue reading stdout from stdio App Server processes while work is
+  active; slow readers can trigger transport backpressure.
+
 ## Verification
 
 - [ ] Add an integration fixture for initialize, thread start, turn start,

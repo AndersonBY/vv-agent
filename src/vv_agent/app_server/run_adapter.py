@@ -69,7 +69,13 @@ class RunAdapter:
         )
         handle = Runner.start(agent, self._prompt_from_input(input), run_config=run_config)
         self._state_manager.set_active_turn(thread_id=thread.thread_id, turn_id=turn.turn_id, handle=handle)
+        self._state_manager.set_status(thread.thread_id, "running")
         started = StartedTurn(thread=thread, turn=turn, handle=handle)
+        self._notify_subscribers(
+            thread.thread_id,
+            "thread/status/changed",
+            {"threadId": thread.thread_id, "status": "running"},
+        )
         if request_id is not None:
             self._router.send_response(
                 connection_id,
@@ -145,6 +151,12 @@ class RunAdapter:
             }
             self._store.update_turn(started.turn.turn_id, status=status, result={"error": payload["error"]})
         self._state_manager.clear_active_turn(started.thread.thread_id, started.turn.turn_id)
+        self._state_manager.set_status(started.thread.thread_id, "idle")
+        self._notify_subscribers(
+            started.thread.thread_id,
+            "thread/status/changed",
+            {"threadId": started.thread.thread_id, "status": "idle"},
+        )
         self._notify_subscribers(started.thread.thread_id, "turn/completed", payload)
         follow_up = self._state_manager.pop_next_follow_up(started.thread.thread_id)
         if follow_up is not None and status == "completed":

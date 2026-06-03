@@ -42,6 +42,16 @@ This checklist moves v-claw from direct interactive runtime wiring toward the
   assistant deltas, tool calls, approval, cancellation, follow-up turns, replay,
   and reconnect.
 
+## v0.5 Lifecycle Events
+
+- [ ] Use `thread/status/changed`, `thread/archived`, and `thread/closed` as
+  the source of truth for loaded thread lifecycle.
+- [ ] Do not infer lifecycle state from missing deltas, UI task timers, or
+  local process state.
+- [ ] Use `initialize.params.capabilities.optOutNotificationMethods` to skip
+  high-volume notifications such as `item/agentMessage/delta` when the UI does
+  not need them.
+
 ## Verification
 
 - [ ] Add a JSONL protocol fixture covering initialize, thread start, turn

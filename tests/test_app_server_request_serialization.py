@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import threading
 
-from vv_agent.app_server.request_serialization import RequestScope, RequestSerializationQueues
+import pytest
+
+from vv_agent.app_server.request_serialization import RequestQueueOverloaded, RequestScope, RequestSerializationQueues
 
 
 def test_same_key_exclusive_requests_run_fifo() -> None:
@@ -109,3 +111,25 @@ def test_following_shared_read_waits_behind_exclusive_request() -> None:
     assert exclusive_future.result(timeout=1) == "exclusive"
     assert read_future.result(timeout=1) == "read"
     assert read_started.is_set()
+
+
+def test_queue_limit_rejects_excess_work() -> None:
+    queues = RequestSerializationQueues(max_queued_per_scope=1)
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def blocking_work() -> str:
+        first_started.set()
+        assert release_first.wait(timeout=2)
+        return "first"
+
+    first = queues.enqueue(key=RequestScope.thread("thread_1"), access="exclusive", fn=blocking_work)
+    assert first_started.wait(timeout=1)
+
+    second = queues.enqueue(key=RequestScope.thread("thread_1"), access="exclusive", fn=lambda: "second")
+    with pytest.raises(RequestQueueOverloaded):
+        queues.enqueue(key=RequestScope.thread("thread_1"), access="exclusive", fn=lambda: "third")
+
+    release_first.set()
+    assert first.result(timeout=1) == "first"
+    assert second.result(timeout=1) == "second"

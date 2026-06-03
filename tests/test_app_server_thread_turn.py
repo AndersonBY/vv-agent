@@ -71,6 +71,35 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
     assert methods[-1] == "turn/completed"
 
 
+def test_turn_start_and_completion_emit_thread_status_changes() -> None:
+    server, transport = _server_with_scripted_steps(
+        [
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            )
+        ]
+    )
+    _send(transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        transport,
+        server,
+        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+    )
+
+    outbound = _drain_until_turn_completed(transport)
+    status_changes: list[object] = []
+    for message in outbound:
+        if message.get("method") != "thread/status/changed":
+            continue
+        params = message.get("params")
+        if isinstance(params, dict):
+            status_changes.append(cast(dict[str, object], params).get("status"))
+
+    assert status_changes == ["running", "idle"]
+
+
 def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
     first_step_ready = threading.Event()
     first_step_can_finish = threading.Event()

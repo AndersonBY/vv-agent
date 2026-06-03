@@ -1,0 +1,5 @@
+{"id":0,"method":"initialize","params":{"clientInfo":{"name":"fixture-client"},"capabilities":{"optOutNotificationMethods":[]}}}
+{"id":1,"method":"thread/start","params":{"agentKey":"default","cwd":"/tmp/project"}}
+{"id":2,"method":"turn/start","params":{"threadId":"thread_1","input":[{"type":"text","text":"hello"}]}}
+{"id":3,"method":"thread/list"}
+{"id":4,"method":"thread/archive","params":{"threadId":"thread_1"}}

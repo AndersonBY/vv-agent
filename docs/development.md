@@ -43,9 +43,10 @@ uv run pytest
 For App Server changes, also check CLI entrypoints and schema generation:
 
 ```bash
+uv run pytest tests/test_app_server_*.py
 uv run python -m vv_agent --help
 uv run python -m vv_agent app-server --help
-uv run python -m vv_agent app-server generate-json-schema --out ./app-server-schema
+uv run python -m vv_agent app-server schema --out ./app-server-schema
 uv run python -m vv_agent debug app-server send-message hello
 ```
 

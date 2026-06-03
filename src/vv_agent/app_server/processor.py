@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from vv_agent.app_server.host import AppServerHost, DefaultAppServerHost
@@ -15,15 +16,41 @@ from vv_agent.app_server.protocol import (
     JsonRpcResponse,
     ModelListRequest,
 )
+from vv_agent.app_server.request_serialization import (
+    RequestAccess,
+    RequestQueueOverloaded,
+    RequestScope,
+    RequestSerializationQueues,
+)
 from vv_agent.app_server.run_adapter import RunAdapter
 from vv_agent.app_server.thread_state import ThreadStateManager
-from vv_agent.app_server.thread_store import ThreadStore
+from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
+
+CLIENT_METHODS: tuple[str, ...] = (
+    "initialize",
+    "model/list",
+    "thread/start",
+    "thread/resume",
+    "thread/read",
+    "thread/list",
+    "thread/archive",
+    "thread/unsubscribe",
+    "turn/start",
+    "turn/steer",
+    "turn/followUp",
+    "turn/interrupt",
+)
 
 
 @dataclass(slots=True)
 class ConnectionState:
     initialized: bool = False
+    client_name: str | None = None
+    client_title: str | None = None
+    client_version: str | None = None
+    experimental_api: bool = False
+    opt_out_notification_methods: set[str] = field(default_factory=set)
 
 
 class MessageProcessor:
@@ -35,11 +62,13 @@ class MessageProcessor:
         store: ThreadStore | None = None,
         state_manager: ThreadStateManager | None = None,
         run_adapter: RunAdapter | None = None,
+        serialization_queues: RequestSerializationQueues | None = None,
     ) -> None:
         self._router = router
         self._host = host or DefaultAppServerHost()
         self._store = store or ThreadStore()
         self._state_manager = state_manager or ThreadStateManager()
+        self._serialization_queues = serialization_queues or RequestSerializationQueues()
         self._run_adapter = run_adapter or RunAdapter(
             host=self._host,
             store=self._store,
@@ -47,6 +76,7 @@ class MessageProcessor:
             router=self._router,
         )
         self._connections: dict[str, ConnectionState] = {}
+        self._router.set_notification_filter(self._should_send_notification)
 
     def process_next(self, transport: ChannelTransport) -> None:
         self.process_message(transport.connection_id, transport.receive_inbound())
@@ -77,42 +107,126 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.not_initialized())
             return
         if request.method == "model/list":
-            self._router.send_response(connection_id, request.id, self._host.list_models(ModelListRequest()).to_dict())
+            self._serialize_or_run(
+                connection_id,
+                request,
+                lambda: self._router.send_response(
+                    connection_id,
+                    request.id,
+                    self._host.list_models(ModelListRequest()).to_dict(),
+                ),
+            )
             return
         if request.method == "thread/start":
-            self._handle_thread_start(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_start(connection_id, request))
             return
         if request.method == "thread/read":
-            self._handle_thread_read(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_read(connection_id, request))
             return
         if request.method == "thread/resume":
-            self._handle_thread_resume(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_resume(connection_id, request))
+            return
+        if request.method == "thread/list":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_list(connection_id, request))
+            return
+        if request.method == "thread/archive":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_archive(connection_id, request))
+            return
+        if request.method == "thread/unsubscribe":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_unsubscribe(connection_id, request))
             return
         if request.method == "turn/start":
-            self._handle_turn_start(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_start(connection_id, request))
             return
         if request.method == "turn/steer":
-            self._handle_turn_steer(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_steer(connection_id, request))
             return
         if request.method == "turn/followUp":
-            self._handle_turn_follow_up(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_follow_up(connection_id, request))
             return
         if request.method == "turn/interrupt":
-            self._handle_turn_interrupt(connection_id, request)
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_interrupt(connection_id, request))
             return
         self._router.send_error(connection_id, request.id, AppServerError.method_not_found(request.method))
+
+    def _serialize_or_run(self, connection_id: str, request: JsonRpcRequest, handler: Callable[[], None]) -> None:
+        try:
+            future = self._serialization_queues.enqueue(
+                key=self._request_scope(request),
+                access=self._request_access(request.method),
+                fn=handler,
+            )
+        except RequestQueueOverloaded:
+            self._router.send_error(connection_id, request.id, AppServerError.server_overloaded())
+            return
+        try:
+            future.result()
+        except Exception as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.internal_error(str(exc)))
+
+    def _request_scope(self, request: JsonRpcRequest) -> RequestScope:
+        if request.method == "model/list":
+            return RequestScope.global_read("model")
+        if request.method == "thread/start":
+            return RequestScope.global_scope("thread-create")
+        if request.method == "thread/list":
+            return RequestScope.global_read("thread-list")
+        thread_id = self._thread_id_from_request(request)
+        return RequestScope.thread(thread_id or "missing-thread")
+
+    def _request_access(self, method: str) -> RequestAccess:
+        if method in {"model/list", "thread/list", "thread/read"}:
+            return "shared_read"
+        return "exclusive"
 
     def _handle_initialize(self, connection_id: str, request: JsonRpcRequest, state: ConnectionState) -> None:
         if state.initialized:
             self._router.send_error(connection_id, request.id, AppServerError.already_initialized())
             return
+        params = request.params if isinstance(request.params, dict) else {}
+        raw_client_info = params.get("clientInfo")
+        client_info = raw_client_info if isinstance(raw_client_info, dict) else {}
+        raw_capabilities = params.get("capabilities")
+        capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
+        raw_opt_out = capabilities.get("optOutNotificationMethods", [])
+        if not isinstance(raw_opt_out, list):
+            self._router.send_error(
+                connection_id,
+                request.id,
+                AppServerError.invalid_params("optOutNotificationMethods must be a list of strings"),
+            )
+            return
+        opt_out_methods: list[str] = []
+        for method in raw_opt_out:
+            if not isinstance(method, str):
+                self._router.send_error(
+                    connection_id,
+                    request.id,
+                    AppServerError.invalid_params("optOutNotificationMethods must be a list of strings"),
+                )
+                return
+            opt_out_methods.append(method)
         state.initialized = True
+        state.client_name = str(client_info.get("name") or "")
+        state.client_title = str(client_info["title"]) if client_info.get("title") is not None else None
+        state.client_version = str(client_info["version"]) if client_info.get("version") is not None else None
+        state.experimental_api = bool(capabilities.get("experimentalApi", False))
+        state.opt_out_notification_methods = set(opt_out_methods)
         response = InitializeResponse(
             user_agent="vv-agent-app-server",
             protocol_version="v1",
-            capabilities={"modelList": True},
+            capabilities={"modelList": True, "threadLifecycle": True, "notificationOptOut": True},
         )
         self._router.send_response(connection_id, request.id, response.to_dict())
+
+    def connection_state(self, connection_id: str) -> ConnectionState:
+        return self._state(connection_id)
+
+    def _should_send_notification(self, connection_id: str, method: str) -> bool:
+        state = self._connections.get(connection_id)
+        if state is None:
+            return True
+        return method not in state.opt_out_notification_methods
 
     def _state(self, connection_id: str) -> ConnectionState:
         state = self._connections.get(connection_id)
@@ -141,15 +255,77 @@ class MessageProcessor:
         if not thread_id:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
             return
-        self._router.send_response(connection_id, request.id, self._snapshot_to_dict(thread_id))
+        try:
+            snapshot = self._snapshot_to_dict(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._router.send_response(connection_id, request.id, snapshot)
 
     def _handle_thread_resume(self, connection_id: str, request: JsonRpcRequest) -> None:
         thread_id = self._thread_id_from_request(request)
         if not thread_id:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
             return
-        self._state_manager.subscribe(thread_id, connection_id)
-        self._router.send_response(connection_id, request.id, self._snapshot_to_dict(thread_id))
+        try:
+            snapshot = self._state_manager.subscribe_and_snapshot(
+                thread_id,
+                connection_id,
+                lambda: self._snapshot_to_dict(thread_id),
+            )
+        except KeyError:
+            self._state_manager.unsubscribe(thread_id, connection_id)
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._router.send_response(connection_id, request.id, snapshot)
+
+    def _handle_thread_list(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = request.params if isinstance(request.params, dict) else {}
+        include_archived = bool(params.get("includeArchived", False))
+        records = self._store.list_threads(include_archived=include_archived)
+        self._router.send_response(
+            connection_id,
+            request.id,
+            {"threads": [self._thread_record_to_dict(record) for record in records]},
+        )
+
+    def _handle_thread_archive(self, connection_id: str, request: JsonRpcRequest) -> None:
+        thread_id = self._thread_id_from_request(request)
+        if not thread_id:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return
+        try:
+            self._store.archive_thread(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._state_manager.set_status(thread_id, "archived")
+        payload = {"threadId": thread_id, "archived": True}
+        self._router.send_response(connection_id, request.id, payload)
+        for subscriber in self._state_manager.subscribers(thread_id) | {connection_id}:
+            self._router.send_notification(subscriber, "thread/archived", payload)
+            self._router.send_notification(
+                subscriber,
+                "thread/status/changed",
+                {"threadId": thread_id, "status": "archived"},
+            )
+
+    def _handle_thread_unsubscribe(self, connection_id: str, request: JsonRpcRequest) -> None:
+        thread_id = self._thread_id_from_request(request)
+        if not thread_id:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return
+        try:
+            self._store.read_thread(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        self._state_manager.unsubscribe(thread_id, connection_id)
+        closed = self._state_manager.close_if_idle(thread_id)
+        self._router.send_response(connection_id, request.id, {"threadId": thread_id, "subscribed": False, "closed": closed})
+        if closed:
+            self._router.send_notification(connection_id, "thread/closed", {"threadId": thread_id})
+            self._router.send_notification(connection_id, "thread/status/changed", {"threadId": thread_id, "status": "closed"})
 
     def _handle_turn_start(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -158,6 +334,14 @@ class MessageProcessor:
         input_items = [dict(item) for item in raw_input] if isinstance(raw_input, list) else []
         if not thread_id:
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Missing threadId"))
+            return
+        try:
+            snapshot = self._store.read_thread(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        if snapshot.thread.archived_at is not None:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
             return
         self._run_adapter.start_turn(connection_id=connection_id, thread_id=thread_id, input=input_items, request_id=request.id)
 
@@ -216,15 +400,7 @@ class MessageProcessor:
     def _snapshot_to_dict(self, thread_id: str) -> dict[str, Any]:
         snapshot = self._store.read_thread(thread_id)
         return {
-            "thread": {
-                "threadId": snapshot.thread.thread_id,
-                "agentKey": snapshot.thread.agent_key,
-                "cwd": snapshot.thread.cwd,
-                "createdAt": snapshot.thread.created_at,
-                "updatedAt": snapshot.thread.updated_at,
-                "archivedAt": snapshot.thread.archived_at,
-                "metadata": dict(snapshot.thread.metadata),
-            },
+            "thread": self._thread_record_to_dict(snapshot.thread),
             "turns": [
                 {
                     "turnId": turn.turn_id,
@@ -239,4 +415,17 @@ class MessageProcessor:
                 for turn in snapshot.turns
             ],
             "items": [item.to_dict() for item in snapshot.items],
+        }
+
+    def _thread_record_to_dict(self, record: ThreadRecord) -> dict[str, Any]:
+        archived = record.archived_at is not None
+        return {
+            "threadId": record.thread_id,
+            "agentKey": record.agent_key,
+            "cwd": record.cwd,
+            "createdAt": record.created_at,
+            "updatedAt": record.updated_at,
+            "archivedAt": record.archived_at,
+            "status": self._state_manager.status(record.thread_id, archived=archived),
+            "metadata": dict(record.metadata),
         }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vv_agent.app_server import ChannelTransport, MessageProcessor, OutgoingRouter
+from vv_agent.app_server.transport import AppServerOverloadedError
 
 
 def test_channel_transport_processes_jsonrpc_request() -> None:
@@ -23,5 +24,5 @@ def test_channel_transport_outbound_overflow_is_reported() -> None:
     transport = ChannelTransport(connection_id="conn_1", outbound_capacity=1)
 
     transport.write_outbound({"id": 1, "result": None})
-    with pytest.raises(RuntimeError, match=r"Server overloaded; retry later\."):
+    with pytest.raises(AppServerOverloadedError, match=r"Server overloaded; retry later\."):
         transport.write_outbound({"id": 2, "result": None})
