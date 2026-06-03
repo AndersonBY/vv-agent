@@ -84,14 +84,15 @@ uv run python examples/24_workspace_backends.py
 
 These examples use the JSON-RPC App Server boundary for product hosts,
 subprocess clients, lifecycle replay, notification filtering, schema export,
-and overload handling. They use scripted or local protocol flows and do not
-require live model credentials.
+and overload handling. Examples 26-28 call a real configured model through
+`local_settings.py` and `V_AGENT_EXAMPLE_*` environment variables. Example 29
+is a local protocol/schema/backpressure example and does not call a model.
 
 | # | File | Shows |
 | --- | --- | --- |
-| 26 | `26_app_server_channel_lifecycle.py` | In-process `ChannelTransport` lifecycle: initialize, thread, turn, list, archive |
-| 27 | `27_app_server_stdio_client.py` | Minimal stdio JSONL subprocess client |
-| 28 | `28_app_server_notification_opt_out.py` | Per-connection notification opt-out with two clients |
+| 26 | `26_app_server_channel_lifecycle.py` | Real model turn through in-process `ChannelTransport`: initialize, thread, turn, list, archive |
+| 27 | `27_app_server_stdio_client.py` | Real model turn through a stdio JSONL subprocess client |
+| 28 | `28_app_server_notification_opt_out.py` | Real model turn with two clients and per-connection notification opt-out |
 | 29 | `29_app_server_schema_backpressure.py` | Schema export, transport overload, and request backlog overload |
 
 ```bash

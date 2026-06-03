@@ -81,14 +81,15 @@ uv run python examples/24_workspace_backends.py
 ## App Server 集成
 
 这些示例使用 JSON-RPC App Server 边界，展示宿主产品、子进程客户端、生命周期
-回放、通知过滤、schema 导出和 overload 处理。它们使用 scripted 或本地协议流，
-不需要真实模型密钥。
+回放、通知过滤、schema 导出和 overload 处理。示例 26-28 会通过
+`local_settings.py` 和 `V_AGENT_EXAMPLE_*` 环境变量调用真实模型；示例 29 是本地
+协议、schema 和 backpressure 示例，不调用模型。
 
 | # | 文件 | 展示内容 |
 | --- | --- | --- |
-| 26 | `26_app_server_channel_lifecycle.py` | 进程内 `ChannelTransport` 生命周期：initialize、thread、turn、list、archive |
-| 27 | `27_app_server_stdio_client.py` | 最小 stdio JSONL 子进程客户端 |
-| 28 | `28_app_server_notification_opt_out.py` | 两个客户端的连接级通知 opt-out |
+| 26 | `26_app_server_channel_lifecycle.py` | 通过进程内 `ChannelTransport` 跑真实模型 turn：initialize、thread、turn、list、archive |
+| 27 | `27_app_server_stdio_client.py` | 通过 stdio JSONL 子进程客户端跑真实模型 turn |
+| 28 | `28_app_server_notification_opt_out.py` | 两个客户端跑真实模型 turn，并演示连接级通知 opt-out |
 | 29 | `29_app_server_schema_backpressure.py` | schema 导出、transport overload 与 request backlog overload |
 
 ```bash
