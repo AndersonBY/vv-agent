@@ -388,6 +388,16 @@ def test_llm_stream_request_payload_aligns_qwen_thinking(monkeypatch) -> None:
     assert response.content == "done"
 
 
+def test_tool_call_incremental_uses_qwen_endpoint_prefix_for_new_models() -> None:
+    assert (
+        VVLlmClient._tool_call_incremental_enabled(
+            model="qwen-next-custom",
+            endpoint_type="qwen",
+        )
+        is True
+    )
+
+
 def test_llm_stream_aggregates_tool_calls_without_index(monkeypatch) -> None:
     chunk_1 = SimpleNamespace(
         usage=None,
@@ -488,15 +498,11 @@ def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
     assert prepared[1]["role"] == "system"
 
 
-def test_should_use_stream_is_case_insensitive_for_minimax() -> None:
+def test_should_use_stream_defaults_all_models_to_stream() -> None:
     assert VVLlmClient._should_use_stream("MiniMax-M2.5") is True
-    assert VVLlmClient._should_use_stream("minimax-m2.5") is True
-    assert VVLlmClient._should_use_stream("MiniMax-M2.7") is True
-
-
-def test_should_use_stream_includes_deepseek_v4_reasoning_models() -> None:
-    assert VVLlmClient._should_use_stream("deepseek-v4-flash") is True
-    assert VVLlmClient._should_use_stream("deepseek-v4-pro") is True
+    assert VVLlmClient._should_use_stream("deepseek-v5-pro") is True
+    assert VVLlmClient._should_use_stream("gpt-4o") is True
+    assert VVLlmClient._should_use_stream("custom-enterprise-model") is True
 
 
 def test_vv_llm_request_options_apply_public_model_settings() -> None:
@@ -521,6 +527,24 @@ def test_vv_llm_request_options_apply_public_model_settings() -> None:
     assert options.extra_body == {"seed": 7}
     assert llm.max_retries_per_endpoint == 5
     assert llm.backoff_seconds == 0.25
+
+
+def test_deepseek_provider_defaults_new_models_to_reasoning_options() -> None:
+    llm = VVLlmClient(endpoint_targets=[], backend="deepseek", selected_model="deepseek-v5-pro")
+
+    options = llm._resolve_request_options(
+        "deepseek-v5-pro",
+        stream=False,
+        endpoint_type="deepseek",
+    )
+
+    assert options.temperature == 0.6
+
+
+def test_minimax_provider_defaults_new_models_to_reasoning_chain() -> None:
+    llm = VVLlmClient(endpoint_targets=[], backend="minimax", selected_model="minimax-m3")
+
+    assert llm._should_preserve_reasoning_chain("minimax-m3") is True
 
 
 def test_build_message_payload_keeps_reasoning_only_for_last_assistant_by_default() -> None:
@@ -600,6 +624,56 @@ def test_deepseek_v4_request_preserves_reasoning_for_all_assistant_turns(monkeyp
     )
 
 
+def test_moonshot_provider_defaults_new_models_to_reasoning_chain(monkeypatch) -> None:
+    chunk = SimpleNamespace(
+        usage=_FakeUsage(),
+        content="done",
+        reasoning_content=None,
+        tool_calls=[],
+    )
+
+    def stream_call(kwargs: dict[str, Any]) -> Any:
+        assistant_messages = [msg for msg in kwargs["messages"] if msg.get("role") == "assistant"]
+        assert len(assistant_messages) == 2
+        assert assistant_messages[0]["reasoning_content"] == "old-thought"
+        assert assistant_messages[1]["reasoning_content"] == "latest-thought"
+        return [chunk]
+
+    _FakeChatClient.behavior_by_endpoint = {"moonshot-new-reasoning": stream_call}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="moonshot-new-reasoning",
+                api_key="k",
+                api_base="https://moonshot.example/v1",
+            )
+        ],
+        backend="moonshot",
+        selected_model="kimi-k3",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    response = llm.complete(
+        model="kimi-k3",
+        messages=[
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="first", reasoning_content="old-thought"),
+            Message(role="user", content="continue"),
+            Message(role="assistant", content="second", reasoning_content="latest-thought"),
+            Message(role="user", content="next turn"),
+        ],
+        tools=[],
+    )
+    assert response.content == "done"
+
+
 def test_moonshot_request_preserves_reasoning_for_all_assistant_turns(monkeypatch) -> None:
     chunk = SimpleNamespace(
         usage=_FakeUsage(),
@@ -653,7 +727,7 @@ def test_moonshot_request_preserves_reasoning_for_all_assistant_turns(monkeypatc
 def test_llm_estimates_usage_when_backend_missing_usage(monkeypatch) -> None:
     response_without_usage = SimpleNamespace(content="done", tool_calls=[], reasoning_content=None, usage=None)
 
-    _FakeChatClient.behavior_by_endpoint = {"usage-missing": response_without_usage}
+    _FakeChatClient.behavior_by_endpoint = {"usage-missing": [response_without_usage]}
     _FakeChatClient.seen_calls = []
 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
@@ -736,7 +810,7 @@ def test_llm_stream_collects_raw_content_blocks(monkeypatch) -> None:
 
 def test_llm_debug_dump_writes_request_messages(monkeypatch, tmp_path: Path) -> None:
     response = SimpleNamespace(content="ok", tool_calls=[], reasoning_content=None, usage=_FakeUsage())
-    _FakeChatClient.behavior_by_endpoint = {"dump-endpoint": response}
+    _FakeChatClient.behavior_by_endpoint = {"dump-endpoint": [response]}
     _FakeChatClient.seen_calls = []
 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)

@@ -27,54 +27,17 @@ from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash
 from vv_agent.runtime.context import StreamCallback
 from vv_agent.types import LLMResponse, Message, ToolCall
 
-_STREAM_MODEL_PREFIXES = (
-    "qwen3",
-    "claude",
-    "gemini",
-    "kimi",
-    "glm-4.",
-    "glm-5",
-    "gpt-5",
-    "MiniMax",
-)
-
-_STREAM_MODEL_EXACT = {
-    "deepseek-v4-flash",
-    "deepseek-v4-pro",
+_REASONING_CHAIN_PROVIDERS = {
+    "deepseek",
+    "minimax",
+    "moonshot",
 }
 
-_STREAM_MODEL_PREFIXES_LOWER = tuple(prefix.lower() for prefix in _STREAM_MODEL_PREFIXES)
-_STREAM_MODEL_EXACT_LOWER = {item.lower() for item in _STREAM_MODEL_EXACT}
-
-_DEEPSEEK_REASONING_MODELS = (
-    "deepseek-v4-flash",
-    "deepseek-v4-pro",
-)
-
-_MINIMAX_REASONING_MODELS = (
-    "minimax-m2.1",
-    "minimax-m2.1-lightning",
-    "minimax-m2.1-highspeed",
-    "minimax-m2.5",
-    "minimax-m2.5-highspeed",
-    "minimax-m2.7",
-    "minimax-m2.7-highspeed",
-)
-
-_MOONSHOT_REASONING_MODELS = (
-    "kimi-k2.5",
-    "kimi-k2.6",
-)
-
-_REASONING_CHAIN_MODELS = {
-    *_DEEPSEEK_REASONING_MODELS,
-    *_MINIMAX_REASONING_MODELS,
-    *_MOONSHOT_REASONING_MODELS,
-}
-
-_REASONING_CHAIN_PREFIXES = (
+_REASONING_CHAIN_MODEL_PREFIXES = (
     "deepseek-",
-    "minimax-m2.",
+    "minimax-",
+    "kimi-",
+    "moonshot-",
 )
 
 _CLAUDE_THINKING_MODELS = (
@@ -98,41 +61,13 @@ _QWEN_THINKING_KEEP_SUFFIX_MODELS = (
 )
 _QWEN_THINKING_KEEP_SUFFIX_MODELS_LOWER = {item.lower() for item in _QWEN_THINKING_KEEP_SUFFIX_MODELS}
 
-_TOOL_CALL_INCREMENTAL_MODELS = {
-    "qwen3-coder-plus",
-    "qwen3-coder-flash",
-    "qwen3-max",
-    "qwen3-max-preview",
-    "qwen3-next-80b-a3b-thinking",
-    "qwen3-next-80b-a3b-instruct",
-    "qwen3-235b-a22b-instruct-2507",
-    "qwen3-coder-480b-a35b-instruct",
-    "qwen3-235b-a22b",
-    "qwen3-235b-a22b-thinking",
-    "qwen3-32b",
-    "qwen3-32b-thinking",
-    "qwen3-30b-a3b",
-    "qwen3-30b-a3b-thinking",
-    "qwen3-14b",
-    "qwen3-14b-thinking",
-    "qwen3-8b",
-    "qwen3-8b-thinking",
-    "qwen3-4b",
-    "qwen3-4b-thinking",
-    "qwen3-1.7b",
-    "qwen3-1.7b-thinking",
-    "qwen3-0.6b",
-    "qwen3-0.6b-thinking",
-    "mixtral-8x7b",
-}
-_TOOL_CALL_INCREMENTAL_MODELS_LOWER = {item.lower() for item in _TOOL_CALL_INCREMENTAL_MODELS}
-
 _TOOL_CALL_INCREMENTAL_ENDPOINT_PREFIXES = (
     "openai",
     "moonshot",
     "anthropic",
     "deepseek",
     "minimax",
+    "qwen",
     "zhipuai",
 )
 
@@ -408,15 +343,37 @@ class VVLlmClient(LLMClient):
         self._prompt_cache_tracker.check(system_hash=system_hash, tool_hash=tool_hash)
 
     def _should_preserve_reasoning_chain(self, requested_model: str) -> bool:
+        if self._is_reasoning_chain_provider(self.backend):
+            return True
+        if any(self._is_reasoning_chain_provider(target.endpoint_type) for target in self.endpoint_targets):
+            return True
         for candidate in self._iter_reasoning_model_candidates(requested_model):
             normalized = candidate.strip().lower()
             if not normalized:
                 continue
-            if normalized in _REASONING_CHAIN_MODELS:
-                return True
-            if normalized.startswith(_REASONING_CHAIN_PREFIXES):
+            if normalized.startswith(_REASONING_CHAIN_MODEL_PREFIXES):
                 return True
         return False
+
+    @staticmethod
+    def _is_reasoning_chain_provider(value: str) -> bool:
+        normalized = value.strip().lower()
+        return any(
+            normalized == provider or normalized.startswith(f"{provider}-") or normalized.startswith(f"{provider}_")
+            for provider in _REASONING_CHAIN_PROVIDERS
+        )
+
+    def _uses_deepseek_reasoning_defaults(self, *, model: str, endpoint_type: str | None) -> bool:
+        normalized_model = model.strip().lower()
+        if normalized_model.startswith("deepseek-"):
+            return True
+        normalized_backend = self.backend.strip().lower()
+        if self._is_reasoning_chain_provider(normalized_backend) and normalized_backend.startswith("deepseek"):
+            return True
+        if endpoint_type is None:
+            return False
+        normalized_endpoint = endpoint_type.strip().lower()
+        return self._is_reasoning_chain_provider(normalized_endpoint) and normalized_endpoint.startswith("deepseek")
 
     def _iter_reasoning_model_candidates(self, requested_model: str) -> list[str]:
         candidates: list[str] = [requested_model]
@@ -499,11 +456,8 @@ class VVLlmClient(LLMClient):
         return payload
 
     @staticmethod
-    def _should_use_stream(model: str) -> bool:
-        normalized = model.lower()
-        if normalized in _STREAM_MODEL_EXACT_LOWER:
-            return True
-        return normalized.startswith(_STREAM_MODEL_PREFIXES_LOWER)
+    def _should_use_stream(_model: str) -> bool:
+        return True
 
     @staticmethod
     def _prepare_messages_for_model(
@@ -564,7 +518,7 @@ class VVLlmClient(LLMClient):
         extra_body: dict[str, Any] | None = None
         extra_args: dict[str, Any] | None = None
 
-        if normalized_model in _DEEPSEEK_REASONING_MODELS:
+        if self._uses_deepseek_reasoning_defaults(model=normalized_model, endpoint_type=endpoint_type):
             temperature = 0.6
         elif normalized_model in _CLAUDE_THINKING_MODELS_LOWER:
             resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-thinking")
@@ -683,10 +637,6 @@ class VVLlmClient(LLMClient):
 
     @staticmethod
     def _tool_call_incremental_enabled(*, model: str, endpoint_type: str | None) -> bool:
-        normalized_model = model.lower()
-        if normalized_model in _TOOL_CALL_INCREMENTAL_MODELS_LOWER or normalized_model.startswith("qwen3"):
-            return True
-
         normalized_endpoint = (endpoint_type or "").strip().lower()
         if not normalized_endpoint or normalized_endpoint == "default":
             return True
