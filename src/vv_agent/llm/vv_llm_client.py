@@ -40,18 +40,6 @@ _REASONING_CHAIN_MODEL_PREFIXES = (
     "moonshot-",
 )
 
-_CLAUDE_THINKING_MODELS = (
-    "claude-3-7-sonnet-thinking",
-    "claude-opus-4-20250514-thinking",
-    "claude-opus-4-1-20250805-thinking",
-    "claude-sonnet-4-20250514-thinking",
-    "claude-sonnet-4-5-20250929-thinking",
-    "claude-opus-4-5-20251101-thinking",
-    "claude-opus-4-6-thinking",
-    "claude-sonnet-4-6-thinking",
-)
-_CLAUDE_THINKING_MODELS_LOWER = {item.lower() for item in _CLAUDE_THINKING_MODELS}
-
 _QWEN_THINKING_KEEP_SUFFIX_MODELS = (
     "qwen3-next-80b-a3b-thinking",
     "qwen3-vl-235b-a22b-thinking",
@@ -363,7 +351,7 @@ class VVLlmClient(LLMClient):
             for provider in _REASONING_CHAIN_PROVIDERS
         )
 
-    def _uses_deepseek_reasoning_defaults(self, *, model: str, endpoint_type: str | None) -> bool:
+    def _uses_deepseek_model(self, *, model: str, endpoint_type: str | None) -> bool:
         normalized_model = model.strip().lower()
         if normalized_model.startswith("deepseek-"):
             return True
@@ -518,9 +506,10 @@ class VVLlmClient(LLMClient):
         extra_body: dict[str, Any] | None = None
         extra_args: dict[str, Any] | None = None
 
-        if self._uses_deepseek_reasoning_defaults(model=normalized_model, endpoint_type=endpoint_type):
-            temperature = 0.6
-        elif normalized_model in _CLAUDE_THINKING_MODELS_LOWER:
+        if self._uses_deepseek_model(model=normalized_model, endpoint_type=endpoint_type):
+            extra_body = {"thinking": {"type": "enabled"}}
+            reasoning_effort = "max"
+        elif normalized_model.startswith("claude") and normalized_model.endswith("-thinking"):
             resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-thinking")
             normalized_model = resolved_model.lower()
             thinking = {"type": "enabled", "budget_tokens": 16000}

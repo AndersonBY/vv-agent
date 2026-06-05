@@ -331,8 +331,8 @@ def test_llm_stream_preserves_gemini3_tool_call_extra_content(monkeypatch) -> No
 
 def test_resolve_request_options_aligns_claude_thinking_profile() -> None:
     llm = VVLlmClient(endpoint_targets=[])
-    options = llm._resolve_request_options("claude-opus-4-6-thinking", stream=True, endpoint_type="openai")
-    assert options.model == "claude-opus-4-6"
+    options = llm._resolve_request_options("claude-opus-4-7-thinking", stream=True, endpoint_type="openai")
+    assert options.model == "claude-opus-4-7"
     assert options.temperature == 1.0
     assert options.max_tokens == 20000
     assert options.thinking == {"type": "enabled", "budget_tokens": 16000}
@@ -538,7 +538,10 @@ def test_deepseek_provider_defaults_new_models_to_reasoning_options() -> None:
         endpoint_type="deepseek",
     )
 
-    assert options.temperature == 0.6
+    assert options.temperature is None
+    assert options.thinking is None
+    assert options.extra_body == {"thinking": {"type": "enabled"}}
+    assert options.reasoning_effort == "max"
 
 
 def test_minimax_provider_defaults_new_models_to_reasoning_chain() -> None:
@@ -582,7 +585,7 @@ def test_build_message_payload_preserves_reasoning_chain_for_reasoning_models() 
     assert second_assistant["reasoning_content"] == ""
 
 
-def test_deepseek_v4_request_preserves_reasoning_for_all_assistant_turns(monkeypatch) -> None:
+def test_deepseek_request_preserves_reasoning_for_all_assistant_turns(monkeypatch) -> None:
     response = SimpleNamespace(
         usage=_FakeUsage(),
         content="done",
@@ -597,22 +600,22 @@ def test_deepseek_v4_request_preserves_reasoning_for_all_assistant_turns(monkeyp
         assert assistant_messages[1]["reasoning_content"] == "latest-thought"
         return [response]
 
-    _FakeChatClient.behavior_by_endpoint = {"deepseek-v4": completion_call}
+    _FakeChatClient.behavior_by_endpoint = {"deepseek-default": completion_call}
     _FakeChatClient.seen_calls = []
 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
     llm = VVLlmClient(
-        endpoint_targets=[EndpointTarget(endpoint_id="deepseek-v4", api_key="k", api_base="https://deepseek.example/v1")],
+        endpoint_targets=[EndpointTarget(endpoint_id="deepseek-default", api_key="k", api_base="https://deepseek.example/v1")],
         backend="deepseek",
-        selected_model="deepseek-v4-pro",
+        selected_model="deepseek-v5-pro",
         randomize_endpoints=False,
         max_retries_per_endpoint=1,
         backoff_seconds=0.0,
     )
     llm.complete(
-        model="deepseek-v4-pro",
+        model="deepseek-v5-pro",
         messages=[
             Message(role="system", content="sys"),
             Message(role="assistant", content="", reasoning_content="old-thought"),
