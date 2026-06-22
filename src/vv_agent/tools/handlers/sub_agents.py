@@ -9,14 +9,10 @@ from vv_agent.types import AgentStatus, SubTaskRequest, ToolExecutionResult, Too
 
 
 def _resolve_agent_name(arguments: dict[str, Any]) -> str:
-    for key in ("agent_id", "agent_name"):
-        raw = arguments.get(key)
-        if raw is None:
-            continue
-        value = str(raw).strip()
-        if value:
-            return value
-    return ""
+    raw = arguments.get("agent_id")
+    if raw is None:
+        return ""
+    return str(raw).strip()
 
 
 def _coerce_bool(value: Any, *, default: bool) -> bool:

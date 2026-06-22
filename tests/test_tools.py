@@ -423,7 +423,7 @@ def test_workspace_grep_explicit_case_flags_override_smart_case(registry, tool_c
     case_sensitive_call = ToolCall(
         id="call_smart_case_override_lower",
         name=WORKSPACE_GREP_TOOL_NAME,
-        arguments={"pattern": "update", "output_mode": "content", "i": False},
+        arguments={"pattern": "update", "output_mode": "content", "case_sensitive": True},
     )
     case_sensitive_result = registry.execute(case_sensitive_call, tool_context)
     case_sensitive_payload = case_sensitive_result.metadata
@@ -473,7 +473,7 @@ def test_workspace_grep_supports_files_with_matches_mode(registry, tool_context:
     call = ToolCall(
         id="call_files",
         name=WORKSPACE_GREP_TOOL_NAME,
-        arguments={"pattern": "token", "output_mode": "files_with_matches", "i": True, "type": "py"},
+        arguments={"pattern": "token", "output_mode": "files_with_matches", "case_sensitive": False, "type": "py"},
     )
     result = registry.execute(call, tool_context)
     payload = result.metadata
@@ -481,6 +481,22 @@ def test_workspace_grep_supports_files_with_matches_mode(registry, tool_context:
     assert payload["files"] == ["a.py", "b.py"]
     assert payload["summary"]["files_with_matches"] == 2
     assert payload["summary"]["total_matches"] == 2
+
+
+def test_workspace_grep_ignores_removed_max_results_alias(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "a.txt").write_text("hit one\nhit two", encoding="utf-8")
+
+    result = registry.execute(
+        ToolCall(
+            id="call_removed_max_results",
+            name=WORKSPACE_GREP_TOOL_NAME,
+            arguments={"pattern": "hit", "output_mode": "content", "max_results": 1},
+        ),
+        tool_context,
+    )
+
+    assert len(result.metadata["matches"]) == 2
+    assert result.metadata.get("head_limit") is None
 
 
 def test_workspace_grep_supports_count_mode(registry, tool_context: ToolContext) -> None:

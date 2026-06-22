@@ -223,7 +223,7 @@ FILTERS:
 - `type`: language/file-type shortcut (py/js/ts/md/json/...)
 - default matching uses smart-case: all-lowercase patterns search case-insensitively
   and patterns containing uppercase stay case-sensitive
-- `i`: force case-insensitive search
+- `case_sensitive`: explicitly override smart-case behavior
 - `multiline`: let `.` match newlines and allow multi-line patterns
 - `include_hidden`: include hidden files/directories (default false)
 - `include_ignored`: include common dependency/cache roots at workspace root (default false)
@@ -236,7 +236,6 @@ CONTENT OPTIONS (only for `content` mode):
 
 LIMITING:
 - `head_limit`: return only first N output rows/entries
-- `max_results`: compatibility alias for `head_limit`
 
 Guidance:
 - Prefer this tool over ad-hoc shell grep for direct content search.
@@ -292,10 +291,6 @@ Guidance:
                         "type": "boolean",
                         "description": "Whether to include line numbers in content output. Default true.",
                     },
-                    "i": {
-                        "type": "boolean",
-                        "description": "Force case-insensitive search.",
-                    },
                     "type": {
                         "type": "string",
                         "description": "File type shortcut (e.g. py/js/ts/md/json).",
@@ -311,12 +306,7 @@ Guidance:
                     },
                     "case_sensitive": {
                         "type": "boolean",
-                        "description": "Explicitly override smart-case behavior and `i`.",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Compatibility alias for `head_limit`.",
+                        "description": "Explicitly override smart-case behavior.",
                     },
                 },
                 "required": ["pattern"],

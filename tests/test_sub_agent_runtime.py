@@ -89,7 +89,7 @@ def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
                         id="p1",
                         name=CREATE_SUB_TASK_TOOL_NAME,
                         arguments={
-                            "agent_name": "research-sub",
+                            "agent_id": "research-sub",
                             "task_description": "Collect core facts",
                             "output_requirements": "Return short bullet list",
                         },
@@ -172,7 +172,7 @@ def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> N
                         id="p1",
                         name=CREATE_SUB_TASK_TOOL_NAME,
                         arguments={
-                            "agent_name": "writer-sub",
+                            "agent_id": "writer-sub",
                             "tasks": [
                                 {"task_description": "Write section A"},
                                 {"task_description": "Write section B"},
@@ -273,7 +273,7 @@ def test_create_sub_task_batch_uses_execution_backend_parallel_map(tmp_path: Pat
                         id="p1",
                         name=CREATE_SUB_TASK_TOOL_NAME,
                         arguments={
-                            "agent_name": "writer-sub",
+                            "agent_id": "writer-sub",
                             "tasks": [
                                 {"task_description": "Write section A"},
                                 {"task_description": "Write section B"},
@@ -484,7 +484,7 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
                         id="p1",
                         name=CREATE_SUB_TASK_TOOL_NAME,
                         arguments={
-                            "agent_name": "research-sub",
+                            "agent_id": "research-sub",
                             "task_description": "Collect one fact",
                         },
                     )
@@ -577,7 +577,7 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
                     ToolCall(
                         id="p1",
                         name=CREATE_SUB_TASK_TOOL_NAME,
-                        arguments={"agent_name": "research-sub", "task_description": "Collect core facts"},
+                        arguments={"agent_id": "research-sub", "task_description": "Collect core facts"},
                     )
                 ],
             ),
@@ -685,7 +685,7 @@ def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_pa
                     ToolCall(
                         id="p1",
                         name=CREATE_SUB_TASK_TOOL_NAME,
-                        arguments={"agent_name": "research-sub", "task_description": "Collect core facts"},
+                        arguments={"agent_id": "research-sub", "task_description": "Collect core facts"},
                     )
                 ],
             )

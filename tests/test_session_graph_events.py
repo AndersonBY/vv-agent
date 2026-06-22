@@ -110,7 +110,7 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
                         id="call_create_sub_task",
                         name=CREATE_SUB_TASK_TOOL_NAME,
                         arguments={
-                            "agent_name": "research-sub",
+                            "agent_id": "research-sub",
                             "task_description": "Collect core facts",
                         },
                     )

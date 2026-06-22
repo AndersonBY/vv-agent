@@ -5,6 +5,7 @@ from vv_agent.constants import (
     READ_FILE_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
+    WORKSPACE_GREP_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
 from vv_agent.tools import build_default_registry
@@ -47,3 +48,17 @@ def test_create_sub_task_schema_uses_agent_id_only() -> None:
     assert "agent_id" in properties
     assert "agent_name" not in properties
     assert "agent_id" in parameters["required"]
+
+
+def test_workspace_grep_schema_uses_canonical_limit_and_case_fields_only() -> None:
+    registry = build_default_registry()
+    schema = registry.get_schema(WORKSPACE_GREP_TOOL_NAME)
+
+    properties = schema["function"]["parameters"]["properties"]
+    description = schema["function"]["description"]
+
+    assert "head_limit" in properties
+    assert "case_sensitive" in properties
+    assert "max_results" not in properties
+    assert "i" not in properties
+    assert "max_results" not in description

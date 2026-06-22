@@ -51,7 +51,7 @@ class TestParallelSubTasks:
         result = create_sub_task(
             context,
             {
-                "agent_name": "worker",
+                "agent_id": "worker",
                 "tasks": [
                     {"task_description": "task A"},
                     {"task_description": "task B"},
@@ -88,7 +88,7 @@ class TestParallelSubTasks:
         result = create_sub_task(
             context,
             {
-                "agent_name": "worker",
+                "agent_id": "worker",
                 "tasks": [
                     {"task_description": "first"},
                     {"task_description": "second"},
@@ -124,7 +124,7 @@ class TestParallelSubTasks:
         result = create_sub_task(
             context,
             {
-                "agent_name": "worker",
+                "agent_id": "worker",
                 "tasks": [
                     {"task_description": "first"},
                     {"task_description": "second"},
@@ -136,6 +136,29 @@ class TestParallelSubTasks:
         assert result.status_code == ToolResultStatus.SUCCESS
         assert len(result.metadata["task_ids"]) == 2
         assert all(manager.wait(task_id) is not None for task_id in result.metadata["task_ids"])
+
+    def test_create_sub_task_rejects_removed_agent_name_alias(self, tmp_path: Path):
+        context = ToolContext(
+            workspace=tmp_path,
+            shared_state={},
+            cycle_index=1,
+            workspace_backend=LocalWorkspaceBackend(tmp_path),
+            sub_task_runner=lambda request: SubTaskOutcome(
+                task_id="unused",
+                agent_name=request.agent_name,
+                status=AgentStatus.COMPLETED,
+            ),
+            sub_task_manager=_build_manager(),
+            task_id="parent_task",
+        )
+
+        result = create_sub_task(
+            context,
+            {"agent_name": "worker", "task_description": "legacy alias"},
+        )
+
+        assert result.status_code == ToolResultStatus.ERROR
+        assert result.metadata["error_code"] == "agent_id_required"
 
     def test_thread_backend_parallel_map_concurrency(self):
         backend = ThreadBackend(max_workers=4)

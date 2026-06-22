@@ -223,7 +223,7 @@ def test_interactive_sub_agent_uses_bridge_llm_builder_for_child_model(tmp_path)
                                     id="parent-call-1",
                                     name=CREATE_SUB_TASK_TOOL_NAME,
                                     arguments={
-                                        "agent_name": "child",
+                                        "agent_id": "child",
                                         "task_description": "Handle child work",
                                         "output_requirements": "Return done",
                                     },

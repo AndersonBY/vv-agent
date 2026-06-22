@@ -493,7 +493,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
         )
 
     try:
-        head_limit_raw = arguments.get("head_limit", arguments.get("max_results"))
+        head_limit_raw = arguments.get("head_limit")
         head_limit = _to_int(head_limit_raw, name="head_limit", min_value=1) if head_limit_raw is not None else None
         lines_before = _to_int(arguments["b"], name="b") if "b" in arguments else None
         lines_after = _to_int(arguments["a"], name="a") if "a" in arguments else None
@@ -518,8 +518,6 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
 
     if "case_sensitive" in arguments:
         case_insensitive = not bool(arguments.get("case_sensitive"))
-    elif "i" in arguments:
-        case_insensitive = bool(arguments.get("i"))
     else:
         case_insensitive = _smart_case_defaults_to_case_insensitive(pattern)
 
