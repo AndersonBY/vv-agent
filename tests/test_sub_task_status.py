@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -160,6 +161,50 @@ def test_sub_task_status_can_queue_message_for_running_task(tmp_path: Path) -> N
     assert result.status_code == ToolResultStatus.SUCCESS
     assert result.metadata["interaction"]["action"] == "message_queued"
     assert session.queued_messages == ["Focus on the README first"]
+
+
+def test_sub_task_status_can_wait_for_background_task_completion(tmp_path: Path) -> None:
+    manager = _build_manager()
+    manager.submit(
+        task_id="sub-wait",
+        session_id="sub-wait",
+        agent_name="research-sub",
+        task_title="Wait for background completion",
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
+        runner=lambda: (
+            time.sleep(0.2)
+            or SubTaskOutcome(
+                task_id="sub-wait",
+                session_id="sub-wait",
+                agent_name="research-sub",
+                status=AgentStatus.COMPLETED,
+                final_answer="waited done",
+                cycles=1,
+            )
+        ),
+    )
+
+    started_at = time.monotonic()
+    result = sub_task_status(
+        _build_context(tmp_path, manager),
+        {
+            "task_ids": ["sub-wait"],
+            "wait_for_completion": True,
+            "check_interval_seconds": 300,
+            "max_wait_seconds": 3600,
+        },
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert result.status_code == ToolResultStatus.SUCCESS
+    assert elapsed < 1.0
+    assert result.metadata["wait_for_completion"] is True
+    assert result.metadata["wait_exceeded"] is False
+    assert result.metadata["running_task_ids"] == []
+    assert result.metadata["suggested_next_check_after_seconds"] == 300
+    task_entry = result.metadata["tasks"][0]
+    assert task_entry["status"] == AgentStatus.COMPLETED.value
+    assert task_entry["final_answer"] == "waited done"
 
 
 def test_sub_task_status_can_continue_completed_task(tmp_path: Path) -> None:

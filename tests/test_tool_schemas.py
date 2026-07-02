@@ -62,3 +62,19 @@ def test_workspace_grep_schema_uses_canonical_limit_and_case_fields_only() -> No
     assert "max_results" not in properties
     assert "i" not in properties
     assert "max_results" not in description
+
+
+def test_sub_task_status_schema_supports_long_wait_without_polling() -> None:
+    registry = build_default_registry()
+    schema = registry.get_schema(SUB_TASK_STATUS_TOOL_NAME)
+
+    properties = schema["function"]["parameters"]["properties"]
+    description = schema["function"]["description"]
+
+    assert "wait_for_completion" in properties
+    assert "check_interval_seconds" in properties
+    assert "max_wait_seconds" in properties
+    assert properties["wait_for_completion"]["type"] == "boolean"
+    assert properties["check_interval_seconds"]["type"] == "integer"
+    assert properties["max_wait_seconds"]["type"] == ["integer", "null"]
+    assert "without repeated polling" in description

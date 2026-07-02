@@ -606,6 +606,11 @@ Use `sub_task_status` to query legacy runtime sub-task states, inspect
 lightweight progress snapshots (`detail_level=snapshot`), or send follow-up
 messages to running/completed sub-tasks.
 
+When the parent task cannot make useful progress until background sub-tasks
+finish, call `sub_task_status` with `wait_for_completion=true`. The runtime waits
+inside that tool call and returns when queried tasks finish or `max_wait_seconds`
+is reached, avoiding repeated status-polling cycles in the agent context.
+
 Before a completed sub-task is resumed, the runtime now sanitizes the saved session transcript: empty assistant turns, thinking-only turns, orphaned tool results, and unresolved tail tool calls are removed so the next follow-up prompt resumes from a coherent history.
 
 Sub-task runtime metadata now includes `task_id`, `session_id`, and `browser_scope_key` for each sub-agent run, so session-scoped tools (for example, browser controllers) stay isolated across parallel sub-tasks.

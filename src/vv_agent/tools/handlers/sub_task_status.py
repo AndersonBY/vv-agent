@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
@@ -8,6 +9,19 @@ from vv_agent.types import AgentStatus, ToolExecutionResult, ToolResultStatus
 
 DEFAULT_SUB_TASK_SNAPSHOT_FILE_LIMIT = 20
 MAX_SUB_TASK_SNAPSHOT_FILE_LIMIT = 100
+DEFAULT_SUB_TASK_WAIT_INTERVAL_SECONDS = 300
+MIN_SUB_TASK_WAIT_INTERVAL_SECONDS = 30
+MAX_SUB_TASK_WAIT_INTERVAL_SECONDS = 1800
+DEFAULT_SUB_TASK_MAX_WAIT_SECONDS = 3600
+MIN_SUB_TASK_MAX_WAIT_SECONDS = 60
+MAX_SUB_TASK_MAX_WAIT_SECONDS = 24 * 60 * 60
+LOCAL_SUB_TASK_WAIT_POLL_SECONDS = 0.1
+RUNNING_SUB_TASK_STATUSES = {
+    AgentStatus.PENDING.value,
+    AgentStatus.RUNNING.value,
+    "pending",
+    "running",
+}
 
 
 def _coerce_bool(value: Any, *, default: bool) -> bool:
@@ -37,6 +51,24 @@ def _normalize_workspace_file_limit(workspace_file_limit: Any) -> int:
     except (TypeError, ValueError):
         limit = DEFAULT_SUB_TASK_SNAPSHOT_FILE_LIMIT
     return max(1, min(limit, MAX_SUB_TASK_SNAPSHOT_FILE_LIMIT))
+
+
+def _normalize_wait_interval_seconds(check_interval_seconds: Any) -> int:
+    try:
+        seconds = int(check_interval_seconds or DEFAULT_SUB_TASK_WAIT_INTERVAL_SECONDS)
+    except (TypeError, ValueError):
+        seconds = DEFAULT_SUB_TASK_WAIT_INTERVAL_SECONDS
+    return max(MIN_SUB_TASK_WAIT_INTERVAL_SECONDS, min(seconds, MAX_SUB_TASK_WAIT_INTERVAL_SECONDS))
+
+
+def _normalize_max_wait_seconds(max_wait_seconds: Any) -> int:
+    if max_wait_seconds is None:
+        return DEFAULT_SUB_TASK_MAX_WAIT_SECONDS
+    try:
+        seconds = int(max_wait_seconds)
+    except (TypeError, ValueError):
+        return DEFAULT_SUB_TASK_MAX_WAIT_SECONDS
+    return max(MIN_SUB_TASK_MAX_WAIT_SECONDS, min(seconds, MAX_SUB_TASK_MAX_WAIT_SECONDS))
 
 
 def _error(message: str, *, error_code: str, details: dict[str, Any] | None = None) -> ToolExecutionResult:
@@ -159,6 +191,119 @@ def _build_status_entry(
     return entry
 
 
+def _running_task_ids(tasks: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(entry.get("task_id"))
+        for entry in tasks
+        if entry.get("status") in RUNNING_SUB_TASK_STATUSES and entry.get("task_id")
+    ]
+
+
+def _build_status_entries(
+    *,
+    manager: Any,
+    task_ids: list[str],
+    detail_level: str,
+    workspace_file_limit: int,
+) -> list[dict[str, Any]]:
+    return [
+        _build_status_entry(
+            task_id=task_id,
+            record=manager.get(task_id),
+            detail_level=detail_level,
+            workspace_file_limit=workspace_file_limit,
+        )
+        for task_id in task_ids
+    ]
+
+
+def _wait_for_sub_task_completion(
+    *,
+    manager: Any,
+    task_ids: list[str],
+    detail_level: str,
+    workspace_file_limit: int,
+    max_wait_seconds: int,
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    deadline = time.monotonic() + max_wait_seconds
+    tasks = _build_status_entries(
+        manager=manager,
+        task_ids=task_ids,
+        detail_level=detail_level,
+        workspace_file_limit=workspace_file_limit,
+    )
+    running_task_ids = _running_task_ids(tasks)
+    wait_exceeded = False
+
+    while running_task_ids:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            wait_exceeded = True
+            break
+
+        progressed = False
+        wait_slice = min(LOCAL_SUB_TASK_WAIT_POLL_SECONDS, remaining_seconds)
+        for task_id in list(running_task_ids):
+            record = manager.wait(task_id, timeout=wait_slice)
+            if record is not None and not record.is_running():
+                progressed = True
+                break
+            if time.monotonic() >= deadline:
+                break
+
+        tasks = _build_status_entries(
+            manager=manager,
+            task_ids=task_ids,
+            detail_level=detail_level,
+            workspace_file_limit=workspace_file_limit,
+        )
+        next_running_task_ids = _running_task_ids(tasks)
+        if not next_running_task_ids:
+            running_task_ids = []
+            break
+        if time.monotonic() >= deadline:
+            running_task_ids = next_running_task_ids
+            wait_exceeded = True
+            break
+        if progressed or next_running_task_ids != running_task_ids:
+            running_task_ids = next_running_task_ids
+            continue
+        running_task_ids = next_running_task_ids
+
+    return tasks, running_task_ids, wait_exceeded
+
+
+def _add_wait_metadata(
+    payload: dict[str, Any],
+    *,
+    wait_for_completion: bool,
+    check_interval_seconds: int,
+    max_wait_seconds: int,
+    running_task_ids: list[str],
+    wait_exceeded: bool,
+) -> None:
+    if not wait_for_completion:
+        if running_task_ids:
+            payload["running_task_ids"] = running_task_ids
+        payload["suggested_next_check_after_seconds"] = check_interval_seconds
+        return
+
+    payload.update(
+        {
+            "wait_for_completion": True,
+            "wait_exceeded": wait_exceeded,
+            "running_task_ids": running_task_ids,
+            "suggested_next_check_after_seconds": check_interval_seconds,
+            "max_wait_seconds": max_wait_seconds,
+        }
+    )
+    if wait_exceeded:
+        payload["message"] = (
+            "Sub-task(s) are still running after the maximum wait. "
+            "Call sub_task_status again later instead of tight polling."
+        )
+
+
 def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     manager = context.sub_task_manager
     if manager is None:
@@ -183,6 +328,9 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
     workspace_file_limit = _normalize_workspace_file_limit(arguments.get("workspace_file_limit"))
     message = str(arguments.get("message", "")).strip() if arguments.get("message") is not None else ""
     wait_for_response = _coerce_bool(arguments.get("wait_for_response"), default=False)
+    wait_for_completion = _coerce_bool(arguments.get("wait_for_completion"), default=False)
+    check_interval_seconds = _normalize_wait_interval_seconds(arguments.get("check_interval_seconds"))
+    max_wait_seconds = _normalize_max_wait_seconds(arguments.get("max_wait_seconds"))
 
     interaction: dict[str, Any] | None = None
     if message:
@@ -246,20 +394,36 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
         if wait_for_response:
             manager.wait(target_id)
 
-    tasks = [
-        _build_status_entry(
-            task_id=task_id,
-            record=manager.get(task_id),
+    if wait_for_completion:
+        tasks, running_task_ids, wait_exceeded = _wait_for_sub_task_completion(
+            manager=manager,
+            task_ids=task_ids,
+            detail_level=detail_level,
+            workspace_file_limit=workspace_file_limit,
+            max_wait_seconds=max_wait_seconds,
+        )
+    else:
+        tasks = _build_status_entries(
+            manager=manager,
+            task_ids=task_ids,
             detail_level=detail_level,
             workspace_file_limit=workspace_file_limit,
         )
-        for task_id in task_ids
-    ]
+        running_task_ids = _running_task_ids(tasks)
+        wait_exceeded = False
 
     payload: dict[str, Any] = {
         "tasks": tasks,
         "detail_level": detail_level,
     }
+    _add_wait_metadata(
+        payload,
+        wait_for_completion=wait_for_completion,
+        check_interval_seconds=check_interval_seconds,
+        max_wait_seconds=max_wait_seconds,
+        running_task_ids=running_task_ids,
+        wait_exceeded=wait_exceeded,
+    )
     if interaction is not None:
         payload["interaction"] = interaction
     return _success(payload)

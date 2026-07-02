@@ -109,12 +109,16 @@ SUB_AGENT_PROMPT = {
         f"Use `agent_id` to select the target sub-agent, `task_description` for one task, "
         f"`tasks` for multiple independent tasks of the same sub-agent, "
         f"`wait_for_completion=false` for background execution, and `{SUB_TASK_STATUS_TOOL_NAME}` "
-        "to query progress or send follow-up messages."
+        "to query progress or send follow-up messages. If background work must finish before "
+        f"you can continue, call `{SUB_TASK_STATUS_TOOL_NAME}` with `wait_for_completion=true` "
+        "and a longer `check_interval_seconds` instead of repeatedly polling."
     ),
     "zh-CN": (
         f"如果已配置子 Agent, 可使用 `{CREATE_SUB_TASK_TOOL_NAME}` 委派任务: 用 `agent_id` 指定目标子 Agent, "
         f"单任务用 `task_description`, 同一子 Agent 的并行任务用 `tasks`, 后台执行用 `wait_for_completion=false`; "
-        f"需要查询进度或追加消息时使用 `{SUB_TASK_STATUS_TOOL_NAME}`。"
+        f"需要查询进度或追加消息时使用 `{SUB_TASK_STATUS_TOOL_NAME}`。如果后台任务完成前主任务无法继续, "
+        f"请调用 `{SUB_TASK_STATUS_TOOL_NAME}` 并设置 `wait_for_completion=true` 和较长的 "
+        "`check_interval_seconds`, 不要连续轮询。"
     ),
 }
 

@@ -544,7 +544,13 @@ Capabilities:
 - Query one or more sub-task ids
 - Return lightweight snapshot progress (`detail_level=snapshot`)
 - Send `message` to the first task id to steer a running task or continue a completed one
-- Optionally wait for the follow-up response with `wait_for_response=true`""",
+- Wait for long-running background sub-task completion without repeated polling (`wait_for_completion=true`)
+- Optionally wait for the follow-up response with `wait_for_response=true`
+
+Waiting:
+- Use `wait_for_completion=true` when the parent Agent has no useful work until the background sub-task result is available.
+- The runtime waits inside this tool call and returns when queried task(s) finish or `max_wait_seconds` is reached.
+- Use `check_interval_seconds` as the suggested future re-check interval if the wait reaches its limit.""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -573,6 +579,35 @@ Capabilities:
                         "minimum": 1,
                         "maximum": 100,
                         "description": "Maximum number of workspace files returned per task in snapshot mode. Default 20.",
+                    },
+                    "wait_for_completion": {
+                        "type": "boolean",
+                        "description": (
+                            "Optional. If true and any queried sub-task is still running, wait inside this tool call "
+                            "until the task finishes or max_wait_seconds is reached. Use this for long-running "
+                            "background sub-tasks when the parent Agent needs the result before continuing."
+                        ),
+                        "default": False,
+                    },
+                    "check_interval_seconds": {
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 1800,
+                        "description": (
+                            "Optional. Used with wait_for_completion=true. Suggested re-check interval in seconds "
+                            "if max_wait_seconds is reached while tasks are still running. Default 300."
+                        ),
+                        "default": 300,
+                    },
+                    "max_wait_seconds": {
+                        "type": ["integer", "null"],
+                        "minimum": 60,
+                        "maximum": 86400,
+                        "description": (
+                            "Optional. Used with wait_for_completion=true. Maximum total wait time before returning "
+                            "the current still-running status to the Agent. Null or omitted uses the system default."
+                        ),
+                        "default": None,
                     },
                     "wait_for_response": {
                         "type": "boolean",
