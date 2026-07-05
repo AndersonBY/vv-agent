@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import difflib
+import hashlib
 import os
 import re
 import shutil
@@ -14,6 +16,9 @@ from vv_agent.types import ToolExecutionResult
 
 READ_FILE_MAX_LINES = 2_000
 READ_FILE_MAX_CHARS = 50_000
+FILE_BASELINES_STATE_KEY = "_workspace_file_baselines"
+EDIT_DIFF_MAX_CHARS = 12_000
+UTF8_BOM = b"\xef\xbb\xbf"
 LIST_FILES_DEFAULT_MAX_RESULTS = 500
 LIST_FILES_HARD_MAX_RESULTS = 5_000
 LIST_FILES_DEFAULT_SCAN_LIMIT = 50_000
@@ -89,6 +94,96 @@ def _format_output_path(context: ToolContext, candidate_path: Path) -> str:
         return rel or "."
     except ValueError:
         return str(resolved)
+
+
+def _baseline_key(path: str) -> str:
+    return _normalize_relative_path(path)
+
+
+def _content_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _line_ending_label(text: str) -> str:
+    return "crlf" if "\r\n" in text else "lf"
+
+
+def _get_file_baselines(context: ToolContext) -> dict[str, dict[str, Any]]:
+    raw = context.shared_state.setdefault(FILE_BASELINES_STATE_KEY, {})
+    if not isinstance(raw, dict):
+        raw = {}
+        context.shared_state[FILE_BASELINES_STATE_KEY] = raw
+    return raw
+
+
+def _decode_workspace_text(raw: bytes) -> tuple[str, bool]:
+    has_bom = raw.startswith(UTF8_BOM)
+    payload = raw[len(UTF8_BOM):] if has_bom else raw
+    try:
+        return payload.decode("utf-8"), has_bom
+    except UnicodeDecodeError as exc:
+        raise ValueError("unsupported_encoding") from exc
+
+
+def _encode_workspace_text(text: str, *, has_bom: bool) -> bytes:
+    payload = text.encode("utf-8")
+    return UTF8_BOM + payload if has_bom else payload
+
+
+def _record_file_baseline(
+    context: ToolContext,
+    *,
+    path: str,
+    raw: bytes,
+    text: str,
+    is_partial: bool,
+) -> None:
+    baselines = _get_file_baselines(context)
+    baselines[_baseline_key(path)] = {
+        "hash": _content_hash(raw),
+        "size": len(raw),
+        "line_ending": _line_ending_label(text),
+        "is_partial": bool(is_partial),
+    }
+
+
+def _baseline_error(context: ToolContext, *, path: str, current_raw: bytes) -> str | None:
+    baseline = _get_file_baselines(context).get(_baseline_key(path))
+    if not baseline or baseline.get("is_partial"):
+        return "file_not_read"
+    if baseline.get("hash") != _content_hash(current_raw):
+        return "file_changed_since_read"
+    return None
+
+
+def _workspace_error(message: str, *, error_code: str, **details: Any) -> ToolExecutionResult:
+    payload: dict[str, Any] = {"error": message, "error_code": error_code, "message": message}
+    payload.update(details)
+    return ToolExecutionResult(
+        tool_call_id="",
+        status="error",
+        error_code=error_code,
+        content=to_json(payload),
+        metadata={"error_code": error_code, **details},
+    )
+
+
+def _bounded_unified_diff(path: str, before: str, after: str) -> tuple[str, bool, int, int]:
+    diff_lines = list(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=path,
+            tofile=path,
+            lineterm="",
+        )
+    )
+    additions = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
+    deletions = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
+    diff_text = "".join(diff_lines)
+    if len(diff_text) <= EDIT_DIFF_MAX_CHARS:
+        return diff_text, False, additions, deletions
+    return diff_text[:EDIT_DIFF_MAX_CHARS], True, additions, deletions
 
 
 def _resolve_rg_executable() -> str | None:
@@ -463,6 +558,9 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         total_chars = len(text)
         suggested_start = min(start_line, total_lines)
         suggested_end = min(suggested_start + READ_FILE_MAX_LINES - 1, total_lines)
+        raw = backend.read_bytes(path)
+        baseline_text = raw.decode("utf-8", errors="replace")
+        _record_file_baseline(context, path=path, raw=raw, text=baseline_text, is_partial=True)
         return ToolExecutionResult(
             tool_call_id="",
             status="success",
@@ -493,6 +591,11 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
                 }
             ),
         )
+
+    raw = backend.read_bytes(path)
+    baseline_text = raw.decode("utf-8", errors="replace")
+    is_partial = "start_line" in arguments or "end_line" in arguments
+    _record_file_baseline(context, path=path, raw=raw, text=baseline_text, is_partial=is_partial)
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -626,54 +729,93 @@ def file_str_replace(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
 
 
 def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    if "old_str" in arguments or "new_str" in arguments:
-        message = "Use `old_string` and `new_string`; legacy `old_str`/`new_str` arguments are not supported."
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
+    legacy_keys = {"old_str", "new_str", "max_replacements"} & set(arguments)
+    if legacy_keys:
+        return _workspace_error(
+            "Invalid edit_file arguments. Use old_string/new_string/replace_all.",
             error_code="invalid_arguments",
-            content=to_json({"error_code": "invalid_arguments", "message": message}),
+            invalid_arguments=sorted(legacy_keys),
         )
 
     required_fields = ("path", "old_string", "new_string")
-    if any(field not in arguments for field in required_fields):
+    missing_fields = [field for field in required_fields if field not in arguments]
+    if missing_fields:
         message = "`path`, `old_string`, and `new_string` are required."
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            error_code="invalid_arguments",
-            content=to_json({"error_code": "invalid_arguments", "message": message}),
-        )
+        return _workspace_error(message, error_code="invalid_arguments", missing_arguments=missing_fields)
 
+    backend = context.workspace_backend
     path = str(arguments["path"])
+    if not backend.is_file(path):
+        return _workspace_error(f"file not found: {path}", error_code="file_not_found", path=path)
+
     old_string = str(arguments["old_string"])
     if not old_string:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            error_code="old_string_empty",
-            content=to_json({"error_code": "old_string_empty", "message": "`old_string` cannot be empty."}),
+        return _workspace_error("`old_string` cannot be empty.", error_code="old_string_empty", path=path)
+
+    new_string = str(arguments["new_string"])
+    if old_string == new_string:
+        return _workspace_error(
+            "No changes: old_string and new_string are identical.",
+            error_code="no_changes",
+            path=path,
+        )
+    replace_all = bool(arguments.get("replace_all", False))
+
+    raw = backend.read_bytes(path)
+    try:
+        text, has_bom = _decode_workspace_text(raw)
+    except ValueError:
+        return _workspace_error("Unsupported file encoding for edit_file.", error_code="unsupported_encoding", path=path)
+
+    baseline_issue = _baseline_error(context, path=path, current_raw=raw)
+    if baseline_issue:
+        message = "Read the full file with read_file before editing."
+        if baseline_issue == "file_changed_since_read":
+            message = "File changed since it was last read. Re-read it before editing."
+        return _workspace_error(message, error_code=baseline_issue, path=path)
+
+    actual_old = old_string
+    actual_new = new_string
+    occurrence_count = text.count(actual_old)
+    line_ending = _line_ending_label(text)
+    if occurrence_count == 0 and line_ending == "crlf" and "\r\n" not in old_string:
+        actual_old = old_string.replace("\n", "\r\n")
+        actual_new = new_string.replace("\n", "\r\n")
+        occurrence_count = text.count(actual_old)
+
+    if occurrence_count == 0:
+        return _workspace_error("`old_string` not found in file.", error_code="old_string_not_found", path=path)
+    if occurrence_count > 1 and not replace_all:
+        return _workspace_error(
+            "`old_string` matched multiple locations; make it unique or set replace_all=true.",
+            error_code="old_string_not_unique",
+            path=path,
+            match_count=occurrence_count,
         )
 
-    replace_all = bool(arguments.get("replace_all", False))
-    if not replace_all and context.workspace_backend.is_file(path):
-        text = context.workspace_backend.read_text(path)
-        match_count = text.count(old_string)
-        if match_count > 1:
-            payload = {
-                "error_code": "old_string_not_unique",
-                "message": "`old_string` matched multiple locations; make it unique or set replace_all=true.",
-                "match_count": match_count,
-            }
-            return ToolExecutionResult(
-                tool_call_id="",
-                status="error",
-                error_code="old_string_not_unique",
-                content=to_json(payload),
-                metadata={"match_count": match_count},
-            )
+    if replace_all:
+        updated = text.replace(actual_old, actual_new)
+        replaced_count = occurrence_count
+    else:
+        updated = text.replace(actual_old, actual_new, 1)
+        replaced_count = 1
 
-    translated = dict(arguments)
-    translated["old_str"] = translated.pop("old_string", "")
-    translated["new_str"] = translated.pop("new_string", "")
-    return file_str_replace(context, translated)
+    backend.write_text(path, "\ufeff" + updated if has_bom else updated)
+    updated_raw = _encode_workspace_text(updated, has_bom=has_bom)
+    _record_file_baseline(context, path=path, raw=updated_raw, text=updated, is_partial=False)
+
+    diff, diff_truncated, additions, deletions = _bounded_unified_diff(path, text, updated)
+    return ToolExecutionResult(
+        tool_call_id="",
+        status="success",
+        content=to_json({"ok": True, "path": path, "replaced_count": replaced_count}),
+        metadata={
+            "changed_files": [path],
+            "diff": diff,
+            "diff_truncated": diff_truncated,
+            "additions": additions,
+            "deletions": deletions,
+            "operation": "edit_file",
+            "line_ending": line_ending,
+        },
+    )

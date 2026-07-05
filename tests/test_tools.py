@@ -137,6 +137,10 @@ def test_edit_file_requires_unique_old_string_by_default(registry, tool_context:
     target = tool_context.workspace / "duplicate.txt"
     target.write_text("hello world\nhello agent", encoding="utf-8")
 
+    registry.execute(
+        ToolCall(id="read_duplicate", name=READ_FILE_TOOL_NAME, arguments={"path": "duplicate.txt"}),
+        tool_context,
+    )
     result = registry.execute(
         ToolCall(
             id="edit_duplicate",
@@ -944,25 +948,246 @@ def test_workspace_grep_rejects_unknown_file_type(registry, tool_context: ToolCo
     assert "Unsupported file type" in result.metadata["error"]
 
 
-def test_file_info_and_edit_file(registry, tool_context: ToolContext) -> None:
+def test_file_info_reports_file_metadata(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "edit.txt"
     target.write_text("hello world\nhello agent", encoding="utf-8")
 
     info_call = ToolCall(id="call_info", name=FILE_INFO_TOOL_NAME, arguments={"path": "edit.txt"})
     info_result = registry.execute(info_call, tool_context)
     info_payload = json.loads(info_result.content)
+
     assert info_payload["is_file"] is True
     assert info_payload["size"] > 0
 
-    replace_call = ToolCall(
-        id="call_replace",
-        name=EDIT_FILE_TOOL_NAME,
-        arguments={"path": "edit.txt", "old_string": "hello", "new_string": "hi", "replace_all": True},
+
+def test_edit_file_requires_full_read_before_edit(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "edit.txt"
+    target.write_text("hello world", encoding="utf-8")
+
+    result = registry.execute(
+        ToolCall(
+            id="edit_without_read",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "edit.txt", "old_string": "hello", "new_string": "hi"},
+        ),
+        tool_context,
     )
-    replace_result = registry.execute(replace_call, tool_context)
-    replace_payload = json.loads(replace_result.content)
-    assert replace_payload["replaced_count"] == 2
+
+    payload = json.loads(result.content)
+    assert result.status == "error"
+    assert result.error_code == "file_not_read"
+    assert payload["error_code"] == "file_not_read"
+    assert target.read_text(encoding="utf-8") == "hello world"
+
+
+def test_edit_file_rejects_partial_read_baseline(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "partial.txt"
+    target.write_text("line1\nline2\nline3", encoding="utf-8")
+
+    registry.execute(
+        ToolCall(
+            id="read_partial",
+            name=READ_FILE_TOOL_NAME,
+            arguments={"path": "partial.txt", "start_line": 1, "end_line": 1},
+        ),
+        tool_context,
+    )
+    result = registry.execute(
+        ToolCall(
+            id="edit_partial",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "partial.txt", "old_string": "line2", "new_string": "changed"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "error"
+    assert result.error_code == "file_not_read"
+    assert payload["error_code"] == "file_not_read"
+    assert target.read_text(encoding="utf-8") == "line1\nline2\nline3"
+
+
+def test_edit_file_rejects_file_changed_since_read(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "changed.txt"
+    target.write_text("hello world", encoding="utf-8")
+
+    registry.execute(
+        ToolCall(id="read_changed", name=READ_FILE_TOOL_NAME, arguments={"path": "changed.txt"}),
+        tool_context,
+    )
+    target.write_text("hello user", encoding="utf-8")
+
+    result = registry.execute(
+        ToolCall(
+            id="edit_changed",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "changed.txt", "old_string": "hello", "new_string": "hi"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "error"
+    assert result.error_code == "file_changed_since_read"
+    assert payload["error_code"] == "file_changed_since_read"
+    assert target.read_text(encoding="utf-8") == "hello user"
+
+
+def test_edit_file_replace_all_replaces_every_match(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "replace_all.txt"
+    target.write_text("hello world\nhello agent", encoding="utf-8")
+
+    registry.execute(
+        ToolCall(id="read_replace_all", name=READ_FILE_TOOL_NAME, arguments={"path": "replace_all.txt"}),
+        tool_context,
+    )
+    result = registry.execute(
+        ToolCall(
+            id="edit_replace_all",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={
+                "path": "replace_all.txt",
+                "old_string": "hello",
+                "new_string": "hi",
+                "replace_all": True,
+            },
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "success"
+    assert payload["replaced_count"] == 2
     assert target.read_text(encoding="utf-8") == "hi world\nhi agent"
+
+
+def test_edit_file_success_returns_changed_files_and_diff_metadata(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "diff.txt"
+    target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+    registry.execute(
+        ToolCall(id="read_diff", name=READ_FILE_TOOL_NAME, arguments={"path": "diff.txt"}),
+        tool_context,
+    )
+    result = registry.execute(
+        ToolCall(
+            id="edit_diff",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "diff.txt", "old_string": "beta", "new_string": "BETTA"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert payload["replaced_count"] == 1
+    assert result.metadata["changed_files"] == ["diff.txt"]
+    assert result.metadata["operation"] == "edit_file"
+    assert "-beta" in result.metadata["diff"]
+    assert "+BETTA" in result.metadata["diff"]
+    assert result.metadata["additions"] == 1
+    assert result.metadata["deletions"] == 1
+
+
+def test_edit_file_preserves_crlf_when_old_string_uses_lf(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "crlf.txt"
+    target.write_bytes(b"first\r\nsecond\r\nthird\r\n")
+
+    registry.execute(
+        ToolCall(id="read_crlf", name=READ_FILE_TOOL_NAME, arguments={"path": "crlf.txt"}),
+        tool_context,
+    )
+    result = registry.execute(
+        ToolCall(
+            id="edit_crlf",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "crlf.txt", "old_string": "second\nthird", "new_string": "SECOND\nTHIRD"},
+        ),
+        tool_context,
+    )
+
+    assert result.status == "success"
+    assert target.read_bytes() == b"first\r\nSECOND\r\nTHIRD\r\n"
+    assert result.metadata["line_ending"] == "crlf"
+
+
+def test_write_file_create_new_file_without_read(registry, tool_context: ToolContext) -> None:
+    result = registry.execute(
+        ToolCall(
+            id="write_new",
+            name=WRITE_FILE_TOOL_NAME,
+            arguments={"path": "new.txt", "content": "created"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "success"
+    assert payload["written_chars"] == 7
+    assert result.metadata["changed_files"] == ["new.txt"]
+    assert (tool_context.workspace / "new.txt").read_text(encoding="utf-8") == "created"
+
+
+def test_write_file_overwrite_existing_requires_read_baseline(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+
+    result = registry.execute(
+        ToolCall(
+            id="overwrite_without_read",
+            name=WRITE_FILE_TOOL_NAME,
+            arguments={"path": "existing.txt", "content": "changed"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "error"
+    assert result.error_code == "file_not_read"
+    assert payload["error_code"] == "file_not_read"
+    assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_write_file_overwrite_existing_after_full_read_succeeds(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "overwrite_after_read.txt"
+    target.write_text("original", encoding="utf-8")
+
+    registry.execute(
+        ToolCall(id="read_overwrite", name=READ_FILE_TOOL_NAME, arguments={"path": "overwrite_after_read.txt"}),
+        tool_context,
+    )
+    result = registry.execute(
+        ToolCall(
+            id="overwrite_after_read",
+            name=WRITE_FILE_TOOL_NAME,
+            arguments={"path": "overwrite_after_read.txt", "content": "changed"},
+        ),
+        tool_context,
+    )
+
+    assert result.status == "success"
+    assert result.metadata["changed_files"] == ["overwrite_after_read.txt"]
+    assert target.read_text(encoding="utf-8") == "changed"
+
+
+def test_write_file_append_returns_changed_files_metadata(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "append.txt"
+    target.write_text("a", encoding="utf-8")
+
+    result = registry.execute(
+        ToolCall(
+            id="append_without_read",
+            name=WRITE_FILE_TOOL_NAME,
+            arguments={"path": "append.txt", "content": "b", "append": True},
+        ),
+        tool_context,
+    )
+
+    assert result.status == "success"
+    assert result.metadata["changed_files"] == ["append.txt"]
+    assert result.metadata["operation"] == "write_file"
+    assert result.metadata["append"] is True
+    assert target.read_text(encoding="utf-8") == "ab"
 
 
 def test_compress_memory_writes_note(registry, tool_context: ToolContext) -> None:
