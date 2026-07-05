@@ -24,7 +24,7 @@ from vv_agent.tools.handlers import search as search_handler
 from vv_agent.tools.handlers import workspace_io
 from vv_agent.tools.registry import ToolNotFoundError
 from vv_agent.types import ToolCall, ToolDirective
-from vv_agent.workspace import LocalWorkspaceBackend
+from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
 TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
 
@@ -528,6 +528,33 @@ def test_find_files_supports_offset_sort_and_sensitive_filter(registry, tool_con
     assert ".env" in included_payload["files"]
 
 
+def test_find_files_non_local_backend_honors_scan_limit(registry, tmp_path: Path) -> None:
+    backend = MemoryWorkspaceBackend()
+    for index in range(5):
+        backend.write_text(f"file_{index}.txt", "x")
+    context = ToolContext(
+        workspace=tmp_path,
+        shared_state={"todo_list": []},
+        cycle_index=1,
+        workspace_backend=backend,
+    )
+
+    result = registry.execute(
+        ToolCall(
+            id="find_memory_scan_limit",
+            name=FIND_FILES_TOOL_NAME,
+            arguments={"max_results": 2, "scan_limit": 2, "sort": "path_asc"},
+        ),
+        context,
+    )
+    payload = json.loads(result.content)
+
+    assert payload["files"] == ["file_0.txt", "file_1.txt"]
+    assert payload["count"] == 2
+    assert payload["count_is_estimate"] is True
+    assert payload["scan_limit"] == 2
+
+
 def test_read_file_can_show_line_numbers(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "notes.txt"
     target.write_text("alpha\nbeta\ngamma", encoding="utf-8")
@@ -664,6 +691,58 @@ def test_search_files_omits_sensitive_paths_by_default(registry, tool_context: T
         tool_context,
     )
     assert included.metadata["files"] == [".env", "visible.txt"]
+
+
+def test_search_files_rg_excludes_sensitive_globs_before_scanning(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tool_context.workspace / "visible.txt").write_text("TOKEN=public", encoding="utf-8")
+    (tool_context.workspace / "private.pem").write_text("TOKEN=secret", encoding="utf-8")
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = io.StringIO(
+                "\n".join(
+                    [
+                        '{"type":"begin","data":{"path":{"text":"visible.txt"}}}',
+                        (
+                            '{"type":"match","data":{"path":{"text":"visible.txt"},'
+                            '"lines":{"text":"TOKEN=public\\n"},"line_number":1,'
+                            '"submatches":[{"start":0,"end":5}]}}'
+                        ),
+                        '{"type":"summary","data":{"stats":{"searches":1}}}',
+                    ]
+                )
+                + "\n"
+            )
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    def _fake_popen(*args, **kwargs):
+        command = args[0]
+        assert "--glob" in command
+        assert "!**/*.pem" in command
+        return _FakeProcess()
+
+    monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(search_handler.subprocess, "Popen", _fake_popen)
+
+    result = registry.execute(
+        ToolCall(id="search_sensitive_rg", name=SEARCH_FILES_TOOL_NAME, arguments={"pattern": "TOKEN"}),
+        tool_context,
+    )
+
+    assert result.metadata["files"] == ["visible.txt"]
+    assert result.metadata["summary"]["files_searched"] == 1
+    assert result.metadata["summary"]["total_matches"] == 1
+    assert result.metadata["sensitive_files_omitted"] == 1
 
 
 def test_search_files_uses_smart_case_for_lowercase_patterns(registry, tool_context: ToolContext) -> None:
@@ -1014,6 +1093,63 @@ def test_search_files_prefers_ripgrep_when_available(
     assert payload["files"] == ["a.py", "b.py"]
     assert payload["summary"]["total_matches"] == 2
     assert payload["summary"]["files_with_matches"] == 2
+
+
+def test_search_files_rg_files_searched_uses_summary_searches_like_fallback(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tool_context.workspace / "hit.txt").write_text("token\n", encoding="utf-8")
+    (tool_context.workspace / "miss.txt").write_text("nothing\n", encoding="utf-8")
+
+    monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: None)
+    fallback = registry.execute(
+        ToolCall(
+            id="search_fallback_count",
+            name=SEARCH_FILES_TOOL_NAME,
+            arguments={"pattern": "token", "output_mode": "content"},
+        ),
+        tool_context,
+    )
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = io.StringIO(
+                "\n".join(
+                    [
+                        '{"type":"begin","data":{"path":{"text":"hit.txt"}}}',
+                        (
+                            '{"type":"match","data":{"path":{"text":"hit.txt"},'
+                            '"lines":{"text":"token\\n"},"line_number":1,'
+                            '"submatches":[{"start":0,"end":5}]}}'
+                        ),
+                        '{"type":"summary","data":{"stats":{"searches":2}}}',
+                    ]
+                )
+                + "\n"
+            )
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(search_handler.subprocess, "Popen", lambda *args, **kwargs: _FakeProcess())
+    rg_result = registry.execute(
+        ToolCall(
+            id="search_rg_count",
+            name=SEARCH_FILES_TOOL_NAME,
+            arguments={"pattern": "token", "output_mode": "content"},
+        ),
+        tool_context,
+    )
+
+    assert fallback.metadata["summary"]["files_searched"] == 2
+    assert rg_result.metadata["summary"]["files_searched"] == fallback.metadata["summary"]["files_searched"]
 
 
 def test_search_files_accepts_ripgrep_returncode_2_with_results(

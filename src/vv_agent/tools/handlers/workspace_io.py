@@ -504,9 +504,11 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
                 f for f in all_files
                 if not any(part.startswith(".") for part in Path(f).parts)
             ]
-        total_count = len(all_files)
-        files = sorted(all_files)
-        truncated = False
+        all_files = sorted(all_files)
+        scan_limited = len(all_files) > scan_limit
+        files = all_files[:scan_limit] if scan_limited else all_files
+        total_count = len(files)
+        truncated = scan_limited
         effective_sort = "path_asc"
 
     sensitive_files_omitted = 0

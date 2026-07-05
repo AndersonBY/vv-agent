@@ -97,6 +97,66 @@ _COMMON_IGNORED_ROOTS = frozenset(
         "vendor",
     }
 )
+_SENSITIVE_RG_EXCLUDE_GLOBS = (
+    "!**/.env",
+    "!**/.npmrc",
+    "!**/.pypirc",
+    "!**/.netrc",
+    "!**/credentials",
+    "!**/id_rsa",
+    "!**/id_dsa",
+    "!**/id_ecdsa",
+    "!**/id_ed25519",
+    "!**/*.key",
+    "!**/*.pem",
+    "!**/*.p8",
+    "!**/*.p12",
+    "!**/*.pfx",
+    "!**/secret.*",
+    "!**/secrets.*",
+    "!**/config/**/*token*",
+    "!**/config/**/*credential*",
+    "!**/config/**/*secret*",
+    "!**/config/**/*private_key*",
+    "!**/configs/**/*token*",
+    "!**/configs/**/*credential*",
+    "!**/configs/**/*secret*",
+    "!**/configs/**/*private_key*",
+    "!**/keys/**/*token*",
+    "!**/keys/**/*credential*",
+    "!**/keys/**/*secret*",
+    "!**/keys/**/*private_key*",
+    "!**/secrets/**/*token*",
+    "!**/secrets/**/*credential*",
+    "!**/secrets/**/*secret*",
+    "!**/secrets/**/*private_key*",
+    "!**/.ssh/**/*token*",
+    "!**/.ssh/**/*credential*",
+    "!**/.ssh/**/*secret*",
+    "!**/.ssh/**/*private_key*",
+    "!**/.aws/**/*token*",
+    "!**/.aws/**/*credential*",
+    "!**/.aws/**/*secret*",
+    "!**/.aws/**/*private_key*",
+    "!**/.gcp/**/*token*",
+    "!**/.gcp/**/*credential*",
+    "!**/.gcp/**/*secret*",
+    "!**/.gcp/**/*private_key*",
+)
+_SENSITIVE_RG_COVERED_EXACT_NAMES = {
+    ".env",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "credentials",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+}
+_SENSITIVE_RG_COVERED_SUFFIXES = {".key", ".pem", ".p8", ".p12", ".pfx"}
+_SENSITIVE_RG_COVERED_CONFIG_DIRS = {".config", "config", "configs", "keys", "secrets", ".ssh", ".aws", ".gcp"}
+_SENSITIVE_RG_COVERED_NAME_TOKENS = ("credential", "credentials", "secret", "secrets", "token", "private_key")
 
 
 def _to_int(value: Any, *, name: str, min_value: int = 0) -> int:
@@ -129,14 +189,29 @@ def _slice_results(items: list[Any], *, offset: int, head_limit: int) -> tuple[l
     return sliced[:head_limit], len(sliced) > head_limit
 
 
-def _count_sensitive_candidates(raw_paths: list[str], file_type: str | None) -> int:
-    sensitive_paths = {
+def _sensitive_candidate_paths(raw_paths: list[str], file_type: str | None) -> list[str]:
+    return [
         raw_path.replace("\\", "/")
         for raw_path in raw_paths
         if _matches_file_type(raw_path.replace("\\", "/"), file_type)
         and is_sensitive_path(raw_path.replace("\\", "/"))
-    }
-    return len(sensitive_paths)
+    ]
+
+
+def _sensitive_path_is_covered_by_rg_excludes(path: str) -> bool:
+    parts = PurePosixPath(path.replace("\\", "/").strip("/")).parts
+    if not parts:
+        return False
+    name = parts[-1].lower()
+    if name in _SENSITIVE_RG_COVERED_EXACT_NAMES:
+        return True
+    if name.startswith(("secret.", "secrets.")):
+        return True
+    if any(name.endswith(suffix) for suffix in _SENSITIVE_RG_COVERED_SUFFIXES):
+        return True
+    if any(token in name for token in _SENSITIVE_RG_COVERED_NAME_TOKENS):
+        return any(part.lower() in _SENSITIVE_RG_COVERED_CONFIG_DIRS for part in parts[:-1])
+    return False
 
 
 def _resolve_rg_executable() -> str | None:
@@ -236,6 +311,7 @@ def _search_files_local_rg(
     context_after: int,
     include_hidden: bool,
     include_ignored: bool,
+    include_sensitive: bool,
     literal: bool,
 ) -> tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None:
     rg_executable = _resolve_rg_executable()
@@ -276,6 +352,9 @@ def _search_files_local_rg(
         command.extend(["--after-context", str(context_after)])
     if glob_pattern and glob_pattern != "**/*":
         command.extend(["--glob", glob_pattern])
+    if not include_sensitive:
+        for sensitive_glob in _SENSITIVE_RG_EXCLUDE_GLOBS:
+            command.extend(["--glob", sensitive_glob])
     if base_is_workspace_root and not include_ignored:
         for ignored_name in ignored_root_names:
             command.extend(["--glob", f"!{ignored_name}/**"])
@@ -307,6 +386,7 @@ def _search_files_local_rg(
     file_counts: dict[str, int] = {}
     line_rows: dict[tuple[str, int], dict[str, Any]] = {}
     content_rows: list[dict[str, Any]] = []
+    summary_searches: int | None = None
 
     try:
         for raw_line in process.stdout:
@@ -320,7 +400,14 @@ def _search_files_local_rg(
 
             event_type = event.get("type")
             data = event.get("data")
-            if not isinstance(data, dict) or event_type == "summary":
+            if not isinstance(data, dict):
+                continue
+            if event_type == "summary":
+                stats = data.get("stats")
+                if isinstance(stats, dict):
+                    searches = stats.get("searches")
+                    if isinstance(searches, int):
+                        summary_searches = searches
                 continue
 
             rel_from_base = _decode_rg_field(data.get("path"))
@@ -425,7 +512,12 @@ def _search_files_local_rg(
 
     files_with_matches = sorted(files_with_matches_set)
     total_matches = sum(file_counts.values())
-    files_searched = len(searched_files) if searched_files else len(files_with_matches)
+    if summary_searches is not None:
+        files_searched = summary_searches
+    elif searched_files:
+        files_searched = len(searched_files)
+    else:
+        files_searched = len(files_with_matches)
     return files_searched, total_matches, files_with_matches, file_counts, content_rows
 
 
@@ -567,14 +659,20 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
     file_counts: dict[str, int] = {}
     content_rows: list[dict[str, Any]] = []
     sensitive_files_omitted = 0
+    sensitive_candidates: list[str] = []
 
     if not include_sensitive:
         raw_sensitive_candidates = [path] if explicit_file_target else backend.list_files(path, glob_pattern)
-        sensitive_files_omitted = _count_sensitive_candidates(raw_sensitive_candidates, file_type)
+        sensitive_candidates = _sensitive_candidate_paths(raw_sensitive_candidates, file_type)
+        sensitive_files_omitted = len(set(sensitive_candidates))
 
     rg_result: tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None = None
     local_root = getattr(backend, "root", None)
-    if isinstance(local_root, Path) and not explicit_file_target:
+    can_exclude_sensitive_in_rg = include_sensitive or all(
+        _sensitive_path_is_covered_by_rg_excludes(candidate)
+        for candidate in sensitive_candidates
+    )
+    if isinstance(local_root, Path) and not explicit_file_target and can_exclude_sensitive_in_rg:
         rg_result = _search_files_local_rg(
             context,
             path=path,
@@ -588,6 +686,7 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
             context_after=context_after,
             include_hidden=include_hidden,
             include_ignored=include_ignored,
+            include_sensitive=include_sensitive,
             literal=literal,
         )
 
