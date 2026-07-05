@@ -379,14 +379,15 @@ config = RunConfig(
 
 ## Workspace Backends
 
-Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All built-in file tools (`read_file`, `write_file`, `list_files`, etc.) go through this abstraction.
+Workspace file I/O is delegated to a pluggable `WorkspaceBackend` protocol. All built-in file tools (`read_file`, `write_file`, `find_files`, etc.) go through this abstraction.
 
-`list_files` includes built-in safety defaults for large workspaces:
+`find_files` includes built-in safety defaults for large workspaces:
 
-- Returns at most `500` paths per call by default (`max_results` can tune this, with hard cap).
+- Returns at most `100` paths per call by default (`max_results` can tune this, with hard cap).
 - Uses `ripgrep` (`rg`) for fast local traversal when available, with automatic fallback to Python walk.
-- `workspace_grep` also uses `rg` for local workspaces (with Python fallback), defaults to smart-case matching (lowercase patterns are case-insensitive; patterns with uppercase stay case-sensitive), and skips hidden/common dependency roots unless explicitly included.
-- `workspace_grep` returns model-facing grep text in `ToolExecutionResult.content`, while structured matches/counts live in `ToolExecutionResult.metadata`.
+- `search_files` also uses `rg` for local workspaces (with Python fallback), defaults to smart-case matching (lowercase patterns are case-insensitive; patterns with uppercase stay case-sensitive), and skips hidden/common dependency roots unless explicitly included.
+- `search_files` returns model-facing search text in `ToolExecutionResult.content`, while structured files/matches/counts live in `ToolExecutionResult.metadata`.
+- Sensitive files such as `.env` and private keys are omitted by default; set `include_sensitive=true` to opt in.
 - When listing from workspace root, common dependency/cache roots (for example `node_modules`, `.venv`, `.git`) are summarized instead of expanded.
 - You can still inspect those paths explicitly by setting `path` to that directory (or by setting `include_ignored=true`).
 - Supports `scan_limit` to stop early on very large trees; when triggered, response sets `count_is_estimate=true`.
@@ -582,7 +583,7 @@ Priority is strict:
 
 ## Built-in Tools
 
-`list_files`, `file_info`, `read_file`, `write_file`, `edit_file`, `workspace_grep`, `compress_memory`, `todo_write`, `task_finish`, `ask_user`, `bash`, `read_image`, `create_sub_task`, `sub_task_status`.
+`find_files`, `file_info`, `read_file`, `write_file`, `edit_file`, `search_files`, `compress_memory`, `todo_write`, `task_finish`, `ask_user`, `bash`, `read_image`, `create_sub_task`, `sub_task_status`.
 
 Custom tools can be registered via `ToolRegistry.register()`.
 

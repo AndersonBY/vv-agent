@@ -66,7 +66,7 @@ def test_assistant_message_preserves_tool_call_extra_content() -> None:
                 "id": "call_1",
                 "type": "function",
                 "function": {
-                    "name": "default_api:list_files",
+                    "name": "default_api:find_files",
                     "arguments": '{"path":"."}',
                 },
                 "extra_content": {
@@ -86,7 +86,7 @@ def test_cycle_runner_serializes_tool_call_extra_content() -> None:
         [
             ToolCall(
                 id="call_1",
-                name="default_api:list_files",
+                name="default_api:find_files",
                 arguments={"path": "."},
                 extra_content={"google": {"thought_signature": "sig_123"}},
             )

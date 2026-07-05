@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from vv_agent.constants import (
     CREATE_SUB_TASK_TOOL_NAME,
+    FIND_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
+    SEARCH_FILES_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
-    WORKSPACE_GREP_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
 from vv_agent.tools import build_default_registry
@@ -50,18 +51,79 @@ def test_create_sub_task_schema_uses_agent_id_only() -> None:
     assert "agent_id" in parameters["required"]
 
 
-def test_workspace_grep_schema_uses_canonical_limit_and_case_fields_only() -> None:
+def test_search_and_find_tools_replace_old_workspace_search_names() -> None:
     registry = build_default_registry()
-    schema = registry.get_schema(WORKSPACE_GREP_TOOL_NAME)
+    names = {schema["function"]["name"] for schema in registry.list_openai_schemas()}
 
-    properties = schema["function"]["parameters"]["properties"]
+    assert SEARCH_FILES_TOOL_NAME in names
+    assert FIND_FILES_TOOL_NAME in names
+    assert "workspace_grep" not in names
+    assert "list_files" not in names
+    assert SEARCH_FILES_TOOL_NAME in WORKSPACE_TOOLS
+    assert FIND_FILES_TOOL_NAME in WORKSPACE_TOOLS
+    assert "workspace_grep" not in WORKSPACE_TOOLS
+    assert "list_files" not in WORKSPACE_TOOLS
+
+
+def test_search_files_schema_uses_clean_search_contract() -> None:
+    registry = build_default_registry()
+    schema = registry.get_schema(SEARCH_FILES_TOOL_NAME)
+
+    parameters = schema["function"]["parameters"]
+    properties = parameters["properties"]
     description = schema["function"]["description"]
 
-    assert "head_limit" in properties
-    assert "case_sensitive" in properties
+    assert parameters["required"] == ["pattern"]
+    assert set(properties) == {
+        "pattern",
+        "path",
+        "glob",
+        "include_hidden",
+        "include_ignored",
+        "include_sensitive",
+        "output_mode",
+        "literal",
+        "b",
+        "a",
+        "c",
+        "n",
+        "type",
+        "offset",
+        "head_limit",
+        "multiline",
+        "case_sensitive",
+    }
+    assert properties["output_mode"]["enum"] == ["files_with_matches", "content", "count"]
+    assert "Default is 'files_with_matches'" in properties["output_mode"]["description"]
+    assert "literal" in properties
+    assert "offset" in properties
+    assert "include_sensitive" in properties
+    assert "workspace_grep" not in description
     assert "max_results" not in properties
     assert "i" not in properties
-    assert "max_results" not in description
+
+
+def test_find_files_schema_uses_glob_only_contract() -> None:
+    registry = build_default_registry()
+    schema = registry.get_schema(FIND_FILES_TOOL_NAME)
+
+    parameters = schema["function"]["parameters"]
+    properties = parameters["properties"]
+
+    assert parameters["required"] == []
+    assert set(properties) == {
+        "path",
+        "glob",
+        "include_hidden",
+        "include_ignored",
+        "include_sensitive",
+        "sort",
+        "offset",
+        "max_results",
+        "scan_limit",
+    }
+    assert "pattern" not in properties
+    assert properties["sort"]["enum"] == ["modified_desc", "path_asc"]
 
 
 def test_sub_task_status_schema_supports_long_wait_without_polling() -> None:

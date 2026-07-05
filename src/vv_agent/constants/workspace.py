@@ -12,25 +12,25 @@ from vv_agent.constants.tool_names import (
     CREATE_SUB_TASK_TOOL_NAME,
     EDIT_FILE_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
-    LIST_FILES_TOOL_NAME,
+    FIND_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
+    SEARCH_FILES_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
-    WORKSPACE_GREP_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
 
 ToolSchema = dict[str, Any]
 
 WORKSPACE_TOOLS = [
-    LIST_FILES_TOOL_NAME,
+    FIND_FILES_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
     EDIT_FILE_TOOL_NAME,
-    WORKSPACE_GREP_TOOL_NAME,
+    SEARCH_FILES_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
 ]
@@ -137,12 +137,12 @@ PARAMETERS:
             },
         },
     },
-    LIST_FILES_TOOL_NAME: {
+    FIND_FILES_TOOL_NAME: {
         "type": "function",
         "function": {
-            "name": LIST_FILES_TOOL_NAME,
+            "name": FIND_FILES_TOOL_NAME,
             "description": (
-                "List files in workspace with optional path and glob filtering. "
+                "Find files in workspace with optional path and glob filtering. "
                 "Large results are truncated, and common dependency/cache directories "
                 "(like node_modules/.venv) are summarized by default when listing from workspace root."
             ),
@@ -172,11 +172,28 @@ PARAMETERS:
                             "dependency/cache directories. Default false."
                         ),
                     },
+                    "include_sensitive": {
+                        "type": "boolean",
+                        "description": "Include sensitive paths such as .env and private keys. Default false.",
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["modified_desc", "path_asc"],
+                        "description": (
+                            "Sort order. Default modified_desc for local files when mtimes are available, "
+                            "otherwise path_asc."
+                        ),
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Skip the first N files after filtering and sorting. Default 0.",
+                    },
                     "max_results": {
                         "type": "integer",
                         "description": (
                             "Maximum number of file paths returned in one call. "
-                            "Default 500; larger values are capped."
+                            "Default 100; larger values are capped."
                         ),
                     },
                     "scan_limit": {
@@ -211,26 +228,28 @@ PARAMETERS:
             },
         },
     },
-    WORKSPACE_GREP_TOOL_NAME: {
+    SEARCH_FILES_TOOL_NAME: {
         "type": "function",
         "function": {
-            "name": WORKSPACE_GREP_TOOL_NAME,
-            "description": """Search workspace files with regex (backend-style grep semantics).
+            "name": SEARCH_FILES_TOOL_NAME,
+            "description": """Search workspace files with regex or literal text.
 
 OUTPUT MODES:
-- `content` (default): show matching lines (supports context and line numbers)
-- `files_with_matches`: show only file paths
+- `files_with_matches` (default): show only file paths
+- `content`: show matching lines (supports context and line numbers)
 - `count`: show per-file match counts
 
 FILTERS:
 - `path` + `glob`: scope the search root and file pattern
 - `type`: language/file-type shortcut (py/js/ts/md/json/...)
+- `literal`: exact text search instead of regex
 - default matching uses smart-case: all-lowercase patterns search case-insensitively
   and patterns containing uppercase stay case-sensitive
 - `case_sensitive`: explicitly override smart-case behavior
 - `multiline`: let `.` match newlines and allow multi-line patterns
 - `include_hidden`: include hidden files/directories (default false)
 - `include_ignored`: include common dependency/cache roots at workspace root (default false)
+- `include_sensitive`: include sensitive files such as .env/private keys (default false)
 
 CONTENT OPTIONS (only for `content` mode):
 - `b`: lines before each match
@@ -249,7 +268,7 @@ Guidance:
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Regex pattern to search for.",
+                        "description": "Regex pattern or literal text to search for.",
                     },
                     "path": {
                         "type": "string",
@@ -274,10 +293,18 @@ Guidance:
                             "dependency/cache directories. Default false."
                         ),
                     },
+                    "include_sensitive": {
+                        "type": "boolean",
+                        "description": "Include sensitive paths such as .env and private keys. Default false.",
+                    },
                     "output_mode": {
                         "type": "string",
-                        "enum": ["content", "files_with_matches", "count"],
-                        "description": "Search output mode. Default is 'content'.",
+                        "enum": ["files_with_matches", "content", "count"],
+                        "description": "Search output mode. Default is 'files_with_matches'.",
+                    },
+                    "literal": {
+                        "type": "boolean",
+                        "description": "Treat pattern as exact text instead of regex. Default false.",
                     },
                     "b": {
                         "type": "integer",
@@ -299,10 +326,18 @@ Guidance:
                         "type": "string",
                         "description": "File type shortcut (e.g. py/js/ts/md/json).",
                     },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Skip the first N result rows or entries after sorting. Default 0.",
+                    },
                     "head_limit": {
                         "type": "integer",
-                        "minimum": 1,
-                        "description": "Limit to first N output rows/entries.",
+                        "minimum": 0,
+                        "description": (
+                            "Limit to first N output rows/entries. "
+                            "Default 250; 0 means unlimited subject to hard caps."
+                        ),
                     },
                     "multiline": {
                         "type": "boolean",

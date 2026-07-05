@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
+from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
 from vv_agent.types import ToolExecutionResult
 
 FILE_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
@@ -119,6 +120,25 @@ def _result_error(message: str) -> ToolExecutionResult:
     )
 
 
+def _slice_results(items: list[Any], *, offset: int, head_limit: int) -> tuple[list[Any], bool]:
+    if offset >= len(items):
+        return [], False
+    sliced = items[offset:]
+    if head_limit == 0:
+        return sliced, False
+    return sliced[:head_limit], len(sliced) > head_limit
+
+
+def _count_sensitive_candidates(raw_paths: list[str], file_type: str | None) -> int:
+    sensitive_paths = {
+        raw_path.replace("\\", "/")
+        for raw_path in raw_paths
+        if _matches_file_type(raw_path.replace("\\", "/"), file_type)
+        and is_sensitive_path(raw_path.replace("\\", "/"))
+    }
+    return len(sensitive_paths)
+
+
 def _resolve_rg_executable() -> str | None:
     global _RG_EXECUTABLE_CACHE
 
@@ -202,7 +222,7 @@ def _format_output_path(context: ToolContext, candidate_path: Path) -> str:
         return str(resolved)
 
 
-def _workspace_grep_local_rg(
+def _search_files_local_rg(
     context: ToolContext,
     *,
     path: str,
@@ -216,6 +236,7 @@ def _workspace_grep_local_rg(
     context_after: int,
     include_hidden: bool,
     include_ignored: bool,
+    literal: bool,
 ) -> tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None:
     rg_executable = _resolve_rg_executable()
     if not rg_executable:
@@ -247,6 +268,8 @@ def _workspace_grep_local_rg(
         command.append("-i")
     if multiline_mode:
         command.extend(["--multiline", "--multiline-dotall"])
+    if literal:
+        command.append("--fixed-strings")
     if context_before > 0:
         command.extend(["--before-context", str(context_before)])
     if context_after > 0:
@@ -481,20 +504,20 @@ def _cap_structured_items(
     return capped, False
 
 
-def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     pattern = str(arguments.get("pattern", "")).strip()
     if not pattern:
         return _result_error("Search pattern is required")
 
-    output_mode = str(arguments.get("output_mode", "content"))
+    output_mode = str(arguments.get("output_mode", "files_with_matches"))
     if output_mode not in _OUTPUT_MODES:
         return _result_error(
             f"Invalid `output_mode`: {output_mode}. Supported: {', '.join(sorted(_OUTPUT_MODES))}"
         )
 
     try:
-        head_limit_raw = arguments.get("head_limit")
-        head_limit = _to_int(head_limit_raw, name="head_limit", min_value=1) if head_limit_raw is not None else None
+        head_limit = _to_int(arguments.get("head_limit", 250), name="head_limit", min_value=0)
+        offset = _to_int(arguments.get("offset", 0), name="offset", min_value=0)
         lines_before = _to_int(arguments["b"], name="b") if "b" in arguments else None
         lines_after = _to_int(arguments["a"], name="a") if "a" in arguments else None
         context_lines = _to_int(arguments["c"], name="c") if "c" in arguments else None
@@ -513,6 +536,8 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     backend = context.workspace_backend
     include_hidden = bool(arguments.get("include_hidden", False))
     include_ignored = bool(arguments.get("include_ignored", False))
+    include_sensitive = bool(arguments.get("include_sensitive", False))
+    literal = bool(arguments.get("literal", False))
     root_listing = _is_workspace_root(path)
     explicit_file_target = backend.is_file(path)
 
@@ -527,8 +552,9 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     regex_flags = re.IGNORECASE if case_insensitive else 0
     if multiline_mode:
         regex_flags |= re.MULTILINE | re.DOTALL
+    regex_pattern = re.escape(pattern) if literal else pattern
     try:
-        regex = re.compile(pattern, regex_flags)
+        regex = re.compile(regex_pattern, regex_flags)
     except re.error as exc:
         return _result_error(f"Invalid regular expression: {exc}")
 
@@ -540,15 +566,20 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     files_with_matches: list[str] = []
     file_counts: dict[str, int] = {}
     content_rows: list[dict[str, Any]] = []
+    sensitive_files_omitted = 0
+
+    if not include_sensitive:
+        raw_sensitive_candidates = [path] if explicit_file_target else backend.list_files(path, glob_pattern)
+        sensitive_files_omitted = _count_sensitive_candidates(raw_sensitive_candidates, file_type)
 
     rg_result: tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None = None
     local_root = getattr(backend, "root", None)
     if isinstance(local_root, Path) and not explicit_file_target:
-        rg_result = _workspace_grep_local_rg(
+        rg_result = _search_files_local_rg(
             context,
             path=path,
             glob_pattern=glob_pattern,
-            pattern=pattern,
+            pattern=pattern if literal else regex_pattern,
             output_mode=output_mode,
             file_type=file_type,
             case_insensitive=case_insensitive,
@@ -557,15 +588,24 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
             context_after=context_after,
             include_hidden=include_hidden,
             include_ignored=include_ignored,
+            literal=literal,
         )
 
     if rg_result is not None:
         files_searched, total_matches, files_with_matches, file_counts, content_rows = rg_result
+        if not include_sensitive:
+            sensitive_paths = {file_path for file_path in files_with_matches if is_sensitive_path(file_path)}
+            files_with_matches = [file_path for file_path in files_with_matches if file_path not in sensitive_paths]
+            file_counts = {file_path: count for file_path, count in file_counts.items() if file_path not in sensitive_paths}
+            content_rows = [row for row in content_rows if row["path"] not in sensitive_paths]
+            total_matches = sum(file_counts.values())
     else:
         raw_paths = [path] if explicit_file_target else backend.list_files(path, glob_pattern)
         for raw_rel_path in raw_paths:
             rel_path = raw_rel_path.replace("\\", "/")
             if not _matches_file_type(rel_path, file_type):
+                continue
+            if not include_sensitive and is_sensitive_path(rel_path):
                 continue
             if not explicit_file_target and not include_hidden and _is_hidden_path(rel_path):
                 continue
@@ -648,14 +688,21 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
 
     metadata: dict[str, Any] = {
         "output_mode": output_mode,
+        "pattern": pattern,
+        "path": path,
+        "glob": glob_pattern,
+        "type": file_type,
+        "literal": literal,
+        "offset": offset,
+        "head_limit": head_limit,
         "summary": {
             "files_searched": files_searched,
             "files_with_matches": len(files_with_matches),
             "total_matches": total_matches,
         },
     }
-    if head_limit is not None:
-        metadata["head_limit"] = head_limit
+    if sensitive_files_omitted:
+        metadata["sensitive_files_omitted"] = sensitive_files_omitted
 
     total_result_items = 0
     returned_count = 0
@@ -664,8 +711,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
 
     if output_mode == "files_with_matches":
         total_result_items = len(files_with_matches)
-        visible_files = files_with_matches[:head_limit] if head_limit is not None else files_with_matches
-        head_limited = len(visible_files) < total_result_items
+        visible_files, head_limited = _slice_results(files_with_matches, offset=offset, head_limit=head_limit)
         visible_files, structured_capped = _cap_structured_items(
             visible_files,
             estimator=lambda item: _estimate_file_path_size(str(item)),
@@ -683,8 +729,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
     elif output_mode == "count":
         count_items = sorted(file_counts.items())
         total_result_items = len(count_items)
-        visible_items = count_items[:head_limit] if head_limit is not None else count_items
-        head_limited = len(visible_items) < total_result_items
+        visible_items, head_limited = _slice_results(count_items, offset=offset, head_limit=head_limit)
         visible_items, structured_capped = _cap_structured_items(
             visible_items,
             estimator=lambda item: _estimate_file_count_size((str(item[0]), int(item[1]))),
@@ -700,8 +745,7 @@ def workspace_grep(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
         metadata["file_counts"] = {file_path: count for file_path, count in visible_items}
     else:
         total_result_items = len(content_rows)
-        visible_rows = content_rows[:head_limit] if head_limit is not None else content_rows
-        head_limited = len(visible_rows) < total_result_items
+        visible_rows, head_limited = _slice_results(content_rows, offset=offset, head_limit=head_limit)
         visible_rows, structured_capped = _cap_structured_items(
             visible_rows,
             estimator=lambda item: _estimate_match_row_size(item if isinstance(item, dict) else {}),

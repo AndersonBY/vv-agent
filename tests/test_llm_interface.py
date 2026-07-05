@@ -277,7 +277,7 @@ def test_llm_stream_preserves_gemini3_tool_call_extra_content(monkeypatch) -> No
                 index=0,
                 id="tc1",
                 function=SimpleNamespace(
-                    name="default_api:list_files",
+                    name="default_api:find_files",
                     arguments='{"path": "."}',
                 ),
                 extra_content={"google": {"thought_signature": "sig_123"}},

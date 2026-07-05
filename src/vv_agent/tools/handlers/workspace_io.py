@@ -12,6 +12,7 @@ from typing import Any
 
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
+from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
 from vv_agent.types import ToolExecutionResult
 
 READ_FILE_MAX_LINES = 2_000
@@ -19,7 +20,7 @@ READ_FILE_MAX_CHARS = 50_000
 FILE_BASELINES_STATE_KEY = "_workspace_file_baselines"
 EDIT_DIFF_MAX_CHARS = 12_000
 UTF8_BOM = b"\xef\xbb\xbf"
-LIST_FILES_DEFAULT_MAX_RESULTS = 500
+LIST_FILES_DEFAULT_MAX_RESULTS = 100
 LIST_FILES_HARD_MAX_RESULTS = 5_000
 LIST_FILES_DEFAULT_SCAN_LIMIT = 50_000
 LIST_FILES_IGNORED_ROOTS = frozenset(
@@ -433,28 +434,58 @@ def _list_files_local_fast(
     return matched_files, matched_count, truncated, scan_limited, ignored_roots_summary
 
 
-def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+def _sort_find_files(context: ToolContext, files: list[str], sort: str) -> list[str]:
+    if sort == "path_asc":
+        return sorted(files)
+
+    def key(file_path: str) -> tuple[float, str]:
+        try:
+            stat = context.resolve_workspace_path(file_path).stat()
+            return (-stat.st_mtime, file_path)
+        except OSError:
+            return (0.0, file_path)
+
+    return sorted(files, key=key)
+
+
+def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+    if "pattern" in arguments:
+        return _workspace_error(
+            "`glob` is required for file patterns; `pattern` is not supported",
+            error_code="invalid_arguments",
+        )
+
     backend = context.workspace_backend
     path = str(arguments.get("path", "."))
     glob_pattern = str(arguments.get("glob", "**/*"))
     include_hidden = bool(arguments.get("include_hidden", False))
     include_ignored = bool(arguments.get("include_ignored", False))
+    include_sensitive = bool(arguments.get("include_sensitive", False))
+    sort = str(arguments.get("sort", "modified_desc"))
     max_results_raw = arguments.get("max_results", LIST_FILES_DEFAULT_MAX_RESULTS)
+    offset_raw = arguments.get("offset", 0)
     scan_limit_raw = arguments.get("scan_limit", LIST_FILES_DEFAULT_SCAN_LIMIT)
+    if sort not in {"modified_desc", "path_asc"}:
+        return _workspace_error(
+            "`sort` must be modified_desc or path_asc",
+            error_code="invalid_arguments",
+        )
     try:
         max_results = int(max_results_raw)
+        offset = int(offset_raw)
         scan_limit = int(scan_limit_raw)
     except (TypeError, ValueError):
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            content=to_json({"error": "`max_results` and `scan_limit` must be integers"}),
+        return _workspace_error(
+            "`max_results`, `offset`, and `scan_limit` must be integers",
+            error_code="invalid_arguments",
         )
     max_results = min(max(max_results, 1), LIST_FILES_HARD_MAX_RESULTS)
-    scan_limit = max(scan_limit, max_results)
+    offset = max(offset, 0)
+    scan_limit = max(scan_limit, max_results + offset)
 
     ignored_roots_summary: list[dict[str, Any]] = []
     scan_limited = False
+    effective_sort = sort
     local_root = getattr(backend, "root", None)
     if isinstance(local_root, Path):
         files, total_count, truncated, scan_limited, ignored_roots_summary = _list_files_local_fast(
@@ -463,7 +494,7 @@ def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
             glob_pattern=glob_pattern,
             include_hidden=include_hidden,
             include_ignored=include_ignored,
-            max_results=max_results,
+            max_results=scan_limit,
             scan_limit=scan_limit,
         )
     else:
@@ -474,18 +505,38 @@ def list_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
                 if not any(part.startswith(".") for part in Path(f).parts)
             ]
         total_count = len(all_files)
-        files = all_files[:max_results]
-        truncated = total_count > len(files)
+        files = sorted(all_files)
+        truncated = False
+        effective_sort = "path_asc"
+
+    sensitive_files_omitted = 0
+    if not include_sensitive:
+        kept_files: list[str] = []
+        for file_path in files:
+            if is_sensitive_path(file_path):
+                sensitive_files_omitted += 1
+            else:
+                kept_files.append(file_path)
+        files = kept_files
+        total_count = max(0, total_count - sensitive_files_omitted)
+
+    files = _sort_find_files(context, files, effective_sort) if isinstance(local_root, Path) else sorted(files)
+    visible_files = files[offset:offset + max_results]
+    truncated = offset + len(visible_files) < total_count or scan_limited
 
     payload: dict[str, Any] = {
-        "files": files,
+        "files": visible_files,
         "count": total_count,
-        "returned_count": len(files),
+        "returned_count": len(visible_files),
         "truncated": truncated,
         "max_results": max_results,
+        "offset": offset,
+        "sort": effective_sort,
     }
-    if total_count > len(files):
-        payload["remaining_count"] = total_count - len(files)
+    if total_count > offset + len(visible_files):
+        payload["remaining_count"] = total_count - offset - len(visible_files)
+    if sensitive_files_omitted:
+        payload["sensitive_files_omitted"] = sensitive_files_omitted
     if scan_limited:
         payload["count_is_estimate"] = True
         payload["scan_limit"] = scan_limit

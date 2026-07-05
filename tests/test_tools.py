@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,10 +13,10 @@ from vv_agent.constants import (
     COMPRESS_MEMORY_TOOL_NAME,
     EDIT_FILE_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
-    LIST_FILES_TOOL_NAME,
+    FIND_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
+    SEARCH_FILES_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
-    WORKSPACE_GREP_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
 from vv_agent.tools import ToolContext, build_default_registry
@@ -66,6 +67,20 @@ def test_legacy_edit_tool_name_is_removed(registry, tool_context: ToolContext) -
 
     with pytest.raises(ToolNotFoundError):
         registry.execute(call, tool_context)
+
+
+def test_old_search_tool_names_are_not_registered(registry, tool_context: ToolContext) -> None:
+    with pytest.raises(ToolNotFoundError):
+        registry.execute(
+            ToolCall(id="old_grep", name="workspace_grep", arguments={"pattern": "token"}),
+            tool_context,
+        )
+
+    with pytest.raises(ToolNotFoundError):
+        registry.execute(
+            ToolCall(id="old_list", name="list_files", arguments={}),
+            tool_context,
+        )
 
 
 def test_edit_file_rejects_legacy_argument_names(registry, tool_context: ToolContext) -> None:
@@ -210,7 +225,7 @@ def test_read_file_allows_absolute_path_when_enabled(registry, tool_context: Too
     assert payload["content"] == "outside"
 
 
-def test_list_files_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
+def test_find_files_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
     outside_dir = (tool_context.workspace.parent / f"{tool_context.workspace.name}_outside_list").resolve()
     outside_dir.mkdir(parents=True, exist_ok=True)
     target = (outside_dir / "a.txt").resolve()
@@ -223,7 +238,7 @@ def test_list_files_allows_absolute_path_when_enabled(registry, tool_context: To
 
     list_call = ToolCall(
         id="call_abs_list",
-        name=LIST_FILES_TOOL_NAME,
+        name=FIND_FILES_TOOL_NAME,
         arguments={"path": str(outside_dir)},
     )
     list_result = registry.execute(list_call, tool_context)
@@ -280,30 +295,30 @@ def test_write_file_ignores_newline_flags_when_overwriting(registry, tool_contex
     assert (tool_context.workspace / "notes/overwrite.txt").read_text(encoding="utf-8") == "final"
 
 
-def test_list_files_truncates_large_response(registry, tool_context: ToolContext) -> None:
+def test_find_files_truncates_large_response(registry, tool_context: ToolContext) -> None:
     for idx in range(620):
         (tool_context.workspace / f"f_{idx:04d}.txt").write_text("x", encoding="utf-8")
 
-    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={})
+    call = ToolCall(id="call_list", name=FIND_FILES_TOOL_NAME, arguments={})
     result = registry.execute(call, tool_context)
     payload = json.loads(result.content)
 
     assert payload["count"] == 620
     assert payload["truncated"] is True
-    assert payload["max_results"] == 500
-    assert payload["returned_count"] == 500
-    assert len(payload["files"]) == 500
-    assert payload["remaining_count"] == 120
+    assert payload["max_results"] == 100
+    assert payload["returned_count"] == 100
+    assert len(payload["files"]) == 100
+    assert payload["remaining_count"] == 520
 
 
-def test_list_files_summarizes_common_roots_by_default(registry, tool_context: ToolContext) -> None:
+def test_find_files_summarizes_common_roots_by_default(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "src").mkdir(parents=True, exist_ok=True)
     (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
     (tool_context.workspace / "src" / "main.ts").write_text("export {}", encoding="utf-8")
     (tool_context.workspace / "node_modules" / "pkg" / "a.js").write_text("a", encoding="utf-8")
     (tool_context.workspace / "node_modules" / "pkg" / "b.js").write_text("b", encoding="utf-8")
 
-    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": "."})
+    call = ToolCall(id="call_list", name=FIND_FILES_TOOL_NAME, arguments={"path": "."})
     result = registry.execute(call, tool_context)
     payload = json.loads(result.content)
 
@@ -313,13 +328,13 @@ def test_list_files_summarizes_common_roots_by_default(registry, tool_context: T
     assert "summarized" in str(payload.get("message", "")).lower()
 
 
-def test_list_files_include_ignored_roots_when_requested(registry, tool_context: ToolContext) -> None:
+def test_find_files_include_ignored_roots_when_requested(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
     (tool_context.workspace / "node_modules" / "pkg" / "a.js").write_text("a", encoding="utf-8")
 
     call = ToolCall(
         id="call_list",
-        name=LIST_FILES_TOOL_NAME,
+        name=FIND_FILES_TOOL_NAME,
         arguments={"path": ".", "include_ignored": True},
     )
     result = registry.execute(call, tool_context)
@@ -329,13 +344,13 @@ def test_list_files_include_ignored_roots_when_requested(registry, tool_context:
     assert payload.get("ignored_roots") is None
 
 
-def test_list_files_reports_estimated_count_when_scan_limit_reached(registry, tool_context: ToolContext) -> None:
+def test_find_files_reports_estimated_count_when_scan_limit_reached(registry, tool_context: ToolContext) -> None:
     for idx in range(40):
         (tool_context.workspace / f"scan_{idx:03d}.txt").write_text("x", encoding="utf-8")
 
     call = ToolCall(
         id="call_list",
-        name=LIST_FILES_TOOL_NAME,
+        name=FIND_FILES_TOOL_NAME,
         arguments={"max_results": 10, "scan_limit": 12},
     )
     result = registry.execute(call, tool_context)
@@ -347,11 +362,11 @@ def test_list_files_reports_estimated_count_when_scan_limit_reached(registry, to
     assert payload["scan_limit"] == 12
 
 
-def test_list_files_can_list_inside_ignored_root(registry, tool_context: ToolContext) -> None:
+def test_find_files_can_list_inside_ignored_root(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
     (tool_context.workspace / "node_modules" / "pkg" / "a.js").write_text("a", encoding="utf-8")
 
-    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": "node_modules"})
+    call = ToolCall(id="call_list", name=FIND_FILES_TOOL_NAME, arguments={"path": "node_modules"})
     result = registry.execute(call, tool_context)
     payload = json.loads(result.content)
 
@@ -359,7 +374,7 @@ def test_list_files_can_list_inside_ignored_root(registry, tool_context: ToolCon
     assert payload.get("ignored_roots") is None
 
 
-def test_list_files_prefers_ripgrep_when_available(registry, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_find_files_prefers_ripgrep_when_available(registry, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeProcess:
         def __init__(self) -> None:
             self.stdout = io.BytesIO(b"sub/b.txt\x00a.txt\x00")
@@ -382,7 +397,7 @@ def test_list_files_prefers_ripgrep_when_available(registry, tool_context: ToolC
     monkeypatch.setattr(workspace_io, "_resolve_rg_executable", lambda: "rg")
     monkeypatch.setattr(workspace_io.subprocess, "Popen", _fake_popen)
 
-    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": "."})
+    call = ToolCall(id="call_list", name=FIND_FILES_TOOL_NAME, arguments={"path": "."})
     result = registry.execute(call, tool_context)
     payload = json.loads(result.content)
 
@@ -391,7 +406,7 @@ def test_list_files_prefers_ripgrep_when_available(registry, tool_context: ToolC
     assert payload["truncated"] is False
 
 
-def test_list_files_glob_matches_rg_dot_slash_paths(
+def test_find_files_glob_matches_rg_dot_slash_paths(
     registry,
     tool_context: ToolContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -414,7 +429,7 @@ def test_list_files_glob_matches_rg_dot_slash_paths(
     monkeypatch.setattr(workspace_io, "_resolve_rg_executable", lambda: "rg")
     monkeypatch.setattr(workspace_io.subprocess, "Popen", lambda *args, **kwargs: _FakeProcess())
 
-    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": ".", "glob": "*.md"})
+    call = ToolCall(id="call_list", name=FIND_FILES_TOOL_NAME, arguments={"path": ".", "glob": "*.md"})
     result = registry.execute(call, tool_context)
     payload = json.loads(result.content)
 
@@ -423,7 +438,7 @@ def test_list_files_glob_matches_rg_dot_slash_paths(
     assert payload["truncated"] is False
 
 
-def test_list_files_falls_back_when_ripgrep_errors(registry, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_find_files_falls_back_when_ripgrep_errors(registry, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
     (tool_context.workspace / "fallback.txt").write_text("x", encoding="utf-8")
 
     class _FailingProcess:
@@ -444,12 +459,73 @@ def test_list_files_falls_back_when_ripgrep_errors(registry, tool_context: ToolC
     monkeypatch.setattr(workspace_io, "_resolve_rg_executable", lambda: "rg")
     monkeypatch.setattr(workspace_io.subprocess, "Popen", lambda *args, **kwargs: _FailingProcess())
 
-    call = ToolCall(id="call_list", name=LIST_FILES_TOOL_NAME, arguments={"path": "."})
+    call = ToolCall(id="call_list", name=FIND_FILES_TOOL_NAME, arguments={"path": "."})
     result = registry.execute(call, tool_context)
     payload = json.loads(result.content)
 
     assert payload["files"] == ["fallback.txt"]
     assert payload["count"] == 1
+
+
+def test_find_files_rejects_pattern_argument(registry, tool_context: ToolContext) -> None:
+    result = registry.execute(
+        ToolCall(id="find_pattern_rejected", name=FIND_FILES_TOOL_NAME, arguments={"pattern": "*.py"}),
+        tool_context,
+    )
+    payload = json.loads(result.content)
+
+    assert result.status == "error"
+    assert result.error_code == "invalid_arguments"
+    assert payload["error_code"] == "invalid_arguments"
+    assert "pattern" in payload["message"]
+
+
+def test_find_files_supports_offset_sort_and_sensitive_filter(registry, tool_context: ToolContext) -> None:
+    first = tool_context.workspace / "first.txt"
+    second = tool_context.workspace / "second.txt"
+    secret = tool_context.workspace / ".env"
+    first.write_text("1", encoding="utf-8")
+    second.write_text("2", encoding="utf-8")
+    secret.write_text("SECRET=1", encoding="utf-8")
+    os.utime(first, (1_700_000_000, 1_700_000_000))
+    os.utime(second, (1_700_000_010, 1_700_000_010))
+
+    result = registry.execute(
+        ToolCall(
+            id="find_page",
+            name=FIND_FILES_TOOL_NAME,
+            arguments={"glob": "*.txt", "sort": "modified_desc", "offset": 0, "max_results": 1},
+        ),
+        tool_context,
+    )
+    payload = json.loads(result.content)
+    assert payload["files"] == ["second.txt"]
+    assert payload["sort"] == "modified_desc"
+    assert payload["offset"] == 0
+    assert payload["remaining_count"] == 1
+
+    hidden_default = registry.execute(
+        ToolCall(
+            id="find_sensitive_default",
+            name=FIND_FILES_TOOL_NAME,
+            arguments={"glob": "**/*", "include_hidden": True, "sort": "path_asc"},
+        ),
+        tool_context,
+    )
+    hidden_payload = json.loads(hidden_default.content)
+    assert ".env" not in hidden_payload["files"]
+    assert hidden_payload["sensitive_files_omitted"] == 1
+
+    hidden_included = registry.execute(
+        ToolCall(
+            id="find_sensitive_included",
+            name=FIND_FILES_TOOL_NAME,
+            arguments={"glob": "**/*", "include_hidden": True, "include_sensitive": True, "sort": "path_asc"},
+        ),
+        tool_context,
+    )
+    included_payload = json.loads(hidden_included.content)
+    assert ".env" in included_payload["files"]
 
 
 def test_read_file_can_show_line_numbers(registry, tool_context: ToolContext) -> None:
@@ -512,9 +588,9 @@ def test_read_file_returns_file_info_when_requested_range_exceeds_limit(registry
     assert payload["suggested_range"] == {"start_line": 1, "end_line": 2000}
 
 
-def test_workspace_grep(registry, tool_context: ToolContext) -> None:
+def test_search_files(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("hello world\nsecond line", encoding="utf-8")
-    call = ToolCall(id="call1", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "hello", "output_mode": "content"})
+    call = ToolCall(id="call1", name=SEARCH_FILES_TOOL_NAME, arguments={"pattern": "hello", "output_mode": "content"})
     result = registry.execute(call, tool_context)
     payload = result.metadata
 
@@ -523,12 +599,79 @@ def test_workspace_grep(registry, tool_context: ToolContext) -> None:
     assert payload["matches"][0]["line"] == 1
 
 
-def test_workspace_grep_uses_smart_case_for_lowercase_patterns(registry, tool_context: ToolContext) -> None:
+def test_search_files_defaults_to_files_with_matches(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / "a.txt").write_text("token one", encoding="utf-8")
+    (tool_context.workspace / "b.txt").write_text("token two", encoding="utf-8")
+
+    result = registry.execute(
+        ToolCall(id="search_default", name=SEARCH_FILES_TOOL_NAME, arguments={"pattern": "token"}),
+        tool_context,
+    )
+
+    assert result.status == "success"
+    assert result.metadata["output_mode"] == "files_with_matches"
+    assert result.metadata["files"] == ["a.txt", "b.txt"]
+    assert "matches" not in result.metadata
+
+
+def test_search_files_literal_offset_and_unlimited_head_limit(registry, tool_context: ToolContext) -> None:
+    for index in range(4):
+        (tool_context.workspace / f"file_{index}.txt").write_text("a.b token", encoding="utf-8")
+
+    result = registry.execute(
+        ToolCall(
+            id="search_literal_page",
+            name=SEARCH_FILES_TOOL_NAME,
+            arguments={"pattern": "a.b", "literal": True, "offset": 1, "head_limit": 2},
+        ),
+        tool_context,
+    )
+
+    assert result.metadata["files"] == ["file_1.txt", "file_2.txt"]
+    assert result.metadata["offset"] == 1
+    assert result.metadata["head_limit"] == 2
+    assert result.metadata["total_result_items"] == 4
+    assert result.metadata["returned_count"] == 2
+
+    unlimited = registry.execute(
+        ToolCall(
+            id="search_literal_unlimited",
+            name=SEARCH_FILES_TOOL_NAME,
+            arguments={"pattern": "a.b", "literal": True, "head_limit": 0},
+        ),
+        tool_context,
+    )
+    assert unlimited.metadata["returned_count"] == 4
+
+
+def test_search_files_omits_sensitive_paths_by_default(registry, tool_context: ToolContext) -> None:
+    (tool_context.workspace / ".env").write_text("TOKEN=secret", encoding="utf-8")
+    (tool_context.workspace / "visible.txt").write_text("TOKEN=public", encoding="utf-8")
+
+    default_result = registry.execute(
+        ToolCall(id="search_sensitive_default", name=SEARCH_FILES_TOOL_NAME, arguments={"pattern": "TOKEN"}),
+        tool_context,
+    )
+    assert default_result.metadata["files"] == ["visible.txt"]
+    assert default_result.metadata["sensitive_files_omitted"] == 1
+
+    included = registry.execute(
+        ToolCall(
+            id="search_sensitive_included",
+            name=SEARCH_FILES_TOOL_NAME,
+            arguments={"pattern": "TOKEN", "include_hidden": True, "include_sensitive": True},
+        ),
+        tool_context,
+    )
+    assert included.metadata["files"] == [".env", "visible.txt"]
+
+
+def test_search_files_uses_smart_case_for_lowercase_patterns(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("update lower\nUpdate upper", encoding="utf-8")
 
     call = ToolCall(
         id="call_smart_case_lower",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "update", "output_mode": "content"},
     )
     result = registry.execute(call, tool_context)
@@ -538,7 +681,7 @@ def test_workspace_grep_uses_smart_case_for_lowercase_patterns(registry, tool_co
     assert [row["text"] for row in payload["matches"]] == ["update lower", "Update upper"]
 
 
-def test_workspace_grep_uses_case_sensitive_default_when_pattern_has_uppercase(
+def test_search_files_uses_case_sensitive_default_when_pattern_has_uppercase(
     registry,
     tool_context: ToolContext,
 ) -> None:
@@ -546,7 +689,7 @@ def test_workspace_grep_uses_case_sensitive_default_when_pattern_has_uppercase(
 
     call = ToolCall(
         id="call_smart_case_upper",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "Update", "output_mode": "content"},
     )
     result = registry.execute(call, tool_context)
@@ -556,12 +699,12 @@ def test_workspace_grep_uses_case_sensitive_default_when_pattern_has_uppercase(
     assert [row["text"] for row in payload["matches"]] == ["Update upper"]
 
 
-def test_workspace_grep_explicit_case_flags_override_smart_case(registry, tool_context: ToolContext) -> None:
+def test_search_files_explicit_case_flags_override_smart_case(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("update lower\nUpdate upper", encoding="utf-8")
 
     case_sensitive_call = ToolCall(
         id="call_smart_case_override_lower",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "update", "output_mode": "content", "case_sensitive": True},
     )
     case_sensitive_result = registry.execute(case_sensitive_call, tool_context)
@@ -572,7 +715,7 @@ def test_workspace_grep_explicit_case_flags_override_smart_case(registry, tool_c
 
     case_insensitive_call = ToolCall(
         id="call_smart_case_override_upper",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "Update", "output_mode": "content", "case_sensitive": False},
     )
     case_insensitive_result = registry.execute(case_insensitive_call, tool_context)
@@ -582,7 +725,7 @@ def test_workspace_grep_explicit_case_flags_override_smart_case(registry, tool_c
     assert [row["text"] for row in case_insensitive_payload["matches"]] == ["update lower", "Update upper"]
 
 
-def test_workspace_grep_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
+def test_search_files_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
     outside_dir = (tool_context.workspace.parent / f"{tool_context.workspace.name}_outside_grep").resolve()
     outside_dir.mkdir(parents=True, exist_ok=True)
     (outside_dir / "a.txt").write_text("hello outside", encoding="utf-8")
@@ -594,7 +737,7 @@ def test_workspace_grep_allows_absolute_path_when_enabled(registry, tool_context
 
     call = ToolCall(
         id="call_abs_grep",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "hello", "output_mode": "content", "path": str(outside_dir)},
     )
     result = registry.execute(call, tool_context)
@@ -604,14 +747,14 @@ def test_workspace_grep_allows_absolute_path_when_enabled(registry, tool_context
     assert payload["matches"][0]["path"] == str((outside_dir / "a.txt").resolve())
 
 
-def test_workspace_grep_supports_files_with_matches_mode(registry, tool_context: ToolContext) -> None:
+def test_search_files_supports_files_with_matches_mode(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.py").write_text("TOKEN = 1", encoding="utf-8")
     (tool_context.workspace / "b.py").write_text("token = 2", encoding="utf-8")
     (tool_context.workspace / "c.md").write_text("no hit", encoding="utf-8")
 
     call = ToolCall(
         id="call_files",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "token", "output_mode": "files_with_matches", "case_sensitive": False, "type": "py"},
     )
     result = registry.execute(call, tool_context)
@@ -622,30 +765,31 @@ def test_workspace_grep_supports_files_with_matches_mode(registry, tool_context:
     assert payload["summary"]["total_matches"] == 2
 
 
-def test_workspace_grep_ignores_removed_max_results_alias(registry, tool_context: ToolContext) -> None:
+def test_search_files_ignores_removed_max_results_alias(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("hit one\nhit two", encoding="utf-8")
 
     result = registry.execute(
         ToolCall(
             id="call_removed_max_results",
-            name=WORKSPACE_GREP_TOOL_NAME,
+            name=SEARCH_FILES_TOOL_NAME,
             arguments={"pattern": "hit", "output_mode": "content", "max_results": 1},
         ),
         tool_context,
     )
 
     assert len(result.metadata["matches"]) == 2
-    assert result.metadata.get("head_limit") is None
+    assert result.metadata["head_limit"] == 250
+    assert "max_results" not in result.metadata
 
 
-def test_workspace_grep_supports_count_mode(registry, tool_context: ToolContext) -> None:
+def test_search_files_supports_count_mode(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "logs").mkdir(parents=True, exist_ok=True)
     (tool_context.workspace / "logs" / "x.log").write_text("err\nok\nerr", encoding="utf-8")
     (tool_context.workspace / "logs" / "y.log").write_text("err", encoding="utf-8")
 
     call = ToolCall(
         id="call_count",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "err", "output_mode": "count", "path": "logs", "type": "log"},
     )
     result = registry.execute(call, tool_context)
@@ -655,11 +799,11 @@ def test_workspace_grep_supports_count_mode(registry, tool_context: ToolContext)
     assert payload["summary"]["total_matches"] == 3
 
 
-def test_workspace_grep_supports_context_lines(registry, tool_context: ToolContext) -> None:
+def test_search_files_supports_context_lines(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "ctx.txt").write_text("line1\nhit\nline3", encoding="utf-8")
     call = ToolCall(
         id="call_ctx",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "hit", "output_mode": "content", "c": 1, "n": True},
     )
     result = registry.execute(call, tool_context)
@@ -670,12 +814,12 @@ def test_workspace_grep_supports_context_lines(registry, tool_context: ToolConte
     assert payload["matches"][1]["is_match"] is True
 
 
-def test_workspace_grep_supports_multiline_and_head_limit(registry, tool_context: ToolContext) -> None:
+def test_search_files_supports_multiline_and_head_limit(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "multi.txt").write_text("start\nalpha\nbeta\nend", encoding="utf-8")
     call = ToolCall(
         id="call_multi",
-        name=WORKSPACE_GREP_TOOL_NAME,
-        arguments={"pattern": "alpha\\nbeta", "multiline": True, "head_limit": 1},
+        name=SEARCH_FILES_TOOL_NAME,
+        arguments={"pattern": "alpha\\nbeta", "output_mode": "content", "multiline": True, "head_limit": 1},
     )
     result = registry.execute(call, tool_context)
     payload = result.metadata
@@ -686,7 +830,7 @@ def test_workspace_grep_supports_multiline_and_head_limit(registry, tool_context
     assert payload["summary"]["total_matches"] == 1
 
 
-def test_workspace_grep_caps_structured_payload_without_duplication(
+def test_search_files_caps_structured_payload_without_duplication(
     registry,
     tool_context: ToolContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -699,7 +843,7 @@ def test_workspace_grep_caps_structured_payload_without_duplication(
 
     call = ToolCall(
         id="call_structured_cap",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "token", "output_mode": "content"},
     )
     result = registry.execute(call, tool_context)
@@ -714,23 +858,27 @@ def test_workspace_grep_caps_structured_payload_without_duplication(
     assert "\"matches\"" not in result.content
 
 
-def test_workspace_grep_excludes_hidden_by_default(registry, tool_context: ToolContext) -> None:
+def test_search_files_excludes_hidden_by_default(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / ".hidden.txt").write_text("secret Agent marker", encoding="utf-8")
 
-    call = ToolCall(id="call_hidden_default", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
+    call = ToolCall(
+        id="call_hidden_default",
+        name=SEARCH_FILES_TOOL_NAME,
+        arguments={"pattern": "Agent", "output_mode": "content"},
+    )
     result = registry.execute(call, tool_context)
     payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 0
 
 
-def test_workspace_grep_can_include_hidden_files(registry, tool_context: ToolContext) -> None:
+def test_search_files_can_include_hidden_files(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / ".hidden.txt").write_text("secret Agent marker", encoding="utf-8")
 
     call = ToolCall(
         id="call_hidden_include",
-        name=WORKSPACE_GREP_TOOL_NAME,
-        arguments={"pattern": "Agent", "include_hidden": True},
+        name=SEARCH_FILES_TOOL_NAME,
+        arguments={"pattern": "Agent", "output_mode": "content", "include_hidden": True},
     )
     result = registry.execute(call, tool_context)
     payload = result.metadata
@@ -739,25 +887,29 @@ def test_workspace_grep_can_include_hidden_files(registry, tool_context: ToolCon
     assert payload["matches"][0]["path"] == ".hidden.txt"
 
 
-def test_workspace_grep_skips_common_ignored_roots_by_default(registry, tool_context: ToolContext) -> None:
+def test_search_files_skips_common_ignored_roots_by_default(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
     (tool_context.workspace / "node_modules" / "pkg" / "x.js").write_text("Agent token", encoding="utf-8")
 
-    call = ToolCall(id="call_ignored_default", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
+    call = ToolCall(
+        id="call_ignored_default",
+        name=SEARCH_FILES_TOOL_NAME,
+        arguments={"pattern": "Agent", "output_mode": "content"},
+    )
     result = registry.execute(call, tool_context)
     payload = result.metadata
 
     assert payload["summary"]["total_matches"] == 0
 
 
-def test_workspace_grep_can_include_common_ignored_roots(registry, tool_context: ToolContext) -> None:
+def test_search_files_can_include_common_ignored_roots(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
     (tool_context.workspace / "node_modules" / "pkg" / "x.js").write_text("Agent token", encoding="utf-8")
 
     call = ToolCall(
         id="call_ignored_include",
-        name=WORKSPACE_GREP_TOOL_NAME,
-        arguments={"pattern": "Agent", "include_ignored": True},
+        name=SEARCH_FILES_TOOL_NAME,
+        arguments={"pattern": "Agent", "output_mode": "content", "include_ignored": True},
     )
     result = registry.execute(call, tool_context)
     payload = result.metadata
@@ -766,14 +918,14 @@ def test_workspace_grep_can_include_common_ignored_roots(registry, tool_context:
     assert payload["matches"][0]["path"] == "node_modules/pkg/x.js"
 
 
-def test_workspace_grep_supports_file_path_target(registry, tool_context: ToolContext) -> None:
+def test_search_files_supports_file_path_target(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "articles").mkdir(parents=True, exist_ok=True)
     file_path = "articles/essay.md"
     (tool_context.workspace / file_path).write_text("intro\nabout Agent design\noutro", encoding="utf-8")
 
     call = ToolCall(
         id="call_file_target",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "Agent", "path": file_path, "output_mode": "content", "c": 1},
     )
     result = registry.execute(call, tool_context)
@@ -785,14 +937,14 @@ def test_workspace_grep_supports_file_path_target(registry, tool_context: ToolCo
     assert any(row["path"] == file_path and row["is_match"] for row in payload["matches"])
 
 
-def test_workspace_grep_file_path_works_inside_ignored_root(registry, tool_context: ToolContext) -> None:
+def test_search_files_file_path_works_inside_ignored_root(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "node_modules" / "pkg").mkdir(parents=True, exist_ok=True)
     file_path = "node_modules/pkg/x.js"
     (tool_context.workspace / file_path).write_text("const token = 'Agent';", encoding="utf-8")
 
     call = ToolCall(
         id="call_file_ignored",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "Agent", "path": file_path, "output_mode": "files_with_matches"},
     )
     result = registry.execute(call, tool_context)
@@ -802,7 +954,7 @@ def test_workspace_grep_file_path_works_inside_ignored_root(registry, tool_conte
     assert payload["summary"]["total_matches"] == 1
 
 
-def test_workspace_grep_prefers_ripgrep_when_available(
+def test_search_files_prefers_ripgrep_when_available(
     registry,
     tool_context: ToolContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -853,7 +1005,7 @@ def test_workspace_grep_prefers_ripgrep_when_available(
 
     call = ToolCall(
         id="call_rg_files",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "token", "output_mode": "files_with_matches", "type": "py"},
     )
     result = registry.execute(call, tool_context)
@@ -864,7 +1016,7 @@ def test_workspace_grep_prefers_ripgrep_when_available(
     assert payload["summary"]["files_with_matches"] == 2
 
 
-def test_workspace_grep_accepts_ripgrep_returncode_2_with_results(
+def test_search_files_accepts_ripgrep_returncode_2_with_results(
     registry,
     tool_context: ToolContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -898,7 +1050,7 @@ def test_workspace_grep_accepts_ripgrep_returncode_2_with_results(
     monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
     monkeypatch.setattr(search_handler.subprocess, "Popen", lambda *args, **kwargs: _PartialErrorProcess())
 
-    call = ToolCall(id="call_rg_partial_error", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "Agent"})
+    call = ToolCall(id="call_rg_partial_error", name=SEARCH_FILES_TOOL_NAME, arguments={"pattern": "Agent"})
     result = registry.execute(call, tool_context)
     payload = result.metadata
 
@@ -906,7 +1058,7 @@ def test_workspace_grep_accepts_ripgrep_returncode_2_with_results(
     assert payload["summary"]["total_matches"] == 1
 
 
-def test_workspace_grep_falls_back_when_ripgrep_errors(
+def test_search_files_falls_back_when_ripgrep_errors(
     registry,
     tool_context: ToolContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -928,7 +1080,11 @@ def test_workspace_grep_falls_back_when_ripgrep_errors(
     monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
     monkeypatch.setattr(search_handler.subprocess, "Popen", lambda *args, **kwargs: _FailingProcess())
 
-    call = ToolCall(id="call_rg_fallback", name=WORKSPACE_GREP_TOOL_NAME, arguments={"pattern": "hello"})
+    call = ToolCall(
+        id="call_rg_fallback",
+        name=SEARCH_FILES_TOOL_NAME,
+        arguments={"pattern": "hello", "output_mode": "content"},
+    )
     result = registry.execute(call, tool_context)
     payload = result.metadata
 
@@ -936,10 +1092,10 @@ def test_workspace_grep_falls_back_when_ripgrep_errors(
     assert payload["matches"][0]["path"] == "fallback.txt"
 
 
-def test_workspace_grep_rejects_unknown_file_type(registry, tool_context: ToolContext) -> None:
+def test_search_files_rejects_unknown_file_type(registry, tool_context: ToolContext) -> None:
     call = ToolCall(
         id="call_invalid_type",
-        name=WORKSPACE_GREP_TOOL_NAME,
+        name=SEARCH_FILES_TOOL_NAME,
         arguments={"pattern": "x", "type": "unknown"},
     )
     result = registry.execute(call, tool_context)
