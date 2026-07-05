@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from vv_agent.memory.microcompact import COMPACTABLE_TOOLS, CLEARED_MARKER, MicrocompactConfig, microcompact
+from vv_agent.memory.microcompact import (
+    CLEARED_MARKER,
+    COMPACTABLE_TOOLS,
+    MicrocompactConfig,
+    microcompact,
+)
 from vv_agent.types import Message
 
 
