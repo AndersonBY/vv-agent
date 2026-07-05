@@ -93,6 +93,46 @@ def test_edit_file_rejects_legacy_argument_names(registry, tool_context: ToolCon
     assert "old_string" in payload["message"]
 
 
+def test_edit_file_rejects_missing_path(registry, tool_context: ToolContext) -> None:
+    result = registry.execute(
+        ToolCall(
+            id="edit_missing_path",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"old_string": "hello", "new_string": "hi"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "error"
+    assert result.error_code == "invalid_arguments"
+    assert payload["error_code"] == "invalid_arguments"
+    assert "path" in payload["message"]
+    assert "old_string" in payload["message"]
+    assert "new_string" in payload["message"]
+
+
+def test_edit_file_rejects_empty_old_string(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "empty_old.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    result = registry.execute(
+        ToolCall(
+            id="edit_empty_old",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "empty_old.txt", "old_string": "", "new_string": "hi"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "error"
+    assert result.error_code == "old_string_empty"
+    assert payload["error_code"] == "old_string_empty"
+    assert "old_string" in payload["message"]
+    assert target.read_text(encoding="utf-8") == "hello"
+
+
 def test_edit_file_requires_unique_old_string_by_default(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "duplicate.txt"
     target.write_text("hello world\nhello agent", encoding="utf-8")

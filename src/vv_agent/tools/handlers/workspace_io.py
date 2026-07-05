@@ -635,8 +635,9 @@ def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             content=to_json({"error_code": "invalid_arguments", "message": message}),
         )
 
-    if "old_string" not in arguments or "new_string" not in arguments:
-        message = "`old_string` and `new_string` are required."
+    required_fields = ("path", "old_string", "new_string")
+    if any(field not in arguments for field in required_fields):
+        message = "`path`, `old_string`, and `new_string` are required."
         return ToolExecutionResult(
             tool_call_id="",
             status="error",
@@ -646,8 +647,16 @@ def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
     path = str(arguments["path"])
     old_string = str(arguments["old_string"])
+    if not old_string:
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="error",
+            error_code="old_string_empty",
+            content=to_json({"error_code": "old_string_empty", "message": "`old_string` cannot be empty."}),
+        )
+
     replace_all = bool(arguments.get("replace_all", False))
-    if not replace_all and old_string and context.workspace_backend.is_file(path):
+    if not replace_all and context.workspace_backend.is_file(path):
         text = context.workspace_backend.read_text(path)
         match_count = text.count(old_string)
         if match_count > 1:
