@@ -42,12 +42,14 @@ def test_build_system_prompt_can_include_session_memory_context() -> None:
 
 def test_prompt_includes_tool_governance_rules() -> None:
     prompt = build_system_prompt("Agent", language="en-US")
+    old_tool_name = "file" + "_str_replace"
 
     assert ASK_USER_TOOL_NAME in prompt
     assert TASK_FINISH_TOOL_NAME in prompt
     assert READ_FILE_TOOL_NAME in prompt
     assert WRITE_FILE_TOOL_NAME in prompt
     assert EDIT_FILE_TOOL_NAME in prompt
+    assert old_tool_name not in prompt
     assert "Tool priority" in prompt
 
 
