@@ -216,7 +216,7 @@ def _resolve_rg_executable() -> str | None:
     return None
 
 
-def _list_files_local_rg(
+def _find_files_local_rg(
     *,
     context: ToolContext,
     base_path: Path,
@@ -333,7 +333,7 @@ def _list_files_local_rg(
     return matched_files, matched_count, truncated, scan_limited
 
 
-def _list_files_local_fast(
+def _find_files_local_fast(
     context: ToolContext,
     *,
     path: str,
@@ -369,7 +369,7 @@ def _list_files_local_fast(
             pass
 
     glob_regex = _compile_glob_pattern(glob_pattern)
-    rg_result = _list_files_local_rg(
+    rg_result = _find_files_local_rg(
         context=context,
         base_path=base_path,
         base_is_workspace_root=root_listing,
@@ -488,7 +488,7 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
     effective_sort = sort
     local_root = getattr(backend, "root", None)
     if isinstance(local_root, Path):
-        files, total_count, truncated, scan_limited, ignored_roots_summary = _list_files_local_fast(
+        files, total_count, truncated, scan_limited, ignored_roots_summary = _find_files_local_fast(
             context,
             path=path,
             glob_pattern=glob_pattern,
