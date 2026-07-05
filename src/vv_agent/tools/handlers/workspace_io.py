@@ -627,7 +627,29 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         suffix = "\n" if trailing_newline else ""
         write_content = f"{prefix}{content}{suffix}"
 
+    exists_before = backend.exists(path)
+    is_existing_file = exists_before and backend.is_file(path)
+    if is_existing_file and not append:
+        try:
+            current_raw = backend.read_bytes(path)
+        except Exception:
+            current_raw = backend.read_text(path).encode("utf-8", errors="replace")
+        baseline_issue = _baseline_error(context, path=path, current_raw=current_raw)
+        if baseline_issue:
+            message = "Read the full file with read_file before overwriting."
+            if baseline_issue == "file_changed_since_read":
+                message = "File changed since it was last read. Re-read it before overwriting."
+            return _workspace_error(message, error_code=baseline_issue, path=path)
+
     backend.write_text(path, write_content, append=append)
+
+    try:
+        updated_raw = backend.read_bytes(path)
+        updated_text, _has_bom = _decode_workspace_text(updated_raw)
+    except Exception:
+        updated_text = backend.read_text(path)
+        updated_raw = updated_text.encode("utf-8", errors="replace")
+    _record_file_baseline(context, path=path, raw=updated_raw, text=updated_text, is_partial=False)
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -642,6 +664,11 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
                 "written_chars": len(write_content),
             }
         ),
+        metadata={
+            "changed_files": [path],
+            "operation": "write_file",
+            "append": append,
+        },
     )
 
 

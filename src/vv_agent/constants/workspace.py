@@ -89,6 +89,10 @@ Guidance:
             "name": WRITE_FILE_TOOL_NAME,
             "description": """Write content to a file in workspace.
 
+Use this for creating files, full-file overwrites, or appends.
+For small edits inside an existing file, use `edit_file` after reading the file.
+Overwriting an existing file requires a full `read_file` baseline.
+
 MODES:
 - Overwrite (default): Replaces entire file content.
 - Append: Adds to existing content (`append=true`).
