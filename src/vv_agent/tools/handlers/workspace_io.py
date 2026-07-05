@@ -701,69 +701,7 @@ def file_info(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
     )
 
 
-def file_str_replace(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    backend = context.workspace_backend
-    path = str(arguments["path"])
-
-    if not backend.is_file(path):
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            content=to_json({"error": f"file not found: {path}"}),
-        )
-
-    old_str = str(arguments.get("old_str", ""))
-    if not old_str:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            content=to_json({"error": "`old_str` cannot be empty"}),
-        )
-    new_str = str(arguments.get("new_str", ""))
-    replace_all = bool(arguments.get("replace_all", False))
-    max_replacements = int(arguments.get("max_replacements", 1))
-    max_replacements = max(max_replacements, 1)
-
-    text = backend.read_text(path)
-    occurrence_count = text.count(old_str)
-    if occurrence_count == 0:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            content=to_json({"error": "`old_str` not found in file"}),
-        )
-
-    if replace_all:
-        replaced_text = text.replace(old_str, new_str)
-        replaced_count = occurrence_count
-    else:
-        replaced_text = text.replace(old_str, new_str, max_replacements)
-        replaced_count = min(occurrence_count, max_replacements)
-
-    backend.write_text(path, replaced_text)
-
-    return ToolExecutionResult(
-        tool_call_id="",
-        status="success",
-        content=to_json(
-            {
-                "ok": True,
-                "path": path,
-                "replaced_count": replaced_count,
-            }
-        ),
-    )
-
-
 def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    legacy_keys = {"old_str", "new_str", "max_replacements"} & set(arguments)
-    if legacy_keys:
-        return _workspace_error(
-            "Invalid edit_file arguments. Use old_string/new_string/replace_all.",
-            error_code="invalid_arguments",
-            invalid_arguments=sorted(legacy_keys),
-        )
-
     required_fields = ("path", "old_string", "new_string")
     missing_fields = [field for field in required_fields if field not in arguments]
     if missing_fields:

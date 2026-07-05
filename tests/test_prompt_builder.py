@@ -48,7 +48,6 @@ def test_prompt_includes_tool_governance_rules() -> None:
     assert READ_FILE_TOOL_NAME in prompt
     assert WRITE_FILE_TOOL_NAME in prompt
     assert EDIT_FILE_TOOL_NAME in prompt
-    assert "file_str_replace" not in prompt
     assert "Tool priority" in prompt
 
 

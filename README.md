@@ -582,7 +582,7 @@ Priority is strict:
 
 ## Built-in Tools
 
-`list_files`, `file_info`, `read_file`, `write_file`, `file_str_replace`, `workspace_grep`, `compress_memory`, `todo_write`, `task_finish`, `ask_user`, `bash`, `read_image`, `create_sub_task`, `sub_task_status`.
+`list_files`, `file_info`, `read_file`, `write_file`, `edit_file`, `workspace_grep`, `compress_memory`, `todo_write`, `task_finish`, `ask_user`, `bash`, `read_image`, `create_sub_task`, `sub_task_status`.
 
 Custom tools can be registered via `ToolRegistry.register()`.
 

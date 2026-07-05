@@ -43,11 +43,10 @@ def tool_context(tmp_path: Path) -> ToolContext:
     )
 
 
-def test_edit_file_replaces_file_str_replace_in_default_tools(registry) -> None:
+def test_edit_file_is_registered_in_default_tools(registry) -> None:
     tool_names = registry.list_tool_names()
 
     assert EDIT_FILE_TOOL_NAME in tool_names
-    assert "file_str_replace" not in tool_names
 
     edit_schema = registry.get_schema(EDIT_FILE_TOOL_NAME)
     parameters = edit_schema["function"]["parameters"]
@@ -56,41 +55,6 @@ def test_edit_file_replaces_file_str_replace_in_default_tools(registry) -> None:
     assert edit_schema["function"]["name"] == "edit_file"
     assert parameters["required"] == ["path", "old_string", "new_string"]
     assert set(properties) == {"path", "old_string", "new_string", "replace_all"}
-
-
-def test_file_str_replace_tool_name_is_removed(registry, tool_context: ToolContext) -> None:
-    call = ToolCall(
-        id="call_removed_replace",
-        name="file_str_replace",
-        arguments={"path": "edit.txt", "old_str": "a", "new_str": "b"},
-    )
-
-    with pytest.raises(ToolNotFoundError):
-        registry.execute(call, tool_context)
-
-
-def test_edit_file_rejects_legacy_argument_names(registry, tool_context: ToolContext) -> None:
-    target = tool_context.workspace / "legacy.txt"
-    target.write_text("hello", encoding="utf-8")
-    registry.execute(
-        ToolCall(id="read_legacy", name=READ_FILE_TOOL_NAME, arguments={"path": "legacy.txt"}),
-        tool_context,
-    )
-
-    result = registry.execute(
-        ToolCall(
-            id="edit_legacy",
-            name=EDIT_FILE_TOOL_NAME,
-            arguments={"path": "legacy.txt", "old_str": "hello", "new_str": "hi"},
-        ),
-        tool_context,
-    )
-
-    payload = json.loads(result.content)
-    assert result.status == "error"
-    assert result.error_code == "invalid_arguments"
-    assert payload["error_code"] == "invalid_arguments"
-    assert "old_string" in payload["message"]
 
 
 def test_edit_file_rejects_missing_path(registry, tool_context: ToolContext) -> None:
