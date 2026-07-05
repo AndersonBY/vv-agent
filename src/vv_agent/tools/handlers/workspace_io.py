@@ -635,6 +635,35 @@ def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             content=to_json({"error_code": "invalid_arguments", "message": message}),
         )
 
+    if "old_string" not in arguments or "new_string" not in arguments:
+        message = "`old_string` and `new_string` are required."
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="error",
+            error_code="invalid_arguments",
+            content=to_json({"error_code": "invalid_arguments", "message": message}),
+        )
+
+    path = str(arguments["path"])
+    old_string = str(arguments["old_string"])
+    replace_all = bool(arguments.get("replace_all", False))
+    if not replace_all and old_string and context.workspace_backend.is_file(path):
+        text = context.workspace_backend.read_text(path)
+        match_count = text.count(old_string)
+        if match_count > 1:
+            payload = {
+                "error_code": "old_string_not_unique",
+                "message": "`old_string` matched multiple locations; make it unique or set replace_all=true.",
+                "match_count": match_count,
+            }
+            return ToolExecutionResult(
+                tool_call_id="",
+                status="error",
+                error_code="old_string_not_unique",
+                content=to_json(payload),
+                metadata={"match_count": match_count},
+            )
+
     translated = dict(arguments)
     translated["old_str"] = translated.pop("old_string", "")
     translated["new_str"] = translated.pop("new_string", "")
