@@ -155,7 +155,7 @@ _SENSITIVE_RG_COVERED_EXACT_NAMES = {
     "id_ed25519",
 }
 _SENSITIVE_RG_COVERED_SUFFIXES = {".key", ".pem", ".p8", ".p12", ".pfx"}
-_SENSITIVE_RG_COVERED_CONFIG_DIRS = {".config", "config", "configs", "keys", "secrets", ".ssh", ".aws", ".gcp"}
+_SENSITIVE_RG_COVERED_CONFIG_DIRS = {"config", "configs", "keys", "secrets", ".ssh", ".aws", ".gcp"}
 _SENSITIVE_RG_COVERED_NAME_TOKENS = ("credential", "credentials", "secret", "secrets", "token", "private_key")
 
 
@@ -202,7 +202,7 @@ def _sensitive_path_is_covered_by_rg_excludes(path: str) -> bool:
     parts = PurePosixPath(path.replace("\\", "/").strip("/")).parts
     if not parts:
         return False
-    name = parts[-1].lower()
+    name = parts[-1]
     if name in _SENSITIVE_RG_COVERED_EXACT_NAMES:
         return True
     if name.startswith(("secret.", "secrets.")):
@@ -210,7 +210,7 @@ def _sensitive_path_is_covered_by_rg_excludes(path: str) -> bool:
     if any(name.endswith(suffix) for suffix in _SENSITIVE_RG_COVERED_SUFFIXES):
         return True
     if any(token in name for token in _SENSITIVE_RG_COVERED_NAME_TOKENS):
-        return any(part.lower() in _SENSITIVE_RG_COVERED_CONFIG_DIRS for part in parts[:-1])
+        return any(part in _SENSITIVE_RG_COVERED_CONFIG_DIRS for part in parts[:-1])
     return False
 
 

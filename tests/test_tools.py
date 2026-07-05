@@ -745,6 +745,60 @@ def test_search_files_rg_excludes_sensitive_globs_before_scanning(
     assert result.metadata["sensitive_files_omitted"] == 1
 
 
+def test_search_files_hidden_config_sensitive_path_uses_fallback_not_rg(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tool_context.workspace / ".config").mkdir()
+    (tool_context.workspace / ".config" / "service_token.json").write_text("TOKEN=secret", encoding="utf-8")
+    (tool_context.workspace / "visible.txt").write_text("TOKEN=public", encoding="utf-8")
+
+    def _fail_if_rg_runs(*args, **kwargs):
+        raise AssertionError("rg must not scan uncovered .config sensitive paths")
+
+    monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(search_handler.subprocess, "Popen", _fail_if_rg_runs)
+
+    result = registry.execute(
+        ToolCall(
+            id="search_config_sensitive",
+            name=SEARCH_FILES_TOOL_NAME,
+            arguments={"pattern": "TOKEN", "include_hidden": True},
+        ),
+        tool_context,
+    )
+
+    assert result.metadata["files"] == ["visible.txt"]
+    assert result.metadata["summary"]["total_matches"] == 1
+    assert result.metadata["sensitive_files_omitted"] == 1
+
+
+def test_search_files_uppercase_sensitive_suffix_uses_fallback_not_rg(
+    registry,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tool_context.workspace / "keys").mkdir()
+    (tool_context.workspace / "keys" / "AuthKey_ABC123.P8").write_text("TOKEN=secret", encoding="utf-8")
+    (tool_context.workspace / "visible.txt").write_text("TOKEN=public", encoding="utf-8")
+
+    def _fail_if_rg_runs(*args, **kwargs):
+        raise AssertionError("rg must not scan case-variant sensitive suffixes")
+
+    monkeypatch.setattr(search_handler, "_resolve_rg_executable", lambda: "rg")
+    monkeypatch.setattr(search_handler.subprocess, "Popen", _fail_if_rg_runs)
+
+    result = registry.execute(
+        ToolCall(id="search_uppercase_sensitive", name=SEARCH_FILES_TOOL_NAME, arguments={"pattern": "TOKEN"}),
+        tool_context,
+    )
+
+    assert result.metadata["files"] == ["visible.txt"]
+    assert result.metadata["summary"]["total_matches"] == 1
+    assert result.metadata["sensitive_files_omitted"] == 1
+
+
 def test_search_files_uses_smart_case_for_lowercase_patterns(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("update lower\nUpdate upper", encoding="utf-8")
 
