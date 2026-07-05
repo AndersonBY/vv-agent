@@ -4,8 +4,8 @@ from dataclasses import dataclass, replace
 
 from vv_agent.constants import (
     BASH_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
-    FILE_STR_REPLACE_TOOL_NAME,
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
@@ -16,7 +16,7 @@ from vv_agent.types import Message
 COMPACTABLE_TOOLS: set[str] = {
     READ_FILE_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
-    FILE_STR_REPLACE_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
     LIST_FILES_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
     BASH_TOOL_NAME,

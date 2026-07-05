@@ -8,7 +8,7 @@ from vv_agent.tools.handlers.skills import activate_skill
 from vv_agent.tools.handlers.sub_agents import create_sub_task
 from vv_agent.tools.handlers.sub_task_status import sub_task_status
 from vv_agent.tools.handlers.todo import todo_read, todo_write
-from vv_agent.tools.handlers.workspace_io import file_info, file_str_replace, list_files, read_file, write_file
+from vv_agent.tools.handlers.workspace_io import edit_file, file_info, list_files, read_file, write_file
 
 __all__ = [
     "activate_skill",
@@ -16,8 +16,8 @@ __all__ = [
     "check_background_command",
     "compress_memory",
     "create_sub_task",
+    "edit_file",
     "file_info",
-    "file_str_replace",
     "list_files",
     "read_file",
     "read_image",

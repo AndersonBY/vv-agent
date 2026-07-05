@@ -10,8 +10,8 @@ from vv_agent.constants.tool_names import (
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
-    FILE_STR_REPLACE_TOOL_NAME,
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
@@ -29,7 +29,7 @@ WORKSPACE_TOOLS = [
     FILE_INFO_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
-    FILE_STR_REPLACE_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
     WORKSPACE_GREP_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
@@ -313,11 +313,21 @@ Guidance:
             },
         },
     },
-    FILE_STR_REPLACE_TOOL_NAME: {
+    EDIT_FILE_TOOL_NAME: {
         "type": "function",
         "function": {
-            "name": FILE_STR_REPLACE_TOOL_NAME,
-            "description": "Replace text in a workspace file.",
+            "name": EDIT_FILE_TOOL_NAME,
+            "description": """Safely edit an existing workspace file by replacing exact text.
+
+When to use:
+- Use this for small, local edits to an existing file.
+- Read the full file with `read_file` before editing.
+- Make `old_string` specific enough to match exactly one location.
+
+Rules:
+- By default, `old_string` must match exactly one location.
+- Set `replace_all=true` only when every occurrence should change.
+- Do not use this to create files or overwrite entire files; use `write_file` for that.""",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -328,25 +338,20 @@ Guidance:
                             "absolute path allowed when outside-workspace access is enabled)."
                         ),
                     },
-                    "old_str": {
+                    "old_string": {
                         "type": "string",
-                        "description": "The source text to replace.",
+                        "description": "Exact source text to replace. Must be non-empty and unique unless replace_all=true.",
                     },
-                    "new_str": {
+                    "new_string": {
                         "type": "string",
-                        "description": "Replacement text.",
+                        "description": "Replacement text. May be empty.",
                     },
                     "replace_all": {
                         "type": "boolean",
-                        "description": "Replace all matches when true. Default false.",
-                    },
-                    "max_replacements": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional cap when replace_all=false. Default 1.",
+                        "description": "Replace every occurrence of old_string. Default false.",
                     },
                 },
-                "required": ["path", "old_str", "new_str"],
+                "required": ["path", "old_string", "new_string"],
             },
         },
     },

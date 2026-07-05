@@ -10,8 +10,8 @@ from vv_agent import constants as constants_module
 from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
     COMPRESS_MEMORY_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
-    FILE_STR_REPLACE_TOOL_NAME,
     LIST_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
@@ -41,6 +41,56 @@ def tool_context(tmp_path: Path) -> ToolContext:
         cycle_index=1,
         workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
+
+
+def test_edit_file_replaces_file_str_replace_in_default_tools(registry) -> None:
+    tool_names = registry.list_tool_names()
+
+    assert EDIT_FILE_TOOL_NAME in tool_names
+    assert "file_str_replace" not in tool_names
+
+    edit_schema = registry.get_schema(EDIT_FILE_TOOL_NAME)
+    parameters = edit_schema["function"]["parameters"]
+    properties = parameters["properties"]
+
+    assert edit_schema["function"]["name"] == "edit_file"
+    assert parameters["required"] == ["path", "old_string", "new_string"]
+    assert set(properties) == {"path", "old_string", "new_string", "replace_all"}
+
+
+def test_file_str_replace_tool_name_is_removed(registry, tool_context: ToolContext) -> None:
+    call = ToolCall(
+        id="call_removed_replace",
+        name="file_str_replace",
+        arguments={"path": "edit.txt", "old_str": "a", "new_str": "b"},
+    )
+
+    with pytest.raises(ToolNotFoundError):
+        registry.execute(call, tool_context)
+
+
+def test_edit_file_rejects_legacy_argument_names(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "legacy.txt"
+    target.write_text("hello", encoding="utf-8")
+    registry.execute(
+        ToolCall(id="read_legacy", name=READ_FILE_TOOL_NAME, arguments={"path": "legacy.txt"}),
+        tool_context,
+    )
+
+    result = registry.execute(
+        ToolCall(
+            id="edit_legacy",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "legacy.txt", "old_str": "hello", "new_str": "hi"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "error"
+    assert result.error_code == "invalid_arguments"
+    assert payload["error_code"] == "invalid_arguments"
+    assert "old_string" in payload["message"]
 
 
 def test_workspace_write_and_read(registry, tool_context: ToolContext) -> None:
@@ -810,7 +860,7 @@ def test_workspace_grep_rejects_unknown_file_type(registry, tool_context: ToolCo
     assert "Unsupported file type" in result.metadata["error"]
 
 
-def test_file_info_and_string_replace(registry, tool_context: ToolContext) -> None:
+def test_file_info_and_edit_file(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "edit.txt"
     target.write_text("hello world\nhello agent", encoding="utf-8")
 
@@ -822,8 +872,8 @@ def test_file_info_and_string_replace(registry, tool_context: ToolContext) -> No
 
     replace_call = ToolCall(
         id="call_replace",
-        name=FILE_STR_REPLACE_TOOL_NAME,
-        arguments={"path": "edit.txt", "old_str": "hello", "new_str": "hi", "replace_all": True},
+        name=EDIT_FILE_TOOL_NAME,
+        arguments={"path": "edit.txt", "old_string": "hello", "new_string": "hi", "replace_all": True},
     )
     replace_result = registry.execute(replace_call, tool_context)
     replace_payload = json.loads(replace_result.content)

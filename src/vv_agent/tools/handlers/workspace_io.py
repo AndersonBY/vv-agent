@@ -623,3 +623,19 @@ def file_str_replace(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             }
         ),
     )
+
+
+def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+    if "old_str" in arguments or "new_str" in arguments:
+        message = "Use `old_string` and `new_string`; legacy `old_str`/`new_str` arguments are not supported."
+        return ToolExecutionResult(
+            tool_call_id="",
+            status="error",
+            error_code="invalid_arguments",
+            content=to_json({"error_code": "invalid_arguments", "message": message}),
+        )
+
+    translated = dict(arguments)
+    translated["old_str"] = translated.pop("old_string", "")
+    translated["new_str"] = translated.pop("new_string", "")
+    return file_str_replace(context, translated)

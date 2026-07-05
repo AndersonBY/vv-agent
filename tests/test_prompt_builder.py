@@ -6,6 +6,7 @@ from pathlib import Path
 from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
@@ -46,6 +47,8 @@ def test_prompt_includes_tool_governance_rules() -> None:
     assert TASK_FINISH_TOOL_NAME in prompt
     assert READ_FILE_TOOL_NAME in prompt
     assert WRITE_FILE_TOOL_NAME in prompt
+    assert EDIT_FILE_TOOL_NAME in prompt
+    assert "file_str_replace" not in prompt
     assert "Tool priority" in prompt
 
 
