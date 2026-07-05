@@ -965,7 +965,7 @@ class MemoryManager:
             "read_file": "read",
             "file_info": "read",
             "write_file": "modified",
-            "file_str_replace": "modified",
+            "edit_file": "modified",
         }
         actions_by_path: dict[str, dict[str, str]] = {}
         ordered_paths: list[str] = []
@@ -1039,7 +1039,7 @@ class MemoryManager:
             return f"Inspected {path}"
         if tool_name == "write_file":
             return f"Updated {path}"
-        if tool_name == "file_str_replace":
+        if tool_name == "edit_file":
             return f"Modified {path}"
         return f"Touched {path}"
 

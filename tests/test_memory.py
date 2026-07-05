@@ -88,6 +88,30 @@ def test_memory_compress_prompt_includes_original_user_messages_and_file_fields(
     assert "7" in prompt
 
 
+def test_memory_file_action_summary_uses_edit_file_for_modified_files() -> None:
+    manager = MemoryManager()
+    messages = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_edit",
+                    "type": "function",
+                    "function": {
+                        "name": "edit_file",
+                        "arguments": json.dumps({"path": "src/app.py"}),
+                    },
+                }
+            ],
+        )
+    ]
+
+    actions = manager._collect_file_actions(messages)
+
+    assert actions == [{"path": "src/app.py", "action": "modified", "summary": "Modified src/app.py"}]
+
+
 def test_memory_does_not_compact_when_small() -> None:
     manager = _build_manager(
         model_context_window=500,

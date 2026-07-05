@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vv_agent.memory.microcompact import CLEARED_MARKER, MicrocompactConfig, microcompact
+from vv_agent.memory.microcompact import COMPACTABLE_TOOLS, CLEARED_MARKER, MicrocompactConfig, microcompact
 from vv_agent.types import Message
 
 
@@ -42,6 +42,13 @@ def test_microcompact_handles_empty_messages() -> None:
 
     assert compacted == []
     assert cleared == 0
+
+
+def test_microcompact_treats_edit_file_as_compactable() -> None:
+    old_tool_name = "file" + "_str_replace"
+
+    assert "edit_file" in COMPACTABLE_TOOLS
+    assert old_tool_name not in COMPACTABLE_TOOLS
 
 
 def test_microcompact_clears_only_old_tool_results() -> None:

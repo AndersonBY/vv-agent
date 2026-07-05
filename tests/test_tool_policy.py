@@ -8,6 +8,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import (
     BASH_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
+    EDIT_FILE_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
@@ -153,6 +154,47 @@ def test_tool_policy_disallowed_default_tool_cannot_execute_even_if_model_calls_
 
     assert not (tmp_path / "secret.txt").exists()
     assert result.raw_result.cycles[0].tool_results[0].error_code == "tool_not_allowed"
+
+
+def test_tool_policy_allowed_tools_can_expose_edit_file_schema(tmp_path: Path) -> None:
+    llm = CapturingLLM()
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return llm, _resolved()
+
+    result = Runner.run_sync(
+        Agent(name="assistant", instructions="Use tools.", model="m"),
+        "edit",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, EDIT_FILE_TOOL_NAME]),
+        ),
+    )
+
+    assert result.final_output == "ok"
+    assert set(llm.tool_names) == {EDIT_FILE_TOOL_NAME, TASK_FINISH_TOOL_NAME}
+
+
+def test_tool_policy_disallowed_tools_can_hide_edit_file_schema(tmp_path: Path) -> None:
+    llm = CapturingLLM()
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return llm, _resolved()
+
+    Runner.run_sync(
+        Agent(name="assistant", instructions="Use tools.", model="m"),
+        "edit",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            tool_policy=ToolPolicy(disallowed_tools=[EDIT_FILE_TOOL_NAME]),
+        ),
+    )
+
+    assert EDIT_FILE_TOOL_NAME not in llm.tool_names
 
 
 def test_tool_policy_can_use_tool_blocks_executor_registered_tool(tmp_path: Path) -> None:
