@@ -52,10 +52,14 @@ def test_edit_file_is_registered_in_default_tools(registry) -> None:
     assert old_tool_name not in tool_names
 
     edit_schema = registry.get_schema(EDIT_FILE_TOOL_NAME)
+    edit_description = edit_schema["function"]["description"]
     parameters = edit_schema["function"]["parameters"]
     properties = parameters["properties"]
 
     assert edit_schema["function"]["name"] == "edit_file"
+    assert "read_file" in edit_description
+    assert "write_file" in edit_description
+    assert "previous successful edit_file" in edit_description
     assert parameters["required"] == ["path", "old_string", "new_string"]
     assert set(properties) == {"path", "old_string", "new_string", "replace_all"}
 
@@ -1379,6 +1383,128 @@ def test_edit_file_rejects_file_changed_since_read(registry, tool_context: ToolC
     assert result.error_code == "file_changed_since_read"
     assert payload["error_code"] == "file_changed_since_read"
     assert target.read_text(encoding="utf-8") == "hello user"
+
+
+def test_edit_file_allows_consecutive_edits_after_full_read(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "consecutive.txt"
+    target.write_text("alpha beta gamma", encoding="utf-8")
+
+    registry.execute(
+        ToolCall(id="read_consecutive", name=READ_FILE_TOOL_NAME, arguments={"path": "consecutive.txt"}),
+        tool_context,
+    )
+
+    first = registry.execute(
+        ToolCall(
+            id="edit_consecutive_first",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "consecutive.txt", "old_string": "alpha", "new_string": "one"},
+        ),
+        tool_context,
+    )
+    second = registry.execute(
+        ToolCall(
+            id="edit_consecutive_second",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "consecutive.txt", "old_string": "beta", "new_string": "two"},
+        ),
+        tool_context,
+    )
+
+    assert first.status == "success"
+    assert second.status == "success"
+    assert target.read_text(encoding="utf-8") == "one two gamma"
+
+
+def test_edit_file_accepts_full_write_file_baseline(registry, tool_context: ToolContext) -> None:
+    write_result = registry.execute(
+        ToolCall(
+            id="write_before_edit",
+            name=WRITE_FILE_TOOL_NAME,
+            arguments={"path": "write_only.txt", "content": "created by write_file"},
+        ),
+        tool_context,
+    )
+    assert write_result.status == "success"
+
+    result = registry.execute(
+        ToolCall(
+            id="edit_after_write_only",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={
+                "path": "write_only.txt",
+                "old_string": "write_file",
+                "new_string": "read_file",
+            },
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "success"
+    assert payload["ok"] is True
+    assert (tool_context.workspace / "write_only.txt").read_text(encoding="utf-8") == "created by read_file"
+
+
+def test_edit_file_rejects_append_to_unknown_existing_file_baseline(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "append_unknown.txt"
+    target.write_text("known? ", encoding="utf-8")
+
+    append_result = registry.execute(
+        ToolCall(
+            id="append_unknown",
+            name=WRITE_FILE_TOOL_NAME,
+            arguments={"path": "append_unknown.txt", "content": "append", "append": True},
+        ),
+        tool_context,
+    )
+    assert append_result.status == "success"
+
+    result = registry.execute(
+        ToolCall(
+            id="edit_after_unknown_append",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "append_unknown.txt", "old_string": "append", "new_string": "changed"},
+        ),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status == "error"
+    assert result.error_code == "file_not_read"
+    assert payload["error_code"] == "file_not_read"
+    assert target.read_text(encoding="utf-8") == "known? append"
+
+
+def test_edit_file_accepts_append_to_known_existing_file_baseline(registry, tool_context: ToolContext) -> None:
+    target = tool_context.workspace / "append_known.txt"
+    target.write_text("before ", encoding="utf-8")
+    registry.execute(
+        ToolCall(id="read_before_append", name=READ_FILE_TOOL_NAME, arguments={"path": "append_known.txt"}),
+        tool_context,
+    )
+
+    append_result = registry.execute(
+        ToolCall(
+            id="append_known",
+            name=WRITE_FILE_TOOL_NAME,
+            arguments={"path": "append_known.txt", "content": "after", "append": True},
+        ),
+        tool_context,
+    )
+    assert append_result.status == "success"
+
+    result = registry.execute(
+        ToolCall(
+            id="edit_after_known_append",
+            name=EDIT_FILE_TOOL_NAME,
+            arguments={"path": "append_known.txt", "old_string": "after", "new_string": "changed"},
+        ),
+        tool_context,
+    )
+
+    assert result.status == "success"
+    assert target.read_text(encoding="utf-8") == "before changed"
 
 
 def test_edit_file_replace_all_replaces_every_match(registry, tool_context: ToolContext) -> None:

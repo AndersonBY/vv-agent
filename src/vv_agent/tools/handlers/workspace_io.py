@@ -18,6 +18,15 @@ from vv_agent.types import ToolExecutionResult
 READ_FILE_MAX_LINES = 2_000
 READ_FILE_MAX_CHARS = 50_000
 FILE_BASELINES_STATE_KEY = "_workspace_file_baselines"
+READ_FILE_BASELINE_SOURCE = "read_file"
+WRITE_FILE_BASELINE_SOURCE = "write_file"
+EDIT_FILE_BASELINE_SOURCE = "edit_file"
+EDIT_FILE_ALLOWED_BASELINE_SOURCES = frozenset(
+    {READ_FILE_BASELINE_SOURCE, WRITE_FILE_BASELINE_SOURCE, EDIT_FILE_BASELINE_SOURCE}
+)
+WRITE_FILE_ALLOWED_BASELINE_SOURCES = frozenset(
+    {READ_FILE_BASELINE_SOURCE, WRITE_FILE_BASELINE_SOURCE, EDIT_FILE_BASELINE_SOURCE}
+)
 EDIT_DIFF_MAX_CHARS = 12_000
 UTF8_BOM = b"\xef\xbb\xbf"
 LIST_FILES_DEFAULT_MAX_RESULTS = 100
@@ -138,6 +147,7 @@ def _record_file_baseline(
     raw: bytes,
     text: str,
     is_partial: bool,
+    source: str,
 ) -> None:
     baselines = _get_file_baselines(context)
     baselines[_baseline_key(path)] = {
@@ -145,12 +155,21 @@ def _record_file_baseline(
         "size": len(raw),
         "line_ending": _line_ending_label(text),
         "is_partial": bool(is_partial),
+        "source": source,
     }
 
 
-def _baseline_error(context: ToolContext, *, path: str, current_raw: bytes) -> str | None:
+def _baseline_error(
+    context: ToolContext,
+    *,
+    path: str,
+    current_raw: bytes,
+    allowed_sources: frozenset[str],
+) -> str | None:
     baseline = _get_file_baselines(context).get(_baseline_key(path))
     if not baseline or baseline.get("is_partial"):
+        return "file_not_read"
+    if baseline.get("source") not in allowed_sources:
         return "file_not_read"
     if baseline.get("hash") != _content_hash(current_raw):
         return "file_changed_since_read"
@@ -613,7 +632,14 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         suggested_end = min(suggested_start + READ_FILE_MAX_LINES - 1, total_lines)
         raw = backend.read_bytes(path)
         baseline_text = raw.decode("utf-8", errors="replace")
-        _record_file_baseline(context, path=path, raw=raw, text=baseline_text, is_partial=True)
+        _record_file_baseline(
+            context,
+            path=path,
+            raw=raw,
+            text=baseline_text,
+            is_partial=True,
+            source=READ_FILE_BASELINE_SOURCE,
+        )
         return ToolExecutionResult(
             tool_call_id="",
             status="success",
@@ -648,7 +674,14 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
     raw = backend.read_bytes(path)
     baseline_text = raw.decode("utf-8", errors="replace")
     is_partial = "start_line" in arguments or "end_line" in arguments
-    _record_file_baseline(context, path=path, raw=raw, text=baseline_text, is_partial=is_partial)
+    _record_file_baseline(
+        context,
+        path=path,
+        raw=raw,
+        text=baseline_text,
+        is_partial=is_partial,
+        source=READ_FILE_BASELINE_SOURCE,
+    )
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -682,17 +715,38 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
 
     exists_before = backend.exists(path)
     is_existing_file = exists_before and backend.is_file(path)
+    known_full_before_write = not is_existing_file
     if is_existing_file and not append:
         try:
             current_raw = backend.read_bytes(path)
         except Exception:
             current_raw = backend.read_text(path).encode("utf-8", errors="replace")
-        baseline_issue = _baseline_error(context, path=path, current_raw=current_raw)
+        baseline_issue = _baseline_error(
+            context,
+            path=path,
+            current_raw=current_raw,
+            allowed_sources=WRITE_FILE_ALLOWED_BASELINE_SOURCES,
+        )
         if baseline_issue:
             message = "Read the full file with read_file before overwriting."
             if baseline_issue == "file_changed_since_read":
                 message = "File changed since it was last read. Re-read it before overwriting."
             return _workspace_error(message, error_code=baseline_issue, path=path)
+        known_full_before_write = True
+    elif is_existing_file and append:
+        try:
+            current_raw = backend.read_bytes(path)
+        except Exception:
+            current_raw = backend.read_text(path).encode("utf-8", errors="replace")
+        known_full_before_write = (
+            _baseline_error(
+                context,
+                path=path,
+                current_raw=current_raw,
+                allowed_sources=WRITE_FILE_ALLOWED_BASELINE_SOURCES,
+            )
+            is None
+        )
 
     backend.write_text(path, write_content, append=append)
 
@@ -702,7 +756,14 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
     except Exception:
         updated_text = backend.read_text(path)
         updated_raw = updated_text.encode("utf-8", errors="replace")
-    _record_file_baseline(context, path=path, raw=updated_raw, text=updated_text, is_partial=False)
+    _record_file_baseline(
+        context,
+        path=path,
+        raw=updated_raw,
+        text=updated_text,
+        is_partial=append and is_existing_file and not known_full_before_write,
+        source=WRITE_FILE_BASELINE_SOURCE,
+    )
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -785,7 +846,12 @@ def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
     except ValueError:
         return _workspace_error("Unsupported file encoding for edit_file.", error_code="unsupported_encoding", path=path)
 
-    baseline_issue = _baseline_error(context, path=path, current_raw=raw)
+    baseline_issue = _baseline_error(
+        context,
+        path=path,
+        current_raw=raw,
+        allowed_sources=EDIT_FILE_ALLOWED_BASELINE_SOURCES,
+    )
     if baseline_issue:
         message = "Read the full file with read_file before editing."
         if baseline_issue == "file_changed_since_read":
@@ -820,7 +886,14 @@ def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
     backend.write_text(path, "\ufeff" + updated if has_bom else updated)
     updated_raw = _encode_workspace_text(updated, has_bom=has_bom)
-    _record_file_baseline(context, path=path, raw=updated_raw, text=updated, is_partial=False)
+    _record_file_baseline(
+        context,
+        path=path,
+        raw=updated_raw,
+        text=updated,
+        is_partial=False,
+        source=EDIT_FILE_BASELINE_SOURCE,
+    )
 
     diff, diff_truncated, additions, deletions = _bounded_unified_diff(path, text, updated)
     return ToolExecutionResult(
