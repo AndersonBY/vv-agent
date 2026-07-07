@@ -1331,7 +1331,7 @@ def test_edit_file_requires_full_read_before_edit(registry, tool_context: ToolCo
     assert target.read_text(encoding="utf-8") == "hello world"
 
 
-def test_edit_file_rejects_partial_read_baseline(registry, tool_context: ToolContext) -> None:
+def test_edit_file_accepts_partial_read_baseline(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "partial.txt"
     target.write_text("line1\nline2\nline3", encoding="utf-8")
 
@@ -1353,10 +1353,9 @@ def test_edit_file_rejects_partial_read_baseline(registry, tool_context: ToolCon
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
-    assert result.error_code == "file_not_read"
-    assert payload["error_code"] == "file_not_read"
-    assert target.read_text(encoding="utf-8") == "line1\nline2\nline3"
+    assert result.status == "success"
+    assert payload["ok"] is True
+    assert target.read_text(encoding="utf-8") == "line1\nchanged\nline3"
 
 
 def test_edit_file_rejects_file_changed_since_read(registry, tool_context: ToolContext) -> None:

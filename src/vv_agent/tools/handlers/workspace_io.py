@@ -165,11 +165,16 @@ def _baseline_error(
     path: str,
     current_raw: bytes,
     allowed_sources: frozenset[str],
+    allow_partial: bool = False,
 ) -> str | None:
     baseline = _get_file_baselines(context).get(_baseline_key(path))
-    if not baseline or baseline.get("is_partial"):
+    if not baseline:
         return "file_not_read"
     if baseline.get("source") not in allowed_sources:
+        return "file_not_read"
+    if baseline.get("is_partial") and not (
+        allow_partial and baseline.get("source") == READ_FILE_BASELINE_SOURCE
+    ):
         return "file_not_read"
     if baseline.get("hash") != _content_hash(current_raw):
         return "file_changed_since_read"
@@ -851,9 +856,10 @@ def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         path=path,
         current_raw=raw,
         allowed_sources=EDIT_FILE_ALLOWED_BASELINE_SOURCES,
+        allow_partial=True,
     )
     if baseline_issue:
-        message = "Read the full file with read_file before editing."
+        message = "Read the file with read_file before editing."
         if baseline_issue == "file_changed_since_read":
             message = "File changed since it was last read. Re-read it before editing."
         return _workspace_error(message, error_code=baseline_issue, path=path)

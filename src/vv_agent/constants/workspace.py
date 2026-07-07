@@ -90,7 +90,7 @@ Guidance:
             "description": """Write content to a file in workspace.
 
 Use this for creating files, full-file overwrites, or appends.
-For small edits inside an existing file, use `edit_file` when the runtime has full current file context.
+For small edits inside an existing file, use `edit_file` when the runtime has a current read baseline.
 Overwriting an existing file requires a full current baseline from `read_file`, a prior full `write_file`, or `edit_file`.
 
 MODES:
@@ -361,11 +361,13 @@ Guidance:
 When to use:
 - Use this for small, local edits to an existing file.
 - Call `read_file` first unless the file was just fully written with `write_file`
-  or updated by a previous successful edit_file/write_file operation that preserved full context.
+  or updated by a previous successful edit_file/write_file operation that preserved current context.
+  A focused line-range read is enough when your `old_string` comes from that current read state;
+  use a full read for broad or uncertain edits.
 - Make `old_string` specific enough to match exactly one location.
 
 Rules:
-- `edit_file` requires a full current-file baseline. Appending to an unknown existing file does not count;
+- `edit_file` requires a current read baseline. Appending to an unknown existing file does not count;
   call `read_file` before editing after that case.
 - By default, `old_string` must match exactly one location.
 - Set `replace_all=true` only when every occurrence should change.
