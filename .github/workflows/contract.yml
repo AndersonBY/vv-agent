@@ -1,0 +1,40 @@
+name: Contract conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    env:
+      UV_NO_SOURCES: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Install dependencies
+        run: uv sync --dev --extra s3
+
+      - name: Verify vendored contract snapshot
+        run: python3 scripts/contract_snapshot.py check
+
+      - name: Rebuild canonical producer evidence
+        run: |
+          uv run pytest \
+            tests/test_parity_evidence_manifests.py \
+            tests/test_tool_schema_contract.py \
+            tests/test_app_server_contract_parity.py \
+            tests/test_runner_events_producer_parity.py

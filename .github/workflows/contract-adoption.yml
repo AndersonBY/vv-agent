@@ -1,0 +1,90 @@
+name: Adopt latest shared contract
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: contract-adoption
+  cancel-in-progress: false
+
+jobs:
+  adopt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout implementation
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Resolve latest contract release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release view --repo AndersonBY/vv-agent-contract --json tagName --jq .tagName)"
+          version="${tag#v}"
+          current="$(python3 -c 'import json; print(json.load(open("contract.lock.json"))["contract_version"])')"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+      - name: Stop when already current
+        if: steps.release.outputs.version == steps.release.outputs.current
+        run: echo "Already using vv-agent-contract ${{ steps.release.outputs.version }}"
+
+      - name: Check out and package canonical contract
+        if: steps.release.outputs.version != steps.release.outputs.current
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ steps.release.outputs.tag }}" \
+            https://github.com/AndersonBY/vv-agent-contract.git /tmp/vv-agent-contract
+          revision="$(git -C /tmp/vv-agent-contract rev-parse HEAD)"
+          python3 /tmp/vv-agent-contract/scripts/contractctl.py build \
+            --output-dir /tmp/vv-agent-contract-dist \
+            --revision "$revision"
+          python3 scripts/contract_snapshot.py sync \
+            --source /tmp/vv-agent-contract \
+            --artifact "/tmp/vv-agent-contract-dist/vv-agent-contract-${{ steps.release.outputs.version }}.zip" \
+            --artifact-url "https://github.com/AndersonBY/vv-agent-contract/releases/download/${{ steps.release.outputs.tag }}/vv-agent-contract-${{ steps.release.outputs.version }}.zip"
+
+      - name: Open or update adoption pull request
+        if: steps.release.outputs.version != steps.release.outputs.current
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          snapshot="$(python3 -c 'import json; print(json.load(open("contract.lock.json"))["snapshot_path"])')"
+          if git diff --quiet -- contract.lock.json "$snapshot"; then
+            echo "No contract snapshot changes detected"
+            exit 0
+          fi
+          version="${{ steps.release.outputs.version }}"
+          branch="chore/vv-agent-contract-$version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add contract.lock.json "$snapshot"
+          git commit -m "chore: adopt vv-agent-contract $version"
+          git push --force-with-lease origin "$branch"
+          body="Adopts vv-agent-contract $version from https://github.com/AndersonBY/vv-agent-contract/releases/tag/v$version. The vendored snapshot and lock were generated automatically. Real producer or runtime changes may still be required before this PR passes; pair it with the vv-agent-rs adoption PR and central cross-repository run."
+          existing="$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "chore: adopt vv-agent-contract $version" --body "$body"
+          else
+            gh pr create --base main --head "$branch" --title "chore: adopt vv-agent-contract $version" --body "$body"
+          fi

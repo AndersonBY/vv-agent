@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "jsonRpc": {
+    "version": "2.0",
+    "validRequestIds": [
+      0,
+      42,
+      "req_42"
+    ],
+    "invalidRequestIds": [
+      null,
+      true,
+      1.5,
+      [],
+      {}
+    ],
+    "errorResponseAllowsNullId": true
+  },
+  "timestamps": {
+    "unit": "unix_seconds",
+    "jsonType": "number",
+    "eventMillis": 1720000000123,
+    "eventSeconds": 1720000000.123
+  },
+  "input": {
+    "valid": [
+      {
+        "type": "text",
+        "text": "hello"
+      },
+      {
+        "type": "image",
+        "url": "https://example.invalid/image.png"
+      }
+    ],
+    "invalid": [
+      "hello",
+      7,
+      true,
+      null,
+      []
+    ]
+  },
+  "liveReplay": {
+    "item": {
+      "itemId": "item_evt_contract",
+      "threadId": "thread_contract",
+      "turnId": "turn_contract",
+      "type": "agentMessage",
+      "status": "completed",
+      "payload": {
+        "text": "contract payload"
+      },
+      "createdAt": 1720000000.123,
+      "updatedAt": 1720000000.123
+    },
+    "notificationMethod": "item/completed",
+    "payloadMustMatch": true
+  },
+  "approval": {
+    "decisions": [
+      "allow",
+      "allow_session",
+      "deny",
+      "timeout"
+    ],
+    "caseSensitive": true,
+    "timeoutDecision": "timeout",
+    "disconnectDecision": "timeout",
+    "duplicateServerRequestId": "reject"
+  },
+  "ordering": {
+    "threadStart": [
+      "response",
+      "thread/started"
+    ],
+    "turnStart": [
+      "response",
+      "thread/status/changed",
+      "turn/started"
+    ],
+    "turnTerminal": [
+      "thread/status/changed",
+      "turn/completed"
+    ]
+  },
+  "terminal": {
+    "threadStatusAfterTurn": "idle",
+    "turnStatuses": [
+      "completed",
+      "failed",
+      "interrupted"
+    ],
+    "optionalFieldsOmittedWhenAbsent": [
+      "runId",
+      "finalOutput",
+      "error",
+      "tokenUsage"
+    ]
+  },
+  "nullability": {
+    "threadStartResponse": {
+      "cwd": null
+    },
+    "threadSnapshot": {
+      "cwd": null,
+      "archivedAt": null
+    },
+    "turnSnapshot": {
+      "runId": null,
+      "completedAt": null
+    }
+  },
+  "restart": {
+    "connectionIdCanReinitialize": true,
+    "staleRunningThreadStatus": "idle"
+  },
+  "schema": {
+    "json": [
+      "AppItem.json",
+      "AppThread.json",
+      "AppTurn.json",
+      "ApprovalDecision.json",
+      "ApprovalRequestParams.json",
+      "ApprovalResolveParams.json",
+      "ClientRequest.json",
+      "InitializeParams.json",
+      "InitializeResponse.json",
+      "JsonRpcMessage.json",
+      "SchemaExportResponse.json",
+      "ServerNotification.json",
+      "ServerRequest.json",
+      "ThreadReadResponse.json",
+      "ThreadResumeResponse.json",
+      "ThreadStartResponse.json",
+      "TurnStartResponse.json"
+    ],
+    "typescript": [
+      "AppItem.ts",
+      "AppThread.ts",
+      "AppTurn.ts",
+      "ApprovalDecision.ts",
+      "ApprovalRequestParams.ts",
+      "ApprovalResolveParams.ts",
+      "ClientRequest.ts",
+      "InitializeParams.ts",
+      "InitializeResponse.ts",
+      "SchemaExportResponse.ts",
+      "ServerNotification.ts",
+      "ServerRequest.ts",
+      "ThreadReadResponse.ts",
+      "ThreadResumeResponse.ts",
+      "ThreadStartResponse.ts",
+      "TurnStartResponse.ts"
+    ],
+    "typescriptSelfContained": true
+  }
+}

@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import warnings
 from collections.abc import Callable
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.events import RunEvent
-from vv_agent.llm.base import LLMClient
+from vv_agent.llm.base import LLMClient, LlmRequest, complete_llm_request
 from vv_agent.memory import CompactionExhaustedError, MemoryManager
 from vv_agent.memory.provider import MemoryCompactCompleted, MemoryCompactStarted, MemoryProvider, MemoryProviderResult
 from vv_agent.memory.token_utils import count_messages_tokens
@@ -136,14 +137,27 @@ class CycleRunner:
             if ctx is not None:
                 ctx.check_cancelled()
 
-            stream_callback = ctx.stream_callback if ctx is not None else None
+            parent_stream_callback = ctx.stream_callback if ctx is not None else None
+            stream_callback = parent_stream_callback
+            if parent_stream_callback is not None:
+
+                def stream_callback(
+                    payload: dict[str, Any],
+                    _parent_stream_callback: Callable[[dict[str, Any]], None] = parent_stream_callback,
+                    _cycle_index: int = cycle_index,
+                ) -> None:
+                    enriched = dict(payload)
+                    enriched["cycle"] = _cycle_index
+                    _parent_stream_callback(enriched)
+
             try:
                 llm_response = self._complete_llm(
                     model=task.model,
                     messages=request_messages,
                     tools=request_tool_schemas,
+                    metadata=dict(task.metadata),
                     stream_callback=stream_callback,
-                    model_settings=self._model_settings_from_context(ctx),
+                    model_settings=self._effective_model_settings(task, ctx),
                 )
                 break
             except Exception as exc:
@@ -233,9 +247,18 @@ class CycleRunner:
         cycle_record = CycleRecord(
             index=cycle_index,
             assistant_message=llm_response.content,
-            tool_calls=llm_response.tool_calls,
+            tool_calls=deepcopy(llm_response.tool_calls),
             memory_compacted=memory_compacted,
             token_usage=normalize_token_usage(llm_response.raw.get("usage")),
+            _planned_tool_names=tuple(
+                name
+                for schema in request_tool_schemas
+                if isinstance(schema, dict)
+                for function in [schema.get("function")]
+                if isinstance(function, dict)
+                for name in [function.get("name")]
+                if isinstance(name, str)
+            ),
         )
         return next_messages, cycle_record
 
@@ -271,24 +294,30 @@ class CycleRunner:
         model: str,
         messages: list[Message],
         tools: list[dict[str, object]],
+        metadata: dict[str, Any],
         stream_callback: Any,
         model_settings: ModelSettings | None,
     ) -> LLMResponse:
-        return self.llm_client.complete(
-            model=model,
-            messages=messages,
-            tools=tools,
+        return complete_llm_request(
+            self.llm_client,
+            LlmRequest(
+                model=model,
+                messages=messages,
+                tools=tools,
+                metadata=metadata,
+                model_settings=model_settings,
+            ),
             stream_callback=stream_callback,
-            model_settings=model_settings,
         )
 
     @staticmethod
-    def _model_settings_from_context(ctx: ExecutionContext | None) -> ModelSettings | None:
+    def _effective_model_settings(task: AgentTask, ctx: ExecutionContext | None) -> ModelSettings | None:
         metadata = getattr(ctx, "metadata", None)
-        if not isinstance(metadata, dict):
-            return None
-        value = metadata.get("_vv_agent_model_settings")
-        return value if isinstance(value, ModelSettings) else None
+        if isinstance(metadata, dict):
+            value = metadata.get("_vv_agent_model_settings")
+            if isinstance(value, ModelSettings):
+                return value
+        return task.model_settings
 
     @staticmethod
     def _estimate_compact_tokens(
@@ -523,7 +552,11 @@ class CycleRunner:
                 "type": "function",
                 "function": {
                     "name": tool_call.name,
-                    "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                    "arguments": json.dumps(
+                        tool_call.arguments,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
                 },
             }
             if tool_call.extra_content is not None:

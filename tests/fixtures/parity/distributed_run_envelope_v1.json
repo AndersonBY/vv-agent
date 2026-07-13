@@ -1,0 +1,113 @@
+{
+  "schema_version": "vv-agent.distributed-run.v1",
+  "default_toolset_schema_digest": "f85422117d41d28ffa3cdfcfd9a42892854de624808fadc2124f4ebe7a452b61",
+  "canonical_envelope": {
+    "schema_version": "vv-agent.distributed-run.v1",
+    "job_id": "run-123:cycle:2",
+    "run_id": "run-123",
+    "task": {
+      "task_id": "run-123",
+      "model": "model-x",
+      "system_prompt": "system",
+      "user_prompt": "prompt",
+      "max_cycles": 8,
+      "memory_compact_threshold": 128000,
+      "memory_threshold_percentage": 90,
+      "no_tool_policy": "continue",
+      "allow_interruption": true,
+      "use_workspace": true,
+      "has_sub_agents": false,
+      "agent_type": null,
+      "native_multimodal": false,
+      "sub_agents": {},
+      "extra_tool_names": [],
+      "exclude_tools": [],
+      "model_settings": null,
+      "initial_messages": [],
+      "initial_shared_state": {},
+      "metadata": {
+        "_vv_agent_run_id": "run-123",
+        "language": "en-US"
+      }
+    },
+    "recipe": {
+      "settings_file": "/srv/settings.json",
+      "backend": "deepseek",
+      "model": "model-x",
+      "workspace": "/srv/workspace",
+      "timeout_seconds": 120.0,
+      "log_preview_chars": 256,
+      "state_store": {
+        "kind": "redis",
+        "location": "redis://state/0"
+      },
+      "capabilities": {
+        "toolset_ref": {
+          "id": "vv-agent.builtin-tools",
+          "version": "1",
+          "schema_digest": "f85422117d41d28ffa3cdfcfd9a42892854de624808fadc2124f4ebe7a452b61"
+        },
+        "tool_policy": {
+          "allowed_tools": ["read_file", "task_finish"],
+          "disallowed_tools": ["bash"],
+          "approval": "on_request",
+          "predicate_ref": {"id": "policy.project", "version": "3"}
+        },
+        "llm_client_ref": {"id": "llm.primary", "version": "2"},
+        "workspace_backend_ref": {"id": "workspace.shared", "version": "1"},
+        "approval_provider_ref": {"id": "approval.remote", "version": "4"},
+        "approval_broker_ref": {"id": "approval.channel", "version": "4"},
+        "approval_timeout_seconds": 45.0,
+        "cancellation_ref": {"id": "cancel.redis", "version": "1"},
+        "event_sink_ref": {"id": "events.outbox", "version": "2"},
+        "app_state_ref": {"id": "app.tenant", "version": "7"},
+        "sub_task_manager_ref": {"id": "subtasks.shared", "version": "1"},
+        "memory_provider_refs": [{"id": "memory.team", "version": "5"}],
+        "hook_refs": [{"id": "hook.audit", "version": "1"}],
+        "observer_refs": [{"id": "observer.metrics", "version": "2"}]
+      }
+    },
+    "cycle_name": "vv_agent.distributed.run_single_cycle",
+    "cycle_index": 2,
+    "idempotency_key": "run-123:cycle:2",
+    "deadline_unix_ms": 2000000000000,
+    "lease_duration_ms": 120000
+  },
+  "invalid_cases": [
+    {
+      "name": "unsupported_schema_version",
+      "path": ["schema_version"],
+      "value": "vv-agent.distributed-run.v2",
+      "error": "unsupported distributed schema_version"
+    },
+    {
+      "name": "zero_cycle_index",
+      "path": ["cycle_index"],
+      "value": 0,
+      "error": "cycle_index must be between 1 and 4294967295"
+    },
+    {
+      "name": "invalid_toolset_digest",
+      "path": ["recipe", "capabilities", "toolset_ref", "schema_digest"],
+      "value": "not-a-sha256",
+      "error": "schema_digest must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "name": "missing_approval_broker",
+      "path": ["recipe", "capabilities", "approval_broker_ref"],
+      "value": null,
+      "error": "approval_provider_ref and approval_broker_ref must be declared together"
+    },
+    {
+      "name": "invalid_approval_timeout",
+      "path": ["recipe", "capabilities", "approval_timeout_seconds"],
+      "value": 0,
+      "error": "approval_timeout_seconds must be a finite positive number or null"
+    }
+  ],
+  "unknown_capability": {
+    "kind": "hook",
+    "reference": {"id": "hook.missing", "version": "1"},
+    "error": "unknown distributed capability hook hook.missing@1"
+  }
+}

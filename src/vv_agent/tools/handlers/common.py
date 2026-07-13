@@ -5,10 +5,46 @@ from pathlib import Path
 from typing import Any, TypeGuard
 
 from vv_agent.tools.base import ToolContext
+from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 
 def to_json(data: Any) -> str:
-    return json.dumps(data, ensure_ascii=False)
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def builtin_error(
+    message: str,
+    error_code: str,
+    *,
+    details: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToolExecutionResult:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": message,
+        "error_code": error_code,
+    }
+    if details:
+        payload.update(details)
+    host_metadata: dict[str, Any] = {"error_code": error_code}
+    if metadata:
+        host_metadata.update(metadata)
+    return ToolExecutionResult(
+        tool_call_id="",
+        status="error",
+        status_code=ToolResultStatus.ERROR,
+        error_code=error_code,
+        content=to_json(payload),
+        metadata=host_metadata,
+    )
+
+
+def select_metadata(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
+    return {key: payload[key] for key in keys if key in payload and payload[key] is not None}
+
+
+def trim_portable_whitespace(value: str) -> str:
+    return value.strip().strip("\x1c\x1d\x1e\x1f")
 
 
 def is_string_keyed_dict(value: Any) -> TypeGuard[dict[str, Any]]:

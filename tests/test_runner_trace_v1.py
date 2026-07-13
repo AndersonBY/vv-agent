@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from vv_agent import Agent, ModelSettings, Runner, ToolCallCompletedEvent, ToolOutputText, function_tool
+from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.types import LLMResponse, Message, ToolCall
+
+TRACE_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "runner_trace_v1.jsonl"
+TRACE_FIXTURE_SHA256 = "1396aab48578f9f7f0a6f8202efeeef38c36093b0645c11010f7aed7d93cb62b"
+TRACE_FIELDS = (
+    "type",
+    "cycle_index",
+    "agent_name",
+    "model",
+    "delta",
+    "tool_name",
+    "tool_call_id",
+    "arguments",
+    "status",
+    "final_output",
+)
+
+
+class StreamingScriptedLLM(ScriptedLLM):
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        tools: list[dict[str, object]],
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+        model_settings: ModelSettings | None = None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        return self.complete_request(
+            LlmRequest(
+                model=model,
+                messages=list(messages),
+                tools=list(tools),
+                metadata=dict(request_metadata or {}),
+                model_settings=model_settings,
+            ),
+            stream_callback=stream_callback,
+        )
+
+    def complete_request(self, request: LlmRequest, *, stream_callback=None) -> LLMResponse:
+        response = super().complete_request(request, stream_callback=stream_callback)
+        if stream_callback is not None:
+            stream_callback({"event": "assistant_delta", "content_delta": response.content})
+        return response
+
+
+def test_real_runner_trace_matches_v1_producer_fixture() -> None:
+    @function_tool
+    def lookup(query: str) -> ToolOutputText:
+        """Look up a deterministic fixture value."""
+        return ToolOutputText(
+            text=f"found:{query}",
+            metadata={"producer_marker": {"nested": True}},
+        )
+
+    agent = Agent(
+        name="trace-agent",
+        instructions="Use lookup then finish.",
+        model=StreamingScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="lookup",
+                    tool_calls=[ToolCall(id="lookup-call", name="lookup", arguments={"query": "parity"})],
+                ),
+                LLMResponse(
+                    content="finish",
+                    tool_calls=[
+                        ToolCall(id="finish-call", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})
+                    ],
+                ),
+            ]
+        ),
+        tools=[lookup],
+    )
+
+    result = Runner.run_sync(agent, "trace this")
+    actual = [
+        _trace_projection(event.to_dict())
+        for event in result.events
+        if event.type not in {"agent_started", "session_persisted"}
+    ]
+    fixture_bytes = TRACE_FIXTURE.read_bytes()
+    expected = [json.loads(line) for line in fixture_bytes.decode("ascii").splitlines()]
+
+    assert hashlib.sha256(fixture_bytes).hexdigest() == TRACE_FIXTURE_SHA256
+    assert actual == expected
+    event_types = {event["type"] for event in actual}
+    assert "cycle_llm_response" not in event_types
+    assert "agent_started" not in event_types
+    assert "session_persisted" not in event_types
+    assert "agent_started" in {event.type for event in result.events}
+    lookup_completed = next(
+        event
+        for event in result.events
+        if isinstance(event, ToolCallCompletedEvent) and event.tool_name == "lookup"
+    )
+    assert lookup_completed.metadata["metadata"]["producer_marker"] == {"nested": True}
+    assert lookup_completed.metadata["tool_arguments"] == {"query": "parity"}
+    assert {
+        event["status"]
+        for event in actual
+        if event["type"] == "tool_call_completed"
+    } == {"success"}
+
+
+def _trace_projection(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: payload[key] for key in TRACE_FIELDS if key in payload}

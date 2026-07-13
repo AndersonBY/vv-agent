@@ -6,14 +6,19 @@ from typing import Protocol
 from vv_agent.agent import Agent
 from vv_agent.app_server.outgoing import OutgoingRouter
 from vv_agent.app_server.protocol import (
+    ApprovalDecision as WireApprovalDecision,
+)
+from vv_agent.app_server.protocol import (
     ApprovalRequestParams,
     AppServerError,
     AppServerErrorCode,
     ModelListRequest,
     ModelListResponse,
     ModelSummary,
+    RequestId,
 )
-from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
+from vv_agent.approval import ApprovalDecision as RuntimeApprovalDecision
+from vv_agent.approval import ApprovalProvider, ApprovalRequest
 from vv_agent.run_config import RunConfig
 
 
@@ -94,7 +99,7 @@ class AppServerApprovalProvider(ApprovalProvider):
         del request
         return True
 
-    def decide(self, request: ApprovalRequest) -> ApprovalDecision | None:
+    def decide(self, request: ApprovalRequest) -> RuntimeApprovalDecision | None:
         pending = self._router.send_server_request(
             self._connection_id,
             "approval/request",
@@ -107,6 +112,7 @@ class AppServerApprovalProvider(ApprovalProvider):
                 preview=f"Approval required for tool {request.tool_name}.",
                 arguments=dict(request.arguments),
             ).to_dict(),
+            request_id=RequestId(request.request_id),
         )
         try:
             result = pending.result(timeout=self._timeout_seconds)
@@ -115,20 +121,36 @@ class AppServerApprovalProvider(ApprovalProvider):
                 pending.request_id,
                 AppServerError(AppServerErrorCode.INTERNAL_ERROR, "approval_timeout"),
             )
-            return ApprovalDecision.timeout("Approval request timed out.")
+            return RuntimeApprovalDecision.timeout("Approval request timed out.")
         except RuntimeError as exc:
-            return ApprovalDecision.deny(str(exc) or "client_disconnected")
+            return RuntimeApprovalDecision.timeout(str(exc) or "client_disconnected")
 
-        return self._decision_from_payload(result or {}, pending.request_id.to_wire())
+        return self._decision_from_payload(result or {}, pending.request_id.require_wire())
 
-    def _decision_from_payload(self, payload: dict[str, object], server_request_id: str | int) -> ApprovalDecision:
-        decision = str(payload.get("decision") or "deny").strip().lower()
-        message = str(payload.get("message") or "")
-        metadata = {"server_request_id": server_request_id}
-        if decision in {"allow", "approve", "approved"}:
-            return ApprovalDecision(action="allow", reason=message, metadata=metadata)
-        if decision == "allow_session":
-            return ApprovalDecision(action="allow_session", reason=message, metadata=metadata)
-        if decision == "timeout":
-            return ApprovalDecision.timeout(message or "Approval request timed out.")
-        return ApprovalDecision.deny(message or "Approval denied by client.")
+    def _decision_from_payload(self, payload: dict[str, object], server_request_id: str | int) -> RuntimeApprovalDecision:
+        raw_decision = str(payload.get("decision") or "deny")
+        message = str(payload.get("reason") or payload.get("message") or "")
+        raw_metadata = payload.get("metadata")
+        metadata = {
+            **(dict(raw_metadata) if isinstance(raw_metadata, dict) else {}),
+            "server_request_id": server_request_id,
+        }
+        try:
+            decision = WireApprovalDecision.from_wire(raw_decision)
+        except ValueError:
+            decision = WireApprovalDecision.DENY
+        if decision is WireApprovalDecision.ALLOW:
+            return RuntimeApprovalDecision(action=decision.value, reason=message, metadata=metadata)
+        if decision is WireApprovalDecision.ALLOW_SESSION:
+            return RuntimeApprovalDecision(action=decision.value, reason=message, metadata=metadata)
+        if decision is WireApprovalDecision.TIMEOUT:
+            return RuntimeApprovalDecision(
+                action=decision.value,
+                reason=message or "Approval request timed out.",
+                metadata=metadata,
+            )
+        return RuntimeApprovalDecision(
+            action=decision.value,
+            reason=message or "Approval denied by client.",
+            metadata=metadata,
+        )

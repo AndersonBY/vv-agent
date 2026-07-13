@@ -28,7 +28,7 @@ def main() -> None:
         settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
         default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
         workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        runtime_hooks=[ContextHintHook()],
+        hooks=[ContextHintHook()],
     )
     result = Runner.run_sync(agent, "Describe the hook mechanism.", run_config=config)
     print(result.final_output)

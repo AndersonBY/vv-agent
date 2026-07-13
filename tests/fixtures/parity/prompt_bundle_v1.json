@@ -1,0 +1,224 @@
+{
+  "contract": "vv-agent-system-prompt-v1",
+  "normalization_rules": {
+    "computer_os": "Replace the host OS label in rendered environment text with <OS> and recompute the stable hash."
+  },
+  "scenarios": [
+    {
+      "id": "en-US-full",
+      "input": {
+        "agent_type": "computer",
+        "allow_interruption": true,
+        "available_skills": [
+          {
+            "allowed_tools": "read_file search_files",
+            "compatibility": "vv-agent >= 1",
+            "description": "Review code against the requested contract.",
+            "location": "skills/review-code/SKILL.md",
+            "name": "review-code"
+          }
+        ],
+        "available_sub_agents": {
+          "researcher": "Finds source evidence.",
+          "writer": "Writes the final report."
+        },
+        "current_time_utc": "2026-07-10T08:30:00Z",
+        "enable_todo_management": true,
+        "language": "en-US",
+        "original_system_prompt": "You are a careful coding agent.",
+        "session_memory_context": "<Session Memory>\n- Keep source evidence.\n</Session Memory>",
+        "use_workspace": true
+      },
+      "normalizations": [
+        "computer_os"
+      ],
+      "output": {
+        "prompt": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nWhen you need clarification or decision from the user, call `ask_user`. You may provide options and set selection mode.\n\nYou can operate workspace files with tools: find_files, file_info, read_file, write_file, edit_file, search_files, compress_memory, todo_write.\n\nTool priority: prefer specialized tools over shell commands. Find candidate files with `find_files`, read with `read_file`, search file contents with `search_files`, write with `write_file`, edit with `edit_file`. Use `bash` only when specialized tools are insufficient.\n\nUse `todo_write` for multi-step tasks and keep progress updated. Only one item should be in progress at a time.\n\nIf sub-agents are configured, delegate work with `create_sub_task`. Use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, `wait_for_completion=false` for background execution, and `sub_task_status` to query progress or send follow-up messages. If background work must finish before you can continue, call `sub_task_status` with `wait_for_completion=true` and a longer `check_interval_seconds` instead of repeatedly polling.\nAvailable sub-agents (use the agent_id exactly as shown):\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\nWhen you confirm task completion, you must call `task_finish` and put the final user-facing result in its `message` field.\n</Tools>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
+        "sections": [
+          {
+            "id": "agent_definition",
+            "stable": true,
+            "text": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>"
+          },
+          {
+            "id": "session_memory",
+            "stable": false,
+            "text": "<Session Memory>\n- Keep source evidence.\n</Session Memory>"
+          },
+          {
+            "id": "environment",
+            "stable": true,
+            "text": "<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>"
+          },
+          {
+            "id": "tools",
+            "stable": true,
+            "text": "<Tools>\nWhen you need clarification or decision from the user, call `ask_user`. You may provide options and set selection mode.\n\nYou can operate workspace files with tools: find_files, file_info, read_file, write_file, edit_file, search_files, compress_memory, todo_write.\n\nTool priority: prefer specialized tools over shell commands. Find candidate files with `find_files`, read with `read_file`, search file contents with `search_files`, write with `write_file`, edit with `edit_file`. Use `bash` only when specialized tools are insufficient.\n\nUse `todo_write` for multi-step tasks and keep progress updated. Only one item should be in progress at a time.\n\nIf sub-agents are configured, delegate work with `create_sub_task`. Use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, `wait_for_completion=false` for background execution, and `sub_task_status` to query progress or send follow-up messages. If background work must finish before you can continue, call `sub_task_status` with `wait_for_completion=true` and a longer `check_interval_seconds` instead of repeatedly polling.\nAvailable sub-agents (use the agent_id exactly as shown):\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\nWhen you confirm task completion, you must call `task_finish` and put the final user-facing result in its `message` field.\n</Tools>"
+          },
+          {
+            "id": "current_time",
+            "stable": false,
+            "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>"
+          }
+        ],
+        "stable_hash": "fe931fec5e2d6af7592641fcea1f68425386cb51300d2b2af442357eabc547ff"
+      },
+      "producer": "build_system_prompt_bundle"
+    },
+    {
+      "id": "zh-CN-full",
+      "input": {
+        "agent_type": "computer",
+        "allow_interruption": true,
+        "available_skills": [
+          {
+            "allowed_tools": "read_file search_files",
+            "compatibility": "vv-agent >= 1",
+            "description": "核对代码与契约。",
+            "location": "skills/review-code/SKILL.md",
+            "name": "review-code"
+          }
+        ],
+        "available_sub_agents": {
+          "researcher": "查找源码证据。",
+          "writer": "整理最终报告。"
+        },
+        "current_time_utc": "2026-07-10T08:30:00Z",
+        "enable_todo_management": true,
+        "language": "zh-CN",
+        "original_system_prompt": "你是一个严谨的编码 Agent。",
+        "session_memory_context": "<Session Memory>\n- 保留源码证据。\n</Session Memory>",
+        "use_workspace": true
+      },
+      "normalizations": [
+        "computer_os"
+      ],
+      "output": {
+        "prompt": "<Agent Definition>\n你是一个严谨的编码 Agent。\n</Agent Definition>\n\n<Session Memory>\n- 保留源码证据。\n</Session Memory>\n\n<Environment>\n你运行在 <OS> 工作区环境中, 可以用工具读取, 搜索, 修改文件.\n</Environment>\n\n<Tools>\n当你需要用户补充信息或做出选择时, 调用 `ask_user`. 你可以提供 options 并设置选择模式.\n\n你可以使用这些工具操作工作区文件: find_files, file_info, read_file, write_file, edit_file, search_files, compress_memory, todo_write.\n\n工具优先级: 优先使用专用工具而不是 shell. 查找候选文件用 `find_files`, 读取用 `read_file`, 搜索文件内容用 `search_files`, 写入用 `write_file`, 编辑用 `edit_file`. 仅在专用工具不足时使用 `bash`.\n\n多步骤任务请使用 `todo_write` 管理任务清单并及时更新状态, 任意时刻仅保留一个 in_progress.\n\n如果已配置子 Agent, 可使用 `create_sub_task` 委派任务: 用 `agent_id` 指定目标子 Agent, 单任务用 `task_description`, 同一子 Agent 的并行任务用 `tasks`, 后台执行用 `wait_for_completion=false`; 需要查询进度或追加消息时使用 `sub_task_status`。如果后台任务完成前主任务无法继续, 请调用 `sub_task_status` 并设置 `wait_for_completion=true` 和较长的 `check_interval_seconds`, 不要连续轮询。\n可用子 Agent 列表 (调用时请直接使用下列 agent_id):\n- agent_id=`researcher`: 查找源码证据。\n- agent_id=`writer`: 整理最终报告。\n\n可用技能元数据 (Agent Skills 标准格式):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n核对代码与契约。\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\n当你确认任务完成时, 必须调用 `task_finish`, 并在 `message` 字段里给出面向用户的最终结果.\n</Tools>\n\n<Current Time>\n任务开始时的真实 UTC 时间:\n2026-07-10T08:30:00Z\n</Current Time>",
+        "sections": [
+          {
+            "id": "agent_definition",
+            "stable": true,
+            "text": "<Agent Definition>\n你是一个严谨的编码 Agent。\n</Agent Definition>"
+          },
+          {
+            "id": "session_memory",
+            "stable": false,
+            "text": "<Session Memory>\n- 保留源码证据。\n</Session Memory>"
+          },
+          {
+            "id": "environment",
+            "stable": true,
+            "text": "<Environment>\n你运行在 <OS> 工作区环境中, 可以用工具读取, 搜索, 修改文件.\n</Environment>"
+          },
+          {
+            "id": "tools",
+            "stable": true,
+            "text": "<Tools>\n当你需要用户补充信息或做出选择时, 调用 `ask_user`. 你可以提供 options 并设置选择模式.\n\n你可以使用这些工具操作工作区文件: find_files, file_info, read_file, write_file, edit_file, search_files, compress_memory, todo_write.\n\n工具优先级: 优先使用专用工具而不是 shell. 查找候选文件用 `find_files`, 读取用 `read_file`, 搜索文件内容用 `search_files`, 写入用 `write_file`, 编辑用 `edit_file`. 仅在专用工具不足时使用 `bash`.\n\n多步骤任务请使用 `todo_write` 管理任务清单并及时更新状态, 任意时刻仅保留一个 in_progress.\n\n如果已配置子 Agent, 可使用 `create_sub_task` 委派任务: 用 `agent_id` 指定目标子 Agent, 单任务用 `task_description`, 同一子 Agent 的并行任务用 `tasks`, 后台执行用 `wait_for_completion=false`; 需要查询进度或追加消息时使用 `sub_task_status`。如果后台任务完成前主任务无法继续, 请调用 `sub_task_status` 并设置 `wait_for_completion=true` 和较长的 `check_interval_seconds`, 不要连续轮询。\n可用子 Agent 列表 (调用时请直接使用下列 agent_id):\n- agent_id=`researcher`: 查找源码证据。\n- agent_id=`writer`: 整理最终报告。\n\n可用技能元数据 (Agent Skills 标准格式):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n核对代码与契约。\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\n当你确认任务完成时, 必须调用 `task_finish`, 并在 `message` 字段里给出面向用户的最终结果.\n</Tools>"
+          },
+          {
+            "id": "current_time",
+            "stable": false,
+            "text": "<Current Time>\n任务开始时的真实 UTC 时间:\n2026-07-10T08:30:00Z\n</Current Time>"
+          }
+        ],
+        "stable_hash": "19c2ace042c6e00115ca87169732d0450bd7313588d0ec9504062230a732f193"
+      },
+      "producer": "build_system_prompt_bundle"
+    },
+    {
+      "id": "en-US-minimal",
+      "input": {
+        "agent_type": null,
+        "allow_interruption": false,
+        "available_skills": [],
+        "available_sub_agents": {},
+        "current_time_utc": "2026-07-10T08:30:00Z",
+        "enable_todo_management": false,
+        "language": "en-US",
+        "original_system_prompt": "Return only verified facts.",
+        "session_memory_context": "",
+        "use_workspace": false
+      },
+      "normalizations": [],
+      "output": {
+        "prompt": "<Agent Definition>\nReturn only verified facts.\n</Agent Definition>\n\n<Tools>\nWhen you confirm task completion, you must call `task_finish` and put the final user-facing result in its `message` field.\n</Tools>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
+        "sections": [
+          {
+            "id": "agent_definition",
+            "stable": true,
+            "text": "<Agent Definition>\nReturn only verified facts.\n</Agent Definition>"
+          },
+          {
+            "id": "tools",
+            "stable": true,
+            "text": "<Tools>\nWhen you confirm task completion, you must call `task_finish` and put the final user-facing result in its `message` field.\n</Tools>"
+          },
+          {
+            "id": "current_time",
+            "stable": false,
+            "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>"
+          }
+        ],
+        "stable_hash": "f56dafd0cf708028700d4971460729f48e3fc5bd2913e62a92ebd17f8051061f"
+      },
+      "producer": "build_system_prompt_bundle"
+    },
+    {
+      "id": "custom-section-metadata",
+      "input": {
+        "sections": [
+          {
+            "cache_hint": "ephemeral",
+            "id": "policy",
+            "metadata": {
+              "owner": "parity",
+              "priority": 1
+            },
+            "source": "contract://policy",
+            "stable": true,
+            "text": "Use verified evidence."
+          },
+          {
+            "id": "runtime",
+            "source": "runtime://request",
+            "stable": false,
+            "text": "request_id=fixture-1"
+          },
+          {
+            "cache_hint": "ignored-empty",
+            "id": "empty",
+            "stable": true,
+            "text": "   "
+          }
+        ]
+      },
+      "normalizations": [],
+      "output": {
+        "prompt": "Use verified evidence.\n\nrequest_id=fixture-1",
+        "sections": [
+          {
+            "cache_hint": "ephemeral",
+            "id": "policy",
+            "metadata": {
+              "owner": "parity",
+              "priority": 1
+            },
+            "source": "contract://policy",
+            "stable": true,
+            "text": "Use verified evidence."
+          },
+          {
+            "id": "runtime",
+            "source": "runtime://request",
+            "stable": false,
+            "text": "request_id=fixture-1"
+          }
+        ],
+        "stable_hash": "05c10da38b493945cf5ae418663f9c6a4152f65a6110207f946d715e77da425a"
+      },
+      "producer": "SystemPromptBuilder"
+    }
+  ],
+  "schema_version": 1
+}

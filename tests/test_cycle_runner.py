@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from vv_agent.llm import ScriptedLLM
+from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import (
     CompactionExhaustedError,
     MemoryManager,
@@ -66,10 +66,12 @@ def _build_memory_manager(**overrides: Any) -> MemoryManager:
 def test_cycle_runner_retries_prompt_too_long_with_forced_compaction() -> None:
     sent_messages: list[list[Message]] = []
 
-    def raise_ptl(_model: str, _messages: list[Message]) -> LLMResponse:
+    def raise_ptl(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         raise RuntimeError("Prompt is too long for this model")
 
-    def succeed_after_compact(_model: str, messages: list[Message]) -> LLMResponse:
+    def succeed_after_compact(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         sent_messages.append(messages)
         return LLMResponse(content="done", raw={"usage": {"prompt_tokens": 12, "completion_tokens": 4}})
 
@@ -101,10 +103,12 @@ def test_cycle_runner_retries_prompt_too_long_then_emergency_compact(monkeypatch
     sent_messages: list[list[Message]] = []
     emergency_calls: list[float] = []
 
-    def raise_ptl(_model: str, _messages: list[Message]) -> LLMResponse:
+    def raise_ptl(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         raise RuntimeError("Prompt is too long for this model")
 
-    def succeed_after_retry(_model: str, messages: list[Message]) -> LLMResponse:
+    def succeed_after_retry(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         sent_messages.append(messages)
         return LLMResponse(content="done")
 
@@ -146,12 +150,13 @@ def test_cycle_runner_retries_prompt_too_long_then_emergency_compact(monkeypatch
 
 
 def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> None:
-    def raise_ptl(_model: str, _messages: list[Message]) -> LLMResponse:
+    def raise_ptl(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         raise RuntimeError("context_length_exceeded")
 
-    ptl_step = cast(Callable[[str, list[Message]], LLMResponse], raise_ptl)
-    ptl_steps: list[LLMResponse | Callable[[str, list[Message]], LLMResponse]] = [
-        cast(LLMResponse | Callable[[str, list[Message]], LLMResponse], ptl_step)
+    ptl_step = cast(Callable[[LlmRequest], LLMResponse], raise_ptl)
+    ptl_steps: list[LLMResponse | Callable[[LlmRequest], LLMResponse]] = [
+        cast(LLMResponse | Callable[[LlmRequest], LLMResponse], ptl_step)
         for _ in range(MAX_PTL_RETRIES + 1)
     ]
 
@@ -179,7 +184,8 @@ def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> Non
 
 
 def test_cycle_runner_does_not_swallow_non_ptl_errors() -> None:
-    def raise_other(_model: str, _messages: list[Message]) -> LLMResponse:
+    def raise_other(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         raise RuntimeError("network down")
 
     runner = CycleRunner(
@@ -213,7 +219,8 @@ def test_cycle_runner_recognizes_prompt_too_long_in_exception_chain() -> None:
 def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
     sent_messages: list[list[Message]] = []
 
-    def capture(_model: str, messages: list[Message]) -> LLMResponse:
+    def capture(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         sent_messages.append(messages)
         return LLMResponse(content="done")
 
@@ -265,7 +272,8 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
 def test_cycle_runner_reapplies_session_memory_after_full_compaction() -> None:
     sent_messages: list[list[Message]] = []
 
-    def capture(_model: str, messages: list[Message]) -> LLMResponse:
+    def capture(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         sent_messages.append(messages)
         return LLMResponse(content="done")
 

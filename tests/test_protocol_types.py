@@ -95,6 +95,14 @@ def test_cycle_runner_serializes_tool_call_extra_content() -> None:
     assert serialized[0]["extra_content"]["google"]["thought_signature"] == "sig_123"
 
 
+def test_cycle_runner_serializes_tool_call_arguments_as_canonical_json() -> None:
+    serialized = CycleRunner._serialize_tool_calls(
+        [ToolCall(id="call_1", name="task_finish", arguments={"message": "done", "count": 2})]
+    )
+
+    assert serialized[0]["function"]["arguments"] == '{"message":"done","count":2}'
+
+
 def test_assistant_message_can_skip_reasoning_content() -> None:
     message = Message(role="assistant", content="answer", reasoning_content="analysis")
     payload = message.to_openai_message(include_reasoning_content=False)

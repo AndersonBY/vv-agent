@@ -42,7 +42,6 @@ class ToolExecutor(Protocol):
 @dataclass(slots=True)
 class FunctionToolExecutor:
     tool: FunctionTool
-    exposure: ToolExposure = ToolExposure.DIRECT
 
     @property
     def name(self) -> str:
@@ -59,6 +58,10 @@ class FunctionToolExecutor:
     @property
     def strict_json_schema(self) -> bool:
         return self.tool.strict_json_schema
+
+    @property
+    def exposure(self) -> ToolExposure:
+        return self.tool.exposure
 
     @property
     def needs_approval(self) -> bool | ApprovalPredicate:
@@ -90,7 +93,7 @@ class FunctionToolExecutor:
         return self.tool.to_openai_schema()
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
-        output = self.tool.on_invoke(context, call.arguments)
+        output = self.tool.invoke(context, call.arguments)
         return self.tool.to_tool_execution_result(output, tool_call_id=call.id)
 
     def requires_approval(self, context: ToolContext, arguments: dict[str, Any]) -> bool:
@@ -112,6 +115,19 @@ class RegistryToolExecutor:
     timeout_seconds: float | None = None
     failure_error_function: ToolErrorFormatter | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.sync_description_from_schema()
+
+    def sync_description_from_schema(self) -> None:
+        if self.description or not self.schema:
+            return
+        function_schema = self.schema.get("function")
+        if not isinstance(function_schema, dict):
+            return
+        description = function_schema.get("description")
+        if isinstance(description, str):
+            self.description = description
 
     @property
     def params_json_schema(self) -> dict[str, Any]:
@@ -149,3 +165,21 @@ class RegistryToolExecutor:
             return bool(self.needs_approval(context, arguments))
         del context, arguments
         return bool(self.needs_approval)
+
+
+def is_tool_executor(value: Any) -> bool:
+    attributes = (
+        "name",
+        "description",
+        "params_json_schema",
+        "strict_json_schema",
+        "exposure",
+        "needs_approval",
+        "timeout_seconds",
+        "failure_error_function",
+        "metadata",
+    )
+    methods = ("spec", "openai_schema", "execute", "requires_approval")
+    return all(hasattr(value, attribute) for attribute in attributes) and all(
+        callable(getattr(value, method, None)) for method in methods
+    )

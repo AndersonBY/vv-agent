@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from vv_agent.constants import (
     READ_FILE_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
+    WORKSPACE_TOOLS,
     WRITE_FILE_TOOL_NAME,
 )
 from vv_agent.prompt import PromptSection, SystemPromptBuilder, build_system_prompt, build_system_prompt_bundle
@@ -51,6 +54,9 @@ def test_prompt_includes_tool_governance_rules() -> None:
     assert EDIT_FILE_TOOL_NAME in prompt
     assert old_tool_name not in prompt
     assert "Tool priority" in prompt
+    workspace_line = next(line for line in prompt.splitlines() if line.startswith("You can operate workspace files with tools:"))
+    assert workspace_line == f"You can operate workspace files with tools: {', '.join(WORKSPACE_TOOLS)}."
+    assert "Find candidate files with `find_files`" in prompt
 
 
 def test_prompt_can_include_computer_environment() -> None:
@@ -169,3 +175,47 @@ def test_system_prompt_builder_stable_hash_matches_build_result_hash() -> None:
     builder.add_section(PromptSection(id="volatile", compute=lambda: " volatile ", stable=False))
 
     assert builder.stable_hash() == builder.build_result().stable_hash
+
+
+def test_task_start_time_is_fixed_when_builder_is_created(monkeypatch) -> None:
+    class FakeDateTime:
+        calls = 0
+
+        @classmethod
+        def now(cls, *, tz):
+            del tz
+            cls.calls += 1
+            return datetime(2026, 2, 17, 15, 0, cls.calls, tzinfo=UTC)
+
+    monkeypatch.setattr("vv_agent.prompt.builder.datetime", FakeDateTime)
+    from vv_agent.prompt.builder import create_system_prompt_builder
+
+    builder = create_system_prompt_builder("Agent")
+
+    assert builder.build() == builder.build()
+    assert FakeDateTime.calls == 1
+
+
+def test_full_prompt_bundle_matches_the_cross_language_golden_contract() -> None:
+    payload = {}
+    for language in ("en-US", "zh-CN"):
+        bundle = build_system_prompt_bundle(
+            "You are careful.",
+            language=language,
+            available_sub_agents={
+                "writer": "Writes final reports.",
+                "researcher": "Finds evidence.",
+            },
+            current_time_utc=datetime(2026, 5, 26, tzinfo=UTC),
+            session_memory_context="Remember prior context.",
+        )
+        payload[language] = {
+            "prompt": bundle.prompt,
+            "sections": bundle.sections,
+            "stable_hash": bundle.stable_hash,
+        }
+
+    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    assert hashlib.sha256(canonical.encode()).hexdigest() == (
+        "1ca970a84ee909f0e8d6dd55e6e8a3a64b67df158d1f0cd681d3686cd15c3415"
+    )

@@ -7,7 +7,7 @@ from typing import Any
 from vv_agent.app_server.host import AgentResolutionRequest, AppServerApprovalProvider, AppServerHost, RunConfigResolutionRequest
 from vv_agent.app_server.item_mapper import map_run_event
 from vv_agent.app_server.outgoing import OutgoingRouter
-from vv_agent.app_server.protocol import RequestId
+from vv_agent.app_server.protocol import RequestId, WarningParams
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore, TurnRecord
 from vv_agent.result import RunResult
@@ -43,23 +43,30 @@ class RunAdapter:
         connection_id: str,
         thread_id: str,
         input: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
         request_id: RequestId | None = None,
     ) -> StartedTurn:
         thread = self._store.read_thread(thread_id).thread
+        turn_metadata = dict(metadata or {})
+        effective_metadata = {**thread.metadata, **turn_metadata}
         agent_request = AgentResolutionRequest(
             thread_id=thread.thread_id,
             agent_key=thread.agent_key,
             cwd=thread.cwd,
-            metadata=thread.metadata,
+            metadata=effective_metadata,
         )
         config_request = RunConfigResolutionRequest(
             thread_id=thread.thread_id,
             agent_key=thread.agent_key,
             cwd=thread.cwd,
-            metadata=thread.metadata,
+            metadata=effective_metadata,
         )
         agent = self._host.resolve_agent(agent_request)
         run_config = self._host.build_run_config(config_request)
+        run_config = replace(
+            run_config,
+            metadata={**run_config.metadata, **effective_metadata},
+        )
         turn = self._store.create_turn(thread_id=thread.thread_id, input=input, status="running")
         run_config = self._with_app_server_controls(
             run_config,
@@ -71,17 +78,17 @@ class RunAdapter:
         self._state_manager.set_active_turn(thread_id=thread.thread_id, turn_id=turn.turn_id, handle=handle)
         self._state_manager.set_status(thread.thread_id, "running")
         started = StartedTurn(thread=thread, turn=turn, handle=handle)
-        self._notify_subscribers(
-            thread.thread_id,
-            "thread/status/changed",
-            {"threadId": thread.thread_id, "status": "running"},
-        )
         if request_id is not None:
             self._router.send_response(
                 connection_id,
                 request_id,
                 {"threadId": thread.thread_id, "turnId": turn.turn_id, "status": "running"},
             )
+        self._notify_subscribers(
+            thread.thread_id,
+            "thread/status/changed",
+            {"threadId": thread.thread_id, "status": "running"},
+        )
         self._router.send_notification(
             connection_id,
             "turn/started",
@@ -110,6 +117,8 @@ class RunAdapter:
                         projection.notification_method,
                         projection.notification_params,
                     )
+                for method, params in projection.additional_notifications:
+                    self._notify_subscribers(started.thread.thread_id, method, params)
             result = started.handle.result(timeout=0)
         except BaseException as exc:
             error = exc
@@ -125,21 +134,28 @@ class RunAdapter:
         error: BaseException | None,
     ) -> None:
         if result is not None:
-            status = result.status.value
+            status = "completed" if result.status.value == "completed" else "failed"
             token_usage = result.token_usage.to_dict()
             payload: dict[str, Any] = {
                 "threadId": started.thread.thread_id,
                 "turnId": started.turn.turn_id,
                 "runId": result.run_id,
                 "status": status,
-                "finalOutput": result.final_output,
                 "tokenUsage": token_usage,
             }
+            stored_result: dict[str, Any] = {"tokenUsage": token_usage}
+            if result.final_output is not None:
+                payload["finalOutput"] = result.final_output
+                stored_result["finalOutput"] = result.final_output
+            if status == "failed":
+                result_error = result.raw_result.error or result.raw_result.wait_reason or "Turn failed"
+                payload["error"] = result_error
+                stored_result["error"] = result_error
             self._store.update_turn(
                 started.turn.turn_id,
                 status=status,
                 run_id=result.run_id,
-                result={"finalOutput": result.final_output, "tokenUsage": token_usage},
+                result=stored_result,
             )
         else:
             status = "failed"
@@ -150,6 +166,14 @@ class RunAdapter:
                 "error": str(error) if error is not None else "Turn failed",
             }
             self._store.update_turn(started.turn.turn_id, status=status, result={"error": payload["error"]})
+            self._notify_subscribers(
+                started.thread.thread_id,
+                "error/warning",
+                WarningParams(
+                    message=str(payload["error"]),
+                    code="event_stream",
+                ).to_dict(),
+            )
         self._state_manager.clear_active_turn(started.thread.thread_id, started.turn.turn_id)
         self._state_manager.set_status(started.thread.thread_id, "idle")
         self._notify_subscribers(
@@ -184,7 +208,12 @@ class RunAdapter:
 
         return replace(
             run_config,
-            metadata={**run_config.metadata, "session_id": thread_id},
+            metadata={
+                **run_config.metadata,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "session_id": thread_id,
+            },
             before_cycle_messages=before_cycle_messages,
             approval_provider=run_config.approval_provider
             or AppServerApprovalProvider(

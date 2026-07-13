@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from vv_agent.app_server.protocol import (
+    ApprovalDecision,
     ApprovalRequestParams,
+    ApprovalResolveParams,
     AppServerError,
     AppServerErrorCode,
     ClientInfo,
@@ -20,13 +22,17 @@ from vv_agent.app_server.protocol import (
 )
 
 
-def test_request_round_trips_without_jsonrpc_header() -> None:
+def test_request_round_trips_with_jsonrpc_header() -> None:
     request = JsonRpcRequest(id=RequestId(1), method="initialize", params={"clientInfo": {"name": "test"}})
 
     payload = request.to_dict()
 
-    assert payload == {"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "test"}}}
-    assert "jsonrpc" not in payload
+    assert payload == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"clientInfo": {"name": "test"}},
+    }
     assert JsonRpcMessage.from_dict(payload).message == request
 
 
@@ -35,7 +41,7 @@ def test_notification_round_trips() -> None:
 
     payload = notification.to_dict()
 
-    assert payload == {"method": "initialized"}
+    assert payload == {"jsonrpc": "2.0", "method": "initialized"}
     assert JsonRpcMessage.from_dict(payload).message == notification
 
 
@@ -52,6 +58,31 @@ def test_error_response_uses_stable_error_code() -> None:
 def test_invalid_wire_message_is_rejected() -> None:
     with pytest.raises(ValueError, match="Invalid JSON-RPC message"):
         JsonRpcMessage.from_dict({"params": {}})
+
+    with pytest.raises(ValueError, match="Invalid JSON-RPC message"):
+        JsonRpcMessage.from_dict({"jsonrpc": "2.0", "id": [], "method": "thread/start", "params": {}})
+
+    with pytest.raises(ValueError, match="Invalid JSON-RPC message"):
+        JsonRpcMessage.from_dict({"jsonrpc": "1.0", "id": 1, "method": "thread/start"})
+
+    for payload in (
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "extra": True},
+        {"jsonrpc": "2.0", "method": "initialized", "extra": True},
+        {"jsonrpc": "2.0", "id": 1, "result": {}, "extra": True},
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "failed"}, "extra": True},
+    ):
+        with pytest.raises(ValueError, match="Invalid JSON-RPC message"):
+            JsonRpcMessage.from_dict(payload)
+
+
+def test_method_not_found_includes_the_rejected_method() -> None:
+    error = AppServerError.method_not_found("unknown/method").to_dict()
+
+    assert error == {
+        "code": AppServerErrorCode.METHOD_NOT_FOUND,
+        "message": "Method not found: unknown/method",
+        "data": {"method": "unknown/method"},
+    }
 
 
 def test_initialize_payload_uses_camel_case() -> None:
@@ -110,3 +141,19 @@ def test_approval_request_payload_is_client_ready() -> None:
 
     assert request.to_dict()["toolName"] == "bash"
     assert request.to_dict()["arguments"] == {"cmd": "pytest"}
+
+
+def test_approval_decision_round_trips_allow_session() -> None:
+    params = ApprovalResolveParams(
+        request_id="req_1",
+        thread_id="thread_1",
+        turn_id="turn_1",
+        decision=ApprovalDecision.ALLOW_SESSION,
+        reason="approved by owner",
+        metadata={"ticket": 7},
+    )
+
+    assert params.to_dict()["decision"] == "allow_session"
+    assert params.to_dict()["reason"] == "approved by owner"
+    assert params.to_dict()["metadata"] == {"ticket": 7}
+    assert ApprovalDecision.from_wire(params.to_dict()["decision"]) is ApprovalDecision.ALLOW_SESSION

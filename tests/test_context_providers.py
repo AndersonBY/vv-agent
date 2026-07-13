@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from vv_agent import Agent, RunConfig
+from vv_agent import Agent, RunConfig, collect_context_fragments
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.context_providers import ContextFragment, ContextRequest, assemble_context_fragments
 from vv_agent.runtime.compiler import AgentCompiler
@@ -41,11 +41,37 @@ def test_context_assembly_skips_empty_fragments_and_reports_metadata() -> None:
 
     assert [section.id for section in bundle.sections] == ["stable", "volatile"]
     assert bundle.prompt == "durable\n\ncurrent"
+    assert bundle.total_chars == len(bundle.prompt)
     assert bundle.sources == {"stable": "test", "volatile": "test"}
     assert bundle.metadata_sections() == [
         {"id": "stable", "text": "durable", "stable": True, "source": "test", "cache_hint": "cache"},
         {"id": "volatile", "text": "current", "stable": False, "source": "test", "cache_hint": "ephemeral"},
     ]
+
+
+def test_context_budget_counts_unicode_characters() -> None:
+    bundle = assemble_context_fragments(
+        ContextRequest(agent_name="assistant", max_prompt_chars=4),
+        [ContextFragment(id="unicode", text="你好世界")],
+    )
+
+    assert bundle.prompt == "你好世界"
+    assert bundle.total_chars == 4
+    assert bundle.omitted_section_ids == []
+
+
+def test_collect_context_fragments_is_exported_from_package_root() -> None:
+    expected = ContextFragment(id="runtime", text="Current runtime context")
+
+    class StaticProvider:
+        def fragments(self, request: ContextRequest) -> list[ContextFragment]:
+            del request
+            return [expected]
+
+    assert collect_context_fragments(
+        ContextRequest(agent_name="assistant"),
+        [StaticProvider()],
+    ) == [expected]
 
 
 def test_compiler_assembles_agent_instructions_with_context_providers() -> None:
@@ -54,7 +80,7 @@ def test_compiler_assembles_agent_instructions_with_context_providers() -> None:
             assert request.agent_name == "ops"
             assert request.input == "analyze order"
             return [
-                ContextFragment(id="runtime_context", text="Current order status.", stable=False, priority=20, source="test")
+                ContextFragment(id="runtime_context", text="Current order status.", stable=False, priority=-10, source="test")
             ]
 
     task = AgentCompiler().compile(
@@ -65,23 +91,23 @@ def test_compiler_assembles_agent_instructions_with_context_providers() -> None:
         trace_id="trace-1",
     )
 
-    assert task.system_prompt == "Check facts.\n\nCurrent order status."
+    assert task.system_prompt == "Current order status.\n\nCheck facts."
     assert task.metadata["system_prompt_sources"] == {
         "agent_instructions": "agent.instructions",
         "runtime_context": "test",
     }
     assert task.metadata["system_prompt_sections"] == [
         {
-            "id": "agent_instructions",
-            "text": "Check facts.",
-            "stable": True,
-            "source": "agent.instructions",
-        },
-        {
             "id": "runtime_context",
             "text": "Current order status.",
             "stable": False,
             "source": "test",
+        },
+        {
+            "id": "agent_instructions",
+            "text": "Check facts.",
+            "stable": True,
+            "source": "agent.instructions",
         },
     ]
 

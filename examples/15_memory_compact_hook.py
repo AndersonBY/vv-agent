@@ -26,7 +26,7 @@ def main() -> None:
         settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
         default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
         workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        runtime_hooks=[MemoryAuditHook()],
+        hooks=[MemoryAuditHook()],
     )
     prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "Explain what memory compaction hooks can observe.")
     result = Runner.run_sync(agent, prompt, run_config=config)

@@ -16,7 +16,6 @@ DEFAULT_MAX_TOKENS = 40_000
 DEFAULT_MIN_TEXT_MESSAGES = 5
 DEFAULT_GROWTH_RATIO = 0.5
 _SESSION_MEMORY_FILENAME = "session_memory.json"
-_JSON_ARRAY_PATTERN = re.compile(r"\[[\s\S]*?\]")
 _SESSION_MEMORY_CATEGORIES = (
     "user_intent",
     "decision",
@@ -101,9 +100,13 @@ class SessionMemoryState:
     def from_dict(cls, data: dict[str, Any]) -> SessionMemoryState:
         raw_entries = data.get("entries", [])
         entries = [SessionMemoryEntry.from_dict(item) for item in raw_entries if isinstance(item, dict)]
+        raw_last_extracted_index = data.get("last_extracted_message_index", -1)
+        last_extracted_message_index = (
+            -1 if raw_last_extracted_index is None or raw_last_extracted_index == "" else int(raw_last_extracted_index)
+        )
         return cls(
             entries=entries,
-            last_extracted_message_index=int(data.get("last_extracted_message_index", -1) or -1),
+            last_extracted_message_index=last_extracted_message_index,
             tokens_at_last_extraction=int(data.get("tokens_at_last_extraction", 0) or 0),
             initialized=bool(data.get("initialized", False)),
         )
@@ -208,6 +211,7 @@ class SessionMemory:
         self.state.last_extracted_message_index = -1
         if current_tokens is not None and current_tokens >= 0:
             self.state.tokens_at_last_extraction = current_tokens
+            self.state.initialized = True
         self._save()
 
     def load(self) -> None:
@@ -308,14 +312,18 @@ class SessionMemory:
             return []
 
         text = raw.strip()
-        match = _JSON_ARRAY_PATTERN.search(text)
-        if match is None:
-            return []
-
-        try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return []
+        data: object = None
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "[":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, list):
+                data = candidate
+                break
         if not isinstance(data, list):
             return []
 

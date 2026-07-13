@@ -10,21 +10,29 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
+from vv_agent.approval import ApprovalError
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import RunEvent, SubRunCompletedEvent, SubRunStartedEvent
 from vv_agent.llm.base import LLMClient
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.token_utils import resolve_model_token_limits
+from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.backends.inline import InlineBackend
+from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.runtime.context import ExecutionContext, StreamCallback
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
-from vv_agent.runtime.sub_task_manager import SubTaskManager
+from vv_agent.runtime.sub_task_identity import normalize_identity_string, take_sub_task_identity
+from vv_agent.runtime.sub_task_manager import (
+    _TURN_LOG_HANDLER_METADATA_KEY,
+    SubTaskManager,
+    _SubTaskTurnSnapshot,
+)
 from vv_agent.runtime.token_usage import summarize_task_token_usage
-from vv_agent.runtime.tool_call_runner import ToolCallRunner
+from vv_agent.runtime.tool_call_runner import ToolCallRunner, _ConfiguredSubTaskCancelledError
 from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints
 from vv_agent.tools import ToolContext, ToolRegistry
 from vv_agent.types import (
@@ -39,8 +47,16 @@ from vv_agent.types import (
     ToolCall,
     ToolDirective,
     ToolExecutionResult,
+    _trim_portable_whitespace,
 )
-from vv_agent.workspace import LocalWorkspaceBackend, WorkspaceBackend
+from vv_agent.workspace import (
+    INVALID_EXCLUDE_FILES_PATTERN_CODE,
+    INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
+    DiscoveryFilteredWorkspaceBackend,
+    InvalidPortableRegexError,
+    LocalWorkspaceBackend,
+    WorkspaceBackend,
+)
 
 RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
 RunEventHandler = Callable[[RunEvent], None]
@@ -49,6 +65,111 @@ InterruptionMessageProvider = Callable[[], list[Message]]
 
 _ACTIVE_SUB_AGENT_SESSIONS_LOCK = RLock()
 _ACTIVE_SUB_AGENT_SESSIONS: dict[str, Any] = {}
+
+_INVALID_SUB_AGENT_MODEL_CODE = "invalid_sub_agent_model"
+_INVALID_SUB_AGENT_MODEL_MESSAGE = "sub-agent model cannot be empty"
+_INVALID_SUB_AGENT_SYSTEM_PROMPT_CODE = "invalid_sub_agent_system_prompt"
+_INVALID_SUB_AGENT_SYSTEM_PROMPT_MESSAGE = "sub-agent system_prompt cannot be empty when provided"
+_TOOL_POLICY_METADATA_KEYS = (
+    "_vv_agent_allowed_tools",
+    "_vv_agent_disallowed_tools",
+    "_vv_agent_tool_policy_approval",
+    "_vv_agent_tool_policy_can_use_tool",
+)
+_RESERVED_SUB_AGENT_METADATA_KEYS = (
+    "browser_scope_key",
+    "is_sub_task",
+    "parent_task_id",
+    "session_id",
+    "session_memory_enabled",
+    "sub_agent_name",
+    "task_id",
+    "workspace",
+    "run_id",
+    "trace_id",
+    "parent_run_id",
+    "parent_tool_call_id",
+    "_vv_agent_run_id",
+    "_vv_agent_trace_id",
+    "_vv_agent_agent_name",
+    "_vv_agent_session_id",
+    "_vv_agent_parent_run_id",
+    "_vv_agent_parent_tool_call_id",
+    *_TOOL_POLICY_METADATA_KEYS,
+)
+_SUB_AGENT_STREAM_PRODUCER_FIELDS = {
+    "assistant_delta": frozenset({"content_chars", "content_delta", "delta", "estimated_tokens", "event"}),
+    "reasoning_delta": frozenset({"estimated_tokens", "event", "reasoning_chars", "reasoning_delta"}),
+    "tool_call_started": frozenset(
+        {"arguments_chars", "estimated_tokens", "event", "function_name", "tool_call_id", "tool_call_index"}
+    ),
+    "tool_call_progress": frozenset(
+        {"arguments_chars", "estimated_tokens", "event", "function_name", "tool_call_id", "tool_call_index"}
+    ),
+}
+
+
+class _CanonicalSubAgentStreamPayload(dict[str, Any]):
+    """Marks a payload whose child identity was written by the runtime."""
+
+
+def _enrich_sub_agent_payload(
+    payload: dict[str, Any],
+    *,
+    task_id: str,
+    session_id: str,
+    sub_agent_name: str,
+) -> dict[str, Any]:
+    enriched = dict(payload)
+    enriched["task_id"] = task_id
+    enriched["session_id"] = session_id
+    enriched["sub_agent_name"] = sub_agent_name
+    return enriched
+
+
+def _canonicalize_sub_agent_stream_event(
+    payload: dict[str, Any],
+    *,
+    task_id: str,
+    session_id: str,
+    sub_agent_name: str,
+    child_run_id: str,
+    trace_id: str,
+    parent_run_id: str,
+    parent_tool_call_id: str,
+) -> _CanonicalSubAgentStreamPayload | None:
+    event_name = payload.get("event")
+    if not isinstance(event_name, str) or event_name not in _SUB_AGENT_STREAM_PRODUCER_FIELDS:
+        return None
+    canonical = _CanonicalSubAgentStreamPayload(
+        {
+            key: value
+            for key, value in payload.items()
+            if key in _SUB_AGENT_STREAM_PRODUCER_FIELDS[event_name]
+        }
+    )
+    canonical.update(
+        {
+            "event": event_name,
+            "agent_name": sub_agent_name,
+            "child_run_id": child_run_id,
+            "child_session_id": session_id,
+            "parent_run_id": parent_run_id,
+            "parent_tool_call_id": parent_tool_call_id,
+            "run_id": child_run_id,
+            "session_id": session_id,
+            "sub_agent_name": sub_agent_name,
+            "task_id": task_id,
+            "trace_id": trace_id,
+        }
+    )
+    return canonical
+
+
+class _SubTaskContractError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _parse_optional_bool(value: Any) -> bool | None:
@@ -137,8 +258,7 @@ class LLMBuilder(Protocol):
         backend: str,
         model: str,
         timeout_seconds: float = 90.0,
-    ) -> tuple[LLMClient, ResolvedModelConfig]:
-        ...
+    ) -> tuple[LLMClient, ResolvedModelConfig]: ...
 
 
 class AgentRuntime:
@@ -201,7 +321,8 @@ class AgentRuntime:
         sub_task_manager: SubTaskManager | None = None,
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
-        shared = dict(shared_state or {})
+        effective_shared_state = shared_state if shared_state is not None else task.initial_shared_state
+        shared = dict(effective_shared_state)
         shared.setdefault("todo_list", [])
         if isinstance(task.metadata, dict):
             if "available_skills" not in shared and task.metadata.get("available_skills") is not None:
@@ -211,7 +332,7 @@ class AgentRuntime:
 
         messages = self._build_initial_messages(
             task=task,
-            initial_messages=initial_messages,
+            initial_messages=(initial_messages if initial_messages is not None else (list(task.initial_messages) or None)),
             user_message=user_message,
         )
         freeze_dynamic_tool_schema_hints(task)
@@ -222,6 +343,7 @@ class AgentRuntime:
             workspace=str(workspace_path),
             max_cycles=task.max_cycles,
         )
+        self._emit_log("agent_started", model=task.model)
 
         memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
         allow_outside_workspace_paths = self._allow_outside_workspace_paths(task)
@@ -235,7 +357,8 @@ class AgentRuntime:
         cycle_executor = self._build_cycle_executor(
             task=task,
             workspace_path=workspace_path,
-            workspace_backend=self._workspace_backend or LocalWorkspaceBackend(
+            workspace_backend=self._workspace_backend
+            or LocalWorkspaceBackend(
                 workspace_path,
                 allow_outside_root=allow_outside_workspace_paths,
             ),
@@ -258,7 +381,14 @@ class AgentRuntime:
             ctx=runtime_ctx,
             max_cycles=task.max_cycles,
         )
-        if result.status == AgentStatus.MAX_CYCLES:
+        cancelled = bool(runtime_ctx.cancellation_token is not None and runtime_ctx.cancellation_token.cancelled)
+        if result.status == AgentStatus.FAILED and cancelled:
+            self._emit_log(
+                "run_cancelled",
+                cycle=len(result.cycles) or None,
+                reason=self._preview_text(result.error or "Operation was cancelled"),
+            )
+        elif result.status == AgentStatus.MAX_CYCLES:
             self._emit_log(
                 "run_max_cycles",
                 cycle=len(result.cycles),
@@ -333,7 +463,11 @@ class AgentRuntime:
                     ctx=ctx,
                 )
             except Exception as exc:
-                self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
+                cancelled = isinstance(exc, CancelledError) or bool(
+                    ctx is not None and ctx.cancellation_token is not None and ctx.cancellation_token.cancelled
+                )
+                if not cancelled:
+                    self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
                 return AgentResult(
                     status=AgentStatus.FAILED,
                     messages=messages,
@@ -366,6 +500,9 @@ class AgentRuntime:
                 )
 
             if cycle_record.tool_calls:
+                tool_context_metadata = dict(task.metadata)
+                if self.log_handler is not None:
+                    tool_context_metadata[_TURN_LOG_HANDLER_METADATA_KEY] = self.log_handler
                 context = ToolContext(
                     workspace=workspace_path,
                     shared_state=shared,
@@ -385,7 +522,7 @@ class AgentRuntime:
                     task_metadata=dict(task.metadata),
                     run_context=(ctx.metadata.get("_vv_agent_run_context") if ctx is not None else None),
                     session=(ctx.metadata.get("_vv_agent_session") if ctx is not None else None),
-                    metadata=dict(task.metadata),
+                    metadata=tool_context_metadata,
                 )
 
                 def _on_tool_result(call: ToolCall, result: ToolExecutionResult, *, _cycle: int = cycle_index) -> None:
@@ -412,17 +549,39 @@ class AgentRuntime:
                         tool_call_id=call.id,
                     )
 
-                tool_outcome = self.tool_call_runner.run(
-                    task=task,
-                    tool_calls=cycle_record.tool_calls,
-                    context=context,
-                    messages=messages,
-                    cycle_record=cycle_record,
-                    interruption_provider=interruption_messages,
-                    on_tool_start=_on_tool_start,
-                    on_tool_result=_on_tool_result,
-                    ctx=ctx,
-                )
+                try:
+                    tool_outcome = self.tool_call_runner.run(
+                        task=task,
+                        tool_calls=cycle_record.tool_calls,
+                        context=context,
+                        messages=messages,
+                        cycle_record=cycle_record,
+                        interruption_provider=interruption_messages,
+                        on_tool_start=_on_tool_start,
+                        on_tool_result=_on_tool_result,
+                        ctx=ctx,
+                    )
+                except ApprovalError as exc:
+                    cycles.append(cycle_record)
+                    self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
+                    return AgentResult(
+                        status=AgentStatus.FAILED,
+                        messages=messages,
+                        cycles=cycles,
+                        error=str(exc),
+                        shared_state=shared,
+                        token_usage=summarize_task_token_usage(cycles),
+                    )
+                except _ConfiguredSubTaskCancelledError as exc:
+                    cycles.append(cycle_record)
+                    return AgentResult(
+                        status=AgentStatus.FAILED,
+                        messages=messages,
+                        cycles=cycles,
+                        error=str(exc),
+                        shared_state=shared,
+                        token_usage=summarize_task_token_usage(cycles),
+                    )
                 tool_result = tool_outcome.directive_result
                 cycles.append(cycle_record)
                 if tool_outcome.interruption_messages:
@@ -543,12 +702,8 @@ class AgentRuntime:
     @staticmethod
     def _metadata_str(metadata: dict[str, Any], *keys: str) -> str | None:
         for key in keys:
-            value = metadata.get(key)
-            if value is None:
-                continue
-            text = str(value).strip()
-            if text:
-                return text
+            if normalized := normalize_identity_string(metadata.get(key)):
+                return normalized
         return None
 
     @staticmethod
@@ -578,6 +733,12 @@ class AgentRuntime:
             elif task.metadata:
                 merged_metadata = dict(task.metadata)
                 merged_metadata.update(prepared[0].metadata)
+                if task.metadata.get("is_sub_task") is True:
+                    for key in _RESERVED_SUB_AGENT_METADATA_KEYS:
+                        if key in task.metadata:
+                            merged_metadata[key] = task.metadata[key]
+                        else:
+                            merged_metadata.pop(key, None)
                 prepared[0].metadata = merged_metadata
             message_to_append = task.user_prompt if user_message is None else user_message
             if message_to_append:
@@ -593,13 +754,21 @@ class AgentRuntime:
     def _build_memory_manager(self, *, task: AgentTask, workspace_path: Path) -> MemoryManager:
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
 
-        def read_int(key: str, default: int, *, minimum: int = 0) -> int:
-            raw = metadata.get(key, default)
+        def read_optional_int(key: str, *, minimum: int = 0) -> int | None:
+            if key not in metadata:
+                return None
+            raw = metadata.get(key)
+            if raw is None:
+                return None
             try:
                 value = int(raw)
             except (TypeError, ValueError):
-                value = default
+                return None
             return max(value, minimum)
+
+        def read_int(key: str, default: int, *, minimum: int = 0) -> int:
+            value = read_optional_int(key, minimum=minimum)
+            return max(default, minimum) if value is None else value
 
         def read_float(key: str, default: float, *, minimum: float = 0.0, maximum: float | None = None) -> float:
             raw = metadata.get(key, default)
@@ -635,24 +804,24 @@ class AgentRuntime:
         )
         summary_backend = metadata_summary_backend or local_summary_backend or self.default_backend
         summary_model = metadata_summary_model or local_summary_model or task.model
+        session_memory_extraction_backend = (
+            self._read_optional_str(metadata, "session_memory_extraction_backend") or summary_backend
+        )
+        session_memory_extraction_model = (
+            self._read_optional_str(metadata, "session_memory_extraction_model") or summary_model
+        )
         session_memory_enabled = self._read_session_memory_enabled(metadata)
-        resolved_context_window, resolved_max_output_tokens = resolve_model_token_limits(task.model)
-        model_context_window = read_int(
-            "model_context_window",
-            resolved_context_window or 200_000,
-            minimum=1,
-        )
-        reserved_output_tokens = read_int(
-            "reserved_output_tokens",
-            resolved_max_output_tokens or 16_000,
-            minimum=0,
-        )
+        model_context_window = read_optional_int("model_context_window", minimum=1)
+        reserved_output_tokens = read_optional_int("reserved_output_tokens", minimum=0)
+        if model_context_window is None or reserved_output_tokens is None:
+            fallback_context_window, fallback_max_output_tokens = resolve_model_token_limits(task.model)
+            if model_context_window is None:
+                model_context_window = fallback_context_window or 200_000
+            if reserved_output_tokens is None:
+                reserved_output_tokens = fallback_max_output_tokens or 16_000
         session_memory: SessionMemory | None = None
         if session_memory_enabled:
-            session_memory_scope = (
-                self._read_optional_str(metadata, "session_id", "task_id")
-                or str(task.task_id or "").strip()
-            )
+            session_memory_scope = self._read_optional_str(metadata, "session_id", "task_id") or str(task.task_id or "").strip()
             session_memory = SessionMemory(
                 SessionMemoryConfig(
                     min_tokens_before_extraction=read_int("session_memory_min_tokens", 10_000, minimum=1),
@@ -660,8 +829,8 @@ class AgentRuntime:
                     min_text_messages=read_int("session_memory_min_text_messages", 5, minimum=1),
                     storage_dir=str(metadata.get("session_memory_storage_dir", ".memory/session")),
                     extraction_callback=self._summarize_memory_prompt,
-                    extraction_backend=summary_backend,
-                    extraction_model=summary_model,
+                    extraction_backend=session_memory_extraction_backend,
+                    extraction_model=session_memory_extraction_model,
                     token_model=task.model or "",
                 ),
                 workspace=workspace_path if task.use_workspace else None,
@@ -710,9 +879,7 @@ class AgentRuntime:
 
     @staticmethod
     def _read_session_memory_enabled(metadata: dict[str, Any]) -> bool:
-        explicit = _parse_optional_bool(
-            metadata.get("session_memory_enabled", metadata.get("enable_session_memory"))
-        )
+        explicit = _parse_optional_bool(metadata.get("session_memory_enabled", metadata.get("enable_session_memory")))
         if explicit is not None:
             return explicit
         return not bool(metadata.get("is_sub_task"))
@@ -843,11 +1010,7 @@ class AgentRuntime:
 
     @staticmethod
     def _build_continue_hint() -> str:
-        return (
-            "No tool call was produced. "
-            f"Continue the task and call `{TASK_FINISH_TOOL_NAME}` "
-            "when all todo items are done."
-        )
+        return f"No tool call was produced. Continue the task and call `{TASK_FINISH_TOOL_NAME}` when all todo items are done."
 
     @staticmethod
     def _extract_final_message(result: ToolExecutionResult) -> str:
@@ -908,21 +1071,35 @@ class AgentRuntime:
         from vv_agent.interactive import AgentSessionRun, InteractiveAgentDefinition, create_agent_session
 
         request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
-        sub_task_id = str(request_metadata.get("task_id") or "").strip()
-        if not sub_task_id:
+        assigned_identity = take_sub_task_identity()
+        if assigned_identity is None:
             sub_task_id = f"{parent_task.task_id}_sub_{request.agent_name}_{uuid.uuid4().hex[:8]}"
-        sub_session_id = str(request_metadata.get("session_id") or "").strip() or sub_task_id
+            sub_session_id = sub_task_id
+        else:
+            sub_task_id = assigned_identity.task_id
+            sub_session_id = assigned_identity.session_id
         parent_metadata = ctx.metadata if ctx is not None else {}
-        parent_run_id = self._metadata_str(parent_metadata, "_vv_agent_run_id")
-        trace_id = (
-            self._metadata_str(parent_metadata, "_vv_agent_trace_id", "trace_id")
-            or self._metadata_str(parent_task.metadata, "trace_id")
+        public_run_context = parent_metadata.get("_vv_agent_run_context")
+        parent_run_id = (
+            normalize_identity_string(getattr(public_run_context, "run_id", None))
+            or self._metadata_str(parent_metadata, "_vv_agent_run_id")
+            or self._metadata_str(request_metadata, "parent_run_id")
             or ""
         )
-        parent_tool_call_id = str(request_metadata.get("parent_tool_call_id") or "").strip()
-        child_run_id = str(request_metadata.get("run_id") or "").strip() or f"run_{uuid.uuid4().hex}"
+        parent_tool_call_id = self._metadata_str(request_metadata, "parent_tool_call_id") or ""
+        child_run_id = f"run_{uuid.uuid4().hex}"
+        public_run_metadata = getattr(public_run_context, "metadata", None)
+        trace_id = (
+            self._metadata_str(parent_metadata, "_vv_agent_trace_id", "trace_id")
+            or (
+                self._metadata_str(public_run_metadata, "_vv_agent_trace_id", "trace_id")
+                if isinstance(public_run_metadata, dict)
+                else None
+            )
+            or self._metadata_str(parent_task.metadata, "_vv_agent_trace_id", "trace_id")
+            or child_run_id
+        )
         event_emitter = self._event_emitter_from_context(ctx)
-        sub_run_started = False
         sub_agent = parent_task.sub_agents.get(request.agent_name)
         if sub_agent is None:
             available = ", ".join(sorted(parent_task.sub_agents))
@@ -932,28 +1109,214 @@ class AgentRuntime:
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
                 error=f"Unknown sub-agent {request.agent_name!r}. Available: {available}",
+                error_code="sub_task_failed",
             )
             if sub_task_manager is not None:
-                sub_task_manager.record_outcome(sub_task_id, outcome)
+                sub_task_manager.record_outcome(
+                    sub_task_id,
+                    outcome,
+                    workspace_backend=workspace_backend,
+                    parent_run_id=parent_run_id or None,
+                    parent_tool_call_id=parent_tool_call_id or None,
+                )
             return outcome
+
+        try:
+            sub_workspace_backend = self._sub_agent_workspace_backend(
+                workspace_backend,
+                request.exclude_files_pattern,
+            )
+        except _SubTaskContractError as exc:
+            outcome = SubTaskOutcome(
+                task_id=sub_task_id,
+                session_id=sub_session_id,
+                agent_name=request.agent_name,
+                status=AgentStatus.FAILED,
+                error=str(exc),
+                error_code=exc.code,
+            )
+            if sub_task_manager is not None:
+                sub_task_manager.record_outcome(
+                    sub_task_id,
+                    outcome,
+                    workspace_backend=workspace_backend,
+                    parent_run_id=parent_run_id or None,
+                    parent_tool_call_id=parent_tool_call_id or None,
+                )
+            return outcome
+
+        manager_execution_token = (
+            sub_task_manager._begin_execution(
+                task_id=sub_task_id,
+                session_id=sub_session_id,
+                agent_name=request.agent_name,
+                task_title=request.task_description,
+                workspace_backend=sub_workspace_backend,
+                parent_run_id=parent_run_id or None,
+                parent_tool_call_id=parent_tool_call_id or None,
+            )
+            if sub_task_manager is not None
+            else None
+        )
+
+        completed_sub_runs: set[str] = set()
+        lifecycle_lock = RLock()
+
+        def _emit_sub_run_started(
+            run_id: str,
+            *,
+            emitter: RunEventHandler | None = event_emitter,
+            current_trace_id: str = trace_id,
+            current_parent_run_id: str = parent_run_id,
+            current_parent_tool_call_id: str = parent_tool_call_id,
+        ) -> None:
+            if emitter is None:
+                return
+            emitter(
+                SubRunStartedEvent(
+                    run_id=run_id,
+                    trace_id=current_trace_id,
+                    session_id=sub_session_id,
+                    child_session_id=sub_session_id,
+                    parent_run_id=current_parent_run_id or None,
+                    parent_tool_call_id=current_parent_tool_call_id,
+                    agent_name=request.agent_name,
+                    task_id=sub_task_id,
+                    metadata={
+                        "parent_task_id": parent_task.task_id,
+                        "model": _trim_portable_whitespace(str(sub_agent.model or "")),
+                    },
+                )
+            )
+
+        def _emit_sub_run_completed(
+            run_id: str,
+            outcome: SubTaskOutcome,
+            *,
+            token_usage: dict[str, Any] | None = None,
+            emitter: RunEventHandler | None = event_emitter,
+            current_trace_id: str = trace_id,
+            current_parent_run_id: str = parent_run_id,
+            current_parent_tool_call_id: str = parent_tool_call_id,
+        ) -> None:
+            if emitter is None:
+                return
+            metadata: dict[str, Any] = {"cycles": outcome.cycles}
+            error_code = outcome.error_code
+            if outcome.status == AgentStatus.FAILED and error_code is None:
+                error_code = "sub_task_failed"
+            if error_code is not None:
+                metadata["error_code"] = error_code
+            emitter(
+                SubRunCompletedEvent(
+                    run_id=run_id,
+                    trace_id=current_trace_id,
+                    session_id=sub_session_id,
+                    child_session_id=sub_session_id,
+                    parent_run_id=current_parent_run_id or None,
+                    parent_tool_call_id=current_parent_tool_call_id,
+                    agent_name=request.agent_name,
+                    task_id=sub_task_id,
+                    status=outcome.status.value,
+                    final_output=outcome.final_answer,
+                    wait_reason=outcome.wait_reason,
+                    error=outcome.error,
+                    token_usage=token_usage,
+                    metadata=metadata,
+                )
+            )
+
+        def _complete_sub_run_once(
+            run_id: str,
+            outcome: SubTaskOutcome,
+            *,
+            token_usage: dict[str, Any] | None = None,
+            emitter: RunEventHandler | None = event_emitter,
+            current_trace_id: str = trace_id,
+            current_parent_run_id: str = parent_run_id,
+            current_parent_tool_call_id: str = parent_tool_call_id,
+        ) -> None:
+            with lifecycle_lock:
+                if run_id in completed_sub_runs:
+                    return
+                completed_sub_runs.add(run_id)
+            try:
+                _emit_sub_run_completed(
+                    run_id,
+                    outcome,
+                    token_usage=token_usage,
+                    emitter=emitter,
+                    current_trace_id=current_trace_id,
+                    current_parent_run_id=current_parent_run_id,
+                    current_parent_tool_call_id=current_parent_tool_call_id,
+                )
+            except BaseException:
+                logging.getLogger(__name__).exception("Configured sub-agent completion sink failed")
+
+        def _emit_sub_run_started_or_fail(
+            run_id: str,
+            *,
+            emitter: RunEventHandler | None = event_emitter,
+            current_trace_id: str = trace_id,
+            current_parent_run_id: str = parent_run_id,
+            current_parent_tool_call_id: str = parent_tool_call_id,
+        ) -> None:
+            try:
+                _emit_sub_run_started(
+                    run_id,
+                    emitter=emitter,
+                    current_trace_id=current_trace_id,
+                    current_parent_run_id=current_parent_run_id,
+                    current_parent_tool_call_id=current_parent_tool_call_id,
+                )
+            except BaseException as exc:
+                failed_outcome = SubTaskOutcome(
+                    task_id=sub_task_id,
+                    session_id=sub_session_id,
+                    agent_name=request.agent_name,
+                    status=AgentStatus.FAILED,
+                    error=str(exc),
+                    error_code="sub_task_failed",
+                )
+                try:
+                    _complete_sub_run_once(
+                        run_id,
+                        failed_outcome,
+                        emitter=emitter,
+                        current_trace_id=current_trace_id,
+                        current_parent_run_id=current_parent_run_id,
+                        current_parent_tool_call_id=current_parent_tool_call_id,
+                    )
+                except BaseException:
+                    logging.getLogger(__name__).exception(
+                        "Configured sub-agent completion sink failed after started sink failure"
+                    )
+                raise
 
         def _emit_sub_session_event(event: str, payload: dict[str, Any]) -> None:
             if self.log_handler is None:
                 return
-            enriched = dict(payload)
-            enriched.setdefault("task_id", sub_task_id)
-            enriched.setdefault("session_id", sub_session_id)
-            enriched.setdefault("sub_agent_name", request.agent_name)
+            enriched = _enrich_sub_agent_payload(
+                payload,
+                task_id=sub_task_id,
+                session_id=sub_session_id,
+                sub_agent_name=request.agent_name,
+            )
             if parent_tool_call_id:
                 enriched.setdefault("parent_tool_call_id", parent_tool_call_id)
             if parent_run_id:
                 enriched.setdefault("parent_run_id", parent_run_id)
             self.log_handler(f"sub_agent_{event}", enriched)
 
+        outcome_workspace_backend = sub_workspace_backend
         try:
+            _emit_sub_run_started_or_fail(child_run_id)
+            self._validate_sub_agent_config(sub_agent)
+            effective_model_settings = self._effective_parent_model_settings(parent_task=parent_task, ctx=ctx)
             llm_client, model_id, resolved_payload, resolved_config = self._resolve_sub_agent_client(
                 parent_task=parent_task,
                 sub_agent=sub_agent,
+                ctx=ctx,
             )
             sub_task = self._build_sub_agent_task(
                 parent_task=parent_task,
@@ -962,9 +1325,21 @@ class AgentRuntime:
                 sub_agent_name=request.agent_name,
                 sub_agent=sub_agent,
                 resolved_model_id=model_id,
+                resolved_native_multimodal=resolved_config.native_multimodal,
+                resolved_context_length=resolved_config.context_length,
+                resolved_max_output_tokens=resolved_config.max_output_tokens,
+                child_run_id=child_run_id,
+                trace_id=trace_id,
+                parent_run_id=parent_run_id,
+                parent_tool_call_id=parent_tool_call_id,
                 request=request,
                 parent_shared_state=parent_shared_state,
                 workspace_path=workspace_path,
+                effective_model_settings=effective_model_settings,
+                parent_tool_policy_metadata=self._trusted_parent_tool_policy_metadata(
+                    parent_task=parent_task,
+                    ctx=ctx,
+                ),
             )
             sub_runtime = AgentRuntime(
                 llm_client=llm_client,
@@ -976,12 +1351,17 @@ class AgentRuntime:
                 llm_builder=self.llm_builder,
                 tool_registry_factory=self.tool_registry_factory,
                 sub_agent_timeout_seconds=self.sub_agent_timeout_seconds,
+                workspace_backend=sub_workspace_backend,
             )
 
             sub_agent_definition = InteractiveAgentDefinition(
                 description=sub_agent.description,
                 model=sub_task.model,
-                backend=sub_agent.backend or self.default_backend,
+                backend=(
+                    _trim_portable_whitespace(sub_agent.backend) or self.default_backend
+                    if isinstance(sub_agent.backend, str)
+                    else self.default_backend
+                ),
                 language=str(parent_task.metadata.get("language", "zh-CN")),
                 max_cycles=sub_task.max_cycles,
                 no_tool_policy=sub_task.no_tool_policy,
@@ -998,6 +1378,8 @@ class AgentRuntime:
                 system_prompt=sub_task.system_prompt,
             )
 
+            sub_run_invocation = 0
+
             def _execute_sub_run(
                 *,
                 prompt: str,
@@ -1008,67 +1390,210 @@ class AgentRuntime:
                 before_cycle_messages: BeforeCycleMessageProvider | None = None,
                 interruption_messages: InterruptionMessageProvider | None = None,
                 log_handler: RuntimeLogHandler | None = None,
+                cancellation_token: CancellationToken | None = None,
+                session: Any | None = None,
+                _sub_task_turn_snapshot: _SubTaskTurnSnapshot | None = None,
                 **_: Any,
             ) -> AgentSessionRun:
-                run_task = replace(
-                    sub_task,
-                    task_id=sub_task_id,
-                    user_prompt=prompt,
-                )
-                run_shared_state = dict(shared_state or {})
-                run_shared_state.setdefault("todo_list", [])
-
-                child_ctx = self._build_child_ctx(ctx)
-                if child_ctx is not None:
-                    child_ctx.metadata["_vv_agent_run_id"] = child_run_id
-                    child_ctx.metadata["_vv_agent_trace_id"] = trace_id
-                    child_ctx.metadata["trace_id"] = trace_id
-                    child_ctx.metadata["_vv_agent_agent_name"] = request.agent_name
-                    child_ctx.metadata["_vv_agent_session_id"] = sub_session_id
-                    if parent_run_id:
-                        child_ctx.metadata["_vv_agent_parent_run_id"] = parent_run_id
-                    if parent_tool_call_id:
-                        child_ctx.metadata["_vv_agent_parent_tool_call_id"] = parent_tool_call_id
-                if log_handler is not None:
-                    parent_stream_callback = child_ctx.stream_callback if child_ctx is not None else None
-
-                    def _sub_stream_callback(event: dict[str, Any]) -> None:
-                        enriched = dict(event)
-                        event_name = str(enriched.get("event") or "stream_event")
-                        enriched.setdefault("task_id", sub_task_id)
-                        enriched.setdefault("session_id", sub_session_id)
-                        enriched.setdefault("sub_agent_name", request.agent_name)
-                        log_payload = dict(enriched)
-                        log_payload.pop("event", None)
-                        log_handler(event_name, log_payload)
-                        if parent_stream_callback is not None:
-                            parent_stream_callback(enriched)
-
-                    if child_ctx is None:
-                        child_ctx = ExecutionContext(stream_callback=_sub_stream_callback)
-                    else:
-                        child_ctx.stream_callback = _sub_stream_callback
-
-                previous_log_handler = sub_runtime.log_handler
-                sub_runtime.log_handler = log_handler
-                try:
-                    sub_result = sub_runtime.run(
-                        run_task,
-                        workspace=workspace,
-                        shared_state=run_shared_state,
-                        initial_messages=initial_messages,
-                        user_message=prompt,
-                        before_cycle_messages=before_cycle_messages,
-                        interruption_messages=interruption_messages,
-                        ctx=child_ctx,
+                nonlocal sub_run_invocation
+                is_initial_sub_run = sub_run_invocation == 0
+                current_child_run_id = child_run_id if is_initial_sub_run else f"run_{uuid.uuid4().hex}"
+                sub_run_invocation += 1
+                if _sub_task_turn_snapshot is None:
+                    current_parent_ctx = ctx
+                    current_event_emitter = event_emitter
+                    current_trace_id = trace_id
+                    current_parent_run_id = parent_run_id
+                    current_parent_tool_call_id = parent_tool_call_id
+                    current_policy_metadata = self._trusted_parent_tool_policy_metadata(
+                        parent_task=parent_task,
+                        ctx=ctx,
                     )
-                finally:
-                    sub_runtime.log_handler = previous_log_handler
-                return AgentSessionRun(
-                    agent_name=task_name,
-                    result=sub_result,
-                    resolved=resolved_config,
-                )
+                else:
+                    current_parent_ctx = self._context_from_turn_snapshot(
+                        base_ctx=ctx,
+                        snapshot=_sub_task_turn_snapshot,
+                    )
+                    current_event_emitter = _sub_task_turn_snapshot.event_sink
+                    current_trace_id = _sub_task_turn_snapshot.trace_id or current_child_run_id
+                    current_parent_run_id = _sub_task_turn_snapshot.parent_run_id or ""
+                    current_parent_tool_call_id = _sub_task_turn_snapshot.parent_tool_call_id or ""
+                    current_policy_metadata = _sub_task_turn_snapshot.tool_policy_metadata()
+                if not is_initial_sub_run:
+                    _emit_sub_run_started_or_fail(
+                        current_child_run_id,
+                        emitter=current_event_emitter,
+                        current_trace_id=current_trace_id,
+                        current_parent_run_id=current_parent_run_id,
+                        current_parent_tool_call_id=current_parent_tool_call_id,
+                    )
+
+                try:
+                    run_metadata = dict(sub_task.metadata)
+                    if _sub_task_turn_snapshot is not None:
+                        for key in _TOOL_POLICY_METADATA_KEYS:
+                            run_metadata.pop(key, None)
+                    run_metadata.update(current_policy_metadata)
+                    run_task = replace(
+                        sub_task,
+                        task_id=sub_task_id,
+                        user_prompt=prompt,
+                        metadata=self._canonical_sub_run_metadata(
+                            run_metadata,
+                            sub_task_id=sub_task_id,
+                            sub_session_id=sub_session_id,
+                            sub_agent_name=request.agent_name,
+                            child_run_id=current_child_run_id,
+                            trace_id=current_trace_id,
+                            parent_run_id=current_parent_run_id,
+                            parent_tool_call_id=current_parent_tool_call_id,
+                        ),
+                    )
+                    run_shared_state = dict(shared_state or {})
+                    run_shared_state.setdefault("todo_list", [])
+
+                    child_ctx = self._build_child_ctx(
+                        current_parent_ctx,
+                        cancellation_token=cancellation_token,
+                        child_run_id=current_child_run_id,
+                        child_session_id=sub_session_id,
+                        child_agent_name=request.agent_name,
+                        child_model=sub_task.model,
+                        child_workspace=workspace_path,
+                        child_metadata=run_task.metadata,
+                        trace_id=current_trace_id,
+                        parent_run_id=current_parent_run_id,
+                        parent_tool_call_id=current_parent_tool_call_id,
+                    )
+                    parent_stream_callback = child_ctx.stream_callback if child_ctx is not None else None
+                    if log_handler is not None or parent_stream_callback is not None:
+
+                        def _sub_stream_callback(event: dict[str, Any]) -> None:
+                            canonical = _canonicalize_sub_agent_stream_event(
+                                event,
+                                task_id=sub_task_id,
+                                session_id=sub_session_id,
+                                sub_agent_name=request.agent_name,
+                                child_run_id=current_child_run_id,
+                                trace_id=current_trace_id,
+                                parent_run_id=current_parent_run_id,
+                                parent_tool_call_id=current_parent_tool_call_id,
+                            )
+                            if canonical is None:
+                                return
+                            event_name = canonical["event"]
+                            log_payload = dict(canonical)
+                            log_payload.pop("event", None)
+                            if log_handler is not None:
+                                log_handler(event_name, log_payload)
+                            if parent_stream_callback is not None:
+                                try:
+                                    parent_stream_callback(canonical)
+                                except BaseException:
+                                    logging.getLogger(__name__).exception(
+                                        "Configured sub-agent stream observer failed"
+                                    )
+
+                        if child_ctx is None:
+                            child_ctx = ExecutionContext(stream_callback=_sub_stream_callback)
+                        else:
+                            child_ctx.stream_callback = _sub_stream_callback
+
+                    previous_log_handler = sub_runtime.log_handler
+                    sub_runtime.log_handler = log_handler
+                    try:
+                        if initial_messages is None and session is not None:
+                            persisted_messages = list(session.get_items())
+                            initial_messages = persisted_messages or None
+                        sub_result = sub_runtime.run(
+                            run_task,
+                            workspace=workspace,
+                            shared_state=run_shared_state,
+                            initial_messages=initial_messages,
+                            user_message=prompt,
+                            before_cycle_messages=before_cycle_messages,
+                            interruption_messages=interruption_messages,
+                            ctx=child_ctx,
+                        )
+                    finally:
+                        sub_runtime.log_handler = previous_log_handler
+                    session_run = AgentSessionRun(
+                        agent_name=task_name,
+                        result=sub_result,
+                        resolved=resolved_config,
+                    )
+                except BaseException as exc:
+                    if not is_initial_sub_run:
+                        _complete_sub_run_once(
+                            current_child_run_id,
+                            SubTaskOutcome(
+                                task_id=sub_task_id,
+                                session_id=sub_session_id,
+                                agent_name=request.agent_name,
+                                status=AgentStatus.FAILED,
+                                error=str(exc),
+                                error_code="sub_task_failed",
+                                cycles=0,
+                                resolved=resolved_payload,
+                            ),
+                            emitter=current_event_emitter,
+                            current_trace_id=current_trace_id,
+                            current_parent_run_id=current_parent_run_id,
+                            current_parent_tool_call_id=current_parent_tool_call_id,
+                        )
+                    raise
+
+                if not is_initial_sub_run:
+                    continuation_outcome = SubTaskOutcome(
+                        task_id=sub_task_id,
+                        session_id=sub_session_id,
+                        agent_name=request.agent_name,
+                        status=sub_result.status,
+                        final_answer=sub_result.final_answer,
+                        wait_reason=sub_result.wait_reason,
+                        error=sub_result.error,
+                        error_code=("sub_task_failed" if sub_result.status == AgentStatus.FAILED else None),
+                        cycles=len(sub_result.cycles),
+                        todo_list=sub_result.todo_list,
+                        resolved=resolved_payload,
+                    )
+
+                    def _complete_persisted_continuation() -> None:
+                        _complete_sub_run_once(
+                            current_child_run_id,
+                            continuation_outcome,
+                            token_usage=self._sub_run_token_usage(sub_result),
+                            emitter=current_event_emitter,
+                            current_trace_id=current_trace_id,
+                            current_parent_run_id=current_parent_run_id,
+                            current_parent_tool_call_id=current_parent_tool_call_id,
+                        )
+
+                    def _fail_unpersisted_continuation(error: BaseException) -> None:
+                        _complete_sub_run_once(
+                            current_child_run_id,
+                            SubTaskOutcome(
+                                task_id=sub_task_id,
+                                session_id=sub_session_id,
+                                agent_name=request.agent_name,
+                                status=AgentStatus.FAILED,
+                                error=str(error),
+                                error_code="sub_task_failed",
+                                cycles=len(sub_result.cycles),
+                                resolved=resolved_payload,
+                            ),
+                            token_usage=self._sub_run_token_usage(sub_result),
+                            emitter=current_event_emitter,
+                            current_trace_id=current_trace_id,
+                            current_parent_run_id=current_parent_run_id,
+                            current_parent_tool_call_id=current_parent_tool_call_id,
+                        )
+
+                    session_run._set_persistence_callbacks(
+                        after_persist=_complete_persisted_continuation,
+                        on_persist_failure=_fail_unpersisted_continuation,
+                    )
+                return session_run
 
             sub_session = create_agent_session(
                 execute_run=_execute_sub_run,
@@ -1077,6 +1602,7 @@ class AgentRuntime:
                 definition=sub_agent_definition,
                 workspace=workspace_path,
                 shared_state={"todo_list": []},
+                approval_broker=parent_metadata.get("_vv_agent_approval_broker"),
             )
 
             if sub_task_manager is not None:
@@ -1085,10 +1611,10 @@ class AgentRuntime:
                     session_id=sub_session_id,
                     agent_name=request.agent_name,
                     task_title=request.task_description,
-                    workspace_backend=workspace_backend,
+                    workspace_backend=sub_workspace_backend,
                     session=sub_session,
                     resolved=resolved_payload,
-                    parent_run_id=parent_run_id,
+                    parent_run_id=parent_run_id or None,
                     parent_tool_call_id=parent_tool_call_id or None,
                     event_forwarder=_emit_sub_session_event,
                 )
@@ -1106,51 +1632,30 @@ class AgentRuntime:
                         "max_cycles": sub_task.max_cycles,
                     },
                 )
-                if event_emitter is not None:
-                    event_emitter(
-                        SubRunStartedEvent(
-                            run_id=child_run_id,
-                            trace_id=trace_id,
-                            session_id=sub_session_id,
-                            child_session_id=sub_session_id,
-                            parent_run_id=parent_run_id,
-                            parent_tool_call_id=parent_tool_call_id,
-                            agent_name=request.agent_name,
-                            task_id=sub_task_id,
-                            metadata={
-                                "parent_task_id": parent_task.task_id,
-                                "model": sub_task.model,
-                            },
-                        )
-                    )
-                    sub_run_started = True
                 sub_run = sub_session.prompt(sub_task.user_prompt, auto_follow_up=False)
             finally:
                 unregister_sub_agent_session(sub_session_id, sub_session)
-        except Exception as exc:
+        except BaseException as exc:
+            error_code = "sub_task_failed"
+            if isinstance(exc, _SubTaskContractError):
+                error_code = exc.code
             outcome = SubTaskOutcome(
                 task_id=sub_task_id,
                 session_id=sub_session_id,
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
                 error=str(exc),
+                error_code=error_code,
             )
+            _complete_sub_run_once(child_run_id, outcome)
             if sub_task_manager is not None:
-                sub_task_manager.record_outcome(sub_task_id, outcome)
-            if sub_run_started and event_emitter is not None:
-                event_emitter(
-                    SubRunCompletedEvent(
-                        run_id=child_run_id,
-                        trace_id=trace_id,
-                        session_id=sub_session_id,
-                        child_session_id=sub_session_id,
-                        parent_run_id=parent_run_id,
-                        parent_tool_call_id=parent_tool_call_id,
-                        agent_name=request.agent_name,
-                        task_id=sub_task_id,
-                        status=AgentStatus.FAILED.value,
-                        error=str(exc),
-                    )
+                sub_task_manager.record_outcome(
+                    sub_task_id,
+                    outcome,
+                    workspace_backend=outcome_workspace_backend,
+                    parent_run_id=parent_run_id or None,
+                    parent_tool_call_id=parent_tool_call_id or None,
+                    execution_token=manager_execution_token,
                 )
             return outcome
 
@@ -1162,30 +1667,24 @@ class AgentRuntime:
             final_answer=sub_run.result.final_answer,
             wait_reason=sub_run.result.wait_reason,
             error=sub_run.result.error,
+            error_code=("sub_task_failed" if sub_run.result.status == AgentStatus.FAILED else None),
             cycles=len(sub_run.result.cycles),
             todo_list=sub_run.result.todo_list,
             resolved=resolved_payload,
         )
+        _complete_sub_run_once(
+            child_run_id,
+            outcome,
+            token_usage=self._sub_run_token_usage(sub_run.result),
+        )
         if sub_task_manager is not None:
-            sub_task_manager.record_outcome(sub_task_id, outcome)
-        if event_emitter is not None:
-            event_emitter(
-                SubRunCompletedEvent(
-                    run_id=child_run_id,
-                    trace_id=trace_id,
-                    session_id=sub_session_id,
-                    child_session_id=sub_session_id,
-                    parent_run_id=parent_run_id,
-                    parent_tool_call_id=parent_tool_call_id,
-                    agent_name=request.agent_name,
-                    task_id=sub_task_id,
-                    status=outcome.status.value,
-                    final_output=outcome.final_answer,
-                    wait_reason=outcome.wait_reason,
-                    error=outcome.error,
-                    token_usage=sub_run.result.token_usage.to_dict(),
-                    metadata={"cycles": outcome.cycles},
-                )
+            sub_task_manager.record_outcome(
+                sub_task_id,
+                outcome,
+                workspace_backend=outcome_workspace_backend,
+                parent_run_id=parent_run_id or None,
+                parent_tool_call_id=parent_tool_call_id or None,
+                execution_token=manager_execution_token,
             )
         return outcome
 
@@ -1194,10 +1693,28 @@ class AgentRuntime:
         *,
         parent_task: AgentTask,
         sub_agent: SubAgentConfig,
+        ctx: ExecutionContext | None,
     ) -> tuple[LLMClient, str, dict[str, str], ResolvedModelConfig]:
-        backend = sub_agent.backend or self.default_backend or "inline"
+        requested_model = _trim_portable_whitespace(str(sub_agent.model))
+        requested_backend = _trim_portable_whitespace(str(sub_agent.backend or "")) or None
+        backend = requested_backend or _trim_portable_whitespace(str(self.default_backend or "")) or "inline"
+        model_provider = ctx.metadata.get("_vv_agent_model_provider") if ctx is not None else None
+        if model_provider is not None and hasattr(model_provider, "resolve") and hasattr(model_provider, "client"):
+            from vv_agent.model import ModelRef
+
+            model_ref = (
+                ModelRef.backend(requested_backend, requested_model)
+                if requested_backend is not None
+                else ModelRef.named(requested_model)
+            )
+            resolved = model_provider.resolve(model_ref)
+            return self._resolved_sub_agent_client(model_provider.client(resolved), resolved)
         if self.settings_file is None:
-            if sub_agent.model != parent_task.model:
+            if requested_backend is not None:
+                raise ValueError(
+                    "Sub-agent model resolution requires a model provider or settings_file when backend is explicit."
+                )
+            if requested_model != parent_task.model:
                 raise ValueError(
                     "Sub-agent model resolution requires runtime settings_file when sub-agent model differs from parent model."
                 )
@@ -1212,6 +1729,17 @@ class AgentRuntime:
                 selected_model=parent_task.model,
                 model_id=parent_task.model,
                 endpoint_options=[EndpointOption(endpoint=fallback_endpoint, model_id=parent_task.model)],
+                context_length=self._metadata_token_limit(
+                    parent_task.metadata,
+                    "model_context_window",
+                    minimum=1,
+                ),
+                max_output_tokens=self._metadata_token_limit(
+                    parent_task.metadata,
+                    "reserved_output_tokens",
+                    minimum=0,
+                ),
+                native_multimodal=parent_task.native_multimodal,
             )
             return self.llm_client, parent_task.model, {}, fallback_resolved
 
@@ -1221,19 +1749,116 @@ class AgentRuntime:
         llm_client, resolved = self.llm_builder(
             self.settings_file,
             backend=backend,
-            model=sub_agent.model,
+            model=requested_model,
             timeout_seconds=self.sub_agent_timeout_seconds,
         )
-        return (
-            llm_client,
-            resolved.model_id,
-            {
-                "backend": resolved.backend,
-                "selected_model": resolved.selected_model,
-                "model_id": resolved.model_id,
-                "endpoint": resolved.endpoint.endpoint_id,
-            },
-            resolved,
+        return self._resolved_sub_agent_client(llm_client, resolved)
+
+    @staticmethod
+    def _resolved_sub_agent_client(
+        llm_client: LLMClient,
+        resolved: ResolvedModelConfig,
+    ) -> tuple[LLMClient, str, dict[str, str], ResolvedModelConfig]:
+        payload = {
+            "backend": resolved.backend,
+            "selected_model": resolved.selected_model,
+            "model_id": resolved.model_id,
+        }
+        if resolved.endpoint_options:
+            payload["endpoint"] = resolved.endpoint.endpoint_id
+        return llm_client, resolved.model_id, payload, resolved
+
+    @staticmethod
+    def _metadata_token_limit(metadata: dict[str, Any], key: str, *, minimum: int) -> int | None:
+        value = metadata.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            return None
+        return value
+
+    @staticmethod
+    def _validate_sub_agent_config(sub_agent: SubAgentConfig) -> None:
+        if not isinstance(sub_agent.model, str) or not _trim_portable_whitespace(sub_agent.model):
+            raise _SubTaskContractError(_INVALID_SUB_AGENT_MODEL_CODE, _INVALID_SUB_AGENT_MODEL_MESSAGE)
+        if sub_agent.system_prompt is not None and (
+            not isinstance(sub_agent.system_prompt, str)
+            or not _trim_portable_whitespace(sub_agent.system_prompt)
+        ):
+            raise _SubTaskContractError(
+                _INVALID_SUB_AGENT_SYSTEM_PROMPT_CODE,
+                _INVALID_SUB_AGENT_SYSTEM_PROMPT_MESSAGE,
+            )
+
+    @staticmethod
+    def _sub_agent_workspace_backend(
+        workspace_backend: WorkspaceBackend,
+        exclude_files_pattern: str | None,
+    ) -> WorkspaceBackend:
+        if exclude_files_pattern is None or not exclude_files_pattern.strip():
+            return workspace_backend
+        try:
+            return DiscoveryFilteredWorkspaceBackend(workspace_backend, exclude_files_pattern)
+        except InvalidPortableRegexError as exc:
+            raise _SubTaskContractError(
+                INVALID_EXCLUDE_FILES_PATTERN_CODE,
+                INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
+            ) from exc
+
+    @staticmethod
+    def _effective_parent_model_settings(
+        *,
+        parent_task: AgentTask,
+        ctx: ExecutionContext | None,
+    ) -> ModelSettings | None:
+        if ctx is not None:
+            value = ctx.metadata.get("_vv_agent_model_settings")
+            if isinstance(value, ModelSettings):
+                return value
+        return parent_task.model_settings
+
+    @staticmethod
+    def _trusted_parent_tool_policy_metadata(
+        *,
+        parent_task: AgentTask,
+        ctx: ExecutionContext | None,
+    ) -> dict[str, Any]:
+        projected: dict[str, Any] = {}
+        task_metadata = parent_task.metadata if isinstance(parent_task.metadata, dict) else {}
+        runtime_metadata = ctx.metadata if ctx is not None and isinstance(ctx.metadata, dict) else {}
+        for key in ("_vv_agent_allowed_tools", "_vv_agent_disallowed_tools"):
+            value = runtime_metadata.get(key, task_metadata.get(key))
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                projected[key] = list(value)
+        can_use_tool = runtime_metadata.get("_vv_agent_tool_policy_can_use_tool")
+        if callable(can_use_tool):
+            projected["_vv_agent_tool_policy_can_use_tool"] = can_use_tool
+        approval = runtime_metadata.get("_vv_agent_tool_policy_approval")
+        if isinstance(approval, str) and approval in {"always", "never", "on_request"}:
+            projected["_vv_agent_tool_policy_approval"] = approval
+        return projected
+
+    @staticmethod
+    def _context_from_turn_snapshot(
+        *,
+        base_ctx: ExecutionContext | None,
+        snapshot: _SubTaskTurnSnapshot,
+    ) -> ExecutionContext:
+        del base_ctx
+        metadata = dict(snapshot.execution_metadata)
+        if snapshot.event_sink is not None:
+            metadata["_vv_agent_emit_event"] = snapshot.event_sink
+        if snapshot.run_context is not None:
+            metadata["_vv_agent_run_context"] = snapshot.run_context
+        if snapshot.parent_run_id:
+            metadata["_vv_agent_run_id"] = snapshot.parent_run_id
+        if snapshot.trace_id:
+            metadata["_vv_agent_trace_id"] = snapshot.trace_id
+            metadata["trace_id"] = snapshot.trace_id
+        metadata.update(snapshot.tool_policy_metadata())
+        return ExecutionContext(
+            cancellation_token=snapshot.cancellation_token,
+            stream_callback=snapshot.stream_callback,
+            state_store=snapshot.state_store,
+            metadata=metadata,
         )
 
     def _build_sub_agent_task(
@@ -1245,9 +1870,18 @@ class AgentRuntime:
         sub_agent_name: str,
         sub_agent: SubAgentConfig,
         resolved_model_id: str,
+        child_run_id: str,
+        trace_id: str,
+        parent_run_id: str,
+        parent_tool_call_id: str,
         request: SubTaskRequest,
         parent_shared_state: dict[str, Any],
         workspace_path: Path,
+        resolved_native_multimodal: bool | None = None,
+        resolved_context_length: int | None = None,
+        resolved_max_output_tokens: int | None = None,
+        effective_model_settings: ModelSettings | None = None,
+        parent_tool_policy_metadata: dict[str, Any] | None = None,
     ) -> AgentTask:
         language = str(parent_task.metadata.get("language", "zh-CN"))
         available_skills = parent_task.metadata.get("available_skills")
@@ -1274,15 +1908,11 @@ class AgentRuntime:
 
         user_prompt = request.task_description
         if request.output_requirements:
-            user_prompt = (
-                f"{user_prompt}\n\n<Output Requirements>\n{request.output_requirements}\n</Output Requirements>"
-            )
+            user_prompt = f"{user_prompt}\n\n<Output Requirements>\n{request.output_requirements}\n</Output Requirements>"
         if request.include_main_summary:
             parent_summary = self._build_parent_summary(parent_task=parent_task, parent_shared_state=parent_shared_state)
             if parent_summary:
-                user_prompt = (
-                    f"{user_prompt}\n\n<Main Task Summary>\n{parent_summary}\n</Main Task Summary>"
-                )
+                user_prompt = f"{user_prompt}\n\n<Main Task Summary>\n{parent_summary}\n</Main Task Summary>"
 
         excluded_tools = set(parent_task.exclude_tools)
         excluded_tools.update(sub_agent.exclude_tools)
@@ -1292,6 +1922,7 @@ class AgentRuntime:
             "parent_task_id": parent_task.task_id,
             "sub_agent_name": sub_agent_name,
             "session_memory_enabled": False,
+            "workspace": str(workspace_path),
         }
         for key in (
             "bash_shell",
@@ -1301,6 +1932,9 @@ class AgentRuntime:
             "allow_outside_workspace",
             "workspace_allow_outside_main",
             "workspace_allow_outside",
+            "language",
+            "available_skills",
+            "active_skills",
         ):
             value = parent_task.metadata.get(key)
             if value is not None:
@@ -1309,11 +1943,34 @@ class AgentRuntime:
             metadata.update(sub_agent.metadata)
         if request.metadata:
             metadata.update(request.metadata)
+        for key in _RESERVED_SUB_AGENT_METADATA_KEYS:
+            metadata.pop(key, None)
+        metadata.update(parent_tool_policy_metadata or {})
+        if resolved_context_length is not None:
+            metadata.setdefault("model_context_window", resolved_context_length)
+        if resolved_max_output_tokens is not None:
+            metadata.setdefault("reserved_output_tokens", resolved_max_output_tokens)
         if generated_sections:
             metadata.setdefault("system_prompt_sections", generated_sections)
-        metadata["task_id"] = sub_task_id
-        metadata["session_id"] = sub_session_id
-        metadata["browser_scope_key"] = sub_session_id
+        metadata.update(
+            {
+                "is_sub_task": True,
+                "parent_task_id": parent_task.task_id,
+                "sub_agent_name": sub_agent_name,
+                "session_memory_enabled": False,
+                "workspace": str(workspace_path),
+            }
+        )
+        metadata = self._canonical_sub_run_metadata(
+            metadata,
+            sub_task_id=sub_task_id,
+            sub_session_id=sub_session_id,
+            sub_agent_name=sub_agent_name,
+            child_run_id=child_run_id,
+            trace_id=trace_id,
+            parent_run_id=parent_run_id,
+            parent_tool_call_id=parent_tool_call_id,
+        )
 
         return AgentTask(
             task_id=sub_task_id,
@@ -1329,11 +1986,74 @@ class AgentRuntime:
             has_sub_agents=False,
             sub_agents={},
             agent_type=parent_task.agent_type,
-            native_multimodal=parent_task.native_multimodal,
+            native_multimodal=(
+                parent_task.native_multimodal if resolved_native_multimodal is None else resolved_native_multimodal
+            ),
             extra_tool_names=list(parent_task.extra_tool_names),
             exclude_tools=sorted(excluded_tools),
+            model_settings=(
+                parent_task.model_settings if effective_model_settings is None else effective_model_settings
+            ),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _canonical_sub_run_metadata(
+        metadata: dict[str, Any],
+        *,
+        sub_task_id: str,
+        sub_session_id: str,
+        sub_agent_name: str,
+        child_run_id: str,
+        trace_id: str,
+        parent_run_id: str,
+        parent_tool_call_id: str,
+    ) -> dict[str, Any]:
+        canonical = dict(metadata)
+        for key in (
+            "browser_scope_key",
+            "session_id",
+            "sub_agent_name",
+            "task_id",
+            "run_id",
+            "trace_id",
+            "parent_run_id",
+            "parent_tool_call_id",
+            "_vv_agent_run_id",
+            "_vv_agent_trace_id",
+            "_vv_agent_agent_name",
+            "_vv_agent_session_id",
+            "_vv_agent_parent_run_id",
+            "_vv_agent_parent_tool_call_id",
+        ):
+            canonical.pop(key, None)
+        canonical.update(
+            {
+                "task_id": sub_task_id,
+                "session_id": sub_session_id,
+                "browser_scope_key": sub_session_id,
+                "sub_agent_name": sub_agent_name,
+                "run_id": child_run_id,
+                "trace_id": trace_id,
+                "_vv_agent_run_id": child_run_id,
+                "_vv_agent_trace_id": trace_id,
+                "_vv_agent_agent_name": sub_agent_name,
+                "_vv_agent_session_id": sub_session_id,
+            }
+        )
+        if parent_run_id:
+            canonical["parent_run_id"] = parent_run_id
+            canonical["_vv_agent_parent_run_id"] = parent_run_id
+        if parent_tool_call_id:
+            canonical["parent_tool_call_id"] = parent_tool_call_id
+            canonical["_vv_agent_parent_tool_call_id"] = parent_tool_call_id
+        return canonical
+
+    @staticmethod
+    def _sub_run_token_usage(result: AgentResult) -> dict[str, Any] | None:
+        if result.status == AgentStatus.FAILED and not result.cycles:
+            return None
+        return result.token_usage.to_dict()
 
     def _build_sub_agent_registry(self) -> ToolRegistry:
         if self.tool_registry_factory is not None:
@@ -1345,19 +2065,92 @@ class AgentRuntime:
         ctx: ExecutionContext | None,
         *,
         stream_callback: StreamCallback | None = None,
+        cancellation_token: CancellationToken | None = None,
+        child_run_id: str = "",
+        child_session_id: str = "",
+        child_agent_name: str = "",
+        child_model: str = "",
+        child_workspace: str | Path | WorkspaceBackend | None = None,
+        child_metadata: dict[str, Any] | None = None,
+        trace_id: str = "",
+        parent_run_id: str = "",
+        parent_tool_call_id: str = "",
     ) -> ExecutionContext | None:
-        if ctx is None:
-            if stream_callback is None:
-                return None
-            return ExecutionContext(stream_callback=stream_callback)
-        child_stream_callback = stream_callback if stream_callback is not None else ctx.stream_callback
-        child_token = ctx.cancellation_token.child() if ctx.cancellation_token is not None else None
+        from vv_agent.agent import RunContext
+
+        child_stream_callback = stream_callback if stream_callback is not None else (ctx.stream_callback if ctx else None)
+        parent_child_token = ctx.cancellation_token.child() if ctx is not None and ctx.cancellation_token else None
+        child_token = cancellation_token or parent_child_token
+        if cancellation_token is not None and parent_child_token is not None:
+            parent_child_token.on_cancel(
+                lambda: cancellation_token.cancel(parent_child_token.reason or "Operation was cancelled")
+            )
+        metadata = AgentRuntime._inherited_child_context_metadata(ctx.metadata) if ctx is not None else {}
+        if child_run_id:
+            metadata["_vv_agent_run_id"] = child_run_id
+        if child_agent_name:
+            metadata["_vv_agent_agent_name"] = child_agent_name
+        if child_session_id:
+            metadata["_vv_agent_session_id"] = child_session_id
+        if trace_id:
+            metadata["_vv_agent_trace_id"] = trace_id
+            metadata["trace_id"] = trace_id
+        else:
+            metadata.pop("_vv_agent_trace_id", None)
+            metadata.pop("trace_id", None)
+        if parent_run_id:
+            metadata["_vv_agent_parent_run_id"] = parent_run_id
+        if parent_tool_call_id:
+            metadata["_vv_agent_parent_tool_call_id"] = parent_tool_call_id
+
+        parent_run_context = ctx.metadata.get("_vv_agent_run_context") if ctx is not None else None
+        app_state = parent_run_context.context if isinstance(parent_run_context, RunContext) else None
+        if child_run_id or child_agent_name or child_model or child_workspace is not None:
+            run_context_metadata = dict(child_metadata or {})
+            if trace_id:
+                run_context_metadata["trace_id"] = trace_id
+            if parent_run_id:
+                run_context_metadata["parent_run_id"] = parent_run_id
+            if parent_tool_call_id:
+                run_context_metadata["parent_tool_call_id"] = parent_tool_call_id
+            metadata["_vv_agent_run_context"] = RunContext(
+                context=app_state,
+                run_id=child_run_id,
+                agent_name=child_agent_name,
+                model=child_model or None,
+                workspace=child_workspace,
+                metadata=run_context_metadata,
+            )
+
+        if ctx is None and child_token is None and child_stream_callback is None and not metadata:
+            return None
         return ExecutionContext(
             cancellation_token=child_token,
             stream_callback=child_stream_callback,
-            state_store=ctx.state_store,
-            metadata=dict(ctx.metadata),
+            state_store=ctx.state_store if ctx is not None else None,
+            metadata=metadata,
         )
+
+    @staticmethod
+    def _inherited_child_context_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+        inherited_keys = {
+            "_vv_agent_approval_provider",
+            "_vv_agent_approval_broker",
+            "_vv_agent_approval_timeout_seconds",
+            "_vv_agent_emit_event",
+            "_vv_agent_memory_providers",
+            "_vv_agent_model_provider",
+            "_vv_agent_model_settings",
+            "_vv_agent_allowed_tools",
+            "_vv_agent_disallowed_tools",
+            "_vv_agent_tool_policy_approval",
+            "_vv_agent_tool_policy_can_use_tool",
+            "_vv_agent_trace_context",
+            "_vv_agent_trace_id",
+            "trace_context",
+            "trace_id",
+        }
+        return {key: value for key, value in metadata.items() if key in inherited_keys}
 
     @staticmethod
     def _build_parent_summary(*, parent_task: AgentTask, parent_shared_state: dict[str, Any]) -> str:

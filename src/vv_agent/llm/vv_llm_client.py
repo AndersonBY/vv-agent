@@ -21,8 +21,8 @@ from vv_agent.llm.anthropic_prompt_cache import (
     SYSTEM_PROMPT_SECTIONS_KEY,
     apply_claude_prompt_cache,
 )
-from vv_agent.llm.base import LLMClient
-from vv_agent.model_settings import ModelSettings
+from vv_agent.llm.base import LLMClient, LlmRequest
+from vv_agent.model_settings import ModelSettings, ResponseFormat, ToolChoice
 from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash_tool_payload
 from vv_agent.runtime.context import StreamCallback
 from vv_agent.types import LLMResponse, Message, ToolCall
@@ -66,7 +66,7 @@ class _RequestOptions:
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
-    tool_choice: str | None = None
+    tool_choice: str | dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
     response_format: dict[str, Any] | None = None
     timeout_seconds: float | None = None
@@ -74,6 +74,8 @@ class _RequestOptions:
     reasoning_effort: str | None = None
     extra_body: dict[str, Any] | None = None
     extra_args: dict[str, Any] | None = None
+    max_attempts: int = 3
+    backoff_seconds: float = 2.0
     is_gemini_3_model: bool = False
     tool_call_incremental: bool = True
 
@@ -110,14 +112,26 @@ class VVLlmClient(LLMClient):
         tools: list[dict[str, object]],
         stream_callback: StreamCallback | None = None,
         model_settings: ModelSettings | None = None,
+        request_metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
         if not self.endpoint_targets:
             raise RuntimeError("No endpoint targets configured")
+        if model_settings is not None and model_settings.extra_headers:
+            raise ValueError(
+                "ModelSettings.extra_headers is not supported by the vv-llm adapter; "
+                "configure headers on the provider endpoint instead"
+            )
+        if model_settings is not None and model_settings.extra_args:
+            raise ValueError(
+                "ModelSettings.extra_args is not supported by the vv-llm adapter; "
+                "use extra_body or a custom model client instead"
+            )
 
         backend_type = self._resolve_backend_type(self.backend)
         model_name = self._current_model_name(model)
         settings = self._ensure_settings(model)
-        request_metadata = self._extract_request_metadata(messages)
+        extracted_metadata = self._extract_request_metadata(messages)
+        request_metadata = {**extracted_metadata, **dict(request_metadata or {})}
         message_payload = self._build_message_payload(
             messages,
             preserve_reasoning_chain=self._should_preserve_reasoning_chain(model),
@@ -137,6 +151,10 @@ class VVLlmClient(LLMClient):
                 endpoint_type=target.endpoint_type,
                 model_settings=model_settings,
             )
+            request_tool_payload, request_options.tool_choice = self._apply_tool_choice(
+                tool_payload,
+                request_options.tool_choice,
+            )
             request_messages = self._prepare_messages_for_model(message_payload, request_options.model)
             formatted_messages = self._format_messages_for_request(
                 settings=settings,
@@ -149,7 +167,7 @@ class VVLlmClient(LLMClient):
                 endpoint_type=target.endpoint_type,
                 model=request_options.model,
                 messages=formatted_messages,
-                tools=tool_payload,
+                tools=request_tool_payload,
                 extra_body=request_options.extra_body,
                 metadata=request_metadata,
             )
@@ -172,12 +190,14 @@ class VVLlmClient(LLMClient):
                 reasoning_effort=request_options.reasoning_effort,
                 extra_body=request_extra_body,
                 extra_args=request_options.extra_args,
+                max_attempts=request_options.max_attempts,
+                backoff_seconds=request_options.backoff_seconds,
                 is_gemini_3_model=request_options.is_gemini_3_model,
                 tool_call_incremental=request_options.tool_call_incremental,
             )
             self._dump_request_messages(request_messages_payload, model_name=model_name)
 
-            for attempt in range(1, self.max_retries_per_endpoint + 1):
+            for attempt in range(1, request_options.max_attempts + 1):
                 try:
                     chat_client = create_chat_client(
                         backend=backend_type,
@@ -213,8 +233,8 @@ class VVLlmClient(LLMClient):
                 except APIConnectionError as exc:
                     last_error = exc
                     errors.append(f"{target.endpoint_id}: network timeout/connection error (attempt {attempt})")
-                    if attempt < self.max_retries_per_endpoint:
-                        self._sleep_backoff(attempt)
+                    if attempt < request_options.max_attempts:
+                        self._sleep_backoff(attempt, request_options.backoff_seconds)
                         continue
                     break
                 except APIStatusError as exc:
@@ -222,20 +242,32 @@ class VVLlmClient(LLMClient):
                     status = exc.status_code
                     detail = getattr(exc, 'message', '') or str(getattr(exc, 'body', ''))
                     errors.append(f"{target.endpoint_id}: status {status} - {detail} (attempt {attempt})")
-                    if status in {429, 500, 502, 503, 504, 408} and attempt < self.max_retries_per_endpoint:
-                        self._sleep_backoff(attempt)
+                    if status in {429, 500, 502, 503, 504, 408} and attempt < request_options.max_attempts:
+                        self._sleep_backoff(attempt, request_options.backoff_seconds)
                         continue
+                    if status in {400, 413, 422}:
+                        raise
                     break
-                except Exception as exc:
-                    last_error = exc
-                    errors.append(f"{target.endpoint_id}: unexpected {type(exc).__name__} (attempt {attempt})")
-                    if attempt < self.max_retries_per_endpoint:
-                        self._sleep_backoff(attempt)
-                        continue
-                    break
+                except Exception:
+                    raise
 
         details = "; ".join(errors) if errors else "no attempts made"
         raise RuntimeError(f"All endpoints failed: {details}") from last_error
+
+    def complete_request(
+        self,
+        request: LlmRequest,
+        *,
+        stream_callback: StreamCallback | None = None,
+    ) -> LLMResponse:
+        return self.complete(
+            model=request.model,
+            messages=request.messages,
+            tools=request.tools,
+            stream_callback=stream_callback,
+            model_settings=request.model_settings,
+            request_metadata=request.metadata,
+        )
 
     def _ensure_settings(self, model: str) -> Settings:
         if self.settings is not None:
@@ -497,7 +529,7 @@ class VVLlmClient(LLMClient):
         temperature: float | None = None
         top_p: float | None = None
         max_tokens: int | None = None
-        tool_choice: str | None = None
+        tool_choice: str | dict[str, Any] | None = None
         parallel_tool_calls: bool | None = None
         response_format: dict[str, Any] | None = None
         timeout_seconds: float | None = None
@@ -505,6 +537,8 @@ class VVLlmClient(LLMClient):
         reasoning_effort: str | None = None
         extra_body: dict[str, Any] | None = None
         extra_args: dict[str, Any] | None = None
+        max_attempts = max(1, int(self.max_retries_per_endpoint))
+        backoff_seconds = max(0.0, float(self.backoff_seconds))
 
         if self._uses_deepseek_model(model=normalized_model, endpoint_type=endpoint_type):
             extra_body = {"thinking": {"type": "enabled"}}
@@ -580,11 +614,11 @@ class VVLlmClient(LLMClient):
             if model_settings.max_tokens is not None:
                 max_tokens = model_settings.max_tokens
             if model_settings.tool_choice is not None:
-                tool_choice = str(model_settings.tool_choice)
+                tool_choice = cast(ToolChoice, model_settings.tool_choice).to_wire()
             if model_settings.parallel_tool_calls is not None:
                 parallel_tool_calls = model_settings.parallel_tool_calls
             if model_settings.response_format is not None:
-                response_format = dict(model_settings.response_format)
+                response_format = cast(ResponseFormat, model_settings.response_format).to_wire()
             if model_settings.timeout_seconds is not None:
                 timeout_seconds = model_settings.timeout_seconds
             if model_settings.reasoning is not None:
@@ -598,11 +632,9 @@ class VVLlmClient(LLMClient):
                 merged_extra_body = dict(extra_body or {})
                 merged_extra_body.update(model_settings.extra_body)
                 extra_body = merged_extra_body
-            if model_settings.extra_args is not None:
-                extra_args = dict(model_settings.extra_args)
             if model_settings.retry is not None:
-                self.max_retries_per_endpoint = max(1, int(model_settings.retry.max_attempts))
-                self.backoff_seconds = max(0.0, float(model_settings.retry.backoff_seconds))
+                max_attempts = max(1, int(model_settings.retry.max_attempts))
+                backoff_seconds = max(0.0, float(model_settings.retry.backoff_seconds))
 
         return _RequestOptions(
             model=resolved_model,
@@ -617,6 +649,8 @@ class VVLlmClient(LLMClient):
             reasoning_effort=reasoning_effort,
             extra_body=extra_body,
             extra_args=extra_args,
+            max_attempts=max_attempts,
+            backoff_seconds=backoff_seconds,
             is_gemini_3_model=is_gemini_3_model,
             tool_call_incremental=self._tool_call_incremental_enabled(
                 model=resolved_model,
@@ -679,6 +713,31 @@ class VVLlmClient(LLMClient):
         if options.extra_args is not None:
             payload.update(options.extra_args)
         return payload
+
+    @staticmethod
+    def _apply_tool_choice(
+        tools: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        if tool_choice == "none":
+            return [], None
+        if not isinstance(tool_choice, dict):
+            return list(tools), tool_choice
+
+        function = tool_choice.get("function")
+        name = function.get("name") if isinstance(function, dict) else None
+        selected = [tool for tool in tools if VVLlmClient._tool_payload_name(tool) == name]
+        if not selected:
+            raise ValueError(f"tool_choice refers to unknown tool: {name}")
+        return selected, "required"
+
+    @staticmethod
+    def _tool_payload_name(tool: dict[str, Any]) -> str | None:
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            return None
+        name = function.get("name")
+        return name if isinstance(name, str) else None
 
     def _non_stream_completion(
         self,
@@ -1262,9 +1321,10 @@ class VVLlmClient(LLMClient):
         # Heuristic fallback when tokenizer is unavailable for this model.
         return max(len(text) // 4, 1)
 
-    def _sleep_backoff(self, attempt: int) -> None:
+    @staticmethod
+    def _sleep_backoff(attempt: int, backoff_seconds: float) -> None:
         jitter = random.uniform(0.0, 0.5)
-        sleep_seconds = self.backoff_seconds * attempt + jitter
+        sleep_seconds = backoff_seconds * attempt + jitter
         time.sleep(sleep_seconds)
 
     def _dump_request_messages(self, messages: list[dict[str, Any]], *, model_name: str) -> None:
@@ -1285,3 +1345,6 @@ class VVLlmClient(LLMClient):
             (dump_dir / filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             logging.getLogger(__name__).debug("Failed to dump request messages", exc_info=True)
+
+
+VvLlmClient = VVLlmClient

@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
+from vv_agent.runtime.sub_task_identity import assigned_sub_task_identity, normalize_identity_string
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import is_string_keyed_dict, to_json
+from vv_agent.tools.handlers.common import is_string_keyed_dict, to_json, trim_portable_whitespace
 from vv_agent.types import AgentStatus, SubTaskRequest, ToolExecutionResult, ToolResultStatus
+from vv_agent.workspace import (
+    INVALID_EXCLUDE_FILES_PATTERN_CODE,
+    INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
+    DiscoveryFilteredWorkspaceBackend,
+    InvalidPortableRegexError,
+    WorkspaceBackend,
+)
 
 
-def _resolve_agent_name(arguments: dict[str, Any]) -> str:
-    raw = arguments.get("agent_id")
-    if raw is None:
-        return ""
-    return str(raw).strip()
+def _resolve_agent_name(arguments: dict[str, Any]) -> tuple[str | None, ToolExecutionResult | None]:
+    if "agent_id" not in arguments:
+        return "", None
+    raw = arguments["agent_id"]
+    if not isinstance(raw, str):
+        return None, _error("`agent_id` must be a string", error_code="invalid_agent_id")
+    return trim_portable_whitespace(raw), None
 
 
 def _coerce_bool(value: Any, *, default: bool) -> bool:
@@ -23,7 +34,7 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
             return bool(value)
         return default
     if isinstance(value, str):
-        normalized = value.strip().lower()
+        normalized = trim_portable_whitespace(value).lower()
         if normalized in {"1", "true", "yes", "on"}:
             return True
         if normalized in {"0", "false", "no", "off"}:
@@ -61,12 +72,45 @@ def _build_async_identity(context: ToolContext, agent_name: str) -> tuple[str, s
     return task_id, task_id
 
 
-def _extract_shared_flags(arguments: dict[str, Any]) -> tuple[bool, str | None]:
+def _run_with_assigned_identity(
+    sub_task_runner: Any,
+    request: SubTaskRequest,
+    task_id: str,
+    session_id: str,
+) -> Any:
+    with assigned_sub_task_identity(task_id, session_id):
+        outcome = sub_task_runner(request)
+    return replace(outcome, task_id=task_id, session_id=session_id)
+
+
+def _extract_shared_flags(
+    arguments: dict[str, Any],
+) -> tuple[bool, str | None, ToolExecutionResult | None]:
     include_main_summary = _coerce_bool(arguments.get("include_main_summary"), default=False)
-    exclude_files_pattern = (
-        str(arguments.get("exclude_files_pattern")).strip() if arguments.get("exclude_files_pattern") is not None else None
-    )
-    return include_main_summary, exclude_files_pattern
+    exclude_files_pattern = None
+    if "exclude_files_pattern" in arguments:
+        raw_exclude_files_pattern = arguments["exclude_files_pattern"]
+        if not isinstance(raw_exclude_files_pattern, str):
+            return False, None, _error(
+                "`exclude_files_pattern` must be a string",
+                error_code="invalid_exclude_files_pattern",
+            )
+        exclude_files_pattern = trim_portable_whitespace(raw_exclude_files_pattern) or None
+    return include_main_summary, exclude_files_pattern, None
+
+
+def _optional_string(
+    arguments: dict[str, Any],
+    key: str,
+    *,
+    error_code: str,
+) -> tuple[str | None, ToolExecutionResult | None]:
+    if key not in arguments:
+        return None, None
+    raw = arguments[key]
+    if not isinstance(raw, str):
+        return None, _error(f"`{key}` must be a string", error_code=error_code)
+    return trim_portable_whitespace(raw), None
 
 
 def _build_single_request(
@@ -90,11 +134,13 @@ def _build_single_request(
 
 def _parent_lineage_metadata(context: ToolContext) -> dict[str, str]:
     metadata: dict[str, str] = {}
-    parent_tool_call_id = str(context.tool_call_id or "").strip()
+    parent_tool_call_id = normalize_identity_string(context.tool_call_id)
     if parent_tool_call_id:
         metadata["parent_tool_call_id"] = parent_tool_call_id
+    parent_run_id = normalize_identity_string(getattr(context.run_context, "run_id", None))
     runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
-    parent_run_id = str(runtime_metadata.get("_vv_agent_run_id") or "").strip()
+    if not parent_run_id:
+        parent_run_id = normalize_identity_string(runtime_metadata.get("_vv_agent_run_id"))
     if parent_run_id:
         metadata["parent_run_id"] = parent_run_id
     return metadata
@@ -130,7 +176,14 @@ def _format_single_sync_result(outcome: Any) -> ToolExecutionResult:
     if outcome.status == AgentStatus.COMPLETED:
         return _success(payload)
 
-    error_code = "sub_task_wait_user" if outcome.status == AgentStatus.WAIT_USER else "sub_task_failed"
+    error_code = (
+        outcome.error_code
+        if isinstance(outcome.error_code, str) and trim_portable_whitespace(outcome.error_code)
+        else None
+    ) or (
+        "sub_task_wait_user" if outcome.status == AgentStatus.WAIT_USER else "sub_task_failed"
+    )
+    payload["error_code"] = error_code
     return ToolExecutionResult(
         tool_call_id="",
         status="error",
@@ -141,23 +194,44 @@ def _format_single_sync_result(outcome: Any) -> ToolExecutionResult:
     )
 
 
+def _manager_workspace_backend(
+    workspace_backend: WorkspaceBackend,
+    exclude_files_pattern: str | None,
+) -> WorkspaceBackend:
+    if exclude_files_pattern is None or not exclude_files_pattern.strip():
+        return workspace_backend
+    return DiscoveryFilteredWorkspaceBackend(workspace_backend, exclude_files_pattern)
+
+
 def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     sub_task_runner = context.sub_task_runner
     if sub_task_runner is None:
         return _error("Sub-agent runtime is not available for this task", error_code="sub_agents_not_enabled")
 
-    agent_name = _resolve_agent_name(arguments)
+    agent_name, argument_error = _resolve_agent_name(arguments)
+    if argument_error is not None:
+        return argument_error
     if not agent_name:
         return _error("`agent_id` is required", error_code="agent_id_required")
 
-    include_main_summary, exclude_files_pattern = _extract_shared_flags(arguments)
+    include_main_summary, exclude_files_pattern, argument_error = _extract_shared_flags(arguments)
+    if argument_error is not None:
+        return argument_error
+
+    task_description, argument_error = _optional_string(
+        arguments,
+        "task_description",
+        error_code="invalid_tasks_payload",
+    )
+    if argument_error is not None:
+        return argument_error
     wait_for_completion = _coerce_bool(arguments.get("wait_for_completion"), default=True)
     parent_lineage = _parent_lineage_metadata(context)
 
-    task_description = str(arguments.get("task_description", "")).strip()
+    task_description = task_description or ""
     raw_tasks = arguments.get("tasks")
     has_single = bool(task_description)
-    has_batch = raw_tasks is not None
+    has_batch = "tasks" in arguments
 
     if has_single and has_batch:
         return _error(
@@ -170,11 +244,28 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             error_code="sub_task_payload_missing",
         )
 
+    if has_batch and (not isinstance(raw_tasks, list) or not raw_tasks):
+        return _error("`tasks` must be a non-empty array", error_code="invalid_tasks_payload")
+
     if has_single:
+        output_requirements, argument_error = _optional_string(
+            arguments,
+            "output_requirements",
+            error_code="invalid_tasks_payload",
+        )
+        if argument_error is not None:
+            return argument_error
+        try:
+            manager_workspace_backend = _manager_workspace_backend(context.workspace_backend, exclude_files_pattern)
+        except InvalidPortableRegexError:
+            return _error(
+                INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
+                error_code=INVALID_EXCLUDE_FILES_PATTERN_CODE,
+            )
         single_request = _build_single_request(
             agent_name=agent_name,
             task_description=task_description,
-            output_requirements=str(arguments.get("output_requirements", "")).strip(),
+            output_requirements=output_requirements or "",
             include_main_summary=include_main_summary,
             exclude_files_pattern=exclude_files_pattern,
             metadata=parent_lineage,
@@ -186,17 +277,28 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
         if context.sub_task_manager is None:
             return _error("Sub-task manager is not available for async mode", error_code="sub_task_manager_unavailable")
         task_id, session_id = _build_async_identity(context, agent_name)
-        single_request.metadata.update({"task_id": task_id, "session_id": session_id})
-        context.sub_task_manager.submit(
-            task_id=task_id,
-            session_id=session_id,
-            agent_name=agent_name,
-            task_title=single_request.task_description,
-            workspace_backend=context.workspace_backend,
-            parent_run_id=parent_lineage.get("parent_run_id"),
-            parent_tool_call_id=parent_lineage.get("parent_tool_call_id"),
-            runner=lambda: sub_task_runner(single_request),
-        )
+
+        def run_single_async() -> Any:
+            return _run_with_assigned_identity(
+                sub_task_runner,
+                single_request,
+                task_id,
+                session_id,
+            )
+
+        try:
+            context.sub_task_manager.submit(
+                task_id=task_id,
+                session_id=session_id,
+                agent_name=agent_name,
+                task_title=single_request.task_description,
+                workspace_backend=manager_workspace_backend,
+                parent_run_id=parent_lineage.get("parent_run_id"),
+                parent_tool_call_id=parent_lineage.get("parent_tool_call_id"),
+                runner=run_single_async,
+            )
+        except Exception as exc:
+            return _error(str(exc), error_code="sub_task_submit_failed")
         return _success(
             {
                 "task_id": task_id,
@@ -208,17 +310,24 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             }
         )
 
-    if not isinstance(raw_tasks, list) or not raw_tasks:
-        return _error("`tasks` must be a non-empty array", error_code="invalid_tasks_payload")
+    assert isinstance(raw_tasks, list)
 
     requests: list[tuple[int, SubTaskRequest | None, str | None]] = []
     for index, raw_item in enumerate(raw_tasks):
         if not is_string_keyed_dict(raw_item):
             requests.append((index, None, "Task item must be an object"))
             continue
-        item_description = str(raw_item.get("task_description", "")).strip()
+        raw_item_description = raw_item.get("task_description")
+        if "task_description" in raw_item and not isinstance(raw_item_description, str):
+            requests.append((index, None, "`task_description` must be a string"))
+            continue
+        item_description = trim_portable_whitespace(raw_item_description or "")
         if not item_description:
             requests.append((index, None, "`task_description` is required"))
+            continue
+        raw_output_requirements = raw_item.get("output_requirements")
+        if "output_requirements" in raw_item and not isinstance(raw_output_requirements, str):
+            requests.append((index, None, "`output_requirements` must be a string"))
             continue
         requests.append(
             (
@@ -226,7 +335,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
                 _build_single_request(
                     agent_name=agent_name,
                     task_description=item_description,
-                    output_requirements=str(raw_item.get("output_requirements", "")).strip(),
+                    output_requirements=trim_portable_whitespace(raw_output_requirements or ""),
                     include_main_summary=include_main_summary,
                     exclude_files_pattern=exclude_files_pattern,
                     metadata={"batch_index": index, **parent_lineage},
@@ -244,6 +353,14 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             "wait_for_completion": wait_for_completion,
         }
         return _error("No valid sub-tasks were provided", error_code="invalid_tasks_payload", details=payload)
+
+    try:
+        manager_workspace_backend = _manager_workspace_backend(context.workspace_backend, exclude_files_pattern)
+    except InvalidPortableRegexError:
+        return _error(
+            INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
+            error_code=INVALID_EXCLUDE_FILES_PATTERN_CODE,
+        )
 
     if wait_for_completion:
         outcome_map = _run_requests_in_parallel_if_possible(context=context, requests=valid_requests)
@@ -294,17 +411,44 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             continue
 
         task_id, session_id = _build_async_identity(context, agent_name)
-        request.metadata.update({"task_id": task_id, "session_id": session_id})
-        context.sub_task_manager.submit(
-            task_id=task_id,
-            session_id=session_id,
-            agent_name=agent_name,
-            task_title=request.task_description,
-            workspace_backend=context.workspace_backend,
-            parent_run_id=parent_lineage.get("parent_run_id"),
-            parent_tool_call_id=parent_lineage.get("parent_tool_call_id"),
-            runner=lambda _request=request: sub_task_runner(_request),
-        )
+
+        def run_batch_async(
+            _request: SubTaskRequest = request,
+            _task_id: str = task_id,
+            _session_id: str = session_id,
+        ) -> Any:
+            return _run_with_assigned_identity(
+                sub_task_runner,
+                _request,
+                _task_id,
+                _session_id,
+            )
+
+        try:
+            context.sub_task_manager.submit(
+                task_id=task_id,
+                session_id=session_id,
+                agent_name=agent_name,
+                task_title=request.task_description,
+                workspace_backend=manager_workspace_backend,
+                parent_run_id=parent_lineage.get("parent_run_id"),
+                parent_tool_call_id=parent_lineage.get("parent_tool_call_id"),
+                runner=run_batch_async,
+            )
+        except Exception as exc:
+            failed += 1
+            results.append(
+                {
+                    "index": index,
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "agent_name": agent_name,
+                    "status": AgentStatus.FAILED.value,
+                    "error": str(exc),
+                    "error_code": "sub_task_submit_failed",
+                }
+            )
+            continue
         started += 1
         task_ids.append(task_id)
         results.append(
@@ -328,4 +472,6 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
         "results": results,
         "wait_for_completion": False,
     }
+    if started == 0:
+        return _error("All batch sub-tasks failed", error_code="create_sub_task_batch_failed", details=payload)
     return _success(payload)

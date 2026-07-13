@@ -12,8 +12,7 @@ def sanitize_for_resume(messages: list[Message]) -> list[Message]:
     sanitized = filter_empty_assistant_messages(sanitized)
     sanitized = filter_thinking_only_messages(sanitized)
     sanitized = filter_orphan_tool_results(sanitized)
-    sanitized = filter_unresolved_tool_uses(sanitized)
-    return sanitized
+    return filter_unresolved_tool_uses(sanitized)
 
 
 def filter_empty_assistant_messages(messages: list[Message]) -> list[Message]:
@@ -36,68 +35,77 @@ def filter_empty_assistant_messages(messages: list[Message]) -> list[Message]:
 
 
 def filter_unresolved_tool_uses(messages: list[Message]) -> list[Message]:
-    """Remove unresolved tail tool calls, keeping earlier history intact."""
-    if not messages:
-        return []
-
-    result_ids: set[str] = set()
-    for message in messages:
-        if message.role != "tool":
-            continue
-        call_id = _get_tool_call_id(message)
-        if call_id:
-            result_ids.add(call_id)
-
-    result = list(messages)
-    while result:
-        tail_index = len(result) - 1
-        while tail_index >= 0 and result[tail_index].role == "tool":
-            tail_index -= 1
-        if tail_index < 0:
-            break
-        last_message = result[tail_index]
-        if last_message.role != "assistant":
-            break
-
-        tool_calls = _get_tool_calls(last_message)
-        if not tool_calls:
-            break
-
-        unresolved_ids = [call_id for call_id in (_get_id(item) for item in tool_calls) if call_id not in result_ids]
-        if not unresolved_ids:
-            break
-
-        if len(unresolved_ids) == len(tool_calls):
-            result.pop(tail_index)
-            continue
-
-        remaining_tool_calls = [item for item in tool_calls if _get_id(item) not in set(unresolved_ids)]
-        result[tail_index] = replace(last_message, tool_calls=remaining_tool_calls or None)
-        break
-
-    return result
+    """Keep only tool calls completed by the immediately following tool-result block."""
+    return _filter_tool_turns(messages, drop_orphan_results=False)
 
 
 def filter_orphan_tool_results(messages: list[Message]) -> list[Message]:
-    """Drop tool results whose tool call no longer exists in history."""
-    call_ids: set[str] = set()
-    for message in messages:
-        if message.role != "assistant":
-            continue
-        for tool_call in _get_tool_calls(message):
-            call_id = _get_id(tool_call)
-            if call_id:
-                call_ids.add(call_id)
+    """Drop tool results not paired with the immediately preceding assistant turn."""
+    return _filter_tool_turns(messages, drop_unresolved_calls=False)
 
+
+def _filter_tool_turns(
+    messages: list[Message],
+    *,
+    drop_orphan_results: bool = True,
+    drop_unresolved_calls: bool = True,
+) -> list[Message]:
     result: list[Message] = []
-    for message in messages:
-        if message.role != "tool":
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role == "tool":
+            if not drop_orphan_results:
+                result.append(message)
+            index += 1
+            continue
+        tool_calls = _get_tool_calls(message) if message.role == "assistant" else []
+        if not tool_calls:
             result.append(message)
+            index += 1
             continue
-        call_id = _get_tool_call_id(message)
-        if call_id and call_id not in call_ids:
-            continue
-        result.append(message)
+
+        result_end = index + 1
+        while result_end < len(messages) and messages[result_end].role == "tool":
+            result_end += 1
+        tool_results = messages[index + 1 : result_end]
+
+        call_counts: dict[str, int] = {}
+        for tool_call in tool_calls:
+            call_id = _get_id(tool_call)
+            if call_id is not None:
+                call_counts[call_id] = call_counts.get(call_id, 0) + 1
+        result_counts: dict[str, int] = {}
+        for tool_result in tool_results:
+            call_id = _get_tool_call_id(tool_result)
+            if call_id is not None:
+                result_counts[call_id] = result_counts.get(call_id, 0) + 1
+
+        ordered_calls = [
+            (call_id, tool_call)
+            for tool_call in tool_calls
+            if (call_id := _get_id(tool_call)) is not None
+        ]
+        ordered_results = [
+            (call_id, tool_result)
+            for tool_result in tool_results
+            if (call_id := _get_tool_call_id(tool_result)) is not None
+        ]
+        paired_calls: list[dict[str, Any]] = []
+        paired_results: list[Message] = []
+        for (call_id, tool_call), (result_id, tool_result) in zip(ordered_calls, ordered_results, strict=False):
+            if call_id != result_id or call_counts[call_id] != 1 or result_counts[result_id] != 1:
+                break
+            paired_calls.append(tool_call)
+            paired_results.append(tool_result)
+        visible_calls = paired_calls if drop_unresolved_calls else tool_calls
+        if visible_calls:
+            result.append(replace(message, tool_calls=visible_calls))
+        if not drop_orphan_results:
+            result.extend(tool_results)
+        elif paired_calls:
+            result.extend(paired_results)
+        index = result_end
     return result
 
 
@@ -144,20 +152,28 @@ def _get_id(tool_call: Any) -> str | None:
     if isinstance(tool_call, dict):
         candidate = tool_call.get("id")
         if candidate:
-            return str(candidate)
+            text = str(candidate).strip()
+            if text:
+                return text
         function_payload = tool_call.get("function")
         if isinstance(function_payload, dict):
             function_id = function_payload.get("id")
             if function_id:
-                return str(function_id)
+                text = str(function_id).strip()
+                if text:
+                    return text
         return None
     candidate = getattr(tool_call, "id", None)
     if candidate:
-        return str(candidate)
+        text = str(candidate).strip()
+        if text:
+            return text
     function_payload = getattr(tool_call, "function", None)
     function_id = getattr(function_payload, "id", None)
     if function_id:
-        return str(function_id)
+        text = str(function_id).strip()
+        if text:
+            return text
     return None
 
 
@@ -169,6 +185,5 @@ def _has_thinking_content(message: Message) -> bool:
     if not isinstance(content, list):
         return False
     return any(
-        isinstance(block, dict) and str(block.get("type") or "").strip().lower() in {"thinking", "reasoning"}
-        for block in content
+        isinstance(block, dict) and str(block.get("type") or "").strip().lower() in {"thinking", "reasoning"} for block in content
     )

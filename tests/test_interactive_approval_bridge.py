@@ -118,6 +118,71 @@ def test_interactive_session_routes_approval_to_active_run_handle(tmp_path) -> N
     assert provider.requests[0].metadata["session_id"] == "session-a"
 
 
+def test_allow_session_persists_across_automatic_follow_up(tmp_path) -> None:
+    calls: list[str] = []
+
+    @function_tool(needs_approval=False)
+    def dangerous() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    registry = build_default_registry()
+    registry.register_executor(FunctionToolExecutor(dangerous))
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="first call", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
+            LLMResponse(
+                content="first finish",
+                tool_calls=[ToolCall(id="finish_1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "first"})],
+            ),
+            LLMResponse(content="second call", tool_calls=[ToolCall(id="call_2", name="dangerous", arguments={})]),
+            LLMResponse(
+                content="second finish",
+                tool_calls=[ToolCall(id="finish_2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "second"})],
+            ),
+        ]
+    )
+
+    def model_provider(settings_file, **kwargs):
+        del settings_file, kwargs
+        return llm, _resolved_model()
+
+    provider = AlwaysAskApprovalProvider()
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="test",
+            llm_builder=model_provider,
+            tool_registry_factory=lambda: registry,
+            approval_provider=provider,
+            approval_timeout_seconds=_TEST_APPROVAL_TIMEOUT_SECONDS,
+            tool_policy=ToolPolicy(approval="always"),
+        )
+    )
+    session = client.create_session(
+        agent=InteractiveAgentDefinition(description="Use the tool twice.", model="test-model"),
+        session_id="session-allow",
+    )
+    approvals = 0
+
+    def approve_first_request(event: str, payload: dict[str, object]) -> None:
+        nonlocal approvals
+        if event != "approval_requested" or approvals:
+            return
+        approvals += 1
+        session.approve(str(payload["request_id"]), "allow_session")
+
+    session.subscribe(approve_first_request)
+    session.follow_up("run it again")
+
+    result = session.prompt("run it")
+
+    assert result.final_output == "second"
+    assert calls == ["ran", "ran"]
+    assert [request.tool_name for request in provider.requests].count("dangerous") == 1
+    assert approvals == 1
+
+
 def test_interactive_session_exposes_active_run_handle_lifecycle(tmp_path) -> None:
     llm = ScriptedLLM(
         steps=[

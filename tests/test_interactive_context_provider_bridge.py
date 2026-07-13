@@ -5,8 +5,8 @@ from typing import Any
 from vv_agent import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.context_providers import ContextFragment, ContextRequest
-from vv_agent.llm import ScriptedLLM
-from vv_agent.types import LLMResponse, Message
+from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.types import LLMResponse
 
 
 def _resolved(*, backend: str = "test", model: str = "test-model") -> ResolvedModelConfig:
@@ -36,7 +36,8 @@ class _StaticProvider:
 def test_interactive_session_options_pass_context_providers_to_run_config(tmp_path) -> None:
     seen_prompts: list[str] = []
 
-    def respond(_model: str, messages: list[Message]) -> LLMResponse:
+    def respond(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         seen_prompts.extend(message.content for message in messages if message.role == "system")
         return LLMResponse(content="answer", tool_calls=[])
 
@@ -65,7 +66,8 @@ def test_interactive_session_options_pass_context_providers_to_run_config(tmp_pa
 def test_interactive_agent_definition_passes_session_context_providers_to_run_config(tmp_path) -> None:
     seen_prompts: list[str] = []
 
-    def respond(_model: str, messages: list[Message]) -> LLMResponse:
+    def respond(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         seen_prompts.extend(message.content for message in messages if message.role == "system")
         return LLMResponse(content="answer", tool_calls=[])
 

@@ -18,6 +18,10 @@ from vv_agent.types import Message
 _MEMORY_SUMMARY_NAME = "memory_summary"
 _COMPACT_MARKER = "<Tool Result Compact>"
 _ORIGINAL_USER_REQUEST_PATTERN = re.compile(r"<Original User Request>\s*(.*?)\s*</Original User Request>", re.DOTALL)
+_COMPRESSED_AGENT_MEMORY_PATTERN = re.compile(
+    r"<Compressed Agent Memory>\s*([\s\S]*?)\s*</Compressed Agent Memory>",
+    re.IGNORECASE,
+)
 _ANALYSIS_BLOCK_PATTERN = re.compile(r"<analysis>[\s\S]*?</analysis>", re.IGNORECASE)
 _SUMMARY_BLOCK_PATTERN = re.compile(r"<summary>\s*([\s\S]*?)\s*</summary>", re.IGNORECASE)
 
@@ -722,8 +726,9 @@ class MemoryManager:
         return content.startswith(_COMPACT_MARKER) or is_microcompacted_tool_content(content)
 
     def _build_tool_artifact_path(self, tool_call_id: str | None, *, cycle_index: int | None) -> Path:
-        safe_tool_call_id = (tool_call_id or f"tool_result_{uuid.uuid4().hex}").strip()
-        safe_tool_call_id = re.sub(r"[^a-zA-Z0-9._-]", "_", safe_tool_call_id)
+        safe_tool_call_id = re.sub(r"[^a-zA-Z0-9._-]", "_", str(tool_call_id or "").strip())
+        if not safe_tool_call_id.strip("._-"):
+            safe_tool_call_id = f"tool_result_{uuid.uuid4().hex}"
         filename = f"{safe_tool_call_id}.txt"
         base = Path(self.tool_result_artifact_dir)
         if cycle_index is None:
@@ -734,9 +739,26 @@ class MemoryManager:
         if self.workspace is None:
             return None
         artifact_rel_path = self._build_tool_artifact_path(tool_call_id, cycle_index=cycle_index)
-        target = (self.workspace / artifact_rel_path).resolve()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        if artifact_rel_path.is_absolute():
+            return None
+
+        workspace_root = self.workspace.resolve()
+        target = (workspace_root / artifact_rel_path).resolve()
+        try:
+            target.relative_to(workspace_root)
+        except ValueError:
+            return None
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        except OSError:
+            logging.getLogger(__name__).warning(
+                "Failed to persist compacted tool result to %s",
+                target,
+                exc_info=True,
+            )
+            return None
         return artifact_rel_path.as_posix()
 
     def _build_compacted_tool_content(
@@ -942,21 +964,39 @@ class MemoryManager:
 
     def _collect_original_user_messages(self, messages: list[Message]) -> list[str]:
         user_messages: list[str] = []
+        seen: set[str] = set()
+
+        def append_unique(value: object) -> None:
+            if not isinstance(value, str):
+                return
+            normalized = value.strip()
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            user_messages.append(normalized)
+
         for message in messages[1:]:
             if message.role != "user":
                 continue
             content = message.content.strip()
             if not content:
                 continue
-            match = _ORIGINAL_USER_REQUEST_PATTERN.search(content)
-            if match:
-                extracted = match.group(1).strip()
-                if extracted:
-                    user_messages.append(extracted)
+
+            compressed_match = _COMPRESSED_AGENT_MEMORY_PATTERN.search(content)
+            if compressed_match:
+                summary_data = self._parse_summary_payload(compressed_match.group(1))
+                previous_originals = summary_data.get("original_user_messages")
+                if isinstance(previous_originals, list):
+                    for previous_original in previous_originals:
+                        append_unique(previous_original)
+
+            original_match = _ORIGINAL_USER_REQUEST_PATTERN.search(content)
+            if original_match:
+                append_unique(original_match.group(1))
+
+            if compressed_match or original_match or "<Compressed Agent Memory>" in content:
                 continue
-            if "<Compressed Agent Memory>" in content:
-                continue
-            user_messages.append(content)
+            append_unique(content)
         return user_messages
 
     def _collect_file_actions(self, messages: list[Message]) -> list[dict[str, str]]:

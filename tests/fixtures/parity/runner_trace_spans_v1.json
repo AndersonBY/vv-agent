@@ -1,0 +1,21 @@
+{
+  "version": "v1",
+  "topology": {
+    "start_order": ["run", "agent", "tool"],
+    "end_order": ["tool", "agent", "run"],
+    "parents": {
+      "run": null,
+      "agent": "run",
+      "tool": "agent"
+    }
+  },
+  "failure_cleanup": {
+    "started": ["run", "agent"],
+    "ended": ["agent", "run"],
+    "run_status": "failed"
+  },
+  "sink_failure": {
+    "isolated": true,
+    "run_status": "completed"
+  }
+}

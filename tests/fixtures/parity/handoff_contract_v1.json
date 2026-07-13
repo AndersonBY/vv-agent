@@ -1,0 +1,50 @@
+{
+  "version": "v1",
+  "default_max_handoffs": 10,
+  "tool_schema": {
+    "type": "function",
+    "function": {
+      "name": "transfer_to_writer",
+      "description": "Use for writing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "description": "Input or handoff summary for the target agent.",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "tool_result": {
+    "content": {
+      "ok": true,
+      "handoff": true,
+      "from_agent": "triage",
+      "to_agent": "writer",
+      "input": "write this"
+    },
+    "metadata": {
+      "routing_group": "writing",
+      "mode": "handoff",
+      "handoff_from": "triage",
+      "handoff_to": "writer",
+      "handoff_input": "write this",
+      "handoff_tool_name": "transfer_to_writer"
+    }
+  },
+  "lifecycle_order": [
+    "handoff",
+    "source_run_terminal",
+    "handoff_started",
+    "target_run_started",
+    "target_run_terminal",
+    "handoff_completed"
+  ]
+}

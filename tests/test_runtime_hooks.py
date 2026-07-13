@@ -4,7 +4,7 @@ from pathlib import Path
 
 from vv_agent import constants as constants_module
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
-from vv_agent.llm import ScriptedLLM
+from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.runtime import (
     AfterLLMEvent,
     AfterToolCallEvent,
@@ -36,7 +36,8 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
             patched.append(Message(role="user", content="HOOK_CONTEXT"))
             return BeforeLLMPatch(messages=patched)
 
-    def assert_hook_message(model: str, messages: list[Message]) -> LLMResponse:
+    def assert_hook_message(request: LlmRequest) -> LLMResponse:
+        model, messages = request.model, request.messages
         del model
         assert any(message.role == "user" and message.content == "HOOK_CONTEXT" for message in messages)
         return LLMResponse(

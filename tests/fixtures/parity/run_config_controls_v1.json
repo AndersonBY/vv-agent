@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "framework_defaults": {
+    "max_cycles": 10,
+    "max_handoffs": 10
+  },
+  "app_server_defaults": {
+    "max_cycles": 80,
+    "agent_name": "assistant",
+    "instructions": "You are the vv-agent App Server assistant. Complete user requests with available tools."
+  },
+  "integer_bounds": {
+    "max_cycles": {
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "max_handoffs": {
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "per_run_controls": [
+    {
+      "capability": "model_selection",
+      "python": "model plus model_provider, with settings-based provider helpers",
+      "rust": "ModelRef plus ModelProvider, with VvLlmModelProvider settings helper",
+      "status": "equivalent"
+    },
+    {
+      "capability": "model_settings",
+      "python": "model_settings",
+      "rust": "model_settings",
+      "status": "equivalent"
+    },
+    {
+      "capability": "workspace",
+      "python": "workspace plus workspace_backend",
+      "rust": "workspace plus workspace_backend",
+      "status": "equivalent"
+    },
+    {
+      "capability": "session_history",
+      "python": "session",
+      "rust": "session",
+      "status": "equivalent"
+    },
+    {
+      "capability": "cycle_and_handoff_limits",
+      "python": "max_cycles plus max_handoffs",
+      "rust": "max_cycles plus max_handoffs",
+      "status": "equivalent"
+    },
+    {
+      "capability": "tool_policy",
+      "python": "tool_policy",
+      "rust": "tool_policy",
+      "status": "equivalent"
+    },
+    {
+      "capability": "per_run_tool_registry",
+      "python": "tool_registry_factory",
+      "rust": "tool_registry_factory",
+      "status": "equivalent"
+    },
+    {
+      "capability": "execution_backend",
+      "python": "execution_backend",
+      "rust": "execution_backend",
+      "status": "equivalent"
+    },
+    {
+      "capability": "cancellation",
+      "python": "cancellation_token",
+      "rust": "cancellation_token",
+      "status": "equivalent"
+    },
+    {
+      "capability": "approval",
+      "python": "approval_provider plus approval_broker plus approval_timeout_seconds",
+      "rust": "approval_provider plus approval_broker plus approval_timeout",
+      "status": "equivalent"
+    },
+    {
+      "capability": "event_store",
+      "python": "event_store plus event_store_fail_closed",
+      "rust": "event_store plus event_store_fail_closed",
+      "status": "equivalent"
+    },
+    {
+      "capability": "typed_run_events",
+      "python": "RunHandle event iterator plus optional stream observer",
+      "rust": "RunHandle event stream",
+      "status": "equivalent"
+    },
+    {
+      "capability": "runtime_hooks_and_tracing",
+      "python": "hooks plus tracing processors",
+      "rust": "hooks plus TraceSink",
+      "status": "equivalent"
+    },
+    {
+      "capability": "application_context",
+      "python": "context plus context_providers",
+      "rust": "app_state plus context_providers",
+      "status": "equivalent"
+    },
+    {
+      "capability": "memory_providers",
+      "python": "memory_providers",
+      "rust": "memory_providers",
+      "status": "equivalent"
+    },
+    {
+      "capability": "initial_state",
+      "python": "shared_state plus initial_messages",
+      "rust": "initial_shared_state plus initial_messages",
+      "status": "equivalent"
+    },
+    {
+      "capability": "cycle_injection",
+      "python": "before_cycle_messages plus interruption_messages",
+      "rust": "before_cycle_messages plus interruption_messages",
+      "status": "equivalent"
+    },
+    {
+      "capability": "sub_task_manager",
+      "python": "sub_task_manager",
+      "rust": "sub_task_manager",
+      "status": "equivalent"
+    },
+    {
+      "capability": "raw_runtime_observers",
+      "python": "runtime_log_handler plus runtime_stream_callback",
+      "rust": "runtime_log_handler plus runtime_stream_callback",
+      "status": "equivalent"
+    },
+    {
+      "capability": "diagnostics",
+      "python": "log_preview_chars plus debug_dump_dir",
+      "rust": "log_preview_chars plus debug_dump_dir",
+      "status": "equivalent"
+    }
+  ]
+}

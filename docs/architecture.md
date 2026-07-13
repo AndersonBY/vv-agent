@@ -88,6 +88,7 @@ the primary state contract for host UIs.
 | `src/vv_agent/config.py` | Settings-file loading, provider/backend lookup, endpoint resolution, and `vv-llm` settings construction. |
 | `src/vv_agent/cli.py` | Command-line argument parsing and one-shot runtime execution. |
 | `src/vv_agent/agent.py` | Public `Agent` definition and agent-as-tool helpers. |
+| `src/vv_agent/background_task.py` | Non-blocking background agent task, handle, and snapshot contracts. |
 | `src/vv_agent/runner.py` | Public synchronous run and stream entry points. |
 | `src/vv_agent/run_handle.py` | Live `Runner.start()` handle for event streaming, cancellation, approvals, and final result retrieval. |
 | `src/vv_agent/run_config.py` | Per-run configuration, model provider binding, tool policy, workspace, session, and tracing options. |
@@ -123,6 +124,19 @@ Checkpoint stores live under `runtime/stores/` and support SQLite and Redis.
 Backends must preserve the same `AgentResult` and checkpoint payload shape as
 inline execution.
 
+Distributed mode sends a versioned `DistributedRunEnvelope` for each cycle.
+Workers resolve all referenced capabilities before claiming state, then use a
+revision/token lease with heartbeat renewal and CAS commit. The scheduler
+accepts a result only after reconciling it with the durable checkpoint;
+terminal checkpoints are immutable and replayable until acknowledged. SQLite
+uses WAL, a bounded busy timeout, and in-place legacy-column migration.
+
+This is an at-least-once execution model. Celery revoke during cancellation is
+best effort, and an active worker claim may still complete after the scheduler
+stops waiting. The cycle idempotency key does not provide an event outbox,
+durable cancellation record, or idempotency for external tool side effects.
+See `parity-contract.md` for the complete cross-language contract.
+
 ## Tool Boundaries
 
 Tool definitions and behavior are intentionally split:
@@ -152,7 +166,20 @@ tools from defaults and custom function tools.
 `FunctionTool.needs_approval` and `ToolPolicy.approval="always"` interrupt tool
 execution with a wait-user directive before user code runs. The runtime log is
 converted to `ToolApprovalRequestedEvent`. `ToolPolicy.approval="never"` skips
-that approval gate for trusted runs.
+that approval gate for trusted runs. `approval="default"` is the unset merge
+sentinel, while explicit `approval="on_request"` overrides lower layers and
+follows the selected tool's static or dynamic approval declaration. `always`
+and `never` do not evaluate dynamic tool approval predicates.
+
+Interrupted results expose `RunState` and structured approval snapshots. An
+approved result resume executes the captured tool call once. Live
+`ApprovalProvider` runs remain active and continue to use `ApprovalBroker` plus
+`RunHandle.approve()`. An `allow_session` decision grants only the same tool for
+the lifetime of that broker.
+
+Session persistence stores the complete current-turn message delta, including
+assistant tool calls and tool results, so the next model request receives an
+executable conversation history rather than a reconstructed summary pair.
 
 ## Guardrails And Tracing
 

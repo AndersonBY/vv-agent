@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,11 @@ LLM_SETTINGS = {
                         {"endpoint_id": "moonshot-default", "model_id": "kimi-k2.6"},
                         {"endpoint_id": "moonshot-backup", "model_id": "kimi-k2.6"},
                     ],
+                    "context_length": 256000,
+                    "max_output_tokens": 32768,
+                    "function_call_available": True,
+                    "response_format_available": False,
+                    "native_multimodal": True,
                 }
             },
         }
@@ -59,6 +65,32 @@ def test_load_llm_settings_from_file(sample_settings_file: Path) -> None:
     assert "moonshot" in settings["backends"]
 
 
+def test_load_llm_settings_supports_json_and_toml(tmp_path: Path) -> None:
+    payload = {
+        "backends": {"demo": {"models": {"m": {"id": "m", "endpoints": ["e"]}}}},
+        "endpoints": [{"id": "e", "api_key": "sk-test", "api_base": "https://example.invalid/v1"}],
+    }
+    json_file = tmp_path / "settings.json"
+    json_file.write_text(json.dumps(payload), encoding="utf-8")
+    toml_file = tmp_path / "settings.toml"
+    toml_file.write_text(
+        """
+[[endpoints]]
+id = "e"
+api_key = "sk-test"
+api_base = "https://example.invalid/v1"
+
+[backends.demo.models.m]
+id = "m"
+endpoints = ["e"]
+""",
+        encoding="utf-8",
+    )
+
+    assert resolve_model_endpoint(load_llm_settings_from_file(json_file), "demo", "m").model_id == "m"
+    assert resolve_model_endpoint(load_llm_settings_from_file(toml_file), "demo", "m").model_id == "m"
+
+
 def test_resolve_model_endpoint(sample_settings_file: Path) -> None:
     settings = load_llm_settings_from_file(sample_settings_file)
     resolved = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
@@ -66,6 +98,11 @@ def test_resolve_model_endpoint(sample_settings_file: Path) -> None:
     assert resolved.model_id == "kimi-k2.6"
     assert resolved.endpoint.endpoint_id == "moonshot-default"
     assert resolved.endpoint.api_key == "sk-test-123456789"
+    assert resolved.context_length == 256_000
+    assert resolved.max_output_tokens == 32_768
+    assert resolved.function_call_available is True
+    assert resolved.response_format_available is False
+    assert resolved.native_multimodal is True
 
 
 def test_resolve_model_endpoint_collects_all_endpoint_options(sample_settings_file: Path) -> None:
@@ -110,6 +147,11 @@ def test_resolve_model_endpoint_keeps_kimi_k25_and_k26_distinct() -> None:
     k26 = resolve_model_endpoint(settings, backend="moonshot", model="kimi-k2.6")
     assert k25.selected_model == "kimi-k2.5"
     assert k25.model_id == "kimi-k2.5"
+    assert k25.context_length is None
+    assert k25.max_output_tokens is None
+    assert k25.function_call_available is False
+    assert k25.response_format_available is False
+    assert k25.native_multimodal is False
     assert k26.selected_model == "kimi-k2.6"
     assert k26.model_id == "kimi-k2.6"
 

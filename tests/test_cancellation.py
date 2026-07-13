@@ -34,6 +34,16 @@ class TestCancellationToken:
         token.cancel()
         assert called == [True]
 
+    def test_cancel_is_idempotent_and_callbacks_run_once(self):
+        token = CancellationToken()
+        called = []
+        token.on_cancel(lambda: called.append(True))
+
+        token.cancel()
+        token.cancel()
+
+        assert called == [True]
+
     def test_on_cancel_fires_immediately_if_already_cancelled(self):
         token = CancellationToken()
         token.cancel()
@@ -62,6 +72,16 @@ class TestCancellationToken:
         grandparent.cancel()
         assert parent.cancelled
         assert child.cancelled
+
+    def test_child_preserves_parent_cancellation_reason(self):
+        parent = CancellationToken()
+        child = parent.child()
+
+        parent.cancel("host requested cancellation")
+
+        assert child.reason == "host requested cancellation"
+        with pytest.raises(CancelledError, match="host requested cancellation"):
+            child.check()
 
 
 class TestExecutionContext:
@@ -136,3 +156,25 @@ class TestCancellationInRuntime:
         result = runtime.run(task, ctx=ctx, before_cycle_messages=cancel_on_cycle_2)
         assert result.status == AgentStatus.FAILED
         assert "cancelled" in (result.error or "").lower()
+
+
+def test_runner_emits_one_cancelled_terminal_event(tmp_path) -> None:
+    from vv_agent import Agent, RunConfig, Runner
+    from vv_agent.llm.scripted import ScriptedLLM
+    from vv_agent.runtime.cancellation import CancellationToken
+    from vv_agent.types import LLMResponse
+
+    token = CancellationToken()
+    token.cancel()
+    result = Runner.run_sync(
+        Agent(name="cancelled", instructions="Stop.", model=ScriptedLLM(steps=[LLMResponse(content="unused")])),
+        "stop",
+        run_config=RunConfig(workspace=tmp_path, cancellation_token=token),
+    )
+
+    terminal_types = [
+        event.type
+        for event in result.events
+        if event.type in {"run_completed", "run_failed", "run_cancelled"}
+    ]
+    assert terminal_types == ["run_cancelled"]

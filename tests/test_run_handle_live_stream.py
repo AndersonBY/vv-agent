@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
+from collections.abc import Callable
+from pathlib import Path
 from threading import Event, Thread
+from typing import Any
 
 import pytest
 
@@ -8,7 +14,18 @@ from vv_agent import Agent, GuardrailResult, RunConfig, Runner, function_tool, i
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
-from vv_agent.types import AgentStatus, LLMResponse, ToolCall
+from vv_agent.model import ModelRef
+from vv_agent.model_settings import ModelSettings
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolCall
+
+RUN_HANDLE_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_handle_v1.json"
+RUN_HANDLE_FIXTURE_SHA256 = "aa6d933f26674beeb68964fa320e62859711114bdd7581ebde1b281f18a439bf"
+
+
+def _run_handle_contract() -> dict[str, Any]:
+    raw = RUN_HANDLE_FIXTURE.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == RUN_HANDLE_FIXTURE_SHA256
+    return json.loads(raw)
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -147,7 +164,7 @@ def test_runner_start_preserves_default_no_tool_continue_policy() -> None:
     assert handle.state().status == "max_cycles"
 
 
-def test_run_handle_state_keeps_result_status_when_cancel_was_requested() -> None:
+def test_completed_result_wins_over_late_cancel_request() -> None:
     ready = Event()
     handle_ref = {}
 
@@ -159,7 +176,7 @@ def test_run_handle_state_keeps_result_status_when_cancel_was_requested() -> Non
 
     def stream(event) -> None:
         if event.type == "run_completed":
-            assert handle_ref["handle"].cancel()
+            assert handle_ref["handle"].cancel() is False
 
     handle = Runner.start(
         agent,
@@ -172,7 +189,7 @@ def test_run_handle_state_keeps_result_status_when_cancel_was_requested() -> Non
     assert handle.result(timeout=2).status == AgentStatus.COMPLETED
     state = handle.state()
     assert state.status == "completed"
-    assert state.cancelled is True
+    assert state.cancelled is False
 
 
 def test_stream_sync_is_backed_by_live_handle() -> None:
@@ -258,3 +275,252 @@ def test_stream_sync_raises_worker_exception_after_yielding_events() -> None:
 
     assert events[0].type == "run_started"
     assert events[-1].type == "run_completed"
+
+
+class _BurstStreamingLLM:
+    def __init__(self, gate: Event, event_count: int) -> None:
+        self.gate = gate
+        self.event_count = event_count
+
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        tools: list[dict[str, object]],
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+        model_settings: Any = None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        del model, messages, tools, model_settings, request_metadata
+        assert self.gate.wait(timeout=2)
+        assert stream_callback is not None
+        for index in range(self.event_count):
+            stream_callback({"event": "assistant_delta", "content_delta": str(index)})
+        return LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+        )
+
+
+def test_run_handle_subscribers_are_independent_and_lossless_after_live_capacity() -> None:
+    contract = _run_handle_contract()
+    event_count = contract["subscribers"]["burst_event_count"]
+    gate = Event()
+    llm = _BurstStreamingLLM(gate, event_count)
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        Agent(name="burst", instructions="Finish.", model="test-model"),
+        "go",
+        run_config=RunConfig(model_provider=model_provider),
+    )
+    first = handle.events()
+    second = handle.events()
+    gate.set()
+    result = handle.result(timeout=3)
+    first_events = list(first)
+    second_events = list(second)
+
+    assert contract["subscribers"]["independent"] is True
+    assert contract["subscribers"]["start_from_complete_backlog"] is True
+    assert contract["subscribers"]["lossless_after_live_capacity"] is True
+    assert [event.event_id for event in first_events] == [event.event_id for event in second_events]
+    assert [event.event_id for event in first_events] == [event.event_id for event in result.events]
+    assert sum(event.type == "assistant_delta" for event in first_events) == event_count
+
+
+class _BlockingCancellationLLM:
+    def __init__(self) -> None:
+        self.started = Event()
+        self.release = Event()
+
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        tools: list[dict[str, object]],
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+        model_settings: Any = None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        del model, messages, tools, stream_callback, model_settings, request_metadata
+        self.started.set()
+        assert self.release.wait(timeout=3)
+        return LLMResponse(
+            content="should be cancelled",
+            tool_calls=[
+                ToolCall(
+                    id="cancel-finish",
+                    name=TASK_FINISH_TOOL_NAME,
+                    arguments={"message": "should be cancelled"},
+                )
+            ],
+        )
+
+
+def test_run_handle_cancel_accepted_state_and_terminal_reason_match_fixture(tmp_path: Path) -> None:
+    contract = _run_handle_contract()["cancellation"]
+    llm = _BlockingCancellationLLM()
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return llm, _resolved_model()
+
+    handle = Runner.start(
+        Agent(name="cancel", instructions="Wait.", model="test-model"),
+        "go",
+        run_config=RunConfig(model_provider=model_provider, workspace=tmp_path),
+    )
+    assert llm.started.wait(timeout=2)
+    assert handle.cancel(contract["reason"]) is True
+
+    accepted = handle.state()
+    assert {
+        "status": accepted.status,
+        "done": accepted.done,
+        "cancelled": accepted.cancelled,
+    } == contract["accepted_state"]
+    assert handle.cancel(contract["reason"]) is contract["repeated_request_accepted"]
+
+    llm.release.set()
+    result = handle.result(timeout=3)
+    terminal = handle.state()
+    assert result.status == AgentStatus.FAILED
+    assert terminal.status == contract["terminal_status"]
+    assert terminal.done is True
+    assert terminal.cancelled is True
+    assert terminal.error is not None and contract["reason"] in terminal.error
+    assert handle.cancel(contract["reason"]) is contract["late_request_accepted"]
+
+
+class _AsyncChildStreamingLLM:
+    def __init__(self) -> None:
+        self.child_started = Event()
+        self.release_child = Event()
+        self.parent_calls = 0
+        self.lock = threading.Lock()
+
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        tools: list[dict[str, object]],
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+        model_settings: Any = None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        del model, tools, stream_callback, model_settings, request_metadata
+        if messages and messages[0].role == "system" and messages[0].content == "Child prompt":
+            self.child_started.set()
+            assert self.release_child.wait(timeout=3)
+            return LLMResponse(
+                content="child done",
+                tool_calls=[ToolCall(id="child-finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "child done"})],
+            )
+        with self.lock:
+            self.parent_calls += 1
+            parent_call = self.parent_calls
+        if parent_call == 1:
+            return LLMResponse(
+                content="delegate",
+                tool_calls=[
+                    ToolCall(
+                        id="delegate",
+                        name="create_sub_task",
+                        arguments={
+                            "agent_id": "researcher",
+                            "task_description": "Finish after parent",
+                            "wait_for_completion": False,
+                        },
+                    )
+                ],
+            )
+        return LLMResponse(
+            content="parent done",
+            tool_calls=[ToolCall(id="parent-finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})],
+        )
+
+
+class _AsyncChildModelProvider:
+    def __init__(self, llm: _AsyncChildStreamingLLM) -> None:
+        self.llm = llm
+
+    def resolve(self, model: ModelRef) -> ResolvedModelConfig:
+        return _resolved_model(model.model())
+
+    def client(self, resolved: ResolvedModelConfig) -> _AsyncChildStreamingLLM:
+        del resolved
+        return self.llm
+
+    def default_settings(self, resolved: ResolvedModelConfig) -> ModelSettings:
+        del resolved
+        return ModelSettings()
+
+
+def test_run_handle_events_wait_for_async_child_after_parent_result_and_allow_tail_cancel(tmp_path: Path) -> None:
+    contract = _run_handle_contract()
+    llm = _AsyncChildStreamingLLM()
+    runtime_task = AgentTask(
+        task_id="parent-task",
+        model="test-model",
+        system_prompt="Parent prompt",
+        user_prompt="Delegate",
+        max_cycles=3,
+        sub_agents={
+            "researcher": SubAgentConfig(
+                model="test-model",
+                description="Research",
+                system_prompt="Child prompt",
+                max_cycles=2,
+            )
+        },
+    )
+
+    handle = Runner._start_compiled(
+        Agent(name="parent", instructions="Delegate.", model="test-model"),
+        "go",
+        task=runtime_task,
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=_AsyncChildModelProvider(llm),
+        ),
+    )
+    consumed: list[Any] = []
+    consumer = Thread(target=lambda: consumed.extend(handle.events()))
+    consumer.start()
+    assert llm.child_started.wait(timeout=2)
+    result = handle.result(timeout=2)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert contract["completion"]["result_may_precede_async_children"] is True
+    assert consumer.is_alive()
+    assert handle.done() is False
+    assert handle.state().status == "running"
+    assert handle.cancel(contract["cancellation"]["reason"]) is True
+    accepted = handle.state()
+    assert {
+        "status": accepted.status,
+        "done": accepted.done,
+        "cancelled": accepted.cancelled,
+    } == contract["cancellation"]["accepted_state"]
+    assert handle.cancel(contract["cancellation"]["reason"]) is contract["cancellation"]["repeated_request_accepted"]
+    llm.release_child.set()
+    consumer.join(timeout=3)
+
+    assert not consumer.is_alive()
+    lifecycle = [event for event in consumed if event.type in {"sub_run_started", "sub_run_completed"}]
+    assert [event.type for event in lifecycle] == ["sub_run_started", "sub_run_completed"]
+    assert lifecycle[-1].status == AgentStatus.FAILED.value
+    assert contract["cancellation"]["reason"] in (lifecycle[-1].error or "")
+    assert contract["completion"]["events_wait_for_started_children"] is True
+    terminal = handle.state()
+    assert terminal.status == contract["cancellation"]["terminal_status"]
+    assert terminal.done is True
+    assert terminal.cancelled is True
+    assert terminal.error is not None and contract["cancellation"]["reason"] in terminal.error

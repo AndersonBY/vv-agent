@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
-from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor
+from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, ToolExposure
 from vv_agent.types import ToolCall, ToolExecutionResult
 
 
@@ -41,6 +41,7 @@ class ToolRegistry:
         executor = self._executors.get(tool_name)
         if isinstance(executor, RegistryToolExecutor):
             executor.schema = deepcopy(schema)
+            executor.sync_description_from_schema()
 
     def register_schemas(self, schemas: dict[str, dict[str, Any]]) -> None:
         for tool_name, schema in schemas.items():
@@ -75,13 +76,22 @@ class ToolRegistry:
         if isinstance(executor, RegistryToolExecutor):
             executor.metadata["policy_managed_by_handler"] = True
 
-    def register_executor(self, executor: ToolExecutor) -> None:
+    def register_executor(
+        self,
+        executor: ToolExecutor,
+        *,
+        expose_to_model: bool = True,
+        planner_extra: bool = True,
+    ) -> None:
         if executor.name in self._executors or executor.name in self._tools:
             raise ValueError(f"Tool already registered: {executor.name}")
         self._executors[executor.name] = executor
-        self.register_schema(executor.name, executor.openai_schema(None))
+        is_model_visible = executor.exposure != ToolExposure.HIDDEN
+        if expose_to_model and is_model_visible:
+            self.register_schema(executor.name, executor.openai_schema(None))
         self._tools[executor.name] = executor.spec(None)
-        self._planner_extra_tool_names.add(executor.name)
+        if planner_extra and is_model_visible:
+            self._planner_extra_tool_names.add(executor.name)
 
     def has_schema(self, name: str) -> bool:
         return name in self._schemas
@@ -94,7 +104,11 @@ class ToolRegistry:
 
     def list_openai_schemas(self, *, tool_names: list[str] | None = None) -> list[dict[str, Any]]:
         ordered_names = tool_names if tool_names is not None else list(self._tools.keys())
-        return [self.get_schema(name) for name in ordered_names]
+        return [self.get_schema(name) for name in ordered_names if self._is_model_visible(name)]
+
+    def _is_model_visible(self, name: str) -> bool:
+        executor = self._executors.get(name)
+        return executor is None or executor.exposure != ToolExposure.HIDDEN
 
     def register_tool(
         self,

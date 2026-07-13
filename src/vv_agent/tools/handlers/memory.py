@@ -3,18 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import to_json
+from vv_agent.tools.handlers.common import builtin_error, to_json
 from vv_agent.types import ToolExecutionResult
 
 
 def compress_memory(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     core_information = str(arguments.get("core_information", "")).strip()
     if not core_information:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            content=to_json({"error": "`core_information` is required"}),
-            error_code="core_information_required",
+        return builtin_error(
+            "`core_information` is required",
+            "core_information_required",
         )
 
     notes = context.shared_state.get("memory_notes")

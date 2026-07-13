@@ -1,0 +1,23 @@
+{
+  "version": "v1",
+  "success_with_session": {
+    "tail": ["session_persisted", "run_completed"],
+    "terminal": "run_completed",
+    "status": "completed"
+  },
+  "output_guardrail_block": {
+    "tail": ["session_persisted", "run_failed"],
+    "terminal": "run_failed",
+    "status": "failed",
+    "error": "blocked final output",
+    "later_guardrails_run": false
+  },
+  "cancellation": {
+    "terminal": "run_cancelled",
+    "terminal_count": 1
+  },
+  "event_store_fail_closed": {
+    "error": "run event store append failed: store down",
+    "panics": false
+  }
+}

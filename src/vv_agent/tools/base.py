@@ -50,6 +50,28 @@ class ToolContext:
     session: Any | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def run_id(self) -> str:
+        runtime_metadata = getattr(self.ctx, "metadata", None)
+        if isinstance(runtime_metadata, dict):
+            return str(runtime_metadata.get("_vv_agent_run_id") or self.task_id)
+        return self.task_id
+
+    @property
+    def agent_name(self) -> str:
+        runtime_metadata = getattr(self.ctx, "metadata", None)
+        if isinstance(runtime_metadata, dict):
+            return str(runtime_metadata.get("_vv_agent_agent_name") or self.metadata.get("agent_name") or "")
+        return str(self.metadata.get("agent_name") or "")
+
+    @property
+    def raw_arguments(self) -> dict[str, Any]:
+        return dict(self.arguments)
+
+    @property
+    def app_state(self) -> Any | None:
+        return getattr(self.run_context, "context", None)
+
     def allow_outside_workspace_paths(self) -> bool:
         sources: list[dict[str, Any]] = []
         if isinstance(self.task_metadata, dict):
@@ -83,7 +105,22 @@ class ToolContext:
         return target
 
 
+def is_tool_call_preapproved(context: ToolContext, *, tool_call_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
+    execution_context = context.ctx
+    approval = getattr(execution_context, "_approved_tool_approval", None)
+    call = getattr(approval, "call", None)
+    return bool(
+        call is not None
+        and getattr(call, "id", None) == tool_call_id
+        and getattr(call, "name", None) == tool_name
+        and getattr(call, "arguments", None) == arguments
+    )
+
+
 @dataclass(slots=True)
 class ToolSpec:
     name: str
     handler: ToolHandler
+
+
+ToolCallContext = ToolContext

@@ -2,6 +2,16 @@
 
 Run commands from the repository root.
 
+The repository vendors an immutable snapshot of the shared Python/Rust
+contract. Verify it before changing or releasing shared behavior:
+
+```bash
+python3 scripts/contract_snapshot.py check
+```
+
+Canonical fixtures live in `../vv-agent-contract/`; never edit
+`tests/fixtures/parity/` directly.
+
 ## Environment
 
 ```bash
@@ -47,6 +57,7 @@ uv run pytest tests/test_app_server_*.py
 uv run python -m vv_agent --help
 uv run python -m vv_agent app-server --help
 uv run python -m vv_agent app-server schema --out ./app-server-schema
+uv run python -m vv_agent app-server generate-ts --out ./app-server-schema/typescript
 uv run python -m vv_agent debug app-server send-message hello
 ```
 
@@ -68,6 +79,7 @@ Useful live-test environment variables:
 
 | Change area | Primary tests |
 | --- | --- |
+| Shared contract and canonical producers | `tests/test_parity_evidence_manifests.py`, `tests/test_tool_schema_contract.py`, `tests/test_app_server_contract_parity.py`, `tests/test_runner_events_producer_parity.py` |
 | Settings/model resolution | `tests/test_config.py` |
 | CLI | `tests/test_config.py`, CLI-specific assertions in existing tests |
 | Runtime loop and statuses | `tests/test_runtime.py`, `tests/test_cycle_runner.py` |

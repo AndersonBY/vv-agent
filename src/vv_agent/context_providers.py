@@ -11,7 +11,7 @@ from typing import Any, Protocol
 class ContextFragment:
     id: str
     text: str
-    stable: bool = True
+    stable: bool = False
     priority: int = 100
     source: str = ""
     cache_hint: str | None = None

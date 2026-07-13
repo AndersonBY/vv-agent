@@ -94,6 +94,8 @@ def main() -> None:
     )
     _print("conn_1", first.receive_outbound(timeout=1))
     _print("conn_2", second.receive_outbound(timeout=1))
+    server.processor.process_message("conn_1", {"method": "initialized"})
+    server.processor.process_message("conn_2", {"method": "initialized"})
 
     _send(server, first, {"id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "./workspace"}})
     _drain_until(first, "conn_1", "thread/started")

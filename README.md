@@ -76,6 +76,23 @@ result = Runner.run_sync(agent, "Analyze order 123", run_config=RunConfig(
 print(result.status, result.final_output)
 ```
 
+For defaults shared by several runs, create a configured Runner instead of
+repeating the same `RunConfig`:
+
+```python
+runner = Runner.configured(RunConfig(
+    model_provider=provider,
+    model="kimi-k2.6",
+    workspace="./workspace",
+))
+result = runner.run_sync(agent, "Analyze order 123")
+```
+
+Provider resolution is per-run then Runner. Model resolution is per-run,
+Agent, Runner, then the selected provider default. Model settings merge in the
+opposite layering direction: provider, Runner, Agent, then per-run, with each
+later layer overriding earlier fields.
+
 `Agent.output_type` can coerce JSON final output into `dict`, `list`,
 dataclasses, or Pydantic-style models. Decorated tools may accept a leading
 `ToolContext` parameter; it is passed at invocation time and omitted from the
@@ -132,12 +149,13 @@ Use the App Server when a desktop app, worker, IDE, or other host process needs
 to drive `vv-agent` through a stable protocol instead of embedding the Python
 SDK directly. It runs JSONL over stdio, exposes Thread / Turn / Item lifecycle
 events, routes tool approval as server-to-client requests, supports
-`thread/read` and `thread/resume` replay, and exports JSON Schema files for
-client bindings.
+`thread/read` and `thread/resume` replay, and exports typed JSON Schema and
+self-contained TypeScript bindings.
 
 ```bash
-uv run vv-agent app-server --listen stdio
+uv run vv-agent app-server --listen stdio --settings-file local_settings.py --backend moonshot --model kimi-k2.6
 uv run vv-agent app-server generate-json-schema --out ./app-server-schema
+uv run vv-agent app-server generate-ts --out ./app-server-schema/typescript
 uv run vv-agent debug app-server send-message "hello"
 ```
 
@@ -160,6 +178,12 @@ shared tool state. During a running session, `session.active_run_handle` exposes
 the unified `RunHandle` control surface for approval, cancellation, steering,
 and follow-up.
 
+Pass an existing `MemorySession`, `SQLiteSession`, or `RedisSession` through
+`AgentSessionOptions.session` (or `create_session(session=...)`) to hydrate a
+facade from durable history and let `Runner` append each turn to the same
+store. When both are provided, the requested `session_id` must match the
+backing Session id. Do not also pass that history as initial messages.
+
 ```python
 from pathlib import Path
 
@@ -167,6 +191,7 @@ from vv_agent import (
     AgentSessionOptions,
     InteractiveAgentClient,
     InteractiveAgentDefinition,
+    SQLiteSession,
 )
 from vv_agent.runtime.backends import ThreadBackend
 
@@ -176,6 +201,7 @@ client = InteractiveAgentClient(
         default_backend="moonshot",
         workspace=Path("./workspace/thread-001"),
         execution_backend=ThreadBackend(max_workers=4),
+        session=SQLiteSession("thread-001", db_path=Path("./sessions.sqlite3")),
     )
 )
 
@@ -227,15 +253,25 @@ result = Runner.run_sync(
     "Write a short report.",
     run_config=RunConfig(
         default_backend="moonshot",
+        max_handoffs=4,
         tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "transfer_to_writer"]),
     ),
 )
 ```
 
+A handoff is an outer Runner control transfer, not an agent-as-tool call. The
+target Agent resolves its own model and model settings, while the active
+session, cancellation token, and mutated shared state continue across the
+transition. `max_handoffs` defaults to `10` and limits control transfers
+independently from `max_cycles`. Approval resume preserves the same behavior.
+
 Tools can request approval with `@function_tool(needs_approval=True)`. By
 default the run enters `WAIT_USER` before the tool body is called and emits a
 `ToolApprovalRequestedEvent`. `ToolPolicy(approval="never")` disables that
-approval gate for trusted runs.
+approval gate for trusted runs. The four policy modes are `default`, `always`,
+`never`, and `on_request`: `default` inherits the next configured policy,
+whereas explicit `on_request` follows each tool's static or dynamic approval
+declaration.
 
 ### Guardrails And Tracing
 

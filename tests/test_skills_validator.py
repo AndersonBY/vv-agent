@@ -83,6 +83,43 @@ def test_validate_metadata_compat_mode_demotes_extra_fields_and_dir_mismatch() -
     assert any("Directory name '5e4a40157abd' must match skill name 'tavily'" in message for message in diagnostics.warnings)
 
 
+def test_validate_metadata_compatibility_matches_mode_severity_and_character_limit() -> None:
+    invalid = {
+        "name": "my-skill",
+        "description": "A test skill",
+        "compatibility": 123,
+    }
+
+    compat = validate_metadata_with_diagnostics(invalid, validation_mode="compat")
+    assert compat.errors == ["Field 'compatibility' must be a string"]
+
+    minimal = validate_metadata_with_diagnostics(invalid, validation_mode="minimal")
+    assert minimal.errors == []
+    assert minimal.warnings == ["Field 'compatibility' must be a string"]
+
+    assert (
+        validate_metadata(
+            {
+                "name": "my-skill",
+                "description": "A test skill",
+                "compatibility": "界" * 500,
+            }
+        )
+        == []
+    )
+    assert any(
+        "500 character limit" in message
+        for message in validate_metadata(
+            {
+                "name": "my-skill",
+                "description": "A test skill",
+                "compatibility": "界" * 501,
+            },
+            validation_mode="compat",
+        )
+    )
+
+
 def test_validate_metadata_minimal_mode_demotes_naming_conventions() -> None:
     diagnostics = validate_metadata_with_diagnostics(
         {

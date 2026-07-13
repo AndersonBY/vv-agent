@@ -14,27 +14,45 @@ approval callbacks, replay, and generated schema files.
 The first transport is JSONL over stdio:
 
 ```bash
-uv run vv-agent app-server --listen stdio
+uv run vv-agent app-server --listen stdio \
+  --settings local_settings.py \
+  --backend moonshot \
+  --model kimi-k2.6 \
+  --timeout-seconds 90
 ```
 
-Each inbound and outbound line is one JSON object. The wire format follows the
-project's JSON-RPC envelope but intentionally omits the `"jsonrpc": "2.0"`
-field. Request `id` values may be strings or integers.
+The listen transport, settings file, backend, and model must each be provided
+exactly once, in any order; `--key=value` syntax is also accepted. They are
+resolved before the stdio loop starts, so a missing file, backend, model,
+endpoint, or key fails at process startup instead of failing the first turn.
+`--timeout-seconds` is optional and defaults to 90 seconds. Production turns use
+a 30-second approval timeout.
+
+Each inbound and outbound line is one JSON object. Every request, response,
+notification, and error uses the standard `"jsonrpc": "2.0"` field. Request
+`id` values may be strings or integers.
 
 ```jsonl
-{"id":1,"method":"initialize","params":{"clientInfo":{"name":"desktop-host","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":[]}}}
-{"method":"initialized"}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"desktop-host","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":[]}}}
+{"jsonrpc":"2.0","method":"initialized"}
 ```
 
 The server responds to `initialize` with the user agent, protocol version, and
 capabilities:
 
 ```json
-{"id":1,"result":{"userAgent":"vv-agent-app-server","protocolVersion":"v1","capabilities":{"modelList":true,"threadLifecycle":true,"notificationOptOut":true}}}
+{"jsonrpc":"2.0","id":1,"result":{"userAgent":"vv-agent-app-server","protocolVersion":"v1","capabilities":{"modelList":true,"threadLifecycle":true,"notificationOptOut":true,"schemaExport":true,"approvalResolve":true}}}
 ```
 
 Requests other than `initialize` are rejected until the connection has been
-initialized.
+initialized. After receiving the initialize response, clients send
+`{"jsonrpc":"2.0","method":"initialized"}` to complete the shared client handshake. Python v1
+compatibility is preserved: the server may emit asynchronous notifications as
+soon as the initialize response has been sent.
+
+Malformed JSONL input returns error code `-32700` with a null id, and the stdio
+server continues reading later lines. A valid JSON value that is not a request,
+notification, response, or error object returns `-32600`.
 
 ## Threads
 
@@ -147,7 +165,11 @@ Important notification methods:
 | --- | --- |
 | `item/started` | Create or mark an item as started. |
 | `item/agentMessage/delta` | Append assistant text delta to the active agent message. |
+| `item/toolCall/delta` | Report streamed tool-call argument progress. |
 | `item/completed` | Mark an item completed and merge its final payload. |
+| `approval/requested` | Show a pending tool approval in the client. |
+| `approval/resolved` | Reconcile the final approval decision. |
+| `error/warning` | Surface a non-protocol runtime or event-stream warning. |
 | `thread/status/changed` | Update loaded-thread status such as running, idle, archived, or closed. |
 | `thread/archived` | Mark a thread archived in the client. |
 | `thread/closed` | Mark a loaded thread closed after the last subscriber leaves. |
@@ -172,19 +194,33 @@ Tools that require approval are routed as server-to-client requests. The App
 Server sends `approval/request` with a request `id` plus approval params:
 
 ```json
-{"id":"server_req_1","method":"approval/request","params":{"requestId":"approval_1","threadId":"thread_1","turnId":"turn_1","toolCallId":"call_1","toolName":"write_file","preview":"Approval required for tool write_file.","arguments":{"path":"notes.md"}}}
+{"id":"approval_1","method":"approval/request","params":{"requestId":"approval_1","threadId":"thread_1","turnId":"turn_1","toolCallId":"call_1","toolName":"write_file","preview":"Approval required for tool write_file.","arguments":{"path":"notes.md"}}}
 ```
 
 The client must answer with a normal response whose `id` matches the server
 request id:
 
 ```jsonl
-{"id":"server_req_1","result":{"decision":"allow","message":"Approved from UI"}}
+{"id":"approval_1","result":{"decision":"allow_session","message":"Approved for this tool during the session"}}
 ```
 
-Supported decisions are `allow`, `deny`, `allow_session`, and `timeout`.
-Disconnects and timeouts resolve as denied or timed-out approval decisions in
-the runtime.
+Clients that prefer request-only control can resolve the same pending callback
+with `approval/resolve`. Its `threadId`, `turnId`, and `requestId` must match the
+active approval:
+
+```jsonl
+{"id":8,"method":"approval/resolve","params":{"threadId":"thread_1","turnId":"turn_1","requestId":"approval_1","decision":"allow_session"}}
+{"id":8,"result":{}}
+```
+
+The server also emits `approval/requested` and `approval/resolved` notifications
+so timeline state does not depend on observing the bidirectional request alone.
+
+Normal response envelopes and `approval/resolve` both support the canonical
+decisions `allow`, `allow_session`, `deny`, and `timeout`. The
+`approval/resolved` notification preserves the selected decision;
+`allow_session` is not collapsed to `allow`. Disconnects and expired requests
+resolve as timed-out approval decisions in the runtime.
 
 ## Model List
 
@@ -212,6 +248,7 @@ Generate JSON Schema files for client bindings and drift checks:
 
 ```bash
 uv run vv-agent app-server schema --out ./app-server-schema
+uv run vv-agent app-server generate-ts --out ./app-server-schema/typescript
 ```
 
 `generate-json-schema` remains available as a compatibility alias.
@@ -221,7 +258,24 @@ The command writes:
 - `json/ClientRequest.json`
 - `json/ServerNotification.json`
 - `json/ServerRequest.json`
+- lifecycle schemas `json/AppItem.json`, `json/AppThread.json`, and
+  `json/AppTurn.json`
+- response schemas including `json/ThreadStartResponse.json` and
+  `json/TurnStartResponse.json`
 - `json/vv_agent_app_server.schemas.json`
+
+Request params such as `turn/start` are represented inside
+`json/ClientRequest.json`; the command does not write a separate
+`json/TurnStartParams.json`. Every method variant uses a method discriminator
+and typed params. The TypeScript files are self-contained and do not rely on
+generated imports.
+
+Initialized clients can also fetch the same JSON Schema and TypeScript bundles
+without filesystem access:
+
+```jsonl
+{"id":9,"method":"schema/export","params":{}}
+```
 
 The debug client prints a complete JSONL flow for a single message:
 

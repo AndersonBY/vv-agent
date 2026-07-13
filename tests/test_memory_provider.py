@@ -26,6 +26,7 @@ from vv_agent.types import AgentTask, LLMResponse, Message
 def test_memory_compact_events_are_serializable() -> None:
     started = MemoryCompactStarted(
         run_id="run_1",
+        trace_id="trace_1",
         session_id="session_1",
         cycle_index=3,
         message_count=12,
@@ -33,6 +34,7 @@ def test_memory_compact_events_are_serializable() -> None:
     )
     completed = MemoryCompactCompleted(
         run_id="run_1",
+        trace_id="trace_1",
         session_id="session_1",
         cycle_index=3,
         before_count=12,

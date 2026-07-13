@@ -74,11 +74,12 @@ def test_interactive_session_options_pass_memory_providers_to_run_config(monkeyp
         def result(self) -> RunResult:
             return _run_result()
 
-    def fake_start(_agent: Any, _input: str, *, run_config: RunConfig) -> _Handle:
+    def fake_start(_agent: Any, _input: str, *, task: Any, run_config: RunConfig) -> _Handle:
+        del task
         seen_configs.append(run_config)
         return _Handle()
 
-    monkeypatch.setattr(interactive_mod.Runner, "start", fake_start)
+    monkeypatch.setattr(interactive_mod.Runner, "_start_compiled", fake_start)
 
     def llm_builder(*_: Any, **__: Any):
         return object(), _resolved()
@@ -113,11 +114,12 @@ def test_interactive_agent_definition_passes_memory_providers_to_run_config(monk
         def result(self) -> RunResult:
             return _run_result()
 
-    def fake_start(_agent: Any, _input: str, *, run_config: RunConfig) -> _Handle:
+    def fake_start(_agent: Any, _input: str, *, task: Any, run_config: RunConfig) -> _Handle:
+        del task
         seen_configs.append(run_config)
         return _Handle()
 
-    monkeypatch.setattr(interactive_mod.Runner, "start", fake_start)
+    monkeypatch.setattr(interactive_mod.Runner, "_start_compiled", fake_start)
 
     def llm_builder(*_: Any, **__: Any):
         return object(), _resolved()

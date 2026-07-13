@@ -32,7 +32,7 @@ def test_agent_as_tool_wraps_child_agent() -> None:
 
     assert tool.name == "research"
     assert tool.description == "Ask the researcher."
-    assert tool.params_json_schema["required"] == ["input"]
+    assert tool.params_json_schema["required"] == ["task_description"]
     assert tool.metadata["agent"] is child
     assert tool.metadata["mode"] == "agent_as_tool"
 

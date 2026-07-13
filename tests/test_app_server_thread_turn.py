@@ -8,9 +8,9 @@ from vv_agent.app_server import AppServer, AppServerErrorCode, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
-from vv_agent.llm import ScriptedLLM
+from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
-from vv_agent.types import LLMResponse, Message, ToolCall
+from vv_agent.types import LLMResponse, ToolCall
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -46,9 +46,15 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
     server = AppServer(transport=transport, host=host)
 
     for payload in [
-        {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}},
-        {"id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "/tmp/work"}},
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+        {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}},
+        {"jsonrpc": "2.0", "method": "initialized"},
+        {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "/tmp/work"}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+        },
     ]:
         transport.send_inbound(payload)
         server.processor.process_next(transport)
@@ -80,12 +86,17 @@ def test_turn_start_and_completion_emit_thread_status_changes() -> None:
             )
         ]
     )
-    _send(transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     _send(
         transport,
         server,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+        },
     )
 
     outbound = _drain_until_turn_completed(transport)
@@ -105,12 +116,14 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
     first_step_can_finish = threading.Event()
     seen_user_messages: list[list[str]] = []
 
-    def first_step(_model: str, _messages: list[Message]) -> LLMResponse:
+    def first_step(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
         return LLMResponse(content="continue", tool_calls=[])
 
-    def second_step(_model: str, messages: list[Message]) -> LLMResponse:
+    def second_step(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         seen_user_messages.append([message.content for message in messages if message.role == "user"])
         return LLMResponse(
             content="done",
@@ -118,12 +131,17 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
         )
 
     server, transport = _server_with_scripted_steps([first_step, second_step], max_cycles=3)
-    _send(transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     _send(
         transport,
         server,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+        },
     )
     assert first_step_ready.wait(timeout=2)
 
@@ -131,6 +149,7 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
         transport,
         server,
         {
+            "jsonrpc": "2.0",
             "id": 3,
             "method": "turn/steer",
             "params": {
@@ -156,7 +175,8 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
     first_step_ready = threading.Event()
     first_step_can_finish = threading.Event()
 
-    def first_step(_model: str, _messages: list[Message]) -> LLMResponse:
+    def first_step(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
         return LLMResponse(
@@ -165,12 +185,17 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
         )
 
     server, transport = _server_with_scripted_steps([first_step])
-    _send(transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     _send(
         transport,
         server,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+        },
     )
     assert first_step_ready.wait(timeout=2)
 
@@ -178,6 +203,7 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
         transport,
         server,
         {
+            "jsonrpc": "2.0",
             "id": 3,
             "method": "turn/steer",
             "params": {"threadId": "thread_1", "expectedTurnId": "wrong", "input": [{"type": "text", "text": "ignored"}]},
@@ -185,7 +211,11 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
     )
 
     response = _receive_response(transport, 3)
-    assert response == {"id": 3, "error": {"code": AppServerErrorCode.TURN_ID_MISMATCH, "message": "Turn id mismatch"}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {"code": AppServerErrorCode.TURN_ID_MISMATCH, "message": "Turn id mismatch"},
+    }
     first_step_can_finish.set()
     _drain_until_turn_completed(transport)
 
@@ -195,7 +225,8 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
     first_step_can_finish = threading.Event()
     seen_user_messages: list[list[str]] = []
 
-    def first_step(_model: str, _messages: list[Message]) -> LLMResponse:
+    def first_step(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
         return LLMResponse(
@@ -203,7 +234,8 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
             tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "first"})],
         )
 
-    def second_step(_model: str, messages: list[Message]) -> LLMResponse:
+    def second_step(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         seen_user_messages.append([message.content for message in messages if message.role == "user"])
         return LLMResponse(
             content="second",
@@ -211,18 +243,24 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
         )
 
     server, transport = _server_with_scripted_steps([first_step, second_step])
-    _send(transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     _send(
         transport,
         server,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+        },
     )
     assert first_step_ready.wait(timeout=2)
     _send(
         transport,
         server,
         {
+            "jsonrpc": "2.0",
             "id": 3,
             "method": "turn/followUp",
             "params": {
@@ -246,25 +284,36 @@ def test_turn_interrupt_cancels_active_turn() -> None:
     first_step_ready = threading.Event()
     first_step_can_finish = threading.Event()
 
-    def first_step(_model: str, _messages: list[Message]) -> LLMResponse:
+    def first_step(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
         return LLMResponse(content="continue", tool_calls=[])
 
     server, transport = _server_with_scripted_steps([first_step], max_cycles=2)
-    _send(transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     _send(
         transport,
         server,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+        },
     )
     assert first_step_ready.wait(timeout=2)
 
     _send(
         transport,
         server,
-        {"id": 3, "method": "turn/interrupt", "params": {"threadId": "thread_1", "expectedTurnId": "turn_1", "reason": "stop"}},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "turn/interrupt",
+            "params": {"threadId": "thread_1", "expectedTurnId": "turn_1", "reason": "stop"},
+        },
     )
     response = _receive_response(transport, 3)
     first_step_can_finish.set()
@@ -272,7 +321,11 @@ def test_turn_interrupt_cancels_active_turn() -> None:
     completed = [message for message in outbound if message.get("method") == "turn/completed"][-1]
     completed_params = completed.get("params")
 
-    assert response == {"id": 3, "result": {"threadId": "thread_1", "turnId": "turn_1", "cancelled": True}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {"threadId": "thread_1", "turnId": "turn_1", "cancelled": True},
+    }
     assert isinstance(completed_params, dict)
     assert cast(dict[str, object], completed_params)["status"] == "failed"
 
@@ -295,6 +348,9 @@ def _server_with_scripted_steps(steps: list[ScriptStep], *, max_cycles: int = 1)
 def _send(transport: ChannelTransport, server: AppServer, payload: dict[str, object]) -> None:
     transport.send_inbound(payload)
     server.processor.process_next(transport)
+    if payload.get("method") == "initialize":
+        transport.send_inbound({"jsonrpc": "2.0", "method": "initialized"})
+        server.processor.process_next(transport)
 
 
 def _receive_response(transport: ChannelTransport, response_id: int) -> dict[str, object]:

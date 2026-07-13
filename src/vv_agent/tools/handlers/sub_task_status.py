@@ -4,7 +4,7 @@ import time
 from typing import Any
 
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import to_json
+from vv_agent.tools.handlers.common import to_json, trim_portable_whitespace
 from vv_agent.types import AgentStatus, ToolExecutionResult, ToolResultStatus
 
 DEFAULT_SUB_TASK_SNAPSHOT_FILE_LIMIT = 20
@@ -16,6 +16,8 @@ DEFAULT_SUB_TASK_MAX_WAIT_SECONDS = 3600
 MIN_SUB_TASK_MAX_WAIT_SECONDS = 60
 MAX_SUB_TASK_MAX_WAIT_SECONDS = 24 * 60 * 60
 LOCAL_SUB_TASK_WAIT_POLL_SECONDS = 0.1
+MIN_I64 = -(2**63)
+MAX_I64 = 2**63 - 1
 RUNNING_SUB_TASK_STATUSES = {
     AgentStatus.PENDING.value,
     AgentStatus.RUNNING.value,
@@ -32,7 +34,7 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
             return bool(value)
         return default
     if isinstance(value, str):
-        normalized = value.strip().lower()
+        normalized = trim_portable_whitespace(value).lower()
         if normalized in {"1", "true", "yes", "on"}:
             return True
         if normalized in {"0", "false", "no", "off"}:
@@ -40,23 +42,41 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
     return default
 
 
-def _normalize_detail_level(detail_level: Any) -> str:
-    normalized = str(detail_level or "basic").strip().lower()
+def _normalize_detail_level(detail_level: str | None) -> str:
+    normalized = trim_portable_whitespace(detail_level or "basic").lower()
     return normalized if normalized in {"basic", "snapshot"} else "basic"
 
 
+def _parse_integer_arg(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if MIN_I64 <= value <= MAX_I64 else None
+    if isinstance(value, str):
+        normalized = trim_portable_whitespace(value)
+        if not normalized or (normalized[0] in "+-" and len(normalized) == 1):
+            return None
+        digits = normalized[1:] if normalized[0] in "+-" else normalized
+        if not digits.isascii() or not digits.isdigit():
+            return None
+        try:
+            parsed = int(normalized)
+        except ValueError:
+            return None
+        return parsed if MIN_I64 <= parsed <= MAX_I64 else None
+    return None
+
+
 def _normalize_workspace_file_limit(workspace_file_limit: Any) -> int:
-    try:
-        limit = int(workspace_file_limit or DEFAULT_SUB_TASK_SNAPSHOT_FILE_LIMIT)
-    except (TypeError, ValueError):
+    limit = _parse_integer_arg(workspace_file_limit)
+    if limit is None:
         limit = DEFAULT_SUB_TASK_SNAPSHOT_FILE_LIMIT
     return max(1, min(limit, MAX_SUB_TASK_SNAPSHOT_FILE_LIMIT))
 
 
 def _normalize_wait_interval_seconds(check_interval_seconds: Any) -> int:
-    try:
-        seconds = int(check_interval_seconds or DEFAULT_SUB_TASK_WAIT_INTERVAL_SECONDS)
-    except (TypeError, ValueError):
+    seconds = _parse_integer_arg(check_interval_seconds)
+    if seconds is None:
         seconds = DEFAULT_SUB_TASK_WAIT_INTERVAL_SECONDS
     return max(MIN_SUB_TASK_WAIT_INTERVAL_SECONDS, min(seconds, MAX_SUB_TASK_WAIT_INTERVAL_SECONDS))
 
@@ -64,9 +84,8 @@ def _normalize_wait_interval_seconds(check_interval_seconds: Any) -> int:
 def _normalize_max_wait_seconds(max_wait_seconds: Any) -> int:
     if max_wait_seconds is None:
         return DEFAULT_SUB_TASK_MAX_WAIT_SECONDS
-    try:
-        seconds = int(max_wait_seconds)
-    except (TypeError, ValueError):
+    seconds = _parse_integer_arg(max_wait_seconds)
+    if seconds is None:
         return DEFAULT_SUB_TASK_MAX_WAIT_SECONDS
     return max(MIN_SUB_TASK_MAX_WAIT_SECONDS, min(seconds, MAX_SUB_TASK_MAX_WAIT_SECONDS))
 
@@ -160,9 +179,10 @@ def _build_status_entry(
             "error": f"Sub-task {task_id} not found.",
         }
 
-    status = AgentStatus.RUNNING.value if record.is_running() else AgentStatus.PENDING.value
+    running = record.is_running()
+    status = AgentStatus.RUNNING.value if running else AgentStatus.PENDING.value
     outcome = getattr(record, "outcome", None)
-    if outcome is not None:
+    if outcome is not None and not running:
         status = outcome.status.value
 
     entry: dict[str, Any] = {
@@ -173,9 +193,13 @@ def _build_status_entry(
     }
     if record.task_title:
         entry["task_description"] = record.task_title
+    if getattr(record, "parent_run_id", None):
+        entry["parent_run_id"] = record.parent_run_id
+    if getattr(record, "parent_tool_call_id", None):
+        entry["parent_tool_call_id"] = record.parent_tool_call_id
 
-    if outcome is not None:
-        for key in ("final_answer", "wait_reason", "error"):
+    if outcome is not None and not running:
+        for key in ("final_answer", "wait_reason", "error", "error_code"):
             value = getattr(outcome, key, None)
             if value:
                 entry[key] = value
@@ -316,7 +340,9 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
     task_ids: list[str] = []
     seen: set[str] = set()
     for item in raw_task_ids:
-        task_id = str(item or "").strip()
+        if not isinstance(item, str):
+            return _error("`task_ids` must contain only strings", error_code="invalid_task_ids")
+        task_id = trim_portable_whitespace(item)
         if not task_id or task_id in seen:
             continue
         seen.add(task_id)
@@ -324,9 +350,15 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
     if not task_ids:
         return _error("`task_ids` must include at least one valid task id", error_code="invalid_task_ids")
 
-    detail_level = _normalize_detail_level(arguments.get("detail_level"))
+    raw_detail_level = arguments.get("detail_level")
+    if "detail_level" in arguments and not isinstance(raw_detail_level, str):
+        return _error("`detail_level` must be a string", error_code="invalid_detail_level")
+    detail_level = _normalize_detail_level(raw_detail_level)
     workspace_file_limit = _normalize_workspace_file_limit(arguments.get("workspace_file_limit"))
-    message = str(arguments.get("message", "")).strip() if arguments.get("message") is not None else ""
+    raw_message = arguments.get("message")
+    if "message" in arguments and not isinstance(raw_message, str):
+        return _error("`message` must be a string", error_code="invalid_sub_task_message")
+    message = trim_portable_whitespace(raw_message) if raw_message is not None else ""
     wait_for_response = _coerce_bool(arguments.get("wait_for_response"), default=False)
     wait_for_completion = _coerce_bool(arguments.get("wait_for_completion"), default=False)
     check_interval_seconds = _normalize_wait_interval_seconds(arguments.get("check_interval_seconds"))
@@ -345,7 +377,13 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
                 details={"task_id": target_id},
             )
 
-        previous_status = record.outcome.status.value if record.outcome is not None else AgentStatus.RUNNING.value
+        previous_status = (
+            record.outcome.status.value
+            if record.outcome is not None
+            else AgentStatus.RUNNING.value
+            if record.is_running()
+            else AgentStatus.PENDING.value
+        )
         if record.is_running():
             if record.session is None:
                 return _error(
@@ -372,7 +410,11 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
                     details={"task_id": target_id},
                 )
             try:
-                manager.continue_task(task_id=target_id, prompt=message)
+                manager._continue_task_with_context(
+                    task_id=target_id,
+                    prompt=message,
+                    context=context,
+                )
             except KeyError:
                 return _error(
                     f"Sub-task {target_id} not found.",

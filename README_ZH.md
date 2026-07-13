@@ -74,6 +74,22 @@ result = Runner.run_sync(agent, "分析订单 123", run_config=RunConfig(
 print(result.status, result.final_output)
 ```
 
+多次运行需要复用同一组默认值时，使用 configured Runner，避免重复传入
+`RunConfig`：
+
+```python
+runner = Runner.configured(RunConfig(
+    model_provider=provider,
+    model="kimi-k2.6",
+    workspace="./workspace",
+))
+result = runner.run_sync(agent, "分析订单 123")
+```
+
+Provider 优先级为 per-run、Runner；Model 优先级为 per-run、Agent、Runner、
+当前 Provider 默认模型；ModelSettings 则按 Provider、Runner、Agent、per-run
+逐层合并，后面的层覆盖前面的字段。
+
 `Agent.output_type` 可以把 JSON 终态输出转换为 `dict`、`list`、dataclass
 或 Pydantic 风格 model。`@function_tool` 包装的函数也可以把 `ToolContext`
 作为第一个参数；运行时会在调用时传入它，但不会把它暴露到工具 JSON schema。
@@ -122,11 +138,13 @@ Redis 支持可通过 `uv sync --extra redis` 安装，也可以在构造 `Redis
 桌面应用、worker、IDE 或其他宿主进程如果需要通过稳定协议驱动 `vv-agent`，而不是
 直接嵌入 Python SDK，可以使用 App Server。它通过 stdio 传输 JSONL，暴露
 Thread / Turn / Item 生命周期事件，把工具审批路由成 server-to-client request，
-支持 `thread/read` 与 `thread/resume` 回放，并可导出 JSON Schema 供客户端绑定使用。
+支持 `thread/read` 与 `thread/resume` 回放，并可导出 typed JSON Schema 与自包含的
+TypeScript 客户端类型。
 
 ```bash
-uv run vv-agent app-server --listen stdio
+uv run vv-agent app-server --listen stdio --settings-file local_settings.py --backend moonshot --model kimi-k2.6
 uv run vv-agent app-server generate-json-schema --out ./app-server-schema
+uv run vv-agent app-server generate-ts --out ./app-server-schema/typescript
 uv run vv-agent debug app-server send-message "hello"
 ```
 
@@ -146,6 +164,12 @@ uv run vv-agent debug app-server send-message "hello"
 `session.active_run_handle` 会暴露统一的 `RunHandle` 控制面，可用于审批、取消、
 steering 和 follow-up。
 
+需要持久化历史时，可通过 `AgentSessionOptions.session`（或
+`create_session(session=...)`）注入已有的 `MemorySession`、`SQLiteSession` 或
+`RedisSession`。facade 会在创建时恢复完整历史，后续每轮由 `Runner` 写回同一个
+Session；不要再把同一份历史作为 initial messages 重复传入。同时提供
+`session_id` 时，它必须与 backing Session 的 id 一致。
+
 ```python
 from pathlib import Path
 
@@ -153,6 +177,7 @@ from vv_agent import (
     AgentSessionOptions,
     InteractiveAgentClient,
     InteractiveAgentDefinition,
+    SQLiteSession,
 )
 from vv_agent.runtime.backends import ThreadBackend
 
@@ -162,6 +187,7 @@ client = InteractiveAgentClient(
         default_backend="moonshot",
         workspace=Path("./workspace/thread-001"),
         execution_backend=ThreadBackend(max_workers=4),
+        session=SQLiteSession("thread-001", db_path=Path("./sessions.sqlite3")),
     )
 )
 
@@ -213,15 +239,23 @@ result = Runner.run_sync(
     "写一份简短报告。",
     run_config=RunConfig(
         default_backend="moonshot",
+        max_handoffs=4,
         tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "transfer_to_writer"]),
     ),
 )
 ```
 
+Handoff 是 Runner 外层的控制权转移，不是 agent-as-tool 调用。目标 Agent 会重新解析
+自己的 model 和 model settings，同时沿用当前 session、cancellation token，并继承源
+Agent 已修改的 shared state。`max_handoffs` 默认值为 `10`，它独立于
+`max_cycles` 限制控制转移次数；审批恢复也保持相同语义。
+
 工具可通过 `@function_tool(needs_approval=True)` 请求审批。默认情况下，
 运行会在工具函数真正执行前进入 `WAIT_USER`，并发出
 `ToolApprovalRequestedEvent`。可信运行可用 `ToolPolicy(approval="never")`
-关闭这道审批门。
+关闭这道审批门。四种 policy mode 为 `default`、`always`、`never` 和
+`on_request`：`default` 继续继承下一层配置，显式 `on_request` 则按每个工具的
+静态或动态审批声明决定是否请求审批。
 
 ### Guardrails 与 Trace
 

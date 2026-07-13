@@ -1,0 +1,57 @@
+{
+  "version": "memory_lifecycle_v1",
+  "summary_route": {
+    "backend": "memory-backend",
+    "model": "memory-model",
+    "request_model": "memory-model",
+    "resolution_count": 1
+  },
+  "session_extraction_route": {
+    "backend": "session-memory-backend",
+    "model": "session-memory-model",
+    "request_model": "session-memory-model",
+    "resolution_count": 1
+  },
+  "provider_attempts": {
+    "prompt_too_long_failures_before_success": 2,
+    "started_count": 2,
+    "completed_count": 2,
+    "strategies": [
+      {
+        "attempt": 1,
+        "strategy": "forced",
+        "drop_ratio": null
+      },
+      {
+        "attempt": 2,
+        "strategy": "emergency",
+        "drop_ratio": 0.4
+      }
+    ],
+    "result_metadata": {
+      "phase": "before"
+    },
+    "before_error": {
+      "stage": "before_compact",
+      "error": "before exploded"
+    },
+    "after_error": {
+      "stage": "after_compact",
+      "error": "after exploded"
+    }
+  },
+  "session_memory": {
+    "stale_fact": "stale decision",
+    "fresh_fact": "fresh decision",
+    "block_count": 1,
+    "initialized_after_compaction": true,
+    "baseline_includes_injected_context": true
+  },
+  "artifacts": {
+    "fallback_pattern": "^tool_result_[0-9a-f]{32}\\.txt$",
+    "fallback_count": 2,
+    "paths_are_distinct": true,
+    "write_failure_path": "N/A",
+    "escape_path": "N/A"
+  }
+}

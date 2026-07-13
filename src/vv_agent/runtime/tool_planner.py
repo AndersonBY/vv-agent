@@ -23,8 +23,15 @@ _BASH_RUNTIME_HINT_METADATA_KEY = "_vv_agent_bash_runtime_hint"
 def _normalize_shell_value(raw: Any) -> str | None:
     if raw is None:
         return None
-    value = str(raw).strip()
+    if not isinstance(raw, str):
+        raise ValueError("`bash_shell` must be a string shell name")
+    value = raw.strip()
     return value or None
+
+
+def _invalid_shell_hint(error: object) -> str:
+    message = str(error).rstrip(".")
+    return f"Runtime shell hint: invalid shell config. {message}."
 
 
 def _normalize_windows_shell_priority(raw: Any) -> tuple[list[str] | None, str | None]:
@@ -45,10 +52,13 @@ def _normalize_windows_shell_priority(raw: Any) -> tuple[list[str] | None, str |
 
 
 def _build_bash_runtime_hint(task: AgentTask) -> str:
-    shell = _normalize_shell_value(task.metadata.get("bash_shell"))
+    try:
+        shell = _normalize_shell_value(task.metadata.get("bash_shell"))
+    except ValueError as exc:
+        return _invalid_shell_hint(exc)
     windows_shell_priority, config_error = _normalize_windows_shell_priority(task.metadata.get("windows_shell_priority"))
     if config_error:
-        return f"Runtime shell hint: invalid shell config. {config_error}."
+        return _invalid_shell_hint(config_error)
 
     try:
         resolved = resolve_shell_invocation(
@@ -56,7 +66,7 @@ def _build_bash_runtime_hint(task: AgentTask) -> str:
             windows_shell_priority=windows_shell_priority,
         )
     except ValueError as exc:
-        return f"Runtime shell hint: unavailable on this host ({exc})."
+        return _invalid_shell_hint(exc)
 
     prefix = " ".join(resolved.prefix)
     return (
@@ -132,15 +142,15 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
         excluded = set(task.exclude_tools)
         tool_names = [name for name in tool_names if name not in excluded]
 
-    disallowed_tools = task.metadata.get("_vv_agent_disallowed_tools")
-    if isinstance(disallowed_tools, list):
-        disallowed = {str(name) for name in disallowed_tools}
-        tool_names = [name for name in tool_names if name not in disallowed]
-
     allowed_tools = task.metadata.get("_vv_agent_allowed_tools")
     if isinstance(allowed_tools, list):
         allowed = {str(name) for name in allowed_tools}
         tool_names = [name for name in tool_names if name in allowed]
+
+    disallowed_tools = task.metadata.get("_vv_agent_disallowed_tools")
+    if isinstance(disallowed_tools, list):
+        disallowed = {str(name) for name in disallowed_tools}
+        tool_names = [name for name in tool_names if name not in disallowed]
 
     deduped: list[str] = []
     seen: set[str] = set()

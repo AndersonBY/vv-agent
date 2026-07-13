@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+from vv_agent.llm.anthropic_prompt_cache import _estimate_block_chars, _estimate_tool_chars
 from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash_tool_payload
 
 
@@ -33,3 +36,15 @@ def test_cache_break_tracker_detects_system_and_tool_changes() -> None:
     assert tracker.cache_breaks == 2
     assert tracker.break_reasons == ["system_prompt_changed", "tool_schemas_changed"]
     assert tracker.cache_hit_rate == 0.5
+
+
+def test_cache_size_estimation_uses_compact_json_and_unicode_characters() -> None:
+    tool = {"name": "读取", "input_schema": {"type": "object", "a": 1}}
+    assert _estimate_tool_chars(tool) == len(
+        json.dumps(tool, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+    block = {"type": "tool_result", "content": {"文本": "你好"}}
+    assert _estimate_block_chars(block) == len(
+        json.dumps(block["content"], ensure_ascii=False, separators=(",", ":"))
+    )

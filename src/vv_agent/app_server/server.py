@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from vv_agent.app_server.host import AppServerHost, DefaultAppServerHost
 from vv_agent.app_server.outgoing import OutgoingRouter
@@ -38,9 +38,14 @@ class AppServer:
         self.router.register_transport(self.transport)
 
     def run_forever(self) -> None:
-        read_messages = cast(Any, self.transport).read_messages
-        for payload in read_messages():
-            if not isinstance(payload, dict):
-                raise ValueError("App Server transport yielded a non-object payload")
-            typed_payload: dict[str, Any] = payload
-            self.processor.process_message(self.transport.connection_id, typed_payload)
+        connection_id = self.transport.connection_id
+        try:
+            for payload in self.transport.read_messages():
+                if not isinstance(payload, dict):
+                    raise ValueError("App Server transport yielded a non-object payload")
+                typed_payload: dict[str, Any] = payload
+                self.processor.process_message(connection_id, typed_payload)
+                if not self.router.is_registered(connection_id):
+                    return
+        finally:
+            self.processor.disconnect_connection(connection_id)

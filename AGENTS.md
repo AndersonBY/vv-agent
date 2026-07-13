@@ -8,6 +8,9 @@ versioned source of truth for architecture, workflows, and model configuration.
 - Read `docs/index.md` first when the task touches more than one file.
 - Use `docs/architecture.md` for runtime, SDK, tools, memory, backend, and
   workspace boundaries.
+- Read `contract.lock.json` and `docs/parity-contract.md` before changing any
+  public, model-visible, runtime, persistence, or wire behavior shared with
+  `vv-agent-rs`.
 - Use `docs/development.md` for setup, commands, test selection, linting, and
   release hygiene.
 - Use `docs/model-settings.md` before changing model defaults, settings
@@ -26,10 +29,36 @@ versioned source of truth for architecture, workflows, and model configuration.
 - After significant behavior changes, update the relevant docs under `docs/`
   and then keep this file as a pointer only.
 
+## Cross-Language Parity
+
+- Canonical shared behavior lives in sibling `../vv-agent-contract/` and its
+  versioned GitHub releases. This repository and `../vv-agent-rs/` are two
+  implementations, not independent contract sources.
+- `contract.lock.json` pins the exact version, Git revision, release artifact,
+  and fixture digest. Read it before parity work.
+- `tests/fixtures/parity/` is a generated vendored snapshot. Never edit it
+  directly; update `vv-agent-contract/` first and run
+  `scripts/contract_snapshot.py sync`.
+- Follow `vv-agent-contract/docs/change-workflow.md` for classification,
+  paired adoption, status transitions, and cross-repository gates.
+- Model-visible prompts and built-in tools, public defaults, errors, side
+  effects, cancellation, persistence, events, App Server protocol, and wire
+  fixtures require paired implementation and behavior tests.
+- Language-idiomatic API spelling is allowed only when both sides can express
+  the same input, observe the same output, and enforce the same safety boundary;
+  record the shared rule centrally and the Python mapping in
+  `docs/parity-contract.md`.
+- Do not mark a version `verified` until both locks select the same contract,
+  both real producer suites and full gates pass, and central cross-repository CI
+  records both implementation revisions.
+- If the sibling repository cannot be updated in the same change, record an
+  explicit open parity gap and do not report the shared feature complete.
+
 ## Common Commands
 
 ```bash
 uv sync --dev
+python3 scripts/contract_snapshot.py check
 uv run ruff check
 uv run pytest
 ```

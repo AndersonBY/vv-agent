@@ -5,16 +5,17 @@ from collections.abc import Callable, Collection, Iterable
 from dataclasses import replace
 from typing import Any, cast
 
-from vv_agent.approval import ApprovalBroker, ApprovalProvider, ApprovalRequest
+from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalProvider, ApprovalRequest, bind_request_cancellation
 from vv_agent.events import ApprovalRequestedEvent, ApprovalResolvedEvent, RunEvent, ToolCallCompletedEvent, ToolCallStartedEvent
-from vv_agent.tools.base import ToolContext
+from vv_agent.tools.base import ToolContext, is_tool_call_preapproved
 from vv_agent.tools.dispatcher import _needs_tool_call_id, _parse_arguments
-from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor
-from vv_agent.tools.function import FunctionTool
+from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, is_tool_executor
+from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 ToolEventSink = Callable[[RunEvent], None]
+_PLANNED_TOOL_NAMES_METADATA_KEY = "_vv_agent_planned_tool_names"
 
 
 class ToolOrchestrator:
@@ -28,13 +29,15 @@ class ToolOrchestrator:
         self._executors = {executor.name: executor for executor in executors}
 
     @classmethod
-    def from_tools(cls, tools: Iterable[FunctionTool | ToolExecutor]) -> ToolOrchestrator:
+    def from_tools(cls, tools: Iterable[Tool | ToolExecutor]) -> ToolOrchestrator:
         executors: list[ToolExecutor] = []
         for tool in tools:
             if isinstance(tool, FunctionTool):
                 executors.append(tool.to_executor())
+            elif is_tool_executor(tool):
+                executors.append(cast(ToolExecutor, tool))
             else:
-                executors.append(tool)
+                executors.append(adapt_tool(cast(Tool, tool)).to_executor())
         return cls(executors=executors)
 
     @classmethod
@@ -49,42 +52,59 @@ class ToolOrchestrator:
         allowed_tool_names: Collection[str] | None = None,
         event_sink: ToolEventSink | None = None,
     ) -> ToolExecutionResult:
-        if allowed_tool_names is not None and call.name not in allowed_tool_names:
-            return self._error_result(
-                call.id,
-                f"Tool not allowed: {call.name}",
-                error_code="tool_not_allowed",
-            )
-
         arguments, parse_error = _parse_arguments(call.id, call.arguments)
         if parse_error is not None:
             return parse_error
         normalized_call = ToolCall(id=call.id, name=call.name, arguments=arguments, extra_content=call.extra_content)
+        context_metadata = dict(context.metadata)
+        if allowed_tool_names is not None:
+            context_metadata[_PLANNED_TOOL_NAMES_METADATA_KEY] = frozenset(allowed_tool_names)
         call_context = replace(
             context,
             tool_call_id=normalized_call.id,
             tool_name=normalized_call.name,
             arguments=dict(arguments),
+            metadata=context_metadata,
         )
 
         executor = self._resolve_executor(normalized_call.name)
         if executor is None:
+            policy_result = self._policy_denial_result(
+                None,
+                call=normalized_call,
+                context=call_context,
+                allowed_tool_names=allowed_tool_names,
+            )
+            if policy_result is not None:
+                return policy_result
             return self._error_result(call.id, f"Unknown tool: {call.name}", error_code="tool_not_found")
 
         self._emit_started(normalized_call, context=call_context, event_sink=event_sink)
         try:
-            policy_result = self._policy_denial_result(executor, call=normalized_call, context=call_context)
+            policy_result = self._policy_denial_result(
+                executor,
+                call=normalized_call,
+                context=call_context,
+                allowed_tool_names=allowed_tool_names,
+            )
             if policy_result is not None:
                 result = policy_result
             else:
                 approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
                 result = approval_result if approval_result is not None else executor.execute(normalized_call, call_context)
+        except ApprovalError:
+            raise
         except Exception as exc:
             if _is_cancelled_error(exc):
                 raise
+            message = (
+                executor.failure_error_function(exc)
+                if executor.failure_error_function is not None
+                else f"Tool execution failed ({normalized_call.name}): {exc}"
+            )
             result = self._error_result(
                 normalized_call.id,
-                f"Tool execution failed ({normalized_call.name}): {exc}",
+                message,
                 error_code="tool_execution_failed",
             )
 
@@ -117,6 +137,13 @@ class ToolOrchestrator:
         context: ToolContext,
     ) -> ToolExecutionResult | None:
         if executor.metadata.get("policy_managed_by_handler"):
+            return None
+        if is_tool_call_preapproved(
+            context,
+            tool_call_id=call.id,
+            tool_name=call.name,
+            arguments=dict(call.arguments),
+        ):
             return None
         metadata = _runtime_metadata(context)
         approval_mode = str(metadata.get("_vv_agent_tool_policy_approval") or "default")
@@ -173,8 +200,11 @@ class ToolOrchestrator:
             content=message,
             status_code=ToolResultStatus.WAIT_RESPONSE,
             directive=ToolDirective.WAIT_USER,
+            error_code="tool_approval_required",
             metadata={
                 "mode": "approval_requested",
+                "approval_required": True,
+                "approval_interruption_id": request.request_id,
                 "request_id": request.request_id,
                 "tool_name": executor.name,
                 "arguments": dict(call.arguments),
@@ -184,23 +214,53 @@ class ToolOrchestrator:
 
     @staticmethod
     def _policy_denial_result(
-        executor: ToolExecutor,
+        executor: ToolExecutor | None,
         *,
         call: ToolCall,
         context: ToolContext,
+        allowed_tool_names: Collection[str] | None,
     ) -> ToolExecutionResult | None:
-        if executor.metadata.get("policy_managed_by_handler"):
+        if executor is not None and executor.metadata.get("policy_managed_by_handler"):
             return None
-        can_use_tool = _runtime_metadata(context).get("_vv_agent_tool_policy_can_use_tool")
-        if not callable(can_use_tool):
-            return None
-        if bool(can_use_tool(call.name, dict(call.arguments))):
+        metadata = _runtime_metadata(context)
+        allowed_tools = metadata.get("_vv_agent_allowed_tools")
+        disallowed_tools = metadata.get("_vv_agent_disallowed_tools")
+        can_use_tool = metadata.get("_vv_agent_tool_policy_can_use_tool")
+
+        policy_source: str | None = None
+        if isinstance(allowed_tools, list) and call.name not in allowed_tools:
+            policy_source = "allowed_tools"
+        elif isinstance(disallowed_tools, list) and call.name in disallowed_tools:
+            policy_source = "disallowed_tools"
+        elif callable(can_use_tool) and not bool(can_use_tool(call.name, dict(call.arguments))):
+            policy_source = "can_use_tool"
+        elif allowed_tool_names is not None and call.name not in allowed_tool_names:
+            policy_source = "planned_name"
+
+        if policy_source is None:
             return None
         message = f"Tool {call.name} is not allowed for these arguments."
-        return ToolOrchestrator._error_result(
-            call.id,
-            message,
+        return ToolExecutionResult(
+            tool_call_id=call.id,
+            content=json.dumps(
+                {
+                    "ok": False,
+                    "error": message,
+                    "error_code": "tool_not_allowed",
+                    "tool_name": call.name,
+                },
+                ensure_ascii=False,
+            ),
+            status="error",
+            status_code=ToolResultStatus.ERROR,
             error_code="tool_not_allowed",
+            metadata={
+                "mode": "permission_denied",
+                "policy_source": policy_source,
+                "tool_name": call.name,
+                "arguments": dict(call.arguments),
+                "message": message,
+            },
         )
 
     @staticmethod
@@ -218,23 +278,45 @@ class ToolOrchestrator:
             if context.ctx is not None:
                 context.ctx.check_cancelled()
 
-        should_request = provider.should_request(request)
+        broker = broker or ApprovalBroker()
+        try:
+            session_allowed = broker.is_session_allowed(executor.name)
+        except Exception as exc:
+            raise ApprovalError(str(exc)) from exc
+        if session_allowed:
+            return None
+        try:
+            should_request = provider.should_request(request)
+        except Exception as exc:
+            raise ApprovalError(str(exc)) from exc
         check_cancelled()
         if not should_request:
             return None
 
-        broker = broker or ApprovalBroker()
-        broker.register(request)
+        try:
+            broker.register(request)
+        except Exception as exc:
+            broker.discard(request.request_id)
+            raise ApprovalError(str(exc)) from exc
+        bind_request_cancellation(broker, request.request_id, context.ctx.cancellation_token if context.ctx else None)
         message = f"Approval required for tool {executor.name}."
         ToolOrchestrator._emit_approval_requested(executor, call=call, context=context, request=request, message=message)
 
-        decision = provider.decide(request)
+        try:
+            decision = provider.decide(request)
+        except Exception as exc:
+            broker.discard(request.request_id)
+            raise ApprovalError(str(exc)) from exc
         check_cancelled()
-        if decision is None:
-            decision = broker.wait(request.request_id, timeout=timeout if isinstance(timeout, (int, float)) else None)
-        else:
-            broker.resolve(request.request_id, decision)
-            decision = broker.wait(request.request_id, timeout=0)
+        try:
+            if decision is None:
+                decision = broker.wait(request.request_id, timeout=timeout if isinstance(timeout, (int, float)) else None)
+            else:
+                broker.resolve(request.request_id, decision)
+                decision = broker.wait(request.request_id, timeout=0)
+        except Exception as exc:
+            broker.discard(request.request_id)
+            raise ApprovalError(str(exc)) from exc
 
         approved = decision.action in {"allow", "allow_session"}
         ToolOrchestrator._emit_approval_resolved(
@@ -256,6 +338,7 @@ class ToolOrchestrator:
                 call=call,
                 request_id=request.request_id,
                 error_code="tool_approval_timeout",
+                action=decision.action,
                 message=decision.reason or "Approval request timed out.",
             )
         return ToolOrchestrator._approval_error_result(
@@ -263,6 +346,7 @@ class ToolOrchestrator:
             call=call,
             request_id=request.request_id,
             error_code="tool_approval_denied",
+            action=decision.action,
             message=decision.reason or f"Approval denied for tool {executor.name}.",
         )
 
@@ -273,6 +357,7 @@ class ToolOrchestrator:
         call: ToolCall,
         request_id: str,
         error_code: str,
+        action: str,
         message: str,
     ) -> ToolExecutionResult:
         return ToolExecutionResult(
@@ -282,6 +367,7 @@ class ToolOrchestrator:
                     "ok": False,
                     "error": message,
                     "error_code": error_code,
+                    "tool_name": executor.name,
                 },
                 ensure_ascii=False,
             ),
@@ -293,6 +379,7 @@ class ToolOrchestrator:
                 "request_id": request_id,
                 "tool_name": executor.name,
                 "arguments": dict(call.arguments),
+                "action": action,
                 "message": message,
             },
         )

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import base64
+import json
 import os
+import tomllib
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,11 @@ class ResolvedModelConfig:
     selected_model: str
     model_id: str
     endpoint_options: list[EndpointOption]
+    context_length: int | None = None
+    max_output_tokens: int | None = None
+    function_call_available: bool = False
+    response_format_available: bool = False
+    native_multimodal: bool = False
 
     @property
     def endpoint(self) -> EndpointConfig:
@@ -48,7 +55,19 @@ def load_llm_settings_from_file(path: str | Path) -> dict[str, Any]:
     if not source_path.exists():
         raise ConfigError(f"Settings file not found: {source_path}")
 
-    module = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    source = source_path.read_text(encoding="utf-8")
+    if source_path.suffix.lower() == ".json":
+        try:
+            return _normalize_loaded_settings(json.loads(source), source_path)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"Invalid JSON settings file: {source_path}") from exc
+    if source_path.suffix.lower() in {".toml", ".tml"}:
+        try:
+            return _normalize_loaded_settings(tomllib.loads(source), source_path)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"Invalid TOML settings file: {source_path}") from exc
+
+    module = ast.parse(source, filename=str(source_path))
     llm_value: ast.expr | None = None
 
     for node in module.body:
@@ -71,8 +90,12 @@ def load_llm_settings_from_file(path: str | Path) -> dict[str, Any]:
     except (ValueError, SyntaxError) as exc:
         raise ConfigError(f"LLM_SETTINGS is not a literal mapping in {source_path}") from exc
 
+    return _normalize_loaded_settings(settings, source_path)
+
+
+def _normalize_loaded_settings(settings: Any, source_path: Path) -> dict[str, Any]:
     if not isinstance(settings, dict):
-        raise ConfigError("LLM_SETTINGS must evaluate to dict")
+        raise ConfigError(f"LLM_SETTINGS must be an object in {source_path}")
 
     # Compatibility: some settings files wrap the actual schema under
     # `{"LLM_SETTINGS": {...}}`.
@@ -171,6 +194,11 @@ def resolve_model_endpoint(settings: dict[str, Any], backend: str, model: str) -
         selected_model=selected_model,
         model_id=options[0].model_id,
         endpoint_options=options,
+        context_length=_read_positive_int(model_config.get("context_length")),
+        max_output_tokens=_read_positive_int(model_config.get("max_output_tokens")),
+        function_call_available=model_config.get("function_call_available") is True,
+        response_format_available=model_config.get("response_format_available") is True,
+        native_multimodal=model_config.get("native_multimodal") is True,
     )
 
 
@@ -303,6 +331,12 @@ def _get_providers(settings: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _read_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
 def _extract_suffix_key(value: str) -> str | None:
     if ":" not in value:
         return None
@@ -331,3 +365,6 @@ def _looks_like_api_key(value: str) -> bool:
     if any(ch.isspace() for ch in value):
         return False
     return len(value) >= 10
+
+
+build_vv_llm_from_local_settings = build_openai_llm_from_local_settings

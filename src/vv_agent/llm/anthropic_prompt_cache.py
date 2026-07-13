@@ -244,7 +244,7 @@ def _estimate_tokens(char_count: int) -> int:
 
 
 def _estimate_tool_chars(tool: dict[str, Any]) -> int:
-    return len(json.dumps(tool, ensure_ascii=False, sort_keys=True))
+    return len(json.dumps(tool, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
 def _estimate_block_chars(block: dict[str, Any]) -> int:
@@ -252,12 +252,14 @@ def _estimate_block_chars(block: dict[str, Any]) -> int:
     if block_type == "text":
         return len(str(block.get("text") or ""))
     if block_type == "tool_result":
-        return len(json.dumps(block.get("content"), ensure_ascii=False))
+        return len(json.dumps(block.get("content"), ensure_ascii=False, separators=(",", ":")))
     if block_type == "tool_use":
-        return len(str(block.get("name") or "")) + len(json.dumps(block.get("input"), ensure_ascii=False))
+        return len(str(block.get("name") or "")) + len(
+            json.dumps(block.get("input"), ensure_ascii=False, separators=(",", ":"))
+        )
     if block_type in _THINKING_BLOCK_TYPES:
         return 0
-    return len(json.dumps(block, ensure_ascii=False))
+    return len(json.dumps(block, ensure_ascii=False, separators=(",", ":")))
 
 
 def _minimum_cacheable_tokens(model: str) -> int:
