@@ -24,8 +24,9 @@ class StreamCapturingLLM:
         tools: list[dict[str, object]],
         stream_callback=None,
         model_settings=None,
+        request_metadata=None,
     ) -> LLMResponse:
-        del model, messages, tools, model_settings
+        del model, messages, tools, model_settings, request_metadata
         content_parts = []
         for token in self.tokens:
             content_parts.append(token)
@@ -58,10 +59,10 @@ class TestStreamCallback:
         result = runtime.run(task, ctx=ctx)
         assert result.status == AgentStatus.COMPLETED
         assert received == [
-            {"event": "assistant_delta", "content_delta": "Hello"},
-            {"event": "assistant_delta", "content_delta": " "},
-            {"event": "assistant_delta", "content_delta": "world"},
-            {"event": "assistant_delta", "content_delta": "!"},
+            {"event": "assistant_delta", "content_delta": "Hello", "cycle": 1},
+            {"event": "assistant_delta", "content_delta": " ", "cycle": 1},
+            {"event": "assistant_delta", "content_delta": "world", "cycle": 1},
+            {"event": "assistant_delta", "content_delta": "!", "cycle": 1},
         ]
         assert result.final_answer == "Hello world!"
 

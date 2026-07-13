@@ -67,8 +67,16 @@ def main() -> None:
     assert process.stdout is not None
     assert process.stderr is not None
 
+    process.stdin.write(_json_line({"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "stdio-example"}}}))
+    process.stdin.flush()
+    for line in process.stdout:
+        stripped = line.rstrip()
+        print(stripped)
+        if '"id":0' in stripped:
+            break
+
     for payload in [
-        {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "stdio-example"}}},
+        {"method": "initialized"},
         {"id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "./workspace"}},
         {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": prompt}]}},
     ]:

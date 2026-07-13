@@ -4,7 +4,10 @@ import json
 import queue
 import sys
 from collections.abc import Iterator
-from typing import Any, Protocol, TextIO
+from contextlib import suppress
+from typing import Any, Protocol, TextIO, cast
+
+from vv_agent.app_server.protocol import AppServerError, JsonRpcError, RequestId
 
 OVERLOADED_MESSAGE = "Server overloaded; retry later."
 
@@ -13,17 +16,25 @@ class AppServerOverloadedError(RuntimeError):
     pass
 
 
-class AppServerTransport(Protocol):
+class OutboundAppServerTransport(Protocol):
     connection_id: str
 
     def write_outbound(self, payload: dict[str, Any]) -> None:
         raise NotImplementedError
 
 
+class AppServerTransport(OutboundAppServerTransport, Protocol):
+    def read_messages(self) -> Iterator[dict[str, Any]]:
+        raise NotImplementedError
+
+
+_CHANNEL_CLOSED = object()
+
+
 class ChannelTransport:
     def __init__(self, *, connection_id: str = "channel", inbound_capacity: int = 0, outbound_capacity: int = 100) -> None:
         self.connection_id = connection_id
-        self._inbound: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=inbound_capacity)
+        self._inbound: queue.Queue[dict[str, Any] | object] = queue.Queue(maxsize=inbound_capacity)
         self._outbound: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=outbound_capacity)
         self._closed = False
 
@@ -33,7 +44,21 @@ class ChannelTransport:
         self._inbound.put_nowait(payload)
 
     def receive_inbound(self, *, timeout: float | None = None) -> dict[str, Any]:
-        return self._inbound.get(timeout=timeout)
+        payload = self._inbound.get(timeout=timeout)
+        if payload is _CHANNEL_CLOSED:
+            raise EOFError("Transport is closed")
+        assert isinstance(payload, dict)
+        return cast(dict[str, Any], payload)
+
+    def read_messages(self) -> Iterator[dict[str, Any]]:
+        while True:
+            if self._closed and self._inbound.empty():
+                return
+            payload = self._inbound.get()
+            if payload is _CHANNEL_CLOSED:
+                return
+            assert isinstance(payload, dict)
+            yield cast(dict[str, Any], payload)
 
     def write_outbound(self, payload: dict[str, Any]) -> None:
         if self._closed:
@@ -47,7 +72,11 @@ class ChannelTransport:
         return self._outbound.get(timeout=timeout)
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        with suppress(queue.Full):
+            self._inbound.put_nowait(_CHANNEL_CLOSED)
 
 
 class StdioJsonlTransport:
@@ -67,9 +96,14 @@ class StdioJsonlTransport:
             stripped = line.strip()
             if not stripped:
                 continue
-            payload = json.loads(stripped)
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                self.write_outbound(JsonRpcError(id=RequestId(None), error=AppServerError.parse_error()).to_dict())
+                continue
             if not isinstance(payload, dict):
-                raise ValueError("Expected JSON object per line")
+                self.write_outbound(JsonRpcError(id=RequestId(None), error=AppServerError.invalid_request()).to_dict())
+                continue
             yield payload
 
     def write_outbound(self, payload: dict[str, Any]) -> None:

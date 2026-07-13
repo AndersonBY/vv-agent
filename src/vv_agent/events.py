@@ -3,9 +3,12 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from math import isfinite
+from typing import Any, Literal, cast
 
 RUN_EVENT_VERSION = "v1"
+ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
+_APPROVAL_ACTIONS = frozenset({"allow", "allow_session", "deny", "timeout"})
 
 
 def new_event_id() -> str:
@@ -14,6 +17,22 @@ def new_event_id() -> str:
 
 def event_created_at() -> float:
     return time.time()
+
+
+def _canonical_tool_status(status: Any) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "completed":
+        return "success"
+    return normalized
+
+
+def _canonical_approval_action(action: Any) -> ApprovalAction | None:
+    if action is None:
+        return None
+    normalized = str(action).strip().lower()
+    if normalized not in _APPROVAL_ACTIONS:
+        raise ValueError(f"Unsupported approval action: {action!r}")
+    return cast(ApprovalAction, normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +175,38 @@ class AgentStartedEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class CycleStartedEvent(RunEvent):
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="cycle_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class LLMStartedEvent(RunEvent):
     model: str = ""
 
@@ -193,6 +244,47 @@ class LLMStartedEvent(RunEvent):
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["model"] = self.model
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class RunStateChangedEvent(RunEvent):
+    state: str = ""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        state: str,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="run_state_changed",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "state", state)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["state"] = self.state
         return payload
 
 
@@ -384,6 +476,7 @@ class AssistantDeltaEvent(RunEvent):
 class ToolCallStartedEvent(RunEvent):
     tool_name: str = ""
     tool_call_id: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -392,6 +485,7 @@ class ToolCallStartedEvent(RunEvent):
         trace_id: str,
         tool_name: str,
         tool_call_id: str,
+        arguments: dict[str, Any] | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -417,11 +511,15 @@ class ToolCallStartedEvent(RunEvent):
         )
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "tool_call_id", tool_call_id)
+        metadata_arguments = metadata.get("arguments") if isinstance(metadata, dict) else None
+        resolved_arguments = arguments if arguments is not None else metadata_arguments
+        object.__setattr__(self, "arguments", dict(resolved_arguments) if isinstance(resolved_arguments, dict) else {})
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["tool_name"] = self.tool_name
         payload["tool_call_id"] = self.tool_call_id
+        payload["arguments"] = dict(self.arguments)
         return payload
 
 
@@ -464,7 +562,7 @@ class ToolCallCompletedEvent(RunEvent):
         )
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "tool_call_id", tool_call_id)
-        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "status", _canonical_tool_status(status))
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -532,6 +630,7 @@ class ApprovalResolvedEvent(RunEvent):
     request_id: str = ""
     tool_name: str = ""
     tool_call_id: str = ""
+    action: ApprovalAction | None = None
     approved: bool | None = None
 
     def __init__(
@@ -541,6 +640,7 @@ class ApprovalResolvedEvent(RunEvent):
         trace_id: str,
         tool_name: str,
         tool_call_id: str,
+        action: ApprovalAction | str | None = None,
         approved: bool | None = None,
         request_id: str = "",
         cycle_index: int | None = None,
@@ -569,13 +669,26 @@ class ApprovalResolvedEvent(RunEvent):
         object.__setattr__(self, "request_id", request_id)
         object.__setattr__(self, "tool_name", tool_name)
         object.__setattr__(self, "tool_call_id", tool_call_id)
-        object.__setattr__(self, "approved", approved)
+        metadata_action = metadata.get("action") if isinstance(metadata, dict) else None
+        resolved_action = _canonical_approval_action(action if action is not None else metadata_action)
+        resolved_approved = approved
+        if resolved_action is None and approved is not None:
+            resolved_action = "allow" if approved else "deny"
+        if resolved_action is not None:
+            action_approved = resolved_action in {"allow", "allow_session"}
+            if approved is not None and approved is not action_approved:
+                raise ValueError(f"Approval action {resolved_action!r} conflicts with approved={approved!r}")
+            resolved_approved = action_approved
+        object.__setattr__(self, "action", resolved_action)
+        object.__setattr__(self, "approved", resolved_approved)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["request_id"] = self.request_id
         payload["tool_name"] = self.tool_name
         payload["tool_call_id"] = self.tool_call_id
+        if self.action is not None:
+            payload["action"] = self.action
         if self.approved is not None:
             payload["approved"] = self.approved
         return payload
@@ -880,6 +993,38 @@ class HandoffCompletedEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class SessionPersistedEvent(RunEvent):
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        session_id: str,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="session_persisted",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RunCompletedEvent(RunEvent):
     final_output: str | None = None
     status: str = ""
@@ -965,19 +1110,65 @@ class RunFailedEvent(RunEvent):
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class RunCancelledEvent(RunEvent):
+    reason: str = ""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        reason: str,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="run_cancelled",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "reason", reason)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["reason"] = self.reason
+        return payload
+
+
 def new_trace_id() -> str:
     return f"trace_{uuid.uuid4().hex}"
 
 
 def _common_event_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
+    created_at = payload.get("created_at")
+    if created_at is None:
+        created_at_ms = payload.get("created_at_ms")
+        if isinstance(created_at_ms, int | float):
+            created_at = created_at_ms / 1000.0
     return {
-        "run_id": str(payload["run_id"]),
-        "trace_id": str(payload["trace_id"]),
+        "run_id": payload["run_id"],
+        "trace_id": payload["trace_id"],
         "session_id": payload.get("session_id"),
         "parent_event_id": payload.get("parent_event_id"),
         "parent_run_id": payload.get("parent_run_id"),
         "event_id": payload.get("event_id"),
-        "created_at": payload.get("created_at"),
+        "created_at": created_at,
         "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
     }
 
@@ -990,9 +1181,40 @@ def _with_cycle_and_agent(payload: dict[str, Any], common: dict[str, Any]) -> di
     }
 
 
-def event_from_dict(payload: dict[str, Any]) -> RunEvent:
+def _validate_event_wire(payload: dict[str, Any]) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("Run event payload must be an object")
     if payload.get("version") != RUN_EVENT_VERSION:
         raise ValueError(f"Unsupported run event version: {payload.get('version')!r}")
+
+    for field_name in ("type", "event_id", "run_id", "trace_id"):
+        value = payload.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Run event {field_name} must be a non-empty string")
+
+    for field_name in ("session_id", "parent_event_id", "parent_run_id", "agent_name"):
+        value = payload.get(field_name)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"Run event {field_name} must be a string or null")
+
+    created_at = payload.get("created_at")
+    created_at_ms = payload.get("created_at_ms")
+    timestamp = created_at if created_at is not None else created_at_ms
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int | float) or not isfinite(timestamp) or timestamp < 0:
+        raise ValueError("Run event created_at must be a finite non-negative number")
+
+    cycle_index = payload.get("cycle_index")
+    if cycle_index is not None and (isinstance(cycle_index, bool) or not isinstance(cycle_index, int) or cycle_index < 0):
+        raise ValueError("Run event cycle_index must be a non-negative integer or null")
+
+    if "metadata" in payload and not isinstance(payload["metadata"], dict):
+        raise ValueError("Run event metadata must be an object")
+    if payload["type"] == "tool_call_started" and "arguments" in payload and not isinstance(payload["arguments"], dict):
+        raise ValueError("Run event tool arguments must be an object")
+
+
+def event_from_dict(payload: dict[str, Any]) -> RunEvent:
+    _validate_event_wire(payload)
 
     event_type = payload.get("type")
     common = _common_event_kwargs(payload)
@@ -1000,8 +1222,15 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         return RunStartedEvent(input=str(payload.get("input") or ""), agent_name=payload.get("agent_name"), **common)
     if event_type == "agent_started":
         return AgentStartedEvent(**_with_cycle_and_agent(payload, common))
+    if event_type == "cycle_started":
+        return CycleStartedEvent(**_with_cycle_and_agent(payload, common))
     if event_type == "llm_started":
         return LLMStartedEvent(model=str(payload.get("model") or ""), **_with_cycle_and_agent(payload, common))
+    if event_type == "run_state_changed":
+        return RunStateChangedEvent(
+            state=str(payload.get("state") or ""),
+            **_with_cycle_and_agent(payload, common),
+        )
     if event_type == "memory_compacted":
         return MemoryCompactedEvent(
             before_count=payload.get("before_count") if isinstance(payload.get("before_count"), int) else None,
@@ -1029,9 +1258,11 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
     if event_type == "assistant_delta":
         return AssistantDeltaEvent(delta=str(payload.get("delta") or ""), **_with_cycle_and_agent(payload, common))
     if event_type == "tool_call_started":
+        arguments = payload.get("arguments")
         return ToolCallStartedEvent(
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
+            arguments=arguments if isinstance(arguments, dict) else None,
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "tool_call_completed":
@@ -1046,7 +1277,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             request_id=str(payload.get("request_id") or ""),
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
-            message=str(payload.get("message") or ""),
+            message=str(payload.get("message") or payload.get("preview") or ""),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "approval_resolved":
@@ -1054,6 +1285,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             request_id=str(payload.get("request_id") or ""),
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
+            action=payload.get("action") if isinstance(payload.get("action"), str) else None,
             approved=payload.get("approved") if isinstance(payload.get("approved"), bool) else None,
             **_with_cycle_and_agent(payload, common),
         )
@@ -1130,6 +1362,8 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             created_at=common["created_at"],
             metadata=common["metadata"],
         )
+    if event_type == "session_persisted":
+        return SessionPersistedEvent(**_with_cycle_and_agent(payload, common))
     if event_type == "run_completed":
         final_output = payload.get("final_output")
         return RunCompletedEvent(
@@ -1139,8 +1373,13 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "run_failed":
         return RunFailedEvent(error=str(payload.get("error") or ""), **_with_cycle_and_agent(payload, common))
+    if event_type == "run_cancelled":
+        return RunCancelledEvent(
+            reason=str(payload.get("reason") or ""),
+            **_with_cycle_and_agent(payload, common),
+        )
 
-    return RunEvent(type=str(event_type or "run_event"), **_with_cycle_and_agent(payload, common))
+    raise ValueError(f"Unsupported run event type: {event_type!r}")
 
 
 def event_from_stream_payload(
@@ -1150,8 +1389,13 @@ def event_from_stream_payload(
     trace_id: str,
     agent_name: str,
     session_id: str | None = None,
+    parent_run_id: str | None = None,
+    preserve_metadata: bool = False,
 ) -> RunEvent | None:
     raw_type = payload.get("type") or payload.get("event")
+    cycle_index = payload.get("cycle")
+    if not isinstance(cycle_index, int):
+        cycle_index = None
     if raw_type == "assistant_delta":
         delta = payload.get("delta", payload.get("content_delta", ""))
         return AssistantDeltaEvent(
@@ -1159,7 +1403,10 @@ def event_from_stream_payload(
             trace_id=trace_id,
             agent_name=agent_name,
             session_id=session_id,
+            parent_run_id=parent_run_id,
+            cycle_index=cycle_index,
             delta=str(delta),
+            metadata=(dict(payload) if preserve_metadata else None),
         )
     return RunEvent(
         type=str(raw_type or "stream_event"),
@@ -1167,8 +1414,19 @@ def event_from_stream_payload(
         trace_id=trace_id,
         agent_name=agent_name,
         session_id=session_id,
+        parent_run_id=parent_run_id,
+        cycle_index=cycle_index,
         metadata=dict(payload),
     )
+
+
+def _runtime_session_id(payload: dict[str, Any], fallback: str | None) -> str | None:
+    if fallback:
+        return fallback
+    payload_session_id = payload.get("session_id")
+    if isinstance(payload_session_id, str) and payload_session_id:
+        return payload_session_id
+    return fallback
 
 
 def event_from_runtime_log(
@@ -1184,6 +1442,7 @@ def event_from_runtime_log(
     cycle_index = payload.get("cycle")
     if not isinstance(cycle_index, int):
         cycle_index = None
+    session_id = _runtime_session_id(payload, session_id)
 
     if event == "run_started":
         return RunStartedEvent(
@@ -1194,8 +1453,17 @@ def event_from_runtime_log(
             input=user_input,
             metadata=dict(payload),
         )
-    if event == "cycle_started":
+    if event == "agent_started":
         return AgentStartedEvent(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            cycle_index=cycle_index,
+            metadata=dict(payload),
+        )
+    if event == "cycle_started":
+        return CycleStartedEvent(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
@@ -1214,23 +1482,15 @@ def event_from_runtime_log(
             metadata=dict(payload),
         )
     if event == "cycle_llm_response":
-        return RunEvent(
-            type="cycle_llm_response",
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            metadata=dict(payload),
-        )
+        return None
     if event == "cycle_failed":
-        return RunEvent(
-            type="cycle_failed",
+        return RunFailedEvent(
             run_id=run_id,
             trace_id=trace_id,
             agent_name=agent_name,
             session_id=session_id,
             cycle_index=cycle_index,
+            error=str(payload.get("error") or "cycle failed"),
             metadata=dict(payload),
         )
     if event == "memory_compacted":
@@ -1298,7 +1558,7 @@ def event_from_runtime_log(
                 tool_call_id=str(payload.get("tool_call_id") or ""),
                 session_id=session_id,
                 cycle_index=cycle_index,
-                metadata=dict(payload),
+                metadata=dict(metadata),
             )
         return ToolCallCompletedEvent(
             run_id=run_id,
@@ -1311,7 +1571,8 @@ def event_from_runtime_log(
             status=str(payload.get("status") or ""),
             metadata=dict(payload),
         )
-    if event == "tool_started":
+    if event in {"tool_started", "tool_call_started"}:
+        arguments = payload.get("arguments", payload.get("tool_arguments"))
         return ToolCallStartedEvent(
             run_id=run_id,
             trace_id=trace_id,
@@ -1320,6 +1581,26 @@ def event_from_runtime_log(
             cycle_index=cycle_index,
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
+            arguments=arguments if isinstance(arguments, dict) else None,
+            metadata=dict(payload),
+        )
+    if event == "run_state_changed":
+        return RunStateChangedEvent(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            cycle_index=cycle_index,
+            state=str(payload.get("state") or ""),
+            metadata=dict(payload),
+        )
+    if event == "session_persisted":
+        return SessionPersistedEvent(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id or "",
+            cycle_index=cycle_index,
             metadata=dict(payload),
         )
     if event == "run_completed":
@@ -1329,7 +1610,7 @@ def event_from_runtime_log(
             agent_name=agent_name,
             session_id=session_id,
             cycle_index=cycle_index,
-            final_output=payload.get("final_answer"),
+            final_output=payload.get("final_output", payload.get("final_answer")),
             status="completed",
             metadata=dict(payload),
         )
@@ -1352,6 +1633,16 @@ def event_from_runtime_log(
             session_id=session_id,
             cycle_index=cycle_index,
             error=str(payload.get("error") or event),
+            metadata=dict(payload),
+        )
+    if event == "run_cancelled":
+        return RunCancelledEvent(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            cycle_index=cycle_index,
+            reason=str(payload.get("reason") or payload.get("error") or "run cancelled"),
             metadata=dict(payload),
         )
     return None

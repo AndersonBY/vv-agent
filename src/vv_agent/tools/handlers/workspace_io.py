@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import difflib
 import hashlib
 import os
 import re
@@ -115,7 +114,13 @@ def _content_hash(content: bytes) -> str:
 
 
 def _line_ending_label(text: str) -> str:
-    return "crlf" if "\r\n" in text else "lf"
+    lf_count = text.count("\n")
+    crlf_count = text.count("\r\n")
+    if crlf_count > 0 and crlf_count == lf_count:
+        return "crlf"
+    if crlf_count > 0:
+        return "mixed"
+    return "lf"
 
 
 def _get_file_baselines(context: ToolContext) -> dict[str, dict[str, Any]]:
@@ -182,7 +187,12 @@ def _baseline_error(
 
 
 def _workspace_error(message: str, *, error_code: str, **details: Any) -> ToolExecutionResult:
-    payload: dict[str, Any] = {"error": message, "error_code": error_code, "message": message}
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": message,
+        "error_code": error_code,
+        "message": message,
+    }
     payload.update(details)
     return ToolExecutionResult(
         tool_call_id="",
@@ -193,19 +203,91 @@ def _workspace_error(message: str, *, error_code: str, **details: Any) -> ToolEx
     )
 
 
+def _split_unified_diff_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    start = 0
+    for index, char in enumerate(text):
+        if char == "\n":
+            lines.append(text[start:index + 1])
+            start = index + 1
+    if start < len(text):
+        lines.append(text[start:])
+    return lines
+
+
+def _format_unified_range(start_index: int, count: int) -> str:
+    start_line = start_index + 1 if count else start_index
+    return str(start_line) if count == 1 else f"{start_line},{count}"
+
+
+def _render_unified_line(marker: str, line: str) -> str:
+    has_newline = line.endswith("\n")
+    body = line[:-1] if has_newline else line
+    if has_newline and body.endswith("\r"):
+        body = body[:-1]
+    rendered = f"{marker}{body}\n"
+    if not has_newline:
+        rendered += "\\ No newline at end of file\n"
+    return rendered
+
+
 def _bounded_unified_diff(path: str, before: str, after: str) -> tuple[str, bool, int, int]:
-    diff_lines = list(
-        difflib.unified_diff(
-            before.splitlines(keepends=True),
-            after.splitlines(keepends=True),
-            fromfile=path,
-            tofile=path,
-            lineterm="",
-        )
+    before_lines = _split_unified_diff_lines(before)
+    after_lines = _split_unified_diff_lines(after)
+
+    prefix = 0
+    while (
+        prefix < len(before_lines)
+        and prefix < len(after_lines)
+        and before_lines[prefix] == after_lines[prefix]
+    ):
+        prefix += 1
+
+    suffix = 0
+    while (
+        prefix + suffix < len(before_lines)
+        and prefix + suffix < len(after_lines)
+        and before_lines[-1 - suffix] == after_lines[-1 - suffix]
+    ):
+        suffix += 1
+
+    before_changed_end = len(before_lines) - suffix
+    after_changed_end = len(after_lines) - suffix
+    additions = after_changed_end - prefix
+    deletions = before_changed_end - prefix
+    if additions == 0 and deletions == 0:
+        return "", False, 0, 0
+
+    context_start = max(prefix - 3, 0)
+    before_hunk_end = min(before_changed_end + 3, len(before_lines))
+    after_hunk_end = min(after_changed_end + 3, len(after_lines))
+    before_hunk_count = before_hunk_end - context_start
+    after_hunk_count = after_hunk_end - context_start
+
+    diff_parts = [
+        f"--- {path}\n",
+        f"+++ {path}\n",
+        "@@ "
+        f"-{_format_unified_range(context_start, before_hunk_count)} "
+        f"+{_format_unified_range(context_start, after_hunk_count)} @@\n",
+    ]
+    diff_parts.extend(
+        _render_unified_line(" ", line)
+        for line in before_lines[context_start:prefix]
     )
-    additions = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
-    deletions = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
-    diff_text = "".join(diff_lines)
+    diff_parts.extend(
+        _render_unified_line("-", line)
+        for line in before_lines[prefix:before_changed_end]
+    )
+    diff_parts.extend(
+        _render_unified_line("+", line)
+        for line in after_lines[prefix:after_changed_end]
+    )
+    diff_parts.extend(
+        _render_unified_line(" ", line)
+        for line in after_lines[after_changed_end:after_hunk_end]
+    )
+    diff_text = "".join(diff_parts)
     if len(diff_text) <= EDIT_DIFF_MAX_CHARS:
         return diff_text, False, additions, deletions
     return diff_text[:EDIT_DIFF_MAX_CHARS], True, additions, deletions
@@ -512,17 +594,32 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
     effective_sort = sort
     local_root = getattr(backend, "root", None)
     if isinstance(local_root, Path):
-        files, total_count, truncated, scan_limited, ignored_roots_summary = _find_files_local_fast(
-            context,
-            path=path,
-            glob_pattern=glob_pattern,
-            include_hidden=include_hidden,
-            include_ignored=include_ignored,
-            max_results=scan_limit,
-            scan_limit=scan_limit,
-        )
+        try:
+            files, total_count, truncated, scan_limited, ignored_roots_summary = _find_files_local_fast(
+                context,
+                path=path,
+                glob_pattern=glob_pattern,
+                include_hidden=include_hidden,
+                include_ignored=include_ignored,
+                max_results=scan_limit,
+                scan_limit=scan_limit,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message.startswith("path not found:"):
+                return _workspace_error(message, error_code="path_not_found", path=path)
+            if message.startswith("not a directory:"):
+                return _workspace_error(message, error_code="not_a_directory", path=path)
+            if message.startswith("Path escapes workspace:"):
+                return _workspace_error(message, error_code="path_escapes_workspace", path=path)
+            return _workspace_error(message, error_code="workspace_backend_error", path=path)
+        except OSError as exc:
+            return _workspace_error(str(exc), error_code="workspace_backend_error", path=path)
     else:
-        all_files = backend.list_files(path, glob_pattern)
+        try:
+            all_files = backend.list_files(path, glob_pattern)
+        except (OSError, ValueError) as exc:
+            return _workspace_error(str(exc), error_code="workspace_backend_error", path=path)
         if not include_hidden:
             all_files = [
                 f for f in all_files
@@ -590,13 +687,19 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
 
 def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     backend = context.workspace_backend
+    if "path" not in arguments:
+        return _workspace_error(
+            "`path` is required.",
+            error_code="invalid_arguments",
+            missing_arguments=["path"],
+        )
     path = str(arguments["path"])
 
     if not backend.is_file(path):
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            content=to_json({"error": f"file not found: {path}"}),
+        return _workspace_error(
+            f"file not found: {path}",
+            error_code="file_not_found",
+            path=path,
         )
 
     try:
@@ -604,10 +707,10 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         end_line_raw = arguments.get("end_line")
         end_line_int = int(end_line_raw) if end_line_raw is not None else None
     except (TypeError, ValueError):
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            content=to_json({"error": "`start_line`/`end_line` must be integers"}),
+        return _workspace_error(
+            "`start_line`/`end_line` must be integers",
+            error_code="invalid_arguments",
+            path=path,
         )
 
     if end_line_int is not None:
@@ -615,7 +718,15 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
     show_line_numbers = bool(arguments.get("show_line_numbers", False))
 
-    text = backend.read_text(path)
+    raw = backend.read_bytes(path)
+    try:
+        text, _has_bom = _decode_workspace_text(raw)
+    except ValueError:
+        return _workspace_error(
+            "Unsupported file encoding for read_file.",
+            error_code="unsupported_encoding",
+            path=path,
+        )
     lines = text.splitlines()
 
     start_idx = max(start_line - 1, 0)
@@ -635,13 +746,11 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         total_chars = len(text)
         suggested_start = min(start_line, total_lines)
         suggested_end = min(suggested_start + READ_FILE_MAX_LINES - 1, total_lines)
-        raw = backend.read_bytes(path)
-        baseline_text = raw.decode("utf-8", errors="replace")
         _record_file_baseline(
             context,
             path=path,
             raw=raw,
-            text=baseline_text,
+            text=text,
             is_partial=True,
             source=READ_FILE_BASELINE_SOURCE,
         )
@@ -676,14 +785,12 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             ),
         )
 
-    raw = backend.read_bytes(path)
-    baseline_text = raw.decode("utf-8", errors="replace")
-    is_partial = "start_line" in arguments or "end_line" in arguments
+    is_partial = start_line != 1 or end_line_int is not None
     _record_file_baseline(
         context,
         path=path,
         raw=raw,
-        text=baseline_text,
+        text=text,
         is_partial=is_partial,
         source=READ_FILE_BASELINE_SOURCE,
     )
@@ -705,6 +812,12 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
 def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     backend = context.workspace_backend
+    if "path" not in arguments:
+        return _workspace_error(
+            "`path` is required.",
+            error_code="invalid_arguments",
+            missing_arguments=["path"],
+        )
     path = str(arguments["path"])
 
     content = str(arguments.get("content", ""))
@@ -753,7 +866,7 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
             is None
         )
 
-    backend.write_text(path, write_content, append=append)
+    written_bytes = backend.write_text(path, write_content, append=append)
 
     try:
         updated_raw = backend.read_bytes(path)
@@ -770,6 +883,8 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         source=WRITE_FILE_BASELINE_SOURCE,
     )
 
+    # Compatibility field: written_chars counts Unicode code points, not bytes.
+    written_chars = len(write_content)
     return ToolExecutionResult(
         tool_call_id="",
         status="success",
@@ -780,7 +895,8 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
                 "append": append,
                 "leading_newline": leading_newline if append else False,
                 "trailing_newline": trailing_newline if append else False,
-                "written_chars": len(write_content),
+                "written_bytes": written_bytes,
+                "written_chars": written_chars,
             }
         ),
         metadata={
@@ -793,14 +909,27 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
 
 def file_info(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     backend = context.workspace_backend
+    if "path" not in arguments:
+        return _workspace_error(
+            "`path` is required.",
+            error_code="invalid_arguments",
+            missing_arguments=["path"],
+        )
     path = str(arguments["path"])
-    info = backend.file_info(path)
+    try:
+        context.resolve_workspace_path(path)
+    except ValueError as exc:
+        return _workspace_error(str(exc), error_code="path_escapes_workspace", path=path)
+    try:
+        info = backend.file_info(path)
+    except (OSError, ValueError) as exc:
+        return _workspace_error(str(exc), error_code="workspace_backend_error", path=path)
 
     if info is None:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            content=to_json({"error": f"path not found: {path}"}),
+        return _workspace_error(
+            f"path not found: {path}",
+            error_code="path_not_found",
+            path=path,
         )
 
     payload: dict[str, Any] = {

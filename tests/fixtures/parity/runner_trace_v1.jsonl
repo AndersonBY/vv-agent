@@ -1,0 +1,12 @@
+{"type":"run_started","agent_name":"trace-agent"}
+{"type":"cycle_started","cycle_index":1,"agent_name":"trace-agent"}
+{"type":"llm_started","cycle_index":1,"agent_name":"trace-agent","model":"direct"}
+{"type":"assistant_delta","cycle_index":1,"agent_name":"trace-agent","delta":"lookup"}
+{"type":"tool_call_started","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","arguments":{"query":"parity"}}
+{"type":"tool_call_completed","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","status":"success"}
+{"type":"cycle_started","cycle_index":2,"agent_name":"trace-agent"}
+{"type":"llm_started","cycle_index":2,"agent_name":"trace-agent","model":"direct"}
+{"type":"assistant_delta","cycle_index":2,"agent_name":"trace-agent","delta":"finish"}
+{"type":"tool_call_started","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","arguments":{"message":"done"}}
+{"type":"tool_call_completed","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","status":"success"}
+{"type":"run_completed","cycle_index":2,"agent_name":"trace-agent","status":"completed","final_output":"done"}

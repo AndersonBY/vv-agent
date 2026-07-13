@@ -3,10 +3,25 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
+
+from vv_agent.model_settings import ModelSettings
 
 Role = Literal["system", "user", "assistant", "tool"]
 NoToolPolicy = Literal["continue", "wait_user", "finish"]
+_MAX_U32 = (1 << 32) - 1
+_MAX_U64 = (1 << 64) - 1
+_MAX_U8 = (1 << 8) - 1
+
+
+def _trim_portable_whitespace(value: str) -> str:
+    start = 0
+    end = len(value)
+    while start < end and (value[start].isspace() or "\x1c" <= value[start] <= "\x1f"):
+        start += 1
+    while end > start and (value[end - 1].isspace() or "\x1c" <= value[end - 1] <= "\x1f"):
+        end -= 1
+    return value[start:end]
 
 
 class AgentStatus(StrEnum):
@@ -352,6 +367,7 @@ class CycleRecord:
     tool_results: list[ToolExecutionResult] = field(default_factory=list)
     memory_compacted: bool = False
     token_usage: TokenUsage = field(default_factory=TokenUsage)
+    _planned_tool_names: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -385,6 +401,32 @@ class SubAgentConfig:
     exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.model, str):
+            raise TypeError("sub-agent model must be a string")
+        normalized_model = _trim_portable_whitespace(self.model)
+        if not normalized_model:
+            raise ValueError("sub-agent model cannot be empty")
+        if not isinstance(self.description, str):
+            raise TypeError("sub-agent description must be a string")
+        if self.backend is not None and not isinstance(self.backend, str):
+            raise TypeError("sub-agent backend must be a string or None")
+        if self.system_prompt is not None and not isinstance(self.system_prompt, str):
+            raise TypeError("sub-agent system_prompt must be a string or None")
+        if self.system_prompt is not None and not _trim_portable_whitespace(self.system_prompt):
+            raise ValueError("sub-agent system_prompt cannot be empty when provided")
+        if isinstance(self.max_cycles, bool) or not isinstance(self.max_cycles, int):
+            raise TypeError("sub-agent max_cycles must be an integer")
+        if not 0 <= self.max_cycles <= _MAX_U32:
+            raise ValueError("sub-agent max_cycles must be in the u32 range")
+        if not isinstance(self.exclude_tools, list) or not all(isinstance(tool_name, str) for tool_name in self.exclude_tools):
+            raise TypeError("sub-agent exclude_tools must be a list of strings")
+        if not isinstance(self.metadata, dict) or not all(isinstance(key, str) for key in self.metadata):
+            raise TypeError("sub-agent metadata must be a dict with string keys")
+        self.model = normalized_model
+        self.exclude_tools = list(self.exclude_tools)
+        self.metadata = dict(self.metadata)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "model": self.model,
@@ -398,15 +440,133 @@ class SubAgentConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SubAgentConfig:
+        if not isinstance(data, dict):
+            raise TypeError("SubAgentConfig payload must be a dict")
         return cls(
             model=data["model"],
             description=data.get("description", ""),
             backend=data.get("backend"),
             system_prompt=data.get("system_prompt"),
             max_cycles=data.get("max_cycles", 8),
-            exclude_tools=list(data.get("exclude_tools", [])),
-            metadata=dict(data.get("metadata", {})),
+            exclude_tools=data.get("exclude_tools", []),
+            metadata=data.get("metadata", {}),
         )
+
+
+def _agent_task_required_string(data: dict[str, Any], field_name: str) -> str:
+    value = data[field_name]
+    if not isinstance(value, str):
+        raise TypeError(f"AgentTask field {field_name!r} must be a string")
+    return value
+
+
+def _agent_task_integer(
+    data: dict[str, Any],
+    field_name: str,
+    *,
+    default: int,
+    maximum: int,
+) -> int:
+    value = data.get(field_name, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"AgentTask field {field_name!r} must be an integer")
+    if not 0 <= value <= maximum:
+        raise ValueError(f"AgentTask field {field_name!r} is outside the supported range")
+    return value
+
+
+def _agent_task_bool(data: dict[str, Any], field_name: str, *, default: bool) -> bool:
+    value = data.get(field_name, default)
+    if not isinstance(value, bool):
+        raise TypeError(f"AgentTask field {field_name!r} must be a boolean")
+    return value
+
+
+def _agent_task_no_tool_policy(data: dict[str, Any]) -> NoToolPolicy:
+    value = data.get("no_tool_policy", "continue")
+    if not isinstance(value, str):
+        raise TypeError("AgentTask field 'no_tool_policy' must be a string")
+    if value not in {"continue", "wait_user", "finish"}:
+        raise ValueError(f"Unknown AgentTask no_tool_policy: {value}")
+    return cast(NoToolPolicy, value)
+
+
+def _agent_task_optional_string(data: dict[str, Any], field_name: str) -> str | None:
+    value = data.get(field_name)
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"AgentTask field {field_name!r} must be a string or None")
+    return value
+
+
+def _agent_task_string_list(data: dict[str, Any], field_name: str) -> list[str]:
+    value = data.get(field_name, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise TypeError(f"AgentTask field {field_name!r} must be a list of strings")
+    return list(cast(list[str], value))
+
+
+def _agent_task_metadata(data: dict[str, Any], field_name: str) -> dict[str, Any]:
+    value = data.get(field_name, {})
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise TypeError(f"AgentTask field {field_name!r} must be a dict with string keys")
+    return dict(value)
+
+
+def _agent_task_sub_agents(data: dict[str, Any]) -> dict[str, SubAgentConfig]:
+    value = data.get("sub_agents", {})
+    if not isinstance(value, dict) or not all(isinstance(name, str) for name in value):
+        raise TypeError("AgentTask field 'sub_agents' must be a dict with string keys")
+
+    sub_agents: dict[str, SubAgentConfig] = {}
+    for name, payload in value.items():
+        if not isinstance(payload, dict):
+            raise TypeError(f"AgentTask sub-agent {name!r} must be a dict")
+        sub_agents[name] = SubAgentConfig.from_dict(payload)
+    return sub_agents
+
+
+def _agent_task_model_settings(data: dict[str, Any]) -> ModelSettings | None:
+    value = data.get("model_settings")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise TypeError("AgentTask field 'model_settings' must be a dict or None")
+    return ModelSettings.from_dict(value)
+
+
+def _agent_task_messages(data: dict[str, Any]) -> list[Message]:
+    value = data.get("initial_messages", [])
+    if not isinstance(value, list):
+        raise TypeError("AgentTask field 'initial_messages' must be a list")
+
+    messages: list[Message] = []
+    for index, payload in enumerate(value):
+        if not isinstance(payload, dict):
+            raise TypeError(f"AgentTask initial_messages[{index}] must be a dict")
+        typed_payload = cast(dict[str, Any], payload)
+        role = typed_payload.get("role")
+        if not isinstance(role, str):
+            raise TypeError(f"AgentTask initial_messages[{index}].role must be a string")
+        if role not in {"system", "user", "assistant", "tool"}:
+            raise ValueError(f"Unknown AgentTask initial_messages[{index}].role: {role}")
+        if "content" in typed_payload and not isinstance(typed_payload["content"], str):
+            raise TypeError(f"AgentTask initial_messages[{index}].content must be a string")
+        for field_name in ("name", "tool_call_id", "reasoning_content", "image_url"):
+            field_value = typed_payload.get(field_name)
+            if field_value is not None and not isinstance(field_value, str):
+                raise TypeError(f"AgentTask initial_messages[{index}].{field_name} must be a string or None")
+        if "tool_calls" in typed_payload:
+            tool_calls = typed_payload["tool_calls"]
+            if not isinstance(tool_calls, list) or not all(isinstance(tool_call, dict) for tool_call in tool_calls):
+                raise TypeError(f"AgentTask initial_messages[{index}].tool_calls must be a list of dicts")
+        if "metadata" in typed_payload:
+            metadata = typed_payload["metadata"]
+            if not isinstance(metadata, dict) or not all(isinstance(key, str) for key in metadata):
+                raise TypeError(
+                    f"AgentTask initial_messages[{index}].metadata must be a dict with string keys"
+                )
+        messages.append(Message.from_dict(typed_payload))
+    return messages
 
 
 @dataclass(slots=True)
@@ -428,8 +588,10 @@ class AgentTask:
     native_multimodal: bool = False
     extra_tool_names: list[str] = field(default_factory=list)
     exclude_tools: list[str] = field(default_factory=list)
+    model_settings: ModelSettings | None = None
+    initial_messages: list[Message] = field(default_factory=list)
+    initial_shared_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
-    runtime_metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def sub_agents_enabled(self) -> bool:
@@ -453,35 +615,48 @@ class AgentTask:
             "sub_agents": {name: config.to_dict() for name, config in self.sub_agents.items()},
             "extra_tool_names": list(self.extra_tool_names),
             "exclude_tools": list(self.exclude_tools),
+            "model_settings": self.model_settings.to_dict() if self.model_settings is not None else None,
+            "initial_messages": [message.to_dict() for message in self.initial_messages],
+            "initial_shared_state": deepcopy(self.initial_shared_state),
             "metadata": dict(self.metadata),
-            "runtime_metadata": dict(self.runtime_metadata),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentTask:
+        """Restore the public dict form; only the four constructor fields are required."""
+        if not isinstance(data, dict):
+            raise TypeError("AgentTask payload must be a dict")
         return cls(
-            task_id=data["task_id"],
-            model=data["model"],
-            system_prompt=data["system_prompt"],
-            user_prompt=data["user_prompt"],
-            max_cycles=data.get("max_cycles", 8),
-            memory_compact_threshold=data.get("memory_compact_threshold", 128_000),
-            memory_threshold_percentage=data.get("memory_threshold_percentage", 90),
-            no_tool_policy=data.get("no_tool_policy", "continue"),
-            allow_interruption=data.get("allow_interruption", True),
-            use_workspace=data.get("use_workspace", True),
-            has_sub_agents=data.get("has_sub_agents", False),
-            sub_agents={
-                name: SubAgentConfig.from_dict(payload)
-                for name, payload in data.get("sub_agents", {}).items()
-                if isinstance(payload, dict)
-            },
-            agent_type=data.get("agent_type"),
-            native_multimodal=data.get("native_multimodal", False),
-            extra_tool_names=list(data.get("extra_tool_names", [])),
-            exclude_tools=list(data.get("exclude_tools", [])),
-            metadata=dict(data.get("metadata", {})),
-            runtime_metadata=dict(data.get("runtime_metadata", {})),
+            task_id=_agent_task_required_string(data, "task_id"),
+            model=_agent_task_required_string(data, "model"),
+            system_prompt=_agent_task_required_string(data, "system_prompt"),
+            user_prompt=_agent_task_required_string(data, "user_prompt"),
+            max_cycles=_agent_task_integer(data, "max_cycles", default=8, maximum=_MAX_U32),
+            memory_compact_threshold=_agent_task_integer(
+                data,
+                "memory_compact_threshold",
+                default=128_000,
+                maximum=_MAX_U64,
+            ),
+            memory_threshold_percentage=_agent_task_integer(
+                data,
+                "memory_threshold_percentage",
+                default=90,
+                maximum=_MAX_U8,
+            ),
+            no_tool_policy=_agent_task_no_tool_policy(data),
+            allow_interruption=_agent_task_bool(data, "allow_interruption", default=True),
+            use_workspace=_agent_task_bool(data, "use_workspace", default=True),
+            has_sub_agents=_agent_task_bool(data, "has_sub_agents", default=False),
+            sub_agents=_agent_task_sub_agents(data),
+            agent_type=_agent_task_optional_string(data, "agent_type"),
+            native_multimodal=_agent_task_bool(data, "native_multimodal", default=False),
+            extra_tool_names=_agent_task_string_list(data, "extra_tool_names"),
+            exclude_tools=_agent_task_string_list(data, "exclude_tools"),
+            model_settings=_agent_task_model_settings(data),
+            initial_messages=_agent_task_messages(data),
+            initial_shared_state=deepcopy(_agent_task_metadata(data, "initial_shared_state")),
+            metadata=_agent_task_metadata(data, "metadata"),
         )
 
 
@@ -504,12 +679,13 @@ class SubTaskOutcome:
     final_answer: str | None = None
     wait_reason: str | None = None
     error: str | None = None
+    error_code: str | None = None
     cycles: int = 0
     todo_list: list[dict[str, Any]] = field(default_factory=list)
     resolved: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "task_id": self.task_id,
             "agent_name": self.agent_name,
             "status": self.status.value,
@@ -521,6 +697,9 @@ class SubTaskOutcome:
             "todo_list": self.todo_list,
             "resolved": self.resolved,
         }
+        if self.error_code is not None:
+            payload["error_code"] = self.error_code
+        return payload
 
 
 @dataclass(slots=True)

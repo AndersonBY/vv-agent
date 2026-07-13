@@ -194,6 +194,7 @@ class TestCeleryBackend:
     def test_runtime_recipe_serialization(self):
         """Test RuntimeRecipe round-trip serialization."""
         from vv_agent.runtime.backends.celery import _CELERY_AVAILABLE, RuntimeRecipe
+        from vv_agent.runtime.backends.distributed import CapabilityRef, DistributedCapabilities
         if not _CELERY_AVAILABLE:
             pytest.skip("celery not installed")
 
@@ -203,8 +204,10 @@ class TestCeleryBackend:
             model="gpt-4",
             workspace="/tmp/workspace",
             timeout_seconds=120.0,
-            hook_class_paths=["my.hooks.LogHook"],
             log_preview_chars=300,
+            capabilities=DistributedCapabilities(
+                hook_refs=(CapabilityRef("hook.logging", "1"),),
+            ),
         )
         d = recipe.to_dict()
         restored = RuntimeRecipe.from_dict(d)
@@ -213,7 +216,7 @@ class TestCeleryBackend:
         assert restored.model == recipe.model
         assert restored.workspace == recipe.workspace
         assert restored.timeout_seconds == recipe.timeout_seconds
-        assert restored.hook_class_paths == recipe.hook_class_paths
+        assert restored.capabilities.hook_refs == recipe.capabilities.hook_refs
         assert restored.log_preview_chars == recipe.log_preview_chars
 
     def test_agent_task_serialization(self):

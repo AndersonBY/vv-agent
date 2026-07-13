@@ -33,7 +33,7 @@ typed events plus cancellation or approval control through `RunHandle`.
 | 03 | `03_sdk_client.py` | Runner configuration, sessions, custom tool, typed events |
 | 04 | `04_session_api.py` | `MemorySession` across multiple runs |
 | 05 | `05_ask_user_resume.py` | Tool approval and `WAIT_USER` events |
-| 06 | `06_runtime_hooks.py` | Low-level hooks passed through `RunConfig.runtime_hooks` |
+| 06 | `06_runtime_hooks.py` | Low-level hooks passed through `RunConfig.hooks` |
 | 07 | `07_token_budget_guard.py` | Input guardrail for prompt budget checks |
 | 08 | `08_custom_tool.py` | `@function_tool` schema inference and structured output |
 | 09 | `09_resource_loader.py` | JSON-backed agent profile loading |
@@ -90,10 +90,10 @@ is a local protocol/schema/backpressure example and does not call a model.
 
 | # | File | Shows |
 | --- | --- | --- |
-| 26 | `26_app_server_channel_lifecycle.py` | Real model turn through in-process `ChannelTransport`: initialize, thread, turn, list, archive |
-| 27 | `27_app_server_stdio_client.py` | Real model turn through a stdio JSONL subprocess client |
+| 26 | `26_app_server_channel_lifecycle.py` | Real model turn through in-process `ChannelTransport`: initialize/initialized, thread, turn, list, archive |
+| 27 | `27_app_server_stdio_client.py` | Real model turn through a stdio JSONL subprocess client with the initialized handshake |
 | 28 | `28_app_server_notification_opt_out.py` | Real model turn with two clients and per-connection notification opt-out |
-| 29 | `29_app_server_schema_backpressure.py` | Schema export, transport overload, and request backlog overload |
+| 29 | `29_app_server_schema_backpressure.py` | Typed JSON Schema, self-contained TypeScript, runtime schema/export, and overload handling |
 
 ```bash
 uv run python examples/26_app_server_channel_lifecycle.py

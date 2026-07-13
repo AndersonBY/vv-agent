@@ -13,7 +13,7 @@ from vv_agent.runtime.processes import (
 )
 from vv_agent.runtime.shell import prepare_shell_execution
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import to_json
+from vv_agent.tools.handlers.common import builtin_error, select_metadata, to_json
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 _DANGEROUS_SNIPPETS = (
@@ -34,7 +34,9 @@ _WINDOWS_PYTHON_ENV_DEFAULTS = {
 def _normalize_shell_value(raw: Any) -> str | None:
     if raw is None:
         return None
-    value = str(raw).strip()
+    if not isinstance(raw, str):
+        raise ValueError("`bash_shell` must be a string shell name")
+    value = raw.strip()
     return value or None
 
 
@@ -119,40 +121,48 @@ def _build_process_env(extra_env: dict[str, str] | None) -> dict[str, str] | Non
     return env
 
 
+def _parse_timeout_seconds(raw: Any) -> int:
+    if isinstance(raw, bool):
+        raise ValueError("`timeout` must be an integer")
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str):
+        try:
+            value = int(raw.strip())
+        except ValueError as exc:
+            raise ValueError("`timeout` must be an integer") from exc
+    else:
+        raise ValueError("`timeout` must be an integer")
+    return max(1, min(value, 600))
+
+
 def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     command = str(arguments.get("command", "")).strip()
     if not command:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            status_code=ToolResultStatus.ERROR,
-            error_code="command_required",
-            content=to_json({"error": "`command` is required"}),
-        )
+        return builtin_error("`command` is required", "command_required")
 
     lowered = command.lower()
     for snippet in _DANGEROUS_SNIPPETS:
         if snippet in lowered:
-            return ToolExecutionResult(
-                tool_call_id="",
-                status="error",
-                status_code=ToolResultStatus.ERROR,
-                error_code="dangerous_command",
-                content=to_json({"error": f"dangerous command blocked: {snippet}"}),
+            return builtin_error(
+                f"dangerous command blocked: {snippet}",
+                "dangerous_command",
             )
 
-    timeout = int(arguments.get("timeout", 300))
-    timeout = max(1, min(timeout, 600))
+    try:
+        timeout = _parse_timeout_seconds(arguments.get("timeout", 300))
+    except ValueError as exc:
+        return builtin_error(str(exc), "invalid_timeout")
 
     exec_dir_raw = str(arguments.get("exec_dir", "."))
-    exec_dir = context.resolve_workspace_path(exec_dir_raw)
+    try:
+        exec_dir = context.resolve_workspace_path(exec_dir_raw)
+    except ValueError as exc:
+        return builtin_error(str(exc), "path_escapes_workspace")
     if not exec_dir.exists() or not exec_dir.is_dir():
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            status_code=ToolResultStatus.ERROR,
-            error_code="invalid_exec_dir",
-            content=to_json({"error": f"exec_dir not found: {exec_dir_raw}"}),
+        return builtin_error(
+            f"exec_dir not found: {exec_dir_raw}",
+            "invalid_exec_dir",
         )
 
     stdin_data = arguments.get("stdin")
@@ -162,13 +172,7 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
     try:
         shell, windows_shell_priority, bash_env = _read_shell_defaults(context)
     except ValueError as exc:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            status_code=ToolResultStatus.ERROR,
-            error_code="invalid_shell_config",
-            content=to_json({"error": str(exc)}),
-        )
+        return builtin_error(str(exc), "invalid_shell_config")
     process_env = _build_process_env(bash_env)
 
     if run_in_background:
@@ -184,12 +188,15 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
                 env=process_env,
             )
         except ValueError as exc:
-            return ToolExecutionResult(
-                tool_call_id="",
-                status="error",
-                status_code=ToolResultStatus.ERROR,
-                error_code="shell_unavailable",
-                content=to_json({"error": str(exc)}),
+            return builtin_error(
+                str(exc),
+                "invalid_shell_config",
+            )
+        except OSError as exc:
+            selected_shell = shell or "shell"
+            return builtin_error(
+                f"Failed to start {selected_shell}: {exc}",
+                "command_failed",
             )
         payload = {
             "status": "running",
@@ -202,7 +209,7 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             status="success",
             status_code=ToolResultStatus.RUNNING,
             content=to_json(payload),
-            metadata=payload,
+            metadata=select_metadata(payload, "status", "session_id", "shell"),
         )
 
     try:
@@ -214,20 +221,21 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             windows_shell_priority=windows_shell_priority,
         )
     except ValueError as exc:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            status_code=ToolResultStatus.ERROR,
-            error_code="shell_unavailable",
-            content=to_json({"error": str(exc)}),
-        )
+        return builtin_error(str(exc), "invalid_shell_config")
 
-    started_process = start_captured_process(
-        shell_command,
-        cwd=exec_dir,
-        stdin_text=prepared_stdin,
-        env=process_env,
-    )
+    try:
+        started_process = start_captured_process(
+            shell_command,
+            cwd=exec_dir,
+            stdin_text=prepared_stdin,
+            env=process_env,
+        )
+    except OSError as exc:
+        selected_shell = shell or "shell"
+        return builtin_error(
+            f"Failed to start {selected_shell}: {exc}",
+            "command_failed",
+        )
 
     try:
         completed_exit_code = started_process.process.wait(timeout=timeout)
@@ -259,7 +267,14 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             status="success",
             status_code=ToolResultStatus.RUNNING,
             content=to_json(payload),
-            metadata=payload,
+            metadata=select_metadata(
+                payload,
+                "status",
+                "session_id",
+                "cwd",
+                "shell",
+                "transitioned_to_background",
+            ),
         )
 
     combined_output = read_captured_output(started_process.output_path, limit_chars=_OUTPUT_LIMIT)
@@ -282,13 +297,14 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
     if shell:
         payload["shell"] = shell
 
+    metadata = select_metadata(payload, "cwd", "exit_code", "shell")
+
     if completed_exit_code != 0:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            status_code=ToolResultStatus.ERROR,
-            error_code="command_failed",
-            content=to_json(payload),
+        return builtin_error(
+            f"command exited with code {completed_exit_code}",
+            "command_failed",
+            details=payload,
+            metadata=metadata,
         )
 
     return ToolExecutionResult(
@@ -296,4 +312,5 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
         status="success",
         status_code=ToolResultStatus.SUCCESS,
         content=to_json(payload),
+        metadata=metadata,
     )

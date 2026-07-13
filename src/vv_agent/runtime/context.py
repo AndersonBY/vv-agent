@@ -17,6 +17,8 @@ class ExecutionContext:
     stream_callback: StreamCallback | None = None
     state_store: StateStore | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    _pending_tool_approval: Any | None = field(default=None, repr=False)
+    _approved_tool_approval: Any | None = field(default=None, repr=False)
 
     def check_cancelled(self) -> None:
         if self.cancellation_token is not None:

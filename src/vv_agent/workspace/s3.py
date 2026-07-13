@@ -13,21 +13,17 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import importlib.util
-import posixpath
 from datetime import UTC, datetime
 from typing import Any
 
-from vv_agent.workspace.base import FileInfo
+from vv_agent.workspace.base import FileInfo, _normalize_workspace_path
 
 _BOTO3_AVAILABLE = importlib.util.find_spec("boto3") is not None
 
 
 def _require_boto3() -> Any:
     if not _BOTO3_AVAILABLE:
-        raise ModuleNotFoundError(
-            "boto3 is required for S3WorkspaceBackend. "
-            "Install it with: uv pip install 'vv-agent[s3]'"
-        )
+        raise ModuleNotFoundError("boto3 is required for S3WorkspaceBackend. Install it with: uv pip install 'vv-agent[s3]'")
     return importlib.import_module("boto3")
 
 
@@ -90,24 +86,26 @@ class S3WorkspaceBackend:
             kwargs["aws_secret_access_key"] = aws_secret_access_key
         self._client: Any = boto3.client("s3", **kwargs)
         self._bucket = bucket
-        self._prefix = prefix.strip("/")
+        self._prefix = _normalize_workspace_path(prefix)
 
     # -- internal helpers ---------------------------------------------------
 
     def _key(self, path: str) -> str:
         """Map a workspace-relative posix path to an S3 object key."""
-        norm = posixpath.normpath(path).lstrip("/")
-        if norm == ".":
-            norm = ""
+        norm = _normalize_workspace_path(path)
         if self._prefix:
             return f"{self._prefix}/{norm}" if norm else self._prefix
         return norm
 
-    def _rel(self, key: str) -> str:
+    def _rel(self, key: str) -> str | None:
         """Strip the prefix from an S3 key to get the workspace-relative path."""
+        if not self._prefix:
+            return _normalize_workspace_path(key)
+        if key == self._prefix:
+            return ""
         if self._prefix and key.startswith(self._prefix + "/"):
-            return key[len(self._prefix) + 1:]
-        return key
+            return _normalize_workspace_path(key[len(self._prefix) + 1 :])
+        return None
 
     def _list_keys(self, prefix: str) -> list[str]:
         """List all object keys under *prefix* (handles pagination)."""
@@ -121,8 +119,8 @@ class S3WorkspaceBackend:
     # -- Protocol implementation --------------------------------------------
 
     def list_files(self, base: str, glob: str) -> list[str]:
-        base_norm = posixpath.normpath(base).lstrip("/")
-        if base_norm == ".":
+        base_norm = _normalize_workspace_path(base)
+        if not base_norm:
             search_prefix = self._prefix
         elif self._prefix:
             search_prefix = f"{self._prefix}/{base_norm}"
@@ -134,7 +132,7 @@ class S3WorkspaceBackend:
 
         all_keys = self._list_keys(search_prefix)
 
-        pattern = posixpath.join(base_norm, glob) if base_norm and base_norm != "." else glob
+        pattern = f"{base_norm}/{glob}" if base_norm else glob
         result: list[str] = []
         for key in all_keys:
             rel = self._rel(key)
@@ -162,9 +160,12 @@ class S3WorkspaceBackend:
             content = existing + content
         data = content.encode("utf-8")
         self._client.put_object(
-            Bucket=self._bucket, Key=key, Body=data, ContentLength=len(data),
+            Bucket=self._bucket,
+            Key=key,
+            Body=data,
+            ContentLength=len(data),
         )
-        return len(content)
+        return len(data)
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._key(path)
@@ -179,7 +180,7 @@ class S3WorkspaceBackend:
         if dot != -1 and "/" not in path[dot:]:
             suffix = path[dot:]
         return FileInfo(
-            path=self._rel(key),
+            path=self._rel(key) or _normalize_workspace_path(path),
             is_file=True,
             is_dir=False,
             size=head.get("ContentLength", 0),
@@ -209,10 +210,10 @@ class S3WorkspaceBackend:
         parts: list[str] = []
         i = 0
         while i < len(pattern):
-            if pattern[i:i + 3] == "**/":
+            if pattern[i : i + 3] == "**/":
                 parts.append("(?:.+/)?")
                 i += 3
-            elif pattern[i:i + 2] == "**":
+            elif pattern[i : i + 2] == "**":
                 parts.append(".*")
                 i += 2
             elif pattern[i] == "*":

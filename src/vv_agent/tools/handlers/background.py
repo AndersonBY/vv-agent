@@ -4,7 +4,7 @@ from typing import Any
 
 from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import to_json
+from vv_agent.tools.handlers.common import builtin_error, select_metadata, to_json
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 
@@ -12,13 +12,7 @@ def check_background_command(context: ToolContext, arguments: dict[str, Any]) ->
     del context
     session_id = str(arguments.get("session_id", "")).strip()
     if not session_id:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status="error",
-            status_code=ToolResultStatus.ERROR,
-            error_code="session_id_required",
-            content=to_json({"error": "`session_id` is required"}),
-        )
+        return builtin_error("`session_id` is required", "session_id_required")
 
     result = background_session_manager.check(session_id)
     status = str(result.get("status", "missing"))
@@ -29,7 +23,13 @@ def check_background_command(context: ToolContext, arguments: dict[str, Any]) ->
             status="success",
             status_code=ToolResultStatus.RUNNING,
             content=to_json(result),
-            metadata=result,
+            metadata=select_metadata(
+                result,
+                "status",
+                "session_id",
+                "elapsed_seconds",
+                "shell",
+            ),
         )
 
     if status in {"completed"}:
@@ -38,14 +38,29 @@ def check_background_command(context: ToolContext, arguments: dict[str, Any]) ->
             status="success",
             status_code=ToolResultStatus.SUCCESS,
             content=to_json(result),
-            metadata=result,
+            metadata=select_metadata(
+                result,
+                "status",
+                "session_id",
+                "exit_code",
+                "shell",
+            ),
         )
 
-    return ToolExecutionResult(
-        tool_call_id="",
-        status="error",
-        status_code=ToolResultStatus.ERROR,
-        error_code="background_command_failed",
-        content=to_json(result),
-        metadata=result,
+    error = str(result.get("error") or "")
+    if not error:
+        error = "Background command timed out" if status == "timeout" else "Background command failed"
+    details = {key: value for key, value in result.items() if key != "error"}
+    metadata = select_metadata(
+        result,
+        "status",
+        "session_id",
+        "exit_code",
+        "shell",
+    )
+    return builtin_error(
+        error,
+        "background_command_failed",
+        details=details,
+        metadata=metadata,
     )

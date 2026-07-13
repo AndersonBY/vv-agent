@@ -59,7 +59,7 @@ def test_edit_file_is_registered_in_default_tools(registry) -> None:
     assert edit_schema["function"]["name"] == "edit_file"
     assert "read_file" in edit_description
     assert "write_file" in edit_description
-    assert "previous successful edit_file" in edit_description
+    assert "exact `old_string` matching" in edit_description
     assert parameters["required"] == ["path", "old_string", "new_string"]
     assert set(properties) == {"path", "old_string", "new_string", "replace_all"}
 

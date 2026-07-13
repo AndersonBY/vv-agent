@@ -11,7 +11,7 @@ def test_router_unregisters_transport_when_overloaded_error_cannot_be_written() 
     pending = router.send_server_request("conn_1", "approval/request", {"threadId": "thread_1"})
     transport.receive_outbound(timeout=1)
 
-    transport.write_outbound({"method": "already-full"})
+    transport.write_outbound({"jsonrpc": "2.0", "method": "already-full"})
     router.send_notification("conn_1", "item/agentMessage/delta", {"text": "overflow"})
 
     assert router.cancel_server_request(RequestId(pending.request_id.to_wire())) is False

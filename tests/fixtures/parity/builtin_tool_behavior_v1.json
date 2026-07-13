@@ -1,0 +1,390 @@
+{
+  "version": 1,
+  "canonical": {
+    "error_content_required_keys": [
+      "ok",
+      "error",
+      "error_code"
+    ],
+    "metadata_policy": {
+      "description": "Host metadata contains only bounded machine fields and never repeats model-facing bulk output.",
+      "forbidden_large_keys": [
+        "content",
+        "instructions",
+        "output",
+        "stderr",
+        "stdout"
+      ]
+    },
+    "activate_skill": {
+      "source": "shared_state.available_skills",
+      "model_visible_optional_fields": [
+        "allowed_tools",
+        "description",
+        "location",
+        "reason"
+      ],
+      "excluded_model_fields": [
+        "compatibility",
+        "metadata"
+      ]
+    },
+    "bash_shell": {
+      "background_field": "explicit_override_only",
+      "invalid_timeout_error_code": "invalid_timeout",
+      "shell_prepare_error_code": "invalid_shell_config"
+    }
+  },
+  "prompt": {
+    "empty_skills": {
+      "available_skills": [],
+      "forbidden_fragments": [
+        "Available skills metadata",
+        "<available_skills>",
+        "\u53ef\u7528\u6280\u80fd\u5143\u6570\u636e"
+      ]
+    }
+  },
+  "tools": {
+    "compress_memory": {
+      "success": {
+        "arguments": {
+          "core_information": "fixture decision"
+        },
+        "result": {
+          "status": "success",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "content": {
+            "ok": true,
+            "saved_notes": 1
+          },
+          "metadata": {
+            "saved_notes": 1
+          }
+        }
+      },
+      "missing_core_information": {
+        "arguments": {
+          "core_information": "   "
+        },
+        "result": {
+          "status": "error",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "core_information_required",
+          "content": {
+            "ok": false,
+            "error": "`core_information` is required",
+            "error_code": "core_information_required"
+          },
+          "metadata": {
+            "error_code": "core_information_required"
+          }
+        }
+      }
+    },
+    "activate_skill": {
+      "success": {
+        "available_skills": [
+          {
+            "name": "fixture-skill",
+            "description": "Fixture skill",
+            "instructions": "Follow fixture instructions.",
+            "compatibility": "host-only",
+            "allowed-tools": "read_file",
+            "metadata": {
+              "owner": "fixture"
+            }
+          }
+        ],
+        "arguments": {
+          "skill_name": "fixture-skill",
+          "reason": "contract check"
+        },
+        "result": {
+          "status": "success",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "content": {
+            "status": "activated",
+            "skill_name": "fixture-skill",
+            "message": "Skill 'fixture-skill' has been activated. Follow the instructions below.",
+            "instructions": "Follow fixture instructions.",
+            "description": "Fixture skill",
+            "allowed_tools": "read_file",
+            "reason": "contract check"
+          },
+          "metadata": {
+            "skill_name": "fixture-skill"
+          }
+        }
+      },
+      "metadata_only_source": {
+        "result": {
+          "status": "error",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "no_skills_configured",
+          "content": {
+            "ok": false,
+            "error": "No skills are configured for this task",
+            "error_code": "no_skills_configured"
+          },
+          "metadata": {
+            "error_code": "no_skills_configured"
+          }
+        }
+      }
+    },
+    "read_image": {
+      "too_large": {
+        "path": "large.png",
+        "actual_bytes": 5242881,
+        "result": {
+          "status": "error",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "image_too_large",
+          "content": {
+            "ok": false,
+            "error": "image is too large for inline message transport",
+            "error_code": "image_too_large",
+            "max_bytes": 5242880,
+            "actual_bytes": 5242881
+          },
+          "metadata": {
+            "error_code": "image_too_large",
+            "max_bytes": 5242880,
+            "actual_bytes": 5242881
+          }
+        }
+      }
+    },
+    "bash": {
+      "non_zero": {
+        "arguments": {
+          "command": "printf 'fixture-output\\n'; exit 7",
+          "timeout": 30
+        },
+        "context_metadata": {
+          "bash_shell": "bash"
+        },
+        "result": {
+          "status": "error",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "command_failed",
+          "content": {
+            "ok": false,
+            "error": "command exited with code 7",
+            "error_code": "command_failed",
+            "cwd": ".",
+            "exit_code": 7,
+            "output": "fixture-output\n",
+            "shell": "bash"
+          },
+          "metadata": {
+            "error_code": "command_failed",
+            "cwd": ".",
+            "exit_code": 7,
+            "shell": "bash"
+          }
+        }
+      },
+      "invalid_timeout": {
+        "arguments": {
+          "command": "echo never-runs",
+          "timeout": "not-an-integer"
+        },
+        "result": {
+          "status": "error",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "invalid_timeout",
+          "content": {
+            "ok": false,
+            "error": "`timeout` must be an integer",
+            "error_code": "invalid_timeout"
+          },
+          "metadata": {
+            "error_code": "invalid_timeout"
+          }
+        }
+      },
+      "background_start": {
+        "arguments": {
+          "command": "sleep 0.1",
+          "run_in_background": true,
+          "timeout": 30
+        },
+        "context_metadata": {
+          "bash_shell": "bash"
+        },
+        "result": {
+          "status": "success",
+          "status_code": "RUNNING",
+          "directive": "continue",
+          "content_subset": {
+            "status": "running",
+            "shell": "bash"
+          },
+          "metadata_subset": {
+            "status": "running",
+            "shell": "bash"
+          },
+          "required_dynamic_fields": [
+            "session_id"
+          ]
+        }
+      }
+    },
+    "check_background_command": {
+      "missing_session": {
+        "arguments": {
+          "session_id": "fixture-missing"
+        },
+        "result": {
+          "status": "error",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "background_command_failed",
+          "content": {
+            "ok": false,
+            "error": "Background session not found",
+            "error_code": "background_command_failed",
+            "status": "missing",
+            "session_id": "fixture-missing"
+          },
+          "metadata": {
+            "error_code": "background_command_failed",
+            "status": "missing",
+            "session_id": "fixture-missing"
+          }
+        }
+      }
+    },
+    "file_info": {
+      "missing_path": {
+        "arguments": {},
+        "result": {
+          "status": "error",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "invalid_arguments",
+          "content": {
+            "ok": false,
+            "error": "`path` is required.",
+            "error_code": "invalid_arguments",
+            "message": "`path` is required.",
+            "missing_arguments": [
+              "path"
+            ]
+          },
+          "metadata": {
+            "error_code": "invalid_arguments",
+            "missing_arguments": [
+              "path"
+            ]
+          }
+        }
+      }
+    },
+    "find_files": {
+      "missing_directory": {
+        "arguments": {
+          "path": "missing-dir"
+        },
+        "result": {
+          "status": "error",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "path_not_found",
+          "content": {
+            "ok": false,
+            "error": "path not found: missing-dir",
+            "error_code": "path_not_found",
+            "message": "path not found: missing-dir",
+            "path": "missing-dir"
+          },
+          "metadata": {
+            "error_code": "path_not_found",
+            "path": "missing-dir"
+          }
+        }
+      }
+    },
+    "control": {
+      "blank_task_finish": {
+        "arguments": {
+          "message": "  \t  "
+        },
+        "result": {
+          "status": "success",
+          "status_code": "SUCCESS",
+          "directive": "finish",
+          "content": {
+            "ok": true,
+            "message": "Task completed"
+          },
+          "metadata": {
+            "final_message": "Task completed"
+          }
+        }
+      },
+      "blank_ask_user": {
+        "arguments": {
+          "question": "  \n  "
+        },
+        "result": {
+          "status": "success",
+          "status_code": "SUCCESS",
+          "directive": "wait_user",
+          "content": {
+            "question": "Need user input",
+            "selection_type": "single",
+            "allow_custom_options": false
+          },
+          "metadata": {
+            "question": "Need user input",
+            "selection_type": "single",
+            "allow_custom_options": false
+          }
+        }
+      }
+    }
+  },
+  "registry": {
+    "builtin_description": {
+      "tool_name": "compress_memory",
+      "must_be_non_empty": true
+    },
+    "hidden_exposure": {
+      "tool_name": "fixture_hidden",
+      "must_be_model_visible": false
+    }
+  },
+  "dynamic_bash_description": {
+    "non_string_bash_shell": {
+      "bash_shell": 7,
+      "expected_hint": "Runtime shell hint: invalid shell config. `bash_shell` must be a string shell name."
+    }
+  },
+  "tool_execution_result_projection": {
+    "canonical": {
+      "tool_call_id": "fixture-call",
+      "content": "{\"error\":\"fixture failure\",\"error_code\":\"fixture_error\",\"ok\":false}",
+      "status": "error",
+      "status_code": "ERROR",
+      "directive": "continue",
+      "error_code": "fixture_error",
+      "metadata": {
+        "error_code": "fixture_error"
+      }
+    },
+    "forbidden_absent_fields": [
+      "image_url",
+      "image_path"
+    ]
+  }
+}

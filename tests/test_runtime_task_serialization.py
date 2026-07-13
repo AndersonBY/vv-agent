@@ -3,24 +3,25 @@ from __future__ import annotations
 from vv_agent.types import AgentTask, CycleRecord, SubAgentConfig, TaskTokenUsage, TokenUsage
 
 
-def test_agent_task_round_trips_sub_agents_and_runtime_metadata() -> None:
+def test_agent_task_round_trips_sub_agents_and_metadata() -> None:
     task = AgentTask(
         task_id="parent",
         model="m",
         system_prompt="sys",
         user_prompt="user",
         sub_agents={"research": SubAgentConfig(model="m2", description="Research facts.", backend="b")},
-        metadata={"legacy": True},
-        runtime_metadata={"trace_id": "trace-1"},
+        metadata={"legacy": True, "trace_id": "trace-1"},
     )
 
-    restored = AgentTask.from_dict(task.to_dict())
+    payload = task.to_dict()
+    restored = AgentTask.from_dict(payload)
 
     assert restored.sub_agents_enabled is True
     assert restored.sub_agents["research"].model == "m2"
     assert restored.sub_agents["research"].description == "Research facts."
     assert restored.sub_agents["research"].backend == "b"
-    assert restored.runtime_metadata == {"trace_id": "trace-1"}
+    assert restored.metadata == {"legacy": True, "trace_id": "trace-1"}
+    assert "runtime_metadata" not in payload
 
 
 def test_cycle_record_round_trips_token_usage() -> None:

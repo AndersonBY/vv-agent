@@ -18,6 +18,7 @@ def test_opted_out_connection_does_not_receive_exact_notification() -> None:
     processor.process_message(
         "conn_1",
         {
+            "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
             "params": {
@@ -26,9 +27,13 @@ def test_opted_out_connection_does_not_receive_exact_notification() -> None:
             },
         },
     )
-    processor.process_message("conn_2", {"id": 2, "method": "initialize", "params": {"clientInfo": {"name": "second"}}})
+    processor.process_message(
+        "conn_2", {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"clientInfo": {"name": "second"}}}
+    )
     first.receive_outbound(timeout=1)
     second.receive_outbound(timeout=1)
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
+    processor.process_message("conn_2", {"jsonrpc": "2.0", "method": "initialized"})
 
     router.send_notification("conn_1", "item/agentMessage/delta", {"threadId": "thread_1", "text": "hidden"})
     router.send_notification("conn_2", "item/agentMessage/delta", {"threadId": "thread_1", "text": "visible"})

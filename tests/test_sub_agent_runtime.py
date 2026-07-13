@@ -383,6 +383,10 @@ def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> No
         sub_agent_name="research-sub",
         sub_agent=sub_agent,
         resolved_model_id="kimi-k2.5",
+        child_run_id="child-run",
+        trace_id="child-trace",
+        parent_run_id="",
+        parent_tool_call_id="",
         request=request,
         parent_shared_state={},
         workspace_path=tmp_path,
@@ -426,6 +430,10 @@ def test_sub_task_metadata_inherits_sub_agent_prompt_cache_metadata(tmp_path: Pa
         sub_agent_name="research-sub",
         sub_agent=sub_agent,
         resolved_model_id="claude-sonnet-4-5-20250929",
+        child_run_id="child-run-cache",
+        trace_id="child-trace",
+        parent_run_id="",
+        parent_tool_call_id="",
         request=SubTaskRequest(agent_name="research-sub", task_description="Collect one fact"),
         parent_shared_state={},
         workspace_path=tmp_path,
@@ -462,6 +470,10 @@ def test_sub_task_metadata_generates_prompt_cache_sections_for_default_prompt(tm
         sub_agent_name="research-sub",
         sub_agent=sub_agent,
         resolved_model_id="claude-sonnet-4-5-20250929",
+        child_run_id="child-run-cache-default",
+        trace_id="child-trace",
+        parent_run_id="",
+        parent_tool_call_id="",
         request=SubTaskRequest(agent_name="research-sub", task_description="Collect one fact"),
         parent_shared_state={},
         workspace_path=tmp_path,
@@ -569,6 +581,12 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
 
 
 def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> None:
+    contract = json.loads(
+        (Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "stream_sink" in contract["capability_projection"]["inherited"]
     parent_llm = ScriptedLLM(
         steps=[
             LLMResponse(
@@ -589,10 +607,27 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
     )
 
     class StreamingSubLLM:
-        def complete(self, *, model, messages, tools, stream_callback=None, model_settings=None):
-            del model, messages, tools, model_settings
+        def complete(
+            self,
+            *,
+            model,
+            messages,
+            tools,
+            stream_callback=None,
+            model_settings=None,
+            request_metadata=None,
+        ):
+            del model, messages, tools, model_settings, request_metadata
             if stream_callback is not None:
-                stream_callback({"event": "assistant_delta", "content_delta": "checking"})
+                stream_callback(
+                    {
+                        "event": "assistant_delta",
+                        "content_delta": "checking",
+                        "task_id": "spoofed-task",
+                        "session_id": "spoofed-session",
+                        "sub_agent_name": "spoofed-agent",
+                    }
+                )
                 stream_callback(
                     {
                         "event": "tool_call_started",
@@ -668,12 +703,20 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
     assert progress_payload["task_id"]
     assert progress_payload["session_id"] == progress_payload["task_id"]
 
+    delta_payload = next(payload for name, payload in captured_logs if name == "sub_agent_assistant_delta")
+    assert delta_payload["task_id"] != "spoofed-task"
+    assert delta_payload["session_id"] == delta_payload["task_id"]
+    assert delta_payload["sub_agent_name"] == "research-sub"
+
     assert [event["event"] for event in parent_stream_events] == [
         "assistant_delta",
         "tool_call_started",
         "tool_call_progress",
     ]
     assert parent_stream_events[-1]["sub_agent_name"] == "research-sub"
+    assert parent_stream_events[0]["task_id"] != "spoofed-task"
+    assert parent_stream_events[0]["session_id"] == parent_stream_events[0]["task_id"]
+    assert parent_stream_events[0]["sub_agent_name"] == "research-sub"
 
 
 def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_path: Path) -> None:
@@ -716,7 +759,9 @@ def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_pa
     tool_result = result.cycles[0].tool_results[0]
     assert tool_result.error_code == "sub_task_failed"
     payload = json.loads(tool_result.content)
-    assert "requires runtime settings_file" in payload["error"]
+    assert payload["error"] == (
+        "Sub-agent model resolution requires a model provider or settings_file when backend is explicit."
+    )
 
 
 def test_steer_sub_agent_session_targets_registered_session() -> None:

@@ -4,12 +4,14 @@ import json
 import uuid
 import warnings
 from collections.abc import Callable, Iterator
-from dataclasses import fields, is_dataclass, replace
+from copy import deepcopy
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
 from vv_agent.agent import Agent, RunContext
-from vv_agent.approval import ApprovalBroker, ApprovalRequest
+from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalRequest, bind_request_cancellation
+from vv_agent.background_task import BackgroundAgentTask
 from vv_agent.config import (
     EndpointConfig,
     EndpointOption,
@@ -23,9 +25,11 @@ from vv_agent.events import (
     HandoffCompletedEvent,
     HandoffEvent,
     HandoffStartedEvent,
+    RunCancelledEvent,
     RunCompletedEvent,
     RunEvent,
     RunFailedEvent,
+    SessionPersistedEvent,
     ToolFinishedEvent,
     ToolStartedEvent,
     event_from_runtime_log,
@@ -34,20 +38,178 @@ from vv_agent.events import (
 )
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm.base import LLMClient
-from vv_agent.result import RunResult
-from vv_agent.run_config import RunConfig
-from vv_agent.run_handle import RunHandle
+from vv_agent.model import ModelRef
+from vv_agent.model_settings import ModelSettings
+from vv_agent.result import ApprovalSnapshot, RunResult, RunState, _PendingToolApproval, _RunResumeContext
+from vv_agent.run_config import (
+    DEFAULT_SETTINGS_FILE,
+    DEFAULT_TIMEOUT_SECONDS,
+    RunConfig,
+    ToolPolicy,
+    _validate_bounded_int,
+    merge_tool_policy_layers,
+)
+from vv_agent.run_handle import RunHandle, RunHandleRunner
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
-from vv_agent.tools.function import FunctionTool
+from vv_agent.runtime.engine import _CanonicalSubAgentStreamPayload
+from vv_agent.tools import ToolContext, ToolExposure, ToolSpec, build_default_registry
+from vv_agent.tools.executor import ToolExecutor, is_tool_executor
+from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.tracing import Span, TraceProcessor
-from vv_agent.types import AgentResult, AgentStatus, Message, ToolDirective, ToolExecutionResult, ToolResultStatus
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message, ToolDirective, ToolExecutionResult, ToolResultStatus
+
+_TOOL_POLICY_METADATA_KEYS = (
+    "_vv_agent_allowed_tools",
+    "_vv_agent_disallowed_tools",
+    "_vv_agent_tool_policy_approval",
+    "_vv_agent_tool_policy_can_use_tool",
+)
+_PLANNED_TOOL_NAMES_METADATA_KEY = "_vv_agent_planned_tool_names"
+_RUNTIME_TERMINAL_LOG_EVENTS = frozenset(
+    {
+        "cycle_failed",
+        "run_cancelled",
+        "run_completed",
+        "run_failed",
+        "run_max_cycles",
+        "run_wait_user",
+    }
+)
+
+
+def _tool_policy_metadata(policy: ToolPolicy | None) -> dict[str, Any]:
+    if policy is None:
+        return {}
+    metadata: dict[str, Any] = {}
+    if policy.allowed_tools is not None:
+        metadata["_vv_agent_allowed_tools"] = list(policy.allowed_tools)
+    if policy.disallowed_tools:
+        metadata["_vv_agent_disallowed_tools"] = list(policy.disallowed_tools)
+    if policy.can_use_tool is not None:
+        metadata["_vv_agent_tool_policy_can_use_tool"] = policy.can_use_tool
+    if policy.approval != "default":
+        metadata["_vv_agent_tool_policy_approval"] = policy.approval
+    return metadata
+
+
+@dataclass(frozen=True, slots=True)
+class _HandoffRequest:
+    source_agent: str
+    target_agent: str
+    tool_name: str
+    tool_call_id: str
+    input: str
+    cycle_index: int | None
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingHandoff:
+    request: _HandoffRequest
+    source_run_id: str
+    source_trace_id: str
+    session_id: str | None
+    event_config: RunConfig
+
+
+@dataclass(frozen=True, slots=True)
+class _CompiledTaskInvocation:
+    task: AgentTask
+
+
+class _RunTrace:
+    def __init__(
+        self,
+        *,
+        processors: list[TraceProcessor],
+        trace_id: str,
+        agent_name: str,
+        workflow_name: str | None,
+    ) -> None:
+        self.processors = processors
+        self.trace_id = trace_id
+        self.agent_name = agent_name
+        self.run_span = self._start(
+            Span(
+                name="run",
+                trace_id=trace_id,
+                metadata={"agent_name": agent_name, "workflow_name": workflow_name},
+            )
+        )
+        self.agent_span = self._start(
+            Span(
+                name="agent",
+                trace_id=trace_id,
+                parent_id=self.run_span.span_id,
+                metadata={"agent_name": agent_name},
+            )
+        )
+        self.tool_spans: dict[str, Span] = {}
+        self.ended_run_span: Span | None = None
+
+    def on_event(self, event: RunEvent) -> None:
+        if isinstance(event, ToolStartedEvent):
+            previous = self.tool_spans.pop(event.tool_call_id, None)
+            if previous is not None:
+                self._end(previous, {"status": "replaced"})
+            self.tool_spans[event.tool_call_id] = self._start(
+                Span(
+                    name="tool",
+                    trace_id=self.trace_id,
+                    parent_id=self.agent_span.span_id,
+                    metadata={"tool_name": event.tool_name, "agent_name": self.agent_name},
+                )
+            )
+        elif isinstance(event, ToolFinishedEvent | HandoffEvent):
+            span = self.tool_spans.pop(event.tool_call_id, None)
+            if span is not None:
+                self._end(span, event.to_dict())
+
+    def finish(self, metadata: dict[str, Any] | None = None) -> Span:
+        if self.ended_run_span is not None:
+            return self.ended_run_span
+        for span in reversed(list(self.tool_spans.values())):
+            self._end(span, {"status": "abandoned"})
+        self.tool_spans.clear()
+        self._end(self.agent_span, metadata)
+        self.ended_run_span = self._end(self.run_span, metadata)
+        for processor in self.processors:
+            flush = getattr(processor, "flush", None)
+            if callable(flush):
+                self._notify(processor, "flush", flush)
+        return self.ended_run_span
+
+    def _start(self, span: Span) -> Span:
+        for processor in self.processors:
+            self._notify(processor, "on_span_start", processor.on_span_start, span)
+        return span
+
+    def _end(self, span: Span, metadata: dict[str, Any] | None = None) -> Span:
+        ended = span.finish(metadata=metadata)
+        for processor in self.processors:
+            self._notify(processor, "on_span_end", processor.on_span_end, ended)
+        return ended
+
+    @staticmethod
+    def _notify(processor: TraceProcessor, operation: str, callback: Callable[..., Any], *args: Any) -> None:
+        try:
+            callback(*args)
+        except BaseException as exc:
+            warnings.warn(
+                f"Trace processor {type(processor).__name__}.{operation} failed: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
 
 class Runner:
+    @classmethod
+    def configured(cls, default_run_config: RunConfig | None = None) -> ConfiguredRunner:
+        return ConfiguredRunner(default_run_config=default_run_config or RunConfig())
+
     @classmethod
     def run_sync(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunResult:
         return cls._run(agent, input, run_config=run_config or RunConfig())
@@ -60,8 +222,298 @@ class Runner:
 
     @classmethod
     def start(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunHandle:
+        return RunHandle._start_worker(
+            agent=agent,
+            input=input,
+            run_config=run_config or RunConfig(),
+            runner=cast(RunHandleRunner, cls),
+        )
+
+    @classmethod
+    def _run_compiled_sync(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        task: AgentTask,
+        run_config: RunConfig | None = None,
+    ) -> RunResult:
+        return cls._run(
+            agent,
+            input,
+            run_config=run_config or RunConfig(),
+            _compiled_invocation=_CompiledTaskInvocation(task=task),
+        )
+
+    @classmethod
+    def _start_compiled(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        task: AgentTask,
+        run_config: RunConfig | None = None,
+    ) -> RunHandle:
+        return RunHandle._start_worker(
+            agent=agent,
+            input=input,
+            run_config=run_config or RunConfig(),
+            runner=cast(RunHandleRunner, cls),
+            _compiled_invocation=_CompiledTaskInvocation(task=task),
+        )
+
+    @classmethod
+    def resume(cls, state: RunState, *, input: str | None = None) -> RunResult:
+        source, approved_ids = state._into_inner()
+        resume_context = source._resume_context
+        if resume_context is None:
+            raise ValueError("run state does not include resume context")
+
+        approved = next(
+            (snapshot for snapshot in source.approvals if snapshot.interruption_id in approved_ids),
+            None,
+        )
+        if approved is not None:
+            return cls._resume_approved_tool_call(source, resume_context, approved)
+
+        config = replace(
+            resume_context.run_config,
+            initial_messages=deepcopy(source.raw_result.messages),
+            shared_state=deepcopy(source.raw_result.shared_state),
+        )
+        return resume_context.runner._run(
+            resume_context.agent,
+            resume_context.input if input is None else input,
+            run_config=config,
+        )
+
+    @classmethod
+    def _resume_approved_tool_call(
+        cls,
+        source: RunResult,
+        resume_context: _RunResumeContext,
+        approval: ApprovalSnapshot,
+    ) -> RunResult:
+        effective_config = resume_context.effective_run_config or resume_context.run_config
+        pending = resume_context.pending_tool_approval
+        if pending is None or pending.interruption_id != approval.interruption_id:
+            raise ValueError("approved tool call is missing its captured interruption context")
+        if not cls._approval_snapshot_matches(source, approval, pending):
+            raise ValueError("approved tool call does not match the captured interruption")
+        if not resume_context.claim_approval(approval.interruption_id):
+            raise RuntimeError("approval_already_consumed")
+        call = pending.call
+        context = replace(
+            pending.context,
+            shared_state=deepcopy(source.raw_result.shared_state),
+        )
+        if context.ctx is None:
+            raise ValueError("captured approval context is missing its execution context")
+        context.ctx._approved_tool_approval = pending
+        tool_result = pending.orchestrator.run_one(
+            call,
+            context=context,
+            allowed_tool_names=pending.allowed_tool_names,
+        )
+        tool_result = pending.hook_manager.apply_after_tool_call(
+            task=pending.task,
+            cycle_index=pending.cycle_index,
+            call=call,
+            context=context,
+            result=tool_result,
+        )
+
+        if tool_result.status_code != ToolResultStatus.SUCCESS:
+            raise RuntimeError(tool_result.content)
+
+        raw_result = deepcopy(source.raw_result)
+        raw_result.status = AgentStatus.COMPLETED
+        raw_result.final_answer = tool_result.content
+        raw_result.wait_reason = None
+        raw_result.error = None
+        raw_result.shared_state = deepcopy(context.shared_state)
+        for cycle in raw_result.cycles:
+            if cycle.index == approval.cycle_index:
+                replaced = False
+                for index, existing in enumerate(cycle.tool_results):
+                    if (
+                        existing.tool_call_id == pending.call.id
+                        and existing.metadata.get("approval_interruption_id") == pending.interruption_id
+                    ):
+                        cycle.tool_results[index] = tool_result
+                        replaced = True
+                        break
+                if not replaced:
+                    cycle.tool_results.append(tool_result)
+                break
+        tool_message = tool_result.to_tool_message()
+        raw_result.messages = [
+            message
+            for message in raw_result.messages
+            if not (message.role == "tool" and message.tool_call_id == pending.call.id)
+        ]
+        raw_result.messages.append(tool_message)
+        if effective_config.session is not None:
+            effective_config.session.add_items([tool_message])
+        resumed = RunResult(
+            input=source.input,
+            new_items=[
+                *[
+                    message
+                    for message in source.new_items
+                    if not (message.role == "tool" and message.tool_call_id == pending.call.id)
+                ],
+                tool_message,
+            ],
+            final_output=tool_result.content,
+            status=AgentStatus.COMPLETED,
+            raw_result=raw_result,
+            events=list(source.events),
+            token_usage=raw_result.token_usage,
+            trace_id=source.trace_id,
+            run_id=source.run_id,
+            metadata={**source.metadata, "resumed": True, "approved_interruption_id": approval.interruption_id},
+            agent_name=source.agent_name,
+            resolved_model=source.resolved_model,
+            _resume_context=resume_context,
+        )
+        handoff_request = cls._extract_handoff(resumed)
+        if handoff_request is None:
+            return resumed
+
+        legacy_event = HandoffEvent(
+            run_id=resumed.run_id,
+            trace_id=resumed.trace_id,
+            source_agent=handoff_request.source_agent,
+            target_agent=handoff_request.target_agent,
+            tool_call_id=handoff_request.tool_call_id,
+            cycle_index=handoff_request.cycle_index,
+            session_id=cls._resolve_event_session_id(effective_config),
+            metadata=dict(handoff_request.metadata),
+        )
+        resumed.events.append(legacy_event)
+        cls._emit_chain_event(legacy_event, run_config=effective_config, event_sink=None)
+        return resume_context.runner._run(
+            resume_context.agent,
+            resume_context.input,
+            run_config=resume_context.run_config,
+            initial_result=resumed,
+        )
+
+    @staticmethod
+    def _approval_snapshot_matches(
+        source: RunResult,
+        approval: ApprovalSnapshot,
+        pending: _PendingToolApproval,
+    ) -> bool:
+        if (
+            approval.cycle_index != pending.cycle_index
+            or approval.tool_call_id != pending.call.id
+            or approval.tool_name != pending.call.name
+            or approval.arguments != pending.call.arguments
+        ):
+            return False
+        return any(
+            cycle.index == pending.cycle_index
+            and any(call == pending.call for call in cycle.tool_calls)
+            and any(
+                result.tool_call_id == pending.call.id
+                and result.metadata.get("approval_interruption_id") == pending.interruption_id
+                and result.metadata.get("tool_name") == pending.call.name
+                and result.metadata.get("arguments") == pending.call.arguments
+                for result in cycle.tool_results
+            )
+            for cycle in source.raw_result.cycles
+        )
+
+    @staticmethod
+    def _effective_run_config(
+        agent: Agent,
+        run_config: RunConfig | None,
+        *,
+        runner_defaults: RunConfig | None = None,
+    ) -> RunConfig:
+        defaults = runner_defaults or RunConfig()
         config = run_config or RunConfig()
-        return RunHandle.start_worker(agent=agent, input=input, run_config=config, runner=cls)
+
+        provider_overridden = config.model_provider is not None
+        model = config.model
+        if model is None:
+            model = agent.model
+        if model is None and not provider_overridden:
+            model = defaults.model
+
+        configured_max_cycles = next(
+            (value for value in (config.max_cycles, defaults.max_cycles, agent.max_cycles) if value is not None),
+            10,
+        )
+        configured_max_handoffs = next(
+            (value for value in (config.max_handoffs, defaults.max_handoffs) if value is not None),
+            10,
+        )
+        effective_max_cycles = _validate_bounded_int(configured_max_cycles, "max_cycles", minimum=1)
+        effective_max_handoffs = _validate_bounded_int(configured_max_handoffs, "max_handoffs", minimum=0)
+        assert effective_max_cycles is not None
+        assert effective_max_handoffs is not None
+        model_settings = (
+            ModelSettings().resolve(defaults.model_settings).resolve(agent.model_settings).resolve(config.model_settings)
+        )
+        shared_state = None
+        if defaults.shared_state is not None or config.shared_state is not None:
+            shared_state = {**(defaults.shared_state or {}), **(config.shared_state or {})}
+
+        def prefer_run(name: str) -> Any:
+            value = getattr(config, name)
+            return value if value is not None else getattr(defaults, name)
+
+        settings_file = config.settings_file or defaults.settings_file or DEFAULT_SETTINGS_FILE
+        timeout_seconds = config.timeout_seconds
+        if timeout_seconds is None:
+            timeout_seconds = defaults.timeout_seconds
+        if timeout_seconds is None:
+            timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+
+        return replace(
+            config,
+            model=model,
+            model_provider=config.model_provider or defaults.model_provider,
+            model_settings=model_settings,
+            workspace=prefer_run("workspace"),
+            workspace_backend=prefer_run("workspace_backend"),
+            session=prefer_run("session"),
+            max_cycles=effective_max_cycles,
+            max_handoffs=effective_max_handoffs,
+            tool_policy=merge_tool_policy_layers(agent.tool_policy, defaults.tool_policy, config.tool_policy),
+            execution_backend=prefer_run("execution_backend"),
+            cancellation_token=prefer_run("cancellation_token"),
+            approval_provider=prefer_run("approval_provider"),
+            approval_timeout_seconds=prefer_run("approval_timeout_seconds"),
+            approval_broker=prefer_run("approval_broker"),
+            event_store=prefer_run("event_store"),
+            event_store_fail_closed=defaults.event_store_fail_closed or config.event_store_fail_closed,
+            stream=prefer_run("stream"),
+            hooks=[*defaults.hooks, *config.hooks],
+            tracing=prefer_run("tracing"),
+            context=prefer_run("context"),
+            context_providers=[*defaults.context_providers, *config.context_providers],
+            max_context_chars=prefer_run("max_context_chars"),
+            memory_providers=[*defaults.memory_providers, *config.memory_providers],
+            metadata={**defaults.metadata, **config.metadata},
+            settings_file=settings_file,
+            default_backend=prefer_run("default_backend"),
+            llm_builder=prefer_run("llm_builder"),
+            timeout_seconds=timeout_seconds,
+            tool_registry_factory=prefer_run("tool_registry_factory"),
+            log_preview_chars=prefer_run("log_preview_chars"),
+            debug_dump_dir=prefer_run("debug_dump_dir"),
+            shared_state=shared_state,
+            initial_messages=prefer_run("initial_messages"),
+            before_cycle_messages=prefer_run("before_cycle_messages"),
+            interruption_messages=prefer_run("interruption_messages"),
+            sub_task_manager=prefer_run("sub_task_manager"),
+            runtime_log_handler=prefer_run("runtime_log_handler"),
+            runtime_stream_callback=prefer_run("runtime_stream_callback"),
+        )
 
     @classmethod
     def _run(
@@ -71,89 +523,294 @@ class Runner:
         *,
         run_config: RunConfig,
         event_sink: Callable[[RunEvent], None] | None = None,
+        resume_runner: RunHandleRunner | None = None,
+        runner_defaults: RunConfig | None = None,
+        initial_result: RunResult | None = None,
+        _compiled_invocation: _CompiledTaskInvocation | None = None,
+    ) -> RunResult:
+        base_config = run_config
+        defaults = runner_defaults or RunConfig()
+        current_agent = agent
+        current_input = input
+        chain_events: list[RunEvent] = []
+        pending: _PendingHandoff | None = None
+        next_result = initial_result
+        next_compiled_invocation = _compiled_invocation
+        handoff_count = 0
+        max_handoffs = cls._effective_run_config(
+            agent,
+            base_config,
+            runner_defaults=defaults,
+        ).max_handoffs
+        assert max_handoffs is not None
+
+        while True:
+            effective_config = cls._effective_run_config(
+                current_agent,
+                base_config,
+                runner_defaults=defaults,
+            )
+            if next_result is not None:
+                result = next_result
+                next_result = None
+            else:
+                try:
+                    result = cls._run_single_agent(
+                        current_agent,
+                        current_input,
+                        run_config=effective_config,
+                        event_sink=event_sink,
+                        resume_runner=resume_runner,
+                        resume_config=base_config,
+                        _compiled_invocation=next_compiled_invocation,
+                    )
+                    next_compiled_invocation = None
+                except Exception as exc:
+                    if pending is not None:
+                        completed = HandoffCompletedEvent(
+                            run_id=pending.source_run_id,
+                            trace_id=pending.source_trace_id,
+                            source_agent=pending.request.source_agent,
+                            target_agent=pending.request.target_agent,
+                            tool_call_id=pending.request.tool_call_id,
+                            status=AgentStatus.FAILED.value,
+                            child_session_id=pending.session_id,
+                            cycle_index=pending.request.cycle_index,
+                            session_id=pending.session_id,
+                            metadata={
+                                **pending.request.metadata,
+                                "chain_continues": False,
+                                "error": str(exc),
+                            },
+                        )
+                        chain_events.append(completed)
+                        cls._emit_chain_event(completed, run_config=pending.event_config, event_sink=event_sink)
+                    raise
+
+            chain_events.extend(result.events)
+            request = cls._extract_handoff(result)
+            if pending is not None:
+                completed = HandoffCompletedEvent(
+                    run_id=pending.source_run_id,
+                    trace_id=pending.source_trace_id,
+                    source_agent=pending.request.source_agent,
+                    target_agent=pending.request.target_agent,
+                    tool_call_id=pending.request.tool_call_id,
+                    status=result.status.value,
+                    child_session_id=cls._resolve_event_session_id(effective_config),
+                    child_run_id=result.run_id,
+                    cycle_index=pending.request.cycle_index,
+                    session_id=pending.session_id,
+                    metadata={
+                        **pending.request.metadata,
+                        "chain_continues": request is not None,
+                    },
+                )
+                chain_events.append(completed)
+                cls._emit_chain_event(completed, run_config=pending.event_config, event_sink=event_sink)
+                pending = None
+
+            if request is None:
+                result.events = chain_events
+                return result
+            if handoff_count >= max_handoffs:
+                raise RuntimeError("maximum handoff depth exceeded")
+
+            transfer = next(
+                (
+                    candidate
+                    for candidate in current_agent.handoffs
+                    if candidate.tool_name == request.tool_name and candidate.agent.name == request.target_agent
+                ),
+                None,
+            )
+            if transfer is None:
+                raise RuntimeError(f"handoff target {request.target_agent!r} is not registered on agent {current_agent.name!r}")
+
+            session_id = cls._resolve_event_session_id(effective_config)
+            started = HandoffStartedEvent(
+                run_id=result.run_id,
+                trace_id=result.trace_id,
+                source_agent=request.source_agent,
+                target_agent=request.target_agent,
+                tool_call_id=request.tool_call_id,
+                child_session_id=session_id,
+                cycle_index=request.cycle_index,
+                session_id=session_id,
+                metadata=dict(request.metadata),
+            )
+            chain_events.append(started)
+            cls._emit_chain_event(started, run_config=effective_config, event_sink=event_sink)
+            pending = _PendingHandoff(
+                request=request,
+                source_run_id=result.run_id,
+                source_trace_id=result.trace_id,
+                session_id=session_id,
+                event_config=effective_config,
+            )
+            handoff_count += 1
+            base_config = replace(
+                base_config,
+                shared_state=deepcopy(result.raw_result.shared_state),
+            )
+            current_agent = transfer.agent
+            current_input = request.input
+
+    @staticmethod
+    def _emit_chain_event(
+        event: RunEvent,
+        *,
+        run_config: RunConfig,
+        event_sink: Callable[[RunEvent], None] | None,
+    ) -> None:
+        if run_config.event_store is not None:
+            try:
+                run_config.event_store.append(event)
+            except Exception as exc:
+                if run_config.event_store_fail_closed:
+                    raise
+                warnings.warn(f"Run event store append failed: {exc}", RuntimeWarning, stacklevel=2)
+        if event_sink is not None:
+            event_sink(event)
+        Runner._notify_observer(run_config.stream, event, label="Run event stream observer")
+
+    @staticmethod
+    def _notify_observer(callback: Callable[[Any], None] | None, payload: Any, *, label: str) -> None:
+        if callback is None:
+            return
+        try:
+            callback(payload)
+        except BaseException as exc:
+            warnings.warn(f"{label} failed: {exc}", RuntimeWarning, stacklevel=2)
+
+    @classmethod
+    def _run_single_agent(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig,
+        event_sink: Callable[[RunEvent], None] | None = None,
+        resume_runner: RunHandleRunner | None = None,
+        resume_config: RunConfig | None = None,
+        _compiled_invocation: _CompiledTaskInvocation | None = None,
     ) -> RunResult:
         if run_config.approval_provider is not None and run_config.approval_broker is None:
             run_config = replace(run_config, approval_broker=ApprovalBroker())
-        approval_broker = run_config.approval_broker
-        if run_config.approval_provider is not None and run_config.cancellation_token is not None and approval_broker is not None:
-            def cancel_approval_waits(broker: ApprovalBroker = approval_broker) -> None:
-                broker.cancel_pending("Run was cancelled.")
-
-            run_config.cancellation_token.on_cancel(cancel_approval_waits)
         run_id = f"run_{uuid.uuid4().hex}"
         trace_id = cls._resolve_trace_id(run_config)
+        trace = _RunTrace(
+            processors=cls._trace_processors(run_config),
+            trace_id=trace_id,
+            agent_name=agent.name,
+            workflow_name=cls._workflow_name(run_config),
+        )
+        trace_metadata: dict[str, Any] = {"status": "failed", "error": "run aborted"}
+        try:
+            result, trace_metadata = cls._run_single_agent_inner(
+                agent,
+                input,
+                run_config=run_config,
+                run_id=run_id,
+                trace_id=trace_id,
+                trace=trace,
+                event_sink=event_sink,
+                resume_runner=resume_runner,
+                resume_config=resume_config,
+                _compiled_invocation=_compiled_invocation,
+            )
+            return result
+        except BaseException as exc:
+            trace_metadata = {"status": "failed", "error": str(exc)}
+            raise
+        finally:
+            ended_run_span = trace.finish(trace_metadata)
+            if "result" in locals():
+                result.metadata["run_span"] = ended_run_span.to_dict()
+
+    @classmethod
+    def _run_single_agent_inner(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig,
+        run_id: str,
+        trace_id: str,
+        trace: _RunTrace,
+        event_sink: Callable[[RunEvent], None] | None = None,
+        resume_runner: RunHandleRunner | None = None,
+        resume_config: RunConfig | None = None,
+        _compiled_invocation: _CompiledTaskInvocation | None = None,
+    ) -> tuple[RunResult, dict[str, Any]]:
         event_session_id = cls._resolve_event_session_id(run_config)
         collected_events: list[RunEvent] = []
-        trace_processors = cls._trace_processors(run_config)
-        run_span = cls._start_span(
-            trace_processors,
-            name="run",
-            trace_id=trace_id,
-            metadata={
-                "agent_name": agent.name,
-                "workflow_name": cls._workflow_name(run_config),
-            },
-        )
-        tool_spans: dict[str, Span] = {}
         user_input = cls._normalize_input(input)
 
         def capture_event(event: RunEvent | None) -> None:
             if event is None:
                 return
             collected_events.append(event)
-            if isinstance(event, ToolStartedEvent):
-                tool_spans[event.tool_call_id] = cls._start_span(
-                    trace_processors,
-                    name="tool",
-                    trace_id=trace_id,
-                    parent_id=run_span.span_id,
-                    metadata={"tool_name": event.tool_name, "agent_name": agent.name},
-                )
-            elif isinstance(event, ToolFinishedEvent | HandoffEvent):
-                span = tool_spans.pop(event.tool_call_id, None)
-                if span is not None:
-                    cls._end_span(trace_processors, span, metadata=event.to_dict())
+            trace.on_event(event)
             if run_config.event_store is not None:
                 try:
                     run_config.event_store.append(event)
                 except Exception as exc:
                     if run_config.event_store_fail_closed:
-                        raise
+                        raise RuntimeError(f"run event store append failed: {exc}") from exc
                     warnings.warn(f"Run event store append failed: {exc}", RuntimeWarning, stacklevel=2)
-            if run_config.stream is not None:
-                run_config.stream(event)
             if event_sink is not None:
                 event_sink(event)
+            cls._notify_observer(run_config.stream, event, label="Run event stream observer")
 
         def log_handler(event: str, payload: dict[str, Any]) -> None:
-            capture_event(
-                event_from_runtime_log(
-                    event,
-                    payload,
-                    run_id=run_id,
-                    trace_id=trace_id,
-                    agent_name=agent.name,
-                    user_input=user_input,
-                    session_id=event_session_id,
+            if event not in _RUNTIME_TERMINAL_LOG_EVENTS:
+                capture_event(
+                    event_from_runtime_log(
+                        event,
+                        payload,
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        agent_name=agent.name,
+                        user_input=user_input,
+                        session_id=event_session_id,
+                    )
                 )
-            )
             if run_config.runtime_log_handler is not None:
                 run_config.runtime_log_handler(event, payload)
 
         def stream_callback(payload: dict[str, Any]) -> None:
-            if run_config.runtime_stream_callback is not None:
-                run_config.runtime_stream_callback(payload)
+            canonical_child = isinstance(payload, _CanonicalSubAgentStreamPayload)
             capture_event(
                 event_from_stream_payload(
                     payload,
-                    run_id=run_id,
-                    trace_id=trace_id,
-                    agent_name=agent.name,
-                    session_id=event_session_id,
+                    run_id=(str(payload["run_id"]) if canonical_child else run_id),
+                    trace_id=(str(payload["trace_id"]) if canonical_child else trace_id),
+                    agent_name=(str(payload["agent_name"]) if canonical_child else agent.name),
+                    session_id=(str(payload["session_id"]) if canonical_child else event_session_id),
+                    parent_run_id=(str(payload.get("parent_run_id") or "") or None if canonical_child else None),
+                    preserve_metadata=canonical_child,
                 )
             )
+            cls._notify_observer(
+                run_config.runtime_stream_callback,
+                payload,
+                label="Runtime stream observer",
+            )
 
-        guardrail_context = RunContext(context=run_config.context, metadata={**agent.metadata, **run_config.metadata})
+        context_model = run_config.model
+        if isinstance(context_model, ModelRef):
+            context_model = context_model.model()
+        elif context_model is not None:
+            context_model = getattr(context_model, "model_id", context_model)
+        guardrail_context = RunContext(
+            context=run_config.context,
+            run_id=run_id,
+            agent_name=agent.name,
+            model=context_model,
+            workspace=run_config.workspace,
+            metadata={**agent.metadata, **run_config.metadata},
+        )
         input_result = cls._apply_input_guardrails(agent=agent, run_context=guardrail_context, user_input=user_input)
         if input_result.outcome in {"block", "require_approval"}:
             message = input_result.message or "Input blocked by guardrail."
@@ -166,8 +823,8 @@ class Runner:
             )
             capture_event(failed_event)
             raw_result = AgentResult(status=AgentStatus.FAILED, messages=[], cycles=[], error=message)
-            ended_run_span = cls._end_span(trace_processors, run_span, metadata={"status": "failed", "error": message})
-            return RunResult(
+            trace_metadata = {"status": "failed", "error": message}
+            result = RunResult(
                 input=user_input,
                 new_items=[],
                 final_output=message,
@@ -177,13 +834,18 @@ class Runner:
                 token_usage=raw_result.token_usage,
                 trace_id=trace_id,
                 run_id=run_id,
-                metadata={"run_span": ended_run_span.to_dict()},
+                metadata={},
+                agent_name=agent.name,
+                resolved_model=None,
             )
+            return result, trace_metadata
         if input_result.outcome == "rewrite":
             user_input = str(input_result.value)
 
         llm_client, resolved = cls._resolve_model(agent=agent, run_config=run_config)
-        resolved_model_settings = agent.model_settings.resolve(run_config.model_settings)
+        guardrail_context.model = resolved.model_id
+        provider_settings = cls._provider_default_settings(run_config=run_config, resolved=resolved)
+        resolved_model_settings = provider_settings.resolve(run_config.model_settings)
         if run_config.debug_dump_dir:
             cast(Any, llm_client).debug_dump_dir = run_config.debug_dump_dir
 
@@ -194,41 +856,59 @@ class Runner:
             default_workspace=cls._resolve_workspace(run_config.workspace),
             log_handler=log_handler,
             log_preview_chars=run_config.log_preview_chars,
-            settings_file=run_config.settings_file,
+            settings_file=run_config.settings_file or DEFAULT_SETTINGS_FILE,
             default_backend=run_config.default_backend,
             llm_builder=run_config.llm_builder,
             tool_registry_factory=run_config.tool_registry_factory,
             execution_backend=run_config.execution_backend,
-            hooks=list(run_config.runtime_hooks),
+            workspace_backend=run_config.workspace_backend,
+            hooks=[*agent.hooks, *run_config.hooks],
         )
-        task = run_config.runtime_task or AgentCompiler().compile(
-            agent=agent,
-            input=user_input,
-            run_config=run_config,
-            resolved=resolved,
-            trace_id=trace_id,
+        task = (
+            deepcopy(_compiled_invocation.task)
+            if _compiled_invocation is not None
+            else AgentCompiler().compile(
+                agent=agent,
+                input=user_input,
+                run_config=run_config,
+                resolved=resolved,
+                trace_id=trace_id,
+                run_id=run_id,
+            )
         )
-        if run_config.tool_registry_factory is not None:
-            task.extra_tool_names = [
-                *task.extra_tool_names,
-                *[name for name in registry.list_planner_extra_tool_names() if name not in task.extra_tool_names],
-            ]
         policy = run_config.tool_policy
+        policy_metadata = _tool_policy_metadata(policy)
+        for key in _TOOL_POLICY_METADATA_KEYS:
+            task.metadata.pop(key, None)
+        for key in ("_vv_agent_allowed_tools", "_vv_agent_disallowed_tools"):
+            if key in policy_metadata:
+                task.metadata[key] = policy_metadata[key]
+        task.extra_tool_names = [
+            *task.extra_tool_names,
+            *[name for name in registry.list_planner_extra_tool_names() if name not in task.extra_tool_names],
+        ]
         initial_messages = (
             list(run_config.initial_messages)
             if run_config.initial_messages is not None
             else cls._session_initial_messages(run_config)
         )
+        runtime_metadata = dict(run_config.metadata)
+        for key in _TOOL_POLICY_METADATA_KEYS:
+            runtime_metadata.pop(key, None)
+        runtime_metadata.update(policy_metadata)
         ctx = ExecutionContext(
             cancellation_token=run_config.cancellation_token,
             stream_callback=stream_callback,
             metadata={
+                **runtime_metadata,
                 "_vv_agent_agent_name": agent.name,
                 "_vv_agent_emit_event": capture_event,
                 "trace_id": trace_id,
                 "_vv_agent_run_id": run_id,
                 "_vv_agent_trace_id": trace_id,
+                "_vv_agent_input": user_input,
                 "_vv_agent_model_settings": resolved_model_settings,
+                "_vv_agent_model_provider": run_config.model_provider,
                 "_vv_agent_run_context": guardrail_context,
                 "_vv_agent_session": run_config.session,
                 "_vv_agent_session_id": event_session_id,
@@ -236,9 +916,6 @@ class Runner:
                 "_vv_agent_approval_provider": run_config.approval_provider,
                 "_vv_agent_approval_broker": run_config.approval_broker,
                 "_vv_agent_approval_timeout_seconds": run_config.approval_timeout_seconds,
-                "_vv_agent_tool_policy_can_use_tool": policy.can_use_tool if policy is not None else None,
-                "_vv_agent_tool_policy_approval": policy.approval if policy is not None else "default",
-                **dict(run_config.metadata),
             },
         )
 
@@ -253,10 +930,6 @@ class Runner:
             interruption_messages=run_config.interruption_messages,
             sub_task_manager=run_config.sub_task_manager,
         )
-        new_items = cls._new_session_items(user_input=user_input, result=raw_result)
-        if run_config.session is not None and new_items:
-            run_config.session.add_items(new_items)
-
         final_output = raw_result.final_answer or raw_result.wait_reason or raw_result.error
         output_result = cls._apply_output_guardrails(
             agent=agent,
@@ -264,35 +937,47 @@ class Runner:
             final_output=final_output,
         )
         if output_result.outcome == "rewrite":
-            final_output = str(output_result.value)
+            final_output = output_result.value
+            cls._replace_raw_result_output(raw_result, final_output)
         elif output_result.outcome in {"block", "require_approval"}:
             final_output = output_result.message or "Output blocked by guardrail."
             raw_result.status = AgentStatus.FAILED
+            raw_result.final_answer = None
+            raw_result.wait_reason = None
             raw_result.error = final_output
-        final_output = cls._coerce_output_type(agent=agent, final_output=final_output)
-        if not any(event.type == "run_completed" for event in collected_events):
+        output_coercion_error: Exception | None = None
+        if raw_result.status == AgentStatus.COMPLETED:
+            try:
+                final_output = cls._coerce_output_type(agent=agent, final_output=final_output)
+            except Exception as exc:
+                output_coercion_error = exc
+
+        new_items = cls._new_session_items(initial_messages=initial_messages, result=raw_result)
+        if run_config.session is not None:
+            run_config.session.add_items(cls._session_items_for_persistence(new_items, raw_result))
             capture_event(
-                RunCompletedEvent(
+                SessionPersistedEvent(
                     run_id=run_id,
                     trace_id=trace_id,
                     agent_name=agent.name,
-                    session_id=event_session_id,
-                    cycle_index=len(raw_result.cycles) or None,
-                    final_output=str(final_output) if final_output is not None else None,
-                    status=raw_result.status.value,
-                    metadata={
-                        "status": raw_result.status.value,
-                        "final_output": final_output,
-                    },
+                    session_id=event_session_id or "",
                 )
             )
-        ended_run_span = cls._end_span(
-            trace_processors,
-            run_span,
-            metadata={"status": raw_result.status.value, "final_output": final_output},
+        capture_event(
+            cls._terminal_event(
+                result=raw_result,
+                final_output=final_output,
+                run_id=run_id,
+                trace_id=trace_id,
+                agent_name=agent.name,
+                session_id=event_session_id,
+                cancellation_token=run_config.cancellation_token,
+            )
         )
-
-        return RunResult(
+        trace_metadata = {"status": raw_result.status.value, "final_output": final_output}
+        if output_coercion_error is not None:
+            raise output_coercion_error
+        result = RunResult(
             input=user_input,
             new_items=new_items,
             final_output=final_output,
@@ -302,8 +987,19 @@ class Runner:
             token_usage=raw_result.token_usage,
             trace_id=trace_id,
             run_id=run_id,
-            metadata={"resolved_model": resolved.model_id, "backend": resolved.backend, "run_span": ended_run_span.to_dict()},
+            metadata={"resolved_model": resolved.model_id, "backend": resolved.backend},
+            agent_name=agent.name,
+            resolved_model=resolved,
+            _resume_context=_RunResumeContext(
+                agent=agent,
+                input=user_input,
+                run_config=resume_config or run_config,
+                runner=resume_runner or cast(RunHandleRunner, cls),
+                effective_run_config=run_config,
+                pending_tool_approval=ctx._pending_tool_approval,
+            ),
         )
+        return result, trace_metadata
 
     @staticmethod
     def _apply_input_guardrails(*, agent: Agent, run_context: RunContext[Any], user_input: str) -> GuardrailResult:
@@ -332,6 +1028,65 @@ class Runner:
         if current_output != final_output:
             return GuardrailResult.rewrite(current_output)
         return GuardrailResult.allow()
+
+    @staticmethod
+    def _replace_raw_result_output(result: AgentResult, output: Any) -> None:
+        value = output if isinstance(output, str) or output is None else json.dumps(output, ensure_ascii=False)
+        if result.status == AgentStatus.COMPLETED:
+            result.final_answer = value
+        elif result.status == AgentStatus.WAIT_USER:
+            result.wait_reason = value
+        else:
+            result.error = value
+
+    @staticmethod
+    def _terminal_event(
+        *,
+        result: AgentResult,
+        final_output: Any,
+        run_id: str,
+        trace_id: str,
+        agent_name: str,
+        session_id: str | None,
+        cancellation_token: Any | None,
+    ) -> RunEvent:
+        cycle_index = len(result.cycles) or None
+        cancelled = bool(result.status == AgentStatus.FAILED and cancellation_token is not None and cancellation_token.cancelled)
+        if cancelled:
+            return RunCancelledEvent(
+                run_id=run_id,
+                trace_id=trace_id,
+                agent_name=agent_name,
+                session_id=session_id,
+                cycle_index=cycle_index,
+                reason=result.error or cancellation_token.reason or "run cancelled",
+            )
+        if result.status in {AgentStatus.FAILED, AgentStatus.MAX_CYCLES}:
+            return RunFailedEvent(
+                run_id=run_id,
+                trace_id=trace_id,
+                agent_name=agent_name,
+                session_id=session_id,
+                cycle_index=cycle_index,
+                error=result.error or result.status.value,
+            )
+        event_output = final_output
+        if event_output is not None and not isinstance(event_output, str):
+            event_output = json.dumps(
+                RunResult._serializable_output(event_output),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        return RunCompletedEvent(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            cycle_index=cycle_index,
+            final_output=event_output,
+            status=result.status.value,
+        )
 
     @staticmethod
     def _coerce_output_type(*, agent: Agent, final_output: Any) -> Any:
@@ -367,40 +1122,72 @@ class Runner:
     @classmethod
     def _resolve_model(cls, *, agent: Agent, run_config: RunConfig) -> tuple[LLMClient, ResolvedModelConfig]:
         if run_config.model_provider is not None:
-            return run_config.model_provider(agent, run_config)
+            provider = cast(Any, run_config.model_provider)
+            if hasattr(provider, "resolve") and hasattr(provider, "client"):
+                model = run_config.model or agent.model
+                if model is None:
+                    default_model_ref = getattr(provider, "default_model_ref", None)
+                    model = default_model_ref() if callable(default_model_ref) else None
+                if model is None:
+                    raise ValueError("Agent.model or RunConfig.model is required when a model provider is configured.")
+                resolved = provider.resolve(ModelRef.coerce(model))
+                return provider.client(resolved), resolved
+            return provider(agent, run_config)
         model = run_config.model or agent.model
         if hasattr(model, "complete"):
             model_id = getattr(model, "model_id", "direct")
             return cast(LLMClient, model), cls._direct_resolved(str(model_id))
         if model is None:
             raise ValueError("Agent.model or RunConfig.model is required when no model_provider is configured.")
-        backend = run_config.default_backend or cls._infer_backend(run_config.settings_file, str(model))
-        return build_openai_llm_from_local_settings(
-            run_config.settings_file,
+        settings_file = run_config.settings_file or DEFAULT_SETTINGS_FILE
+        timeout_seconds = run_config.timeout_seconds if run_config.timeout_seconds is not None else DEFAULT_TIMEOUT_SECONDS
+        backend = run_config.default_backend or cls._infer_backend(settings_file, str(model))
+        llm_builder = run_config.llm_builder or build_openai_llm_from_local_settings
+        return llm_builder(
+            settings_file,
             backend=backend,
             model=str(model),
-            timeout_seconds=run_config.timeout_seconds,
+            timeout_seconds=timeout_seconds,
         )
+
+    @staticmethod
+    def _provider_default_settings(*, run_config: RunConfig, resolved: ResolvedModelConfig) -> ModelSettings:
+        default_settings = getattr(run_config.model_provider, "default_settings", None)
+        if callable(default_settings):
+            return default_settings(resolved)
+        return ModelSettings()
 
     @classmethod
     def _build_tool_registry(cls, *, agent: Agent, run_config: RunConfig) -> ToolRegistry:
         registry = (
-            run_config.tool_registry_factory()
-            if run_config.tool_registry_factory is not None
-            else build_default_registry()
+            run_config.tool_registry_factory() if run_config.tool_registry_factory is not None else build_default_registry()
         )
-        for tool in agent.tools:
-            if not isinstance(tool, FunctionTool):
+        for candidate in agent.tools:
+            if is_tool_executor(candidate):
+                executor = cast(ToolExecutor, candidate)
+                is_model_visible = executor.exposure != ToolExposure.HIDDEN
+                registry.register_executor(
+                    executor,
+                    expose_to_model=is_model_visible,
+                    planner_extra=is_model_visible,
+                )
                 continue
+            tool = candidate if isinstance(candidate, FunctionTool) else adapt_tool(cast(Tool, candidate))
             if not cls._tool_is_enabled(tool=tool, agent=agent, run_config=run_config):
                 continue
-            registry.register_schema(tool.name, tool.to_openai_schema())
+            if not isinstance(candidate, FunctionTool):
+                is_model_visible = tool.exposure != ToolExposure.HIDDEN
+                registry.register_executor(
+                    tool.to_executor(),
+                    expose_to_model=is_model_visible,
+                    planner_extra=is_model_visible,
+                )
+                continue
+            if tool.exposure != ToolExposure.HIDDEN:
+                registry.register_schema(tool.name, tool.to_openai_schema())
 
             def handler(context: ToolContext, arguments: dict[str, Any], *, _tool: FunctionTool = tool) -> ToolExecutionResult:
-                result = cls._execute_function_tool(_tool, context=context, arguments=arguments, run_config=run_config)
-                if agent.tool_use_behavior == "stop_on_first_tool" and result.directive == ToolDirective.CONTINUE:
-                    result.directive = ToolDirective.FINISH
-                return result
+                return cls._execute_function_tool(_tool, context=context, arguments=arguments, run_config=run_config)
 
             registry.register(ToolSpec(name=tool.name, handler=handler))
             registry.mark_policy_managed_by_handler(tool.name)
@@ -416,7 +1203,13 @@ class Runner:
                         "description": transfer.description or f"Transfer control to {transfer.agent.name}.",
                         "parameters": {
                             "type": "object",
-                            "properties": {"input": {"type": "string"}},
+                            "properties": {
+                                "input": {
+                                    "type": "string",
+                                    "description": "Input or handoff summary for the target agent.",
+                                    "minLength": 1,
+                                }
+                            },
                             "required": ["input"],
                             "additionalProperties": False,
                         },
@@ -430,81 +1223,49 @@ class Runner:
                 *,
                 _target: Agent = transfer.agent,
                 _tool_name: str = transfer.tool_name,
+                _metadata: tuple[tuple[str, Any], ...] = tuple(transfer.metadata.items()),
             ) -> ToolExecutionResult:
-                runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
-                event_sink = runtime_metadata.get("_vv_agent_emit_event")
-                run_id = str(runtime_metadata.get("_vv_agent_run_id") or "")
-                trace_id = str(runtime_metadata.get("_vv_agent_trace_id") or runtime_metadata.get("trace_id") or "")
-                session_id = runtime_metadata.get("_vv_agent_session_id")
-                parent_run_id = runtime_metadata.get("_vv_agent_parent_run_id")
-
-                def emit(event: RunEvent) -> None:
-                    if callable(event_sink):
-                        event_sink(event)
-
-                event_metadata = {
-                    "arguments": dict(arguments),
-                    "tool_name": context.tool_name or _tool_name,
-                }
-                emit(
-                    HandoffStartedEvent(
-                        run_id=run_id,
-                        trace_id=trace_id,
-                        source_agent=agent.name,
-                        target_agent=_target.name,
+                input_value = arguments.get("input")
+                if set(arguments) != {"input"} or not isinstance(input_value, str) or not input_value.strip():
+                    return ToolExecutionResult(
                         tool_call_id=context.tool_call_id,
-                        status="started",
-                        cycle_index=context.cycle_index,
-                        session_id=str(session_id) if session_id is not None else None,
-                        parent_run_id=str(parent_run_id) if parent_run_id is not None else None,
-                        metadata=event_metadata,
+                        content=json.dumps(
+                            {
+                                "ok": False,
+                                "error": "handoff requires a non-empty input string and no additional arguments",
+                                "error_code": "invalid_handoff_arguments",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        status="error",
+                        status_code=ToolResultStatus.ERROR,
+                        error_code="invalid_handoff_arguments",
                     )
-                )
-                try:
-                    child = cls._run_child_agent(_target, arguments=arguments, parent_config=run_config)
-                except Exception as exc:
-                    emit(
-                        HandoffCompletedEvent(
-                            run_id=run_id,
-                            trace_id=trace_id,
-                            source_agent=agent.name,
-                            target_agent=_target.name,
-                            tool_call_id=context.tool_call_id,
-                            status=AgentStatus.FAILED.value,
-                            cycle_index=context.cycle_index,
-                            session_id=str(session_id) if session_id is not None else None,
-                            parent_run_id=str(parent_run_id) if parent_run_id is not None else None,
-                            metadata={**event_metadata, "error": str(exc)},
-                        )
-                    )
-                    raise
-                emit(
-                    HandoffCompletedEvent(
-                        run_id=run_id,
-                        trace_id=trace_id,
-                        source_agent=agent.name,
-                        target_agent=_target.name,
-                        tool_call_id=context.tool_call_id,
-                        status=child.status.value,
-                        child_run_id=child.run_id,
-                        cycle_index=context.cycle_index,
-                        session_id=str(session_id) if session_id is not None else None,
-                        parent_run_id=str(parent_run_id) if parent_run_id is not None else None,
-                        metadata=event_metadata,
-                    )
-                )
-                return ToolExecutionResult(
-                    tool_call_id="",
-                    content=child.final_output or "",
-                    directive=ToolDirective.FINISH,
-                    metadata={
-                        "agent": _target.name,
+                handoff_input = input_value.strip()
+                metadata = dict(_metadata)
+                metadata.update(
+                    {
                         "mode": "handoff",
                         "handoff_from": agent.name,
                         "handoff_to": _target.name,
-                        "child_status": child.status.value,
-                        "child_run_id": child.run_id,
-                    },
+                        "handoff_input": handoff_input,
+                        "handoff_tool_name": _tool_name,
+                    }
+                )
+                return ToolExecutionResult(
+                    tool_call_id=context.tool_call_id,
+                    content=json.dumps(
+                        {
+                            "ok": True,
+                            "handoff": True,
+                            "from_agent": agent.name,
+                            "to_agent": _target.name,
+                            "input": handoff_input,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    directive=ToolDirective.FINISH,
+                    metadata=metadata,
                 )
 
             registry.register(ToolSpec(name=transfer.tool_name, handler=handoff_handler))
@@ -519,15 +1280,55 @@ class Runner:
         arguments: dict[str, Any],
         run_config: RunConfig,
     ) -> ToolExecutionResult:
+        run_config = cls._tool_run_config_from_context(context=context, fallback=run_config)
+        denied_result = cls._policy_denial_result(
+            tool,
+            context=context,
+            arguments=arguments,
+            run_config=run_config,
+        )
+        if denied_result is not None:
+            return denied_result
         approval_result = cls._approval_result(tool, context=context, arguments=arguments, run_config=run_config)
         if approval_result is not None:
             return approval_result
-        denied_result = cls._policy_denial_result(tool, arguments=arguments, run_config=run_config)
-        if denied_result is not None:
-            return denied_result
-        if tool.metadata.get("mode") in {"agent_as_tool", "background_task"} and isinstance(tool.metadata.get("agent"), Agent):
+        return cls._invoke_function_tool(tool, context=context, arguments=arguments, run_config=run_config)
+
+    @classmethod
+    def _invoke_function_tool(
+        cls,
+        tool: FunctionTool,
+        *,
+        context: ToolContext,
+        arguments: dict[str, Any],
+        run_config: RunConfig,
+    ) -> ToolExecutionResult:
+        if isinstance(tool, BackgroundAgentTask):
+            handle = tool.start(
+                cls,
+                context,
+                arguments,
+                run_config=cls._child_run_config(run_config, context=context),
+            )
+            snapshot = handle.snapshot()
+            return ToolExecutionResult(
+                tool_call_id="",
+                content=json.dumps(snapshot.to_dict(), ensure_ascii=False),
+                metadata={
+                    "agent": tool.agent.name,
+                    "mode": "background_task",
+                    "task_id": handle.task_id,
+                    "child_status": snapshot.status.value,
+                },
+            )
+        if tool.metadata.get("mode") == "agent_as_tool" and isinstance(tool.metadata.get("agent"), Agent):
             child_agent = tool.metadata["agent"]
-            child = cls._run_child_agent(child_agent, arguments=arguments, parent_config=run_config)
+            child = cls._run_child_agent(
+                child_agent,
+                arguments=arguments,
+                parent_config=run_config,
+                context=context,
+            )
             return ToolExecutionResult(
                 tool_call_id="",
                 content=child.final_output or "",
@@ -538,7 +1339,52 @@ class Runner:
                     "child_run_id": child.run_id,
                 },
             )
-        return tool.to_tool_execution_result(tool.on_invoke(context, arguments))
+        return tool.to_tool_execution_result(tool.invoke(context, arguments))
+
+    @staticmethod
+    def _tool_run_config_from_context(*, context: ToolContext, fallback: RunConfig) -> RunConfig:
+        runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
+        task_metadata = context.task_metadata if isinstance(context.task_metadata, dict) else {}
+        is_sub_task = task_metadata.get("is_sub_task") is True
+        policy_keys_present = any(key in runtime_metadata for key in _TOOL_POLICY_METADATA_KEYS)
+
+        if is_sub_task or policy_keys_present:
+            allowed = runtime_metadata.get("_vv_agent_allowed_tools")
+            disallowed = runtime_metadata.get("_vv_agent_disallowed_tools")
+            can_use_tool = runtime_metadata.get("_vv_agent_tool_policy_can_use_tool")
+            approval = runtime_metadata.get("_vv_agent_tool_policy_approval")
+            tool_policy = None
+            if policy_keys_present:
+                tool_policy = ToolPolicy(
+                    allowed_tools=([name for name in allowed if isinstance(name, str)] if isinstance(allowed, list) else None),
+                    disallowed_tools=(
+                        [name for name in disallowed if isinstance(name, str)] if isinstance(disallowed, list) else []
+                    ),
+                    approval=(approval if approval in {"always", "never", "on_request"} else "default"),
+                    can_use_tool=can_use_tool if callable(can_use_tool) else None,
+                )
+        else:
+            tool_policy = fallback.tool_policy
+
+        def runtime_capability(key: str, fallback_value: Any) -> Any:
+            return runtime_metadata.get(key, fallback_value)
+
+        return replace(
+            fallback,
+            tool_policy=tool_policy,
+            approval_provider=runtime_capability(
+                "_vv_agent_approval_provider",
+                fallback.approval_provider,
+            ),
+            approval_broker=runtime_capability(
+                "_vv_agent_approval_broker",
+                fallback.approval_broker,
+            ),
+            approval_timeout_seconds=runtime_capability(
+                "_vv_agent_approval_timeout_seconds",
+                fallback.approval_timeout_seconds,
+            ),
+        )
 
     @staticmethod
     def _tool_is_enabled(*, tool: FunctionTool, agent: Agent, run_config: RunConfig) -> bool:
@@ -554,32 +1400,49 @@ class Runner:
     def _policy_denial_result(
         tool: FunctionTool,
         *,
+        context: ToolContext,
         arguments: dict[str, Any],
         run_config: RunConfig,
     ) -> ToolExecutionResult | None:
         policy = run_config.tool_policy
-        if policy is None:
-            return None
+        policy_source: str | None = None
+        if policy is not None:
+            if policy.allowed_tools is not None and tool.name not in policy.allowed_tools:
+                policy_source = "allowed_tools"
+            elif tool.name in policy.disallowed_tools:
+                policy_source = "disallowed_tools"
+            elif policy.can_use_tool is not None and not bool(policy.can_use_tool(tool.name, dict(arguments))):
+                policy_source = "can_use_tool"
 
-        if tool.name in policy.disallowed_tools or (policy.allowed_tools is not None and tool.name not in policy.allowed_tools):
-            allowed = False
-        elif policy.can_use_tool is not None:
-            allowed = bool(policy.can_use_tool(tool.name, dict(arguments)))
-        else:
-            allowed = True
+        planned_tool_names = context.metadata.get(_PLANNED_TOOL_NAMES_METADATA_KEY)
+        if (
+            policy_source is None
+            and isinstance(planned_tool_names, (frozenset, set, list, tuple))
+            and tool.name not in planned_tool_names
+        ):
+            policy_source = "planned_name"
 
-        if allowed:
+        if policy_source is None:
             return None
 
         message = f"Tool {tool.name} is not allowed for these arguments."
         return ToolExecutionResult(
             tool_call_id="",
-            content=message,
+            content=json.dumps(
+                {
+                    "ok": False,
+                    "error": message,
+                    "error_code": "tool_not_allowed",
+                    "tool_name": tool.name,
+                },
+                ensure_ascii=False,
+            ),
             status="error",
             status_code=ToolResultStatus.ERROR,
             error_code="tool_not_allowed",
             metadata={
                 "mode": "permission_denied",
+                "policy_source": policy_source,
                 "tool_name": tool.name,
                 "arguments": dict(arguments),
                 "message": message,
@@ -594,6 +1457,16 @@ class Runner:
         arguments: dict[str, Any],
         run_config: RunConfig,
     ) -> ToolExecutionResult | None:
+        if context.ctx is not None:
+            approved = getattr(context.ctx, "_approved_tool_approval", None)
+            approved_call = getattr(approved, "call", None)
+            if (
+                approved_call is not None
+                and approved_call.id == context.tool_call_id
+                and approved_call.name == tool.name
+                and approved_call.arguments == arguments
+            ):
+                return None
         policy = run_config.tool_policy
         if policy is not None and policy.approval == "never":
             return None
@@ -612,13 +1485,28 @@ class Runner:
                 run_config=run_config,
             )
         message = f"Approval required for tool {tool.name}."
+        runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
+        run_id = str(runtime_metadata.get("_vv_agent_run_id") or "run")
+        interruption_id = ApprovalRequest.create(
+            tool_name=tool.name,
+            tool_call_id=context.tool_call_id,
+            arguments=arguments,
+            run_id=run_id,
+            trace_id=str(runtime_metadata.get("_vv_agent_trace_id") or runtime_metadata.get("trace_id") or ""),
+            agent_name=str(runtime_metadata.get("_vv_agent_agent_name") or ""),
+            cycle_index=context.cycle_index,
+        ).request_id
         return ToolExecutionResult(
             tool_call_id="",
             content=message,
             status_code=ToolResultStatus.WAIT_RESPONSE,
             directive=ToolDirective.WAIT_USER,
+            error_code="tool_approval_required",
             metadata={
                 "mode": "approval_requested",
+                "approval_required": True,
+                "approval_interruption_id": interruption_id,
+                "request_id": interruption_id,
                 "tool_name": tool.name,
                 "arguments": dict(arguments),
                 "message": message,
@@ -659,13 +1547,27 @@ class Runner:
 
         if provider is None:
             return None
-        should_request = provider.should_request(request)
+        if broker is None:
+            broker = ApprovalBroker()
+        try:
+            session_allowed = broker.is_session_allowed(tool.name)
+        except Exception as exc:
+            raise ApprovalError(str(exc)) from exc
+        if session_allowed:
+            return None
+        try:
+            should_request = provider.should_request(request)
+        except Exception as exc:
+            raise ApprovalError(str(exc)) from exc
         check_cancelled()
         if not should_request:
             return None
-        if broker is None:
-            broker = ApprovalBroker()
-        broker.register(request)
+        try:
+            broker.register(request)
+        except Exception as exc:
+            broker.discard(request.request_id)
+            raise ApprovalError(str(exc)) from exc
+        bind_request_cancellation(broker, request.request_id, context.ctx.cancellation_token if context.ctx else None)
 
         def emit(event: RunEvent) -> None:
             event_sink = runtime_metadata.get("_vv_agent_emit_event")
@@ -678,6 +1580,7 @@ class Runner:
                 run_id=run_id,
                 trace_id=trace_id,
                 agent_name=agent_name,
+                session_id=str(request.metadata.get("session_id") or "") or None,
                 cycle_index=context.cycle_index,
                 request_id=request.request_id,
                 tool_name=tool.name,
@@ -690,23 +1593,33 @@ class Runner:
             )
         )
 
-        decision = provider.decide(request)
+        try:
+            decision = provider.decide(request)
+        except Exception as exc:
+            broker.discard(request.request_id)
+            raise ApprovalError(str(exc)) from exc
         check_cancelled()
-        if decision is None:
-            decision = broker.wait(request.request_id, timeout=run_config.approval_timeout_seconds)
-        else:
-            broker.resolve(request.request_id, decision)
-            decision = broker.wait(request.request_id, timeout=0)
+        try:
+            if decision is None:
+                decision = broker.wait(request.request_id, timeout=run_config.approval_timeout_seconds)
+            else:
+                broker.resolve(request.request_id, decision)
+                decision = broker.wait(request.request_id, timeout=0)
+        except Exception as exc:
+            broker.discard(request.request_id)
+            raise ApprovalError(str(exc)) from exc
         approved = decision.action in {"allow", "allow_session"}
         emit(
             ApprovalResolvedEvent(
                 run_id=run_id,
                 trace_id=trace_id,
                 agent_name=agent_name,
+                session_id=str(request.metadata.get("session_id") or "") or None,
                 cycle_index=context.cycle_index,
                 request_id=request.request_id,
                 tool_name=tool.name,
                 tool_call_id=context.tool_call_id,
+                action=decision.action,
                 approved=approved,
                 metadata={
                     "action": decision.action,
@@ -725,6 +1638,7 @@ class Runner:
                 arguments=arguments,
                 request_id=request.request_id,
                 error_code="tool_approval_timeout",
+                action=decision.action,
                 message=decision.reason or "Approval request timed out.",
             )
         return Runner._approval_error_result(
@@ -733,6 +1647,7 @@ class Runner:
             arguments=arguments,
             request_id=request.request_id,
             error_code="tool_approval_denied",
+            action=decision.action,
             message=decision.reason or f"Approval denied for tool {tool.name}.",
         )
 
@@ -744,6 +1659,7 @@ class Runner:
         arguments: dict[str, Any],
         request_id: str,
         error_code: str,
+        action: str,
         message: str,
     ) -> ToolExecutionResult:
         return ToolExecutionResult(
@@ -753,6 +1669,7 @@ class Runner:
                     "ok": False,
                     "error": message,
                     "error_code": error_code,
+                    "tool_name": tool.name,
                 },
                 ensure_ascii=False,
             ),
@@ -764,27 +1681,101 @@ class Runner:
                 "request_id": request_id,
                 "tool_name": tool.name,
                 "arguments": dict(arguments),
+                "action": action,
                 "message": message,
             },
         )
 
+    @staticmethod
+    def _extract_handoff(result: RunResult) -> _HandoffRequest | None:
+        for cycle in result.raw_result.cycles:
+            for tool_result in cycle.tool_results:
+                metadata = tool_result.metadata if isinstance(tool_result.metadata, dict) else {}
+                if metadata.get("mode") != "handoff":
+                    continue
+                source_agent = metadata.get("handoff_from")
+                target_agent = metadata.get("handoff_to")
+                tool_name = metadata.get("handoff_tool_name")
+                handoff_input = metadata.get("handoff_input")
+                if not isinstance(source_agent, str) or not source_agent:
+                    raise RuntimeError("handoff tool result is missing canonical control metadata")
+                if not isinstance(target_agent, str) or not target_agent:
+                    raise RuntimeError("handoff tool result is missing canonical control metadata")
+                if not isinstance(tool_name, str) or not tool_name:
+                    raise RuntimeError("handoff tool result is missing canonical control metadata")
+                if not isinstance(handoff_input, str) or not handoff_input:
+                    raise RuntimeError("handoff tool result is missing canonical control metadata")
+                return _HandoffRequest(
+                    source_agent=source_agent,
+                    target_agent=target_agent,
+                    tool_name=tool_name,
+                    tool_call_id=tool_result.tool_call_id,
+                    input=handoff_input,
+                    cycle_index=cycle.index,
+                    metadata=dict(metadata),
+                )
+        return None
+
     @classmethod
-    def _run_child_agent(cls, child_agent: Agent, *, arguments: dict[str, Any], parent_config: RunConfig) -> RunResult:
-        child_input = str(arguments.get("input") or arguments.get("prompt") or "")
-        child_config = replace(
+    def _run_child_agent(
+        cls,
+        child_agent: Agent,
+        *,
+        arguments: dict[str, Any],
+        parent_config: RunConfig,
+        context: ToolContext | None = None,
+    ) -> RunResult:
+        child_input = cls._child_agent_prompt(arguments=arguments, context=context)
+        return cls.run_sync(
+            child_agent,
+            child_input,
+            run_config=cls._child_run_config(parent_config, context=context),
+        )
+
+    @staticmethod
+    def _child_run_config(parent_config: RunConfig, *, context: ToolContext | None = None) -> RunConfig:
+        cancellation_token = parent_config.cancellation_token
+        if cancellation_token is not None:
+            cancellation_token = cancellation_token.child()
+        return replace(
             parent_config,
+            model=None,
+            model_settings=None,
             session=None,
             stream=None,
-            runtime_task=None,
-            shared_state=None,
+            shared_state=deepcopy(context.shared_state) if context is not None else None,
             initial_messages=None,
             before_cycle_messages=None,
             interruption_messages=None,
             sub_task_manager=None,
             runtime_log_handler=None,
             runtime_stream_callback=None,
+            cancellation_token=cancellation_token,
         )
-        return cls.run_sync(child_agent, child_input, run_config=child_config)
+
+    @staticmethod
+    def _child_agent_prompt(*, arguments: dict[str, Any], context: ToolContext | None) -> str:
+        task_description = next(
+            (
+                value.strip()
+                for key in ("task_description", "task", "input", "prompt")
+                if isinstance((value := arguments.get(key)), str) and value.strip()
+            ),
+            "",
+        )
+        if not task_description:
+            raise ValueError("agent tool requires task_description")
+        output_requirements = arguments.get("output_requirements")
+        if isinstance(output_requirements, str) and output_requirements.strip():
+            task_description += f"\n\n<Output Requirements>\n{output_requirements.strip()}\n</Output Requirements>"
+        if arguments.get("include_main_summary") is True and context is not None:
+            runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
+            parent_summary = context.shared_state.get("main_task_summary")
+            if not isinstance(parent_summary, str) or not parent_summary.strip():
+                parent_summary = runtime_metadata.get("_vv_agent_input")
+            if isinstance(parent_summary, str) and parent_summary.strip():
+                task_description += f"\n\n<Main Task Summary>\n{parent_summary.strip()}\n</Main Task Summary>"
+        return task_description
 
     @staticmethod
     def _session_initial_messages(run_config: RunConfig) -> list[Message] | None:
@@ -794,14 +1785,29 @@ class Runner:
         return list(items) or None
 
     @staticmethod
-    def _new_session_items(*, user_input: str, result: Any) -> list[Message]:
-        items = [Message(role="user", content=user_input)]
-        assistant_content = ""
-        if getattr(result, "cycles", None):
-            assistant_content = result.cycles[-1].assistant_message
-        if assistant_content:
-            items.append(Message(role="assistant", content=assistant_content))
-        return items
+    def _new_session_items(*, initial_messages: list[Message] | None, result: AgentResult) -> list[Message]:
+        history = list(initial_messages or [])
+        result_messages = list(result.messages)
+        prefix_length = len(history)
+        if not history or history[0].role != "system":
+            prefix_length += 1
+        if prefix_length > len(result_messages):
+            return []
+        return deepcopy(result_messages[prefix_length:])
+
+    @staticmethod
+    def _session_items_for_persistence(items: list[Message], result: AgentResult) -> list[Message]:
+        if result.status != AgentStatus.WAIT_USER:
+            return items
+        approval_call_ids = {
+            tool_result.tool_call_id
+            for cycle in result.cycles
+            for tool_result in cycle.tool_results
+            if tool_result.error_code == "tool_approval_required"
+        }
+        if not approval_call_ids:
+            return items
+        return [item for item in items if not (item.role == "tool" and item.tool_call_id in approval_call_ids)]
 
     @staticmethod
     def _normalize_input(input: str) -> str:
@@ -847,27 +1853,6 @@ class Runner:
         return processors
 
     @staticmethod
-    def _start_span(
-        processors: list[TraceProcessor],
-        *,
-        name: str,
-        trace_id: str,
-        parent_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> Span:
-        span = Span(name=name, trace_id=trace_id, parent_id=parent_id, metadata=dict(metadata or {}))
-        for processor in processors:
-            processor.on_span_start(span)
-        return span
-
-    @staticmethod
-    def _end_span(processors: list[TraceProcessor], span: Span, *, metadata: dict[str, Any] | None = None) -> Span:
-        ended = span.finish(metadata=metadata)
-        for processor in processors:
-            processor.on_span_end(ended)
-        return ended
-
-    @staticmethod
     def _infer_backend(settings_file: str | Path, model: str) -> str:
         settings = load_llm_settings_from_file(settings_file)
         providers = settings.get("providers")
@@ -894,4 +1879,56 @@ class Runner:
             selected_model=model,
             model_id=model,
             endpoint_options=[EndpointOption(endpoint=endpoint, model_id=model)],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ConfiguredRunner:
+    default_run_config: RunConfig = field(default_factory=RunConfig)
+
+    def run_sync(self, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunResult:
+        return Runner._run(
+            agent,
+            input,
+            run_config=run_config or RunConfig(),
+            resume_runner=self,
+            runner_defaults=self.default_run_config,
+        )
+
+    def stream_sync(self, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> Iterator[RunEvent]:
+        handle = self.start(agent, input, run_config=run_config)
+        yield from handle.events()
+        handle.result()
+
+    def start(self, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunHandle:
+        config = run_config or RunConfig()
+        control_config = replace(
+            config,
+            cancellation_token=config.cancellation_token or self.default_run_config.cancellation_token,
+            approval_broker=config.approval_broker or self.default_run_config.approval_broker,
+        )
+        return RunHandle._start_worker(agent=agent, input=input, run_config=control_config, runner=self)
+
+    def resume(self, state: RunState, *, input: str | None = None) -> RunResult:
+        return Runner.resume(state, input=input)
+
+    def _run(
+        self,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig,
+        event_sink: Callable[[RunEvent], None] | None = None,
+        initial_result: RunResult | None = None,
+        _compiled_invocation: _CompiledTaskInvocation | None = None,
+    ) -> RunResult:
+        return Runner._run(
+            agent,
+            input,
+            run_config=run_config,
+            event_sink=event_sink,
+            resume_runner=self,
+            runner_defaults=self.default_run_config,
+            initial_result=initial_result,
+            _compiled_invocation=_compiled_invocation,
         )

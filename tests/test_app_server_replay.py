@@ -4,14 +4,17 @@ import threading
 from collections.abc import Callable
 from typing import cast
 
+import pytest
+
 from vv_agent import Agent, RunConfig
 from vv_agent.app_server import AppServer, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
+from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
-from vv_agent.llm import ScriptedLLM
+from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
-from vv_agent.types import LLMResponse, Message, ToolCall
+from vv_agent.types import LLMResponse, ToolCall
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -29,9 +32,16 @@ def test_thread_read_replays_emitted_items() -> None:
     server, transport = _server_with_steps([_finish_response("first")])
     _initialize_and_start_thread(server, transport)
     outbound = _start_turn_and_drain(server, transport, text="hello")
-    emitted_items = [message["params"] for message in outbound if str(message.get("method", "")).startswith("item/")]
+    item_methods = {"item/started", "item/completed", "item/agentMessage/delta"}
+    emitted_items = []
+    for message in outbound:
+        if message.get("method") not in item_methods:
+            continue
+        item = dict(cast(dict[str, object], message["params"]))
+        item.pop("delta", None)
+        emitted_items.append(item)
 
-    _send(transport, server, {"id": 3, "method": "thread/read", "params": {"threadId": "thread_1"}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 3, "method": "thread/read", "params": {"threadId": "thread_1"}})
     response = _receive_response(transport, 3)
     result = cast(dict[str, object], response["result"])
     replayed_items = cast(list[dict[str, object]], result["items"])
@@ -46,8 +56,8 @@ def test_thread_resume_replays_timeline_and_subscribes_to_live_events() -> None:
 
     second = ChannelTransport(connection_id="conn_2")
     server.router.register_transport(second)
-    _send(second, server, {"id": 10, "method": "initialize", "params": {"clientInfo": {"name": "test-2"}}})
-    _send(second, server, {"id": 11, "method": "thread/resume", "params": {"threadId": "thread_1"}})
+    _send(second, server, {"jsonrpc": "2.0", "id": 10, "method": "initialize", "params": {"clientInfo": {"name": "test-2"}}})
+    _send(second, server, {"jsonrpc": "2.0", "id": 11, "method": "thread/resume", "params": {"threadId": "thread_1"}})
     resume_response = _receive_response(second, 11)
     resume_result = cast(dict[str, object], resume_response["result"])
     assert cast(list[object], resume_result["items"])
@@ -65,7 +75,8 @@ def test_resume_during_active_turn_subscribes_before_later_notifications() -> No
     first_step_ready = threading.Event()
     first_step_can_finish = threading.Event()
 
-    def first_step(_model: str, _messages: list[Message]) -> LLMResponse:
+    def first_step(request: LlmRequest) -> LLMResponse:
+        _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
         return LLMResponse(
@@ -74,20 +85,32 @@ def test_resume_during_active_turn_subscribes_before_later_notifications() -> No
         )
 
     server, first_transport = _server_with_steps([first_step])
-    _send(first_transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "first"}}})
-    _send(first_transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(
+        first_transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "first"}}}
+    )
+    _send(first_transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     _send(
         first_transport,
         server,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "hello"}]},
+        },
     )
     assert first_step_ready.wait(timeout=2)
 
     second_transport = ChannelTransport(connection_id="conn_2")
     server.router.register_transport(second_transport)
-    server.processor.process_message("conn_2", {"id": 10, "method": "initialize", "params": {"clientInfo": {"name": "second"}}})
+    server.processor.process_message(
+        "conn_2", {"jsonrpc": "2.0", "id": 10, "method": "initialize", "params": {"clientInfo": {"name": "second"}}}
+    )
     second_transport.receive_outbound(timeout=1)
-    server.processor.process_message("conn_2", {"id": 11, "method": "thread/resume", "params": {"threadId": "thread_1"}})
+    server.processor.process_message("conn_2", {"jsonrpc": "2.0", "method": "initialized"})
+    server.processor.process_message(
+        "conn_2", {"jsonrpc": "2.0", "id": 11, "method": "thread/resume", "params": {"threadId": "thread_1"}}
+    )
     resume_response = second_transport.receive_outbound(timeout=1)
 
     first_step_can_finish.set()
@@ -101,6 +124,36 @@ def test_resume_during_active_turn_subscribes_before_later_notifications() -> No
     assert resume_response["id"] == 11
     assert resume_response["result"]["thread"]["threadId"] == "thread_1"
     assert any(message.get("method") == "turn/completed" for message in messages)
+
+
+def test_resume_subscription_and_reopen_are_installed_before_snapshot() -> None:
+    state_manager = ThreadStateManager()
+    state_manager.subscribe("thread_1", "old_connection")
+    state_manager.unsubscribe("thread_1", "old_connection")
+    assert state_manager.close_if_idle("thread_1") is True
+
+    def snapshot() -> str:
+        assert state_manager.subscribers("thread_1") == {"new_connection"}
+        assert state_manager.status("thread_1") == "idle"
+        return "snapshot"
+
+    assert state_manager.subscribe_and_snapshot("thread_1", "new_connection", snapshot) == "snapshot"
+
+
+def test_resume_snapshot_runtime_error_rolls_back_new_subscription_and_closed_state() -> None:
+    state_manager = ThreadStateManager()
+    state_manager.subscribe("thread_1", "old_connection")
+    state_manager.unsubscribe("thread_1", "old_connection")
+    assert state_manager.close_if_idle("thread_1") is True
+
+    def fail_snapshot() -> None:
+        raise RuntimeError("snapshot failed")
+
+    with pytest.raises(RuntimeError, match="snapshot failed"):
+        state_manager.subscribe_and_snapshot("thread_1", "new_connection", fail_snapshot)
+
+    assert state_manager.subscribers("thread_1") == set()
+    assert state_manager.status("thread_1") == "closed"
 
 
 def _server_with_steps(steps: list[ScriptStep]) -> tuple[AppServer, ChannelTransport]:
@@ -126,15 +179,20 @@ def _finish_response(message: str) -> LLMResponse:
 
 
 def _initialize_and_start_thread(server: AppServer, transport: ChannelTransport) -> None:
-    _send(transport, server, {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
-    _send(transport, server, {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
 
 
 def _start_turn_and_drain(server: AppServer, transport: ChannelTransport, *, text: str) -> list[dict[str, object]]:
     _send(
         transport,
         server,
-        {"id": 2, "method": "turn/start", "params": {"threadId": "thread_1", "input": [{"type": "text", "text": text}]}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {"threadId": "thread_1", "input": [{"type": "text", "text": text}]},
+        },
     )
     return _drain_until(transport, lambda message: message.get("method") == "turn/completed")
 
@@ -142,6 +200,9 @@ def _start_turn_and_drain(server: AppServer, transport: ChannelTransport, *, tex
 def _send(transport: ChannelTransport, server: AppServer, payload: dict[str, object]) -> None:
     transport.send_inbound(payload)
     server.processor.process_next(transport)
+    if payload.get("method") == "initialize":
+        transport.send_inbound({"jsonrpc": "2.0", "method": "initialized"})
+        server.processor.process_next(transport)
 
 
 def _receive_response(transport: ChannelTransport, response_id: int) -> dict[str, object]:

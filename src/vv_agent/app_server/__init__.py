@@ -1,7 +1,17 @@
+from vv_agent.app_server.client import AppServerClient, AppServerClientError
+from vv_agent.app_server.host import (
+    AgentResolutionRequest,
+    AppServerApprovalProvider,
+    AppServerHost,
+    DefaultAppServerHost,
+    RunConfigResolutionRequest,
+)
 from vv_agent.app_server.outgoing import OutgoingRouter, PendingServerRequest
 from vv_agent.app_server.processor import MessageProcessor
 from vv_agent.app_server.protocol import (
+    ApprovalDecision,
     ApprovalRequestParams,
+    ApprovalResolveParams,
     AppServerError,
     AppServerErrorCode,
     ClientInfo,
@@ -16,20 +26,37 @@ from vv_agent.app_server.protocol import (
     ModelListResponse,
     ModelSummary,
     RequestId,
+    ThreadArchiveParams,
     ThreadItem,
+    ThreadListParams,
+    ThreadReadParams,
+    ThreadResumeParams,
     ThreadStartParams,
+    ThreadUnsubscribeParams,
+    TurnFollowUpParams,
+    TurnInterruptParams,
     TurnStartParams,
+    TurnSteerParams,
+    WarningParams,
 )
 from vv_agent.app_server.server import AppServer
 from vv_agent.app_server.transport import ChannelTransport, StdioJsonlTransport
 
 __all__ = [
+    "AgentResolutionRequest",
     "AppServer",
+    "AppServerApprovalProvider",
+    "AppServerClient",
+    "AppServerClientError",
     "AppServerError",
     "AppServerErrorCode",
+    "AppServerHost",
+    "ApprovalDecision",
     "ApprovalRequestParams",
+    "ApprovalResolveParams",
     "ChannelTransport",
     "ClientInfo",
+    "DefaultAppServerHost",
     "InitializeParams",
     "InitializeResponse",
     "JsonRpcError",
@@ -44,8 +71,18 @@ __all__ = [
     "OutgoingRouter",
     "PendingServerRequest",
     "RequestId",
+    "RunConfigResolutionRequest",
     "StdioJsonlTransport",
+    "ThreadArchiveParams",
     "ThreadItem",
+    "ThreadListParams",
+    "ThreadReadParams",
+    "ThreadResumeParams",
     "ThreadStartParams",
+    "ThreadUnsubscribeParams",
+    "TurnFollowUpParams",
+    "TurnInterruptParams",
     "TurnStartParams",
+    "TurnSteerParams",
+    "WarningParams",
 ]

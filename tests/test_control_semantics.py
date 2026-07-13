@@ -92,3 +92,18 @@ def test_task_finish_blocks_when_todo_incomplete(tmp_path: Path) -> None:
     payload = json.loads(result.content)
     assert result.status == "error"
     assert payload["error_code"] == "todo_incomplete"
+
+
+def test_task_finish_returns_canonical_json_wire(tmp_path: Path) -> None:
+    registry = build_default_registry()
+
+    result = registry.execute(
+        ToolCall(
+            id="finish",
+            name=TASK_FINISH_TOOL_NAME,
+            arguments={"message": "done"},
+        ),
+        _context(tmp_path),
+    )
+
+    assert result.content == '{"message":"done","ok":true}'

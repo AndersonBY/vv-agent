@@ -18,7 +18,8 @@ This checklist moves v-claw from direct interactive runtime wiring toward the
 
 ## Client Protocol
 
-- [ ] Start the App Server process with `vv-agent app-server --listen stdio`.
+- [ ] Start the App Server process with `vv-agent app-server --listen stdio`
+  plus explicit `--settings-file`, `--backend`, and `--model` arguments.
 - [ ] Send `initialize`, then send the `initialized` notification after the
   connection is accepted.
 - [ ] Use `thread/start` when the user opens a new agent thread, passing the
@@ -32,7 +33,10 @@ This checklist moves v-claw from direct interactive runtime wiring toward the
 ## UI And State
 
 - [ ] Route `approval/request` to the existing approval UI and respond with
-  `allow`, `deny`, `allow_session`, or `timeout`.
+  `allow`, `deny`, `allow_session`, or `timeout`; `approval/resolve` with
+  `allow` or `deny` is the request-only alternative to a response envelope.
+- [ ] Reconcile `approval/requested`, `approval/resolved`, and `error/warning`
+  notifications into the timeline and error surface.
 - [ ] Render the timeline from `item/*` notifications and replayed snapshot
   `items`.
 - [ ] Persist thread ids and any product thread metadata needed to reconnect

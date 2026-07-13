@@ -10,13 +10,18 @@ def test_thread_mutations_are_serialized_by_processor() -> None:
     router.register_transport(transport)
     queues = RequestSerializationQueues(max_queued_per_scope=1)
     processor = MessageProcessor(router=router, serialization_queues=queues)
-    processor.process_message("conn_1", {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}}
+    )
     transport.receive_outbound(timeout=1)
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
 
-    processor.process_message("conn_1", {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     transport.receive_outbound(timeout=1)
     transport.receive_outbound(timeout=1)
-    processor.process_message("conn_1", {"id": 2, "method": "thread/archive", "params": {"threadId": "thread_1"}})
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 2, "method": "thread/archive", "params": {"threadId": "thread_1"}}
+    )
 
     response = transport.receive_outbound(timeout=1)
     assert response["id"] == 2
@@ -29,10 +34,13 @@ def test_processor_returns_overloaded_when_serialization_queue_is_full() -> None
     router.register_transport(transport)
     queues = RequestSerializationQueues(max_queued_per_scope=0)
     processor = MessageProcessor(router=router, serialization_queues=queues)
-    processor.process_message("conn_1", {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}}
+    )
     transport.receive_outbound(timeout=1)
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
 
-    processor.process_message("conn_1", {"id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     response = transport.receive_outbound(timeout=1)
 
     assert response["id"] == 1

@@ -1,0 +1,106 @@
+{
+  "contract": "public_configured_sub_agent_v1",
+  "normalization": {
+    "raw_entries": [
+      {
+        "id": " \u001cresearcher\u001f ",
+        "config": {
+          "model": "shared-model",
+          "description": "Research source-backed facts.",
+          "backend": "test",
+          "system_prompt": "Research carefully.",
+          "max_cycles": 4,
+          "exclude_tools": [
+            "bash"
+          ],
+          "metadata": {
+            "nested": {
+              "scope": "sources"
+            }
+          }
+        }
+      },
+      {
+        "id": "writer",
+        "config": {
+          "model": "shared-model",
+          "description": "Draft the final response.",
+          "backend": null,
+          "system_prompt": null,
+          "max_cycles": 8,
+          "exclude_tools": [],
+          "metadata": {}
+        }
+      }
+    ],
+    "normalized_ids": [
+      "researcher",
+      "writer"
+    ],
+    "empty_id_error": "sub-agent id cannot be empty",
+    "collision_error": "duplicate sub-agent id after normalization: researcher",
+    "copy_on_agent_construction": true,
+    "retained_researcher_config": {
+      "model": "shared-model",
+      "description": "Research source-backed facts.",
+      "backend": "test",
+      "system_prompt": "Research carefully.",
+      "max_cycles": 4,
+      "exclude_tools": [
+        "bash"
+      ],
+      "metadata": {
+        "nested": {
+          "scope": "sources"
+        }
+      }
+    }
+  },
+  "projection": {
+    "has_sub_agents": false,
+    "sub_agents_enabled": true,
+    "configured_tool_names": [
+      "create_sub_task",
+      "sub_task_status"
+    ],
+    "fragment": {
+      "id": "configured_sub_agents",
+      "text": "If sub-agents are configured, delegate work with `create_sub_task`. Use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, `wait_for_completion=false` for background execution, and `sub_task_status` to query progress or send follow-up messages. If background work must finish before you can continue, call `sub_task_status` with `wait_for_completion=true` and a longer `check_interval_seconds` instead of repeatedly polling.\nAvailable sub-agents (use the agent_id exactly as shown):\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
+      "stable": true,
+      "priority": 10,
+      "source": "agent.sub_agents"
+    },
+    "prompt": "Coordinate the work carefully.\n\nIf sub-agents are configured, delegate work with `create_sub_task`. Use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, `wait_for_completion=false` for background execution, and `sub_task_status` to query progress or send follow-up messages. If background work must finish before you can continue, call `sub_task_status` with `wait_for_completion=true` and a longer `check_interval_seconds` instead of repeatedly polling.\nAvailable sub-agents (use the agent_id exactly as shown):\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
+    "sections": [
+      {
+        "id": "agent_instructions",
+        "text": "Coordinate the work carefully.",
+        "stable": true,
+        "priority": 0,
+        "source": "agent.instructions"
+      },
+      {
+        "id": "configured_sub_agents",
+        "text": "If sub-agents are configured, delegate work with `create_sub_task`. Use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, `wait_for_completion=false` for background execution, and `sub_task_status` to query progress or send follow-up messages. If background work must finish before you can continue, call `sub_task_status` with `wait_for_completion=true` and a longer `check_interval_seconds` instead of repeatedly polling.\nAvailable sub-agents (use the agent_id exactly as shown):\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
+        "stable": true,
+        "priority": 10,
+        "source": "agent.sub_agents"
+      }
+    ],
+    "sources": {
+      "agent_instructions": "agent.instructions",
+      "configured_sub_agents": "agent.sub_agents"
+    },
+    "stable_hash": "e471d833a57d6711eda527e15ebf0f8f88657462cfc1da314d7ad37b53277cc9",
+    "total_chars": 703
+  },
+  "public_runner": {
+    "constructs_agent_task": false,
+    "parent_model": "shared-model",
+    "child_model": "shared-model",
+    "delegated_agent_id": "researcher",
+    "child_final_output": "child done",
+    "parent_final_output": "parent done",
+    "terminal_status": "completed"
+  }
+}

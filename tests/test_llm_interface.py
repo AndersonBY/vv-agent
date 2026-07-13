@@ -5,12 +5,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
+import httpx
+import pytest
 from openai.types.chat import ChatCompletionMessageParam
+from vv_llm.types import APIConnectionError, APIStatusError
 
 from vv_agent import constants as constants_module
 from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
 from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
-from vv_agent.model_settings import ModelSettings, RetrySettings
+from vv_agent.model_settings import ModelSettings, RetrySettings, ToolChoice
 from vv_agent.types import Message
 
 TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
@@ -59,7 +62,7 @@ def _passthrough_format_messages(*, messages: list[dict[str, Any]], **kwargs: An
 def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
     def failing_call(kwargs: dict[str, Any]) -> Any:
         del kwargs
-        raise RuntimeError("first endpoint down")
+        raise APIConnectionError(request=httpx.Request("POST", "https://first.example/v1/chat/completions"))
 
     _FakeChatClient.behavior_by_endpoint = {
         "first": failing_call,
@@ -87,6 +90,102 @@ def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
 
     assert response.content == "ok from backup"
     assert response.raw["used_endpoint_id"] == "second"
+
+
+def test_llm_retries_transient_status_on_the_same_endpoint(monkeypatch) -> None:
+    attempts = 0
+
+    def flaky_call(kwargs: dict[str, Any]) -> Any:
+        nonlocal attempts
+        del kwargs
+        attempts += 1
+        if attempts == 1:
+            request = httpx.Request("POST", "https://first.example/v1/chat/completions")
+            response = httpx.Response(429, request=request)
+            raise APIStatusError("rate limited", response=response, body={"error": "rate limited"})
+        return SimpleNamespace(content="ok", tool_calls=[], reasoning_content=None, usage=_FakeUsage())
+
+    _FakeChatClient.behavior_by_endpoint = {"first": flaky_call}
+    _FakeChatClient.seen_calls = []
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    llm = VVLlmClient(
+        endpoint_targets=[EndpointTarget(endpoint_id="first", api_key="k", api_base="https://first.example/v1")],
+        randomize_endpoints=False,
+        max_retries_per_endpoint=2,
+        backoff_seconds=0.0,
+    )
+
+    response = llm.complete(model="demo", messages=[Message(role="user", content="hello")], tools=[])
+
+    assert response.content == "ok"
+    assert attempts == 2
+
+
+def test_llm_auth_status_fails_over_without_same_endpoint_retry(monkeypatch) -> None:
+    def unauthorized_call(kwargs: dict[str, Any]) -> Any:
+        del kwargs
+        request = httpx.Request("POST", "https://first.example/v1/chat/completions")
+        response = httpx.Response(401, request=request)
+        raise APIStatusError("unauthorized", response=response, body={"error": "unauthorized"})
+
+    _FakeChatClient.behavior_by_endpoint = {
+        "first": unauthorized_call,
+        "second": SimpleNamespace(content="backup", tool_calls=[], reasoning_content=None, usage=_FakeUsage()),
+    }
+    _FakeChatClient.seen_calls = []
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(endpoint_id="first", api_key="bad", api_base="https://first.example/v1"),
+            EndpointTarget(endpoint_id="second", api_key="good", api_base="https://second.example/v1"),
+        ],
+        randomize_endpoints=False,
+        max_retries_per_endpoint=3,
+        backoff_seconds=0.0,
+    )
+
+    response = llm.complete(model="demo", messages=[Message(role="user", content="hello")], tools=[])
+
+    assert response.content == "backup"
+    assert [call["endpoint_id"] for call in _FakeChatClient.seen_calls] == ["first", "second"]
+
+
+@pytest.mark.parametrize("failure", ["bad_request", "program_error"])
+def test_llm_aborts_non_retryable_errors_without_failover(monkeypatch, failure: str) -> None:
+    def failing_call(kwargs: dict[str, Any]) -> Any:
+        del kwargs
+        if failure == "bad_request":
+            request = httpx.Request("POST", "https://first.example/v1/chat/completions")
+            response = httpx.Response(400, request=request)
+            raise APIStatusError("invalid request", response=response, body={"error": "invalid request"})
+        raise RuntimeError("programming error")
+
+    _FakeChatClient.behavior_by_endpoint = {
+        "first": failing_call,
+        "second": SimpleNamespace(content="must not run", tool_calls=[], reasoning_content=None, usage=_FakeUsage()),
+    }
+    _FakeChatClient.seen_calls = []
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(endpoint_id="first", api_key="k1", api_base="https://first.example/v1"),
+            EndpointTarget(endpoint_id="second", api_key="k2", api_base="https://second.example/v1"),
+        ],
+        randomize_endpoints=False,
+        max_retries_per_endpoint=3,
+        backoff_seconds=0.0,
+    )
+
+    with pytest.raises((APIStatusError, RuntimeError)):
+        llm.complete(model="demo", messages=[Message(role="user", content="hello")], tools=[])
+
+    assert [call["endpoint_id"] for call in _FakeChatClient.seen_calls] == ["first"]
 
 
 def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
@@ -338,6 +437,88 @@ def test_resolve_request_options_aligns_claude_thinking_profile() -> None:
     assert options.thinking == {"type": "enabled", "budget_tokens": 16000}
 
 
+def test_llm_rejects_per_request_extra_headers() -> None:
+    llm = VVLlmClient(
+        endpoint_targets=[EndpointTarget(endpoint_id="demo", api_key="k", api_base="https://example.test/v1")]
+    )
+
+    with pytest.raises(ValueError, match="extra_headers is not supported"):
+        llm.complete(
+            model="demo-model",
+            messages=[Message(role="user", content="hello")],
+            tools=[],
+            model_settings=ModelSettings(extra_headers={"x-request": "value"}),
+        )
+
+
+def test_llm_rejects_per_request_extra_args() -> None:
+    llm = VVLlmClient(
+        endpoint_targets=[EndpointTarget(endpoint_id="demo", api_key="k", api_base="https://example.test/v1")]
+    )
+
+    with pytest.raises(ValueError, match="extra_args is not supported"):
+        llm.complete(
+            model="demo-model",
+            messages=[Message(role="user", content="hello")],
+            tools=[],
+            model_settings=ModelSettings(extra_args={"extra_query": {"region": "test"}}),
+        )
+
+
+def test_tool_choice_semantics_reach_the_real_provider_request(monkeypatch) -> None:
+    response = SimpleNamespace(content="ok", tool_calls=[], reasoning_content=None, usage=_FakeUsage())
+    _FakeChatClient.behavior_by_endpoint = {"tool-choice": response}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(endpoint_id="tool-choice", api_key="k", api_base="https://example.test/v1")
+        ],
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+    tools: list[dict[str, object]] = [
+        {
+            "type": "function",
+            "function": {"name": name, "description": name, "parameters": {"type": "object"}},
+        }
+        for name in ("lookup", "write")
+    ]
+
+    llm.complete(
+        model="demo-model",
+        messages=[Message(role="user", content="hello")],
+        tools=tools,
+        model_settings=ModelSettings(tool_choice=ToolChoice.tool("lookup")),
+    )
+    named_call = _FakeChatClient.seen_calls[-1]
+    assert named_call["tool_choice"] == "required"
+    assert [tool["function"]["name"] for tool in named_call["tools"]] == ["lookup"]
+
+    llm.complete(
+        model="demo-model",
+        messages=[Message(role="user", content="hello")],
+        tools=tools,
+        model_settings=ModelSettings(tool_choice=ToolChoice.none()),
+    )
+    none_call = _FakeChatClient.seen_calls[-1]
+    assert "tool_choice" not in none_call
+    assert "tools" not in none_call
+
+    with pytest.raises(ValueError, match="unknown tool: missing"):
+        llm.complete(
+            model="demo-model",
+            messages=[Message(role="user", content="hello")],
+            tools=tools,
+            model_settings=ModelSettings(tool_choice=ToolChoice.tool("missing")),
+        )
+
+
 def test_resolve_request_options_aligns_gemini3_profile() -> None:
     llm = VVLlmClient(endpoint_targets=[])
     options = llm._resolve_request_options("gemini-3-pro", stream=True, endpoint_type="openai")
@@ -354,6 +535,57 @@ def test_resolve_request_options_aligns_gemini3_profile() -> None:
             }
         }
     }
+
+
+def test_request_retry_settings_do_not_leak_into_the_next_request() -> None:
+    llm = VVLlmClient(
+        endpoint_targets=[],
+        max_retries_per_endpoint=3,
+        backoff_seconds=2.0,
+    )
+
+    overridden = llm._resolve_request_options(
+        "gpt-4o",
+        stream=False,
+        endpoint_type="openai",
+        model_settings=ModelSettings(retry=RetrySettings(max_attempts=7, backoff_seconds=0.25)),
+    )
+    defaulted = llm._resolve_request_options(
+        "gpt-4o",
+        stream=False,
+        endpoint_type="openai",
+        model_settings=None,
+    )
+
+    assert (overridden.max_attempts, overridden.backoff_seconds) == (7, 0.25)
+    assert (defaulted.max_attempts, defaulted.backoff_seconds) == (3, 2.0)
+    assert (llm.max_retries_per_endpoint, llm.backoff_seconds) == (3, 2.0)
+
+
+def test_provider_timeout_default_and_model_override_reach_the_request(monkeypatch) -> None:
+    response = SimpleNamespace(content="ok", tool_calls=[], reasoning_content=None, usage=_FakeUsage())
+    _FakeChatClient.behavior_by_endpoint = {"timeout": response}
+    _FakeChatClient.seen_calls = []
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    llm = VVLlmClient(
+        endpoint_targets=[EndpointTarget(endpoint_id="timeout", api_key="k", api_base="https://example.test/v1")],
+        timeout_seconds=12.5,
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+    )
+
+    llm.complete(model="demo-model", messages=[Message(role="user", content="default")], tools=[])
+    assert _FakeChatClient.seen_calls[-1]["timeout"] == 12.5
+
+    llm.complete(
+        model="demo-model",
+        messages=[Message(role="user", content="override")],
+        tools=[],
+        model_settings=ModelSettings(timeout_seconds=3.25),
+    )
+    assert _FakeChatClient.seen_calls[-1]["timeout"] == 3.25
 
 
 def test_llm_stream_request_payload_aligns_qwen_thinking(monkeypatch) -> None:
@@ -525,8 +757,10 @@ def test_vv_llm_request_options_apply_public_model_settings() -> None:
     assert options.max_tokens == 512
     assert options.reasoning_effort == "low"
     assert options.extra_body == {"seed": 7}
-    assert llm.max_retries_per_endpoint == 5
-    assert llm.backoff_seconds == 0.25
+    assert options.max_attempts == 5
+    assert options.backoff_seconds == 0.25
+    assert llm.max_retries_per_endpoint == 3
+    assert llm.backoff_seconds == 2.0
 
 
 def test_deepseek_provider_defaults_new_models_to_reasoning_options() -> None:
@@ -882,32 +1116,34 @@ def test_claude_direct_request_adds_explicit_breakpoints(monkeypatch) -> None:
     )
 
     long_section = "stable context " * 400
+    messages = [
+        Message(
+            role="system",
+            content="system",
+            metadata={
+                "anthropic_prompt_cache_enabled": True,
+                "system_prompt_sections": [
+                    {"id": "core_identity", "text": long_section, "stable": True},
+                    {"id": "tool_runtime_contract", "text": "tool contract", "stable": True},
+                ],
+            },
+        ),
+        Message(role="user", content="hello"),
+    ]
+    tools: list[dict[str, object]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search_docs",
+                "description": "Search docs " * 200,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
     result = llm.complete(
         model="claude-sonnet-4-5-20250929",
-        messages=[
-            Message(
-                role="system",
-                content="system",
-                metadata={
-                    "anthropic_prompt_cache_enabled": True,
-                    "system_prompt_sections": [
-                        {"id": "core_identity", "text": long_section, "stable": True},
-                        {"id": "tool_runtime_contract", "text": "tool contract", "stable": True},
-                    ],
-                },
-            ),
-            Message(role="user", content="hello"),
-        ],
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "search_docs",
-                    "description": "Search docs " * 200,
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ],
+        messages=messages,
+        tools=tools,
     )
 
     assert result.content == "ok"
@@ -916,6 +1152,16 @@ def test_claude_direct_request_adds_explicit_breakpoints(monkeypatch) -> None:
     assert call["messages"][0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert call["tools"][-1]["cache_control"] == {"type": "ephemeral"}
     assert call["messages"][1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+    llm.complete(
+        model="claude-sonnet-4-5-20250929",
+        messages=messages,
+        tools=tools,
+        request_metadata={"anthropic_prompt_cache_enabled": False},
+    )
+    disabled_call = _FakeChatClient.seen_calls[-1]
+    assert all("cache_control" not in block for message in disabled_call["messages"] for block in message["content"])
+    assert all("cache_control" not in tool for tool in disabled_call["tools"])
 
 
 def test_apply_claude_prompt_cache_vertex_marks_history_boundary_and_skips_thinking() -> None:

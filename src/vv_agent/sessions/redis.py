@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
+from vv_agent.sessions.base import _deserialize_message, _serialize_message
 from vv_agent.types import Message
 
 
@@ -31,28 +31,25 @@ class RedisSession:
             if parsed_limit == 0:
                 return []
             raw_items = self._client.lrange(self.key, -parsed_limit, -1)
-        return [Message.from_dict(json.loads(self._decode(item))) for item in raw_items]
+        return [_deserialize_message(item) for item in raw_items]
 
     def add_items(self, items: list[Message]) -> None:
         if not items:
             return
-        payloads = [json.dumps(item.to_dict(), ensure_ascii=False) for item in items]
+        payloads = [_serialize_message(item) for item in items]
         self._client.rpush(self.key, *payloads)
 
     def pop_item(self) -> Message | None:
         raw = self._client.rpop(self.key)
         if raw is None:
             return None
-        return Message.from_dict(json.loads(self._decode(raw)))
+        return _deserialize_message(raw)
 
-    def clear_session(self) -> None:
+    def clear(self) -> None:
         self._client.delete(self.key)
 
-    @staticmethod
-    def _decode(value: Any) -> str:
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        return str(value)
+    def clear_session(self) -> None:
+        self.clear()
 
     @staticmethod
     def _build_client(redis_url: str) -> Any:
@@ -61,3 +58,22 @@ class RedisSession:
         except ImportError as exc:  # pragma: no cover - depends on optional extra
             raise ImportError("RedisSession requires the optional redis package or an injected redis_client.") from exc
         return redis.Redis.from_url(redis_url)
+
+
+class RedisSessionStore:
+    def __init__(
+        self,
+        *,
+        redis_client: Any | None = None,
+        redis_url: str = "redis://localhost:6379/0",
+        key_prefix: str = "vv-agent-session",
+    ) -> None:
+        self.key_prefix = key_prefix
+        self._client = redis_client if redis_client is not None else RedisSession._build_client(redis_url)
+
+    def session(self, session_id: str) -> RedisSession:
+        return RedisSession(
+            session_id,
+            redis_client=self._client,
+            key_prefix=self.key_prefix,
+        )

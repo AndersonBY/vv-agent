@@ -4,14 +4,14 @@ from typing import Any
 
 from vv_agent.constants import TODO_INCOMPLETE_ERROR_CODE
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import get_todo_list, to_json
+from vv_agent.tools.handlers.common import get_todo_list, to_json, trim_portable_whitespace
 from vv_agent.types import ToolDirective, ToolExecutionResult
 
 
 def task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     todo = get_todo_list(context.shared_state)
     require_all_done = bool(arguments.get("require_all_todos_completed", True))
-    message = str(arguments.get("message", "Task completed"))
+    message = trim_portable_whitespace(str(arguments.get("message", "Task completed"))) or "Task completed"
     exposed_files = arguments.get("exposed_files")
 
     incomplete_todos = []
@@ -52,8 +52,8 @@ def task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutio
 
 def ask_user(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
     del context
-    question = str(arguments.get("question", "Need user input"))
-    selection_type = str(arguments.get("selection_type", "single"))
+    question = trim_portable_whitespace(str(arguments.get("question", "Need user input"))) or "Need user input"
+    selection_type = trim_portable_whitespace(str(arguments.get("selection_type", "single")))
     allow_custom_options = bool(arguments.get("allow_custom_options", False))
 
     options_raw = arguments.get("options")

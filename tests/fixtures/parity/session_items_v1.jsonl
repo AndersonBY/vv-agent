@@ -1,0 +1,4 @@
+{"role":"system","content":"Keep session history exact."}
+{"role":"user","content":"Inspect this image.","name":"operator","image_url":"data:image/png;base64,AA==","metadata":{"kind":"input","sequence":1}}
+{"role":"assistant","content":"","name":"planner","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"query\":\"session parity\"}"},"extra_content":{"provider":"fixture"}}],"reasoning_content":"Check persistence details.","metadata":{"attempt":1,"flags":["rich","parity"]}}
+{"role":"tool","content":"result: ok","name":"lookup","tool_call_id":"call_1","image_url":"data:image/png;base64,AQ==","metadata":{"duration_ms":12,"source":"cache"}}

@@ -1,0 +1,6 @@
+{"role":"user","content":"first input"}
+{"role":"assistant","content":"first assistant","tool_calls":[{"id":"finish_1","type":"function","function":{"name":"task_finish","arguments":"{\"message\":\"first result\"}"}}]}
+{"role":"tool","content":"{\"message\":\"first result\",\"ok\":true}","tool_call_id":"finish_1"}
+{"role":"user","content":"second input"}
+{"role":"assistant","content":"second assistant","tool_calls":[{"id":"finish_2","type":"function","function":{"name":"task_finish","arguments":"{\"message\":\"second result\"}"}}]}
+{"role":"tool","content":"{\"message\":\"second result\",\"ok\":true}","tool_call_id":"finish_2"}

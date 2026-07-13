@@ -13,7 +13,7 @@ from vv_agent.constants import (
     TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
-from vv_agent.types import LLMResponse, Message, ToolCall
+from vv_agent.types import AgentStatus, LLMResponse, Message, ToolCall, ToolResultStatus
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -39,8 +39,9 @@ class CapturingLLM:
         tools: list[dict[str, object]],
         stream_callback=None,
         model_settings=None,
+        request_metadata=None,
     ) -> LLMResponse:
-        del model, messages, stream_callback, model_settings
+        del model, messages, stream_callback, model_settings, request_metadata
         names: list[str] = []
         for tool in tools:
             function = cast(dict[str, object], tool["function"])
@@ -232,6 +233,43 @@ def test_tool_policy_can_use_tool_blocks_executor_registered_tool(tmp_path: Path
     assert result.raw_result.cycles[0].tool_results[0].error_code == "tool_not_allowed"
 
 
+def test_empty_actual_schema_plan_rejects_forced_runtime_tool_call(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    @function_tool
+    def runtime_only() -> str:
+        calls.append("ran")
+        return "ran"
+
+    def registry_factory():
+        registry = build_default_registry()
+        registry.register_executor(
+            runtime_only.to_executor(),
+            expose_to_model=False,
+        )
+        return registry
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return CapturingLLMWithToolCall("runtime_only", {}), _resolved()
+
+    result = Runner.run_sync(
+        Agent(name="assistant", instructions="Do not expose tools.", model="m"),
+        "run",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            tool_registry_factory=registry_factory,
+            max_cycles=1,
+            tool_policy=ToolPolicy(allowed_tools=[]),
+        ),
+    )
+
+    assert calls == []
+    denied = result.raw_result.cycles[0].tool_results[0]
+    assert denied.error_code == "tool_not_allowed"
+
+
 def test_function_tool_is_enabled_false_hides_schema(tmp_path: Path) -> None:
     @function_tool(is_enabled=False)
     def disabled() -> str:
@@ -282,6 +320,7 @@ def test_tool_policy_can_use_tool_blocks_invocation_with_arguments(tmp_path: Pat
         run_config=RunConfig(
             workspace=tmp_path,
             model_provider=model_provider,
+            max_cycles=1,
             tool_policy=ToolPolicy(
                 can_use_tool=lambda tool_name, arguments: tool_name != "delete_file"
                 or arguments.get("path") != "secrets.txt"
@@ -290,8 +329,45 @@ def test_tool_policy_can_use_tool_blocks_invocation_with_arguments(tmp_path: Pat
     )
 
     assert invoked is False
-    assert result.final_output is not None
-    assert "not allowed" in result.final_output
+    denied = result.raw_result.cycles[0].tool_results[0]
+    assert denied.error_code == "tool_not_allowed"
+    assert "not allowed" in denied.content
+    assert result.status == AgentStatus.MAX_CYCLES
+
+
+def test_tool_policy_denial_happens_before_function_tool_approval(tmp_path: Path) -> None:
+    invoked = False
+
+    @function_tool(needs_approval=True)
+    def destructive_action() -> str:
+        nonlocal invoked
+        invoked = True
+        return "ran"
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return CapturingLLMWithToolCall("destructive_action", {}), _resolved()
+
+    result = Runner.run_sync(
+        Agent(
+            name="assistant",
+            instructions="Use tools.",
+            model="m",
+            tools=[destructive_action],
+        ),
+        "run",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            max_cycles=1,
+            tool_policy=ToolPolicy(can_use_tool=lambda name, arguments: False),
+        ),
+    )
+
+    denied = result.raw_result.cycles[0].tool_results[0]
+    assert invoked is False
+    assert denied.error_code == "tool_not_allowed"
+    assert denied.status_code == ToolResultStatus.ERROR
 
 
 class CapturingLLMWithToolCall:
@@ -307,8 +383,9 @@ class CapturingLLMWithToolCall:
         tools: list[dict[str, object]],
         stream_callback=None,
         model_settings=None,
+        request_metadata=None,
     ) -> LLMResponse:
-        del model, messages, tools, stream_callback, model_settings
+        del model, messages, tools, stream_callback, model_settings, request_metadata
         return LLMResponse(
             content="call tool",
             tool_calls=[ToolCall(id="policy-call", name=self.tool_name, arguments=self.arguments)],

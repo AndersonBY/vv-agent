@@ -13,10 +13,10 @@ def _glob_match(path: str, pattern: str) -> bool:
     parts: list[str] = []
     i = 0
     while i < len(pattern):
-        if pattern[i:i + 3] == "**/":
+        if pattern[i : i + 3] == "**/":
             parts.append("(?:.+/)?")
             i += 3
-        elif pattern[i:i + 2] == "**":
+        elif pattern[i : i + 2] == "**":
             parts.append(".*")
             i += 2
         elif pattern[i] == "*":
@@ -50,11 +50,7 @@ class LocalWorkspaceBackend:
     def _resolve(self, path: str) -> Path:
         candidate = Path(path).expanduser()
         target = candidate.resolve() if candidate.is_absolute() else (self._root / candidate).resolve()
-        if (
-            not self._allow_outside_root
-            and target != self._root
-            and self._root not in target.parents
-        ):
+        if not self._allow_outside_root and target != self._root and self._root not in target.parents:
             raise ValueError(f"Path escapes workspace: {path}")
         return target
 
@@ -98,10 +94,10 @@ class LocalWorkspaceBackend:
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
         target = self._resolve(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        mode = "a" if append else "w"
-        with target.open(mode, encoding="utf-8") as fh:
-            fh.write(content)
-        return len(content)
+        data = content.encode("utf-8")
+        mode = "ab" if append else "wb"
+        with target.open(mode) as fh:
+            return fh.write(data)
 
     def file_info(self, path: str) -> FileInfo | None:
         target = self._resolve(path)
@@ -118,10 +114,16 @@ class LocalWorkspaceBackend:
         )
 
     def exists(self, path: str) -> bool:
-        return self._resolve(path).exists()
+        try:
+            return self._resolve(path).exists()
+        except (OSError, RuntimeError, ValueError):
+            return False
 
     def is_file(self, path: str) -> bool:
-        return self._resolve(path).is_file()
+        try:
+            return self._resolve(path).is_file()
+        except (OSError, RuntimeError, ValueError):
+            return False
 
     def mkdir(self, path: str) -> None:
         self._resolve(path).mkdir(parents=True, exist_ok=True)

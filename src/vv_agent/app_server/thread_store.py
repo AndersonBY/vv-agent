@@ -19,6 +19,8 @@ class ThreadRecord:
     created_at: float = 0
     updated_at: float = 0
     archived_at: float | None = None
+    status: str = "idle"
+    active_turn_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -63,8 +65,11 @@ class ThreadStore:
             )
             self._connection.execute(
                 """
-                INSERT INTO threads (thread_id, agent_key, cwd, created_at, updated_at, archived_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO threads (
+                    thread_id, agent_key, cwd, created_at, updated_at, archived_at,
+                    status, active_turn_id, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.thread_id,
@@ -73,6 +78,8 @@ class ThreadStore:
                     record.created_at,
                     record.updated_at,
                     record.archived_at,
+                    record.status,
+                    record.active_turn_id,
                     json.dumps(record.metadata, ensure_ascii=False, sort_keys=True),
                 ),
             )
@@ -203,8 +210,22 @@ class ThreadStore:
             self._require_thread(thread_id)
             now = time.time()
             self._connection.execute(
-                "UPDATE threads SET archived_at = ?, updated_at = ? WHERE thread_id = ?",
+                """
+                UPDATE threads
+                SET archived_at = ?, status = 'archived', active_turn_id = NULL, updated_at = ?
+                WHERE thread_id = ?
+                """,
                 (now, now, thread_id),
+            )
+            self._connection.commit()
+
+    def set_active_turn(self, thread_id: str, active_turn_id: str | None, status: str) -> None:
+        with self._lock:
+            self._require_thread(thread_id)
+            now = time.time()
+            self._connection.execute(
+                "UPDATE threads SET active_turn_id = ?, status = ?, updated_at = ? WHERE thread_id = ?",
+                (active_turn_id, status, now, thread_id),
             )
             self._connection.commit()
 
@@ -220,6 +241,8 @@ class ThreadStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     archived_at REAL,
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    active_turn_id TEXT,
                     metadata_json TEXT NOT NULL
                 );
 
@@ -249,7 +272,20 @@ class ThreadStore:
                 );
                 """
             )
+            self._ensure_column("threads", "status", "TEXT NOT NULL DEFAULT 'idle'")
+            self._ensure_column("threads", "active_turn_id", "TEXT")
+            self._connection.execute(
+                "UPDATE threads SET status = 'idle', active_turn_id = NULL WHERE status = 'running'"
+            )
             self._connection.commit()
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        columns = {
+            str(row["name"])
+            for row in self._connection.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in columns:
+            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def _next_id(self, table: str, column: str, prefix: str) -> str:
         row = self._connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
@@ -282,6 +318,8 @@ class ThreadStore:
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
             archived_at=None if row["archived_at"] is None else float(row["archived_at"]),
+            status=str(row["status"]),
+            active_turn_id=None if row["active_turn_id"] is None else str(row["active_turn_id"]),
             metadata=json.loads(str(row["metadata_json"])),
         )
 

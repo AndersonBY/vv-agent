@@ -30,8 +30,8 @@ This checklist describes how a backend service or worker can host the
   conversation scope.
 - [ ] Persist progress from item notifications, especially `item/started`,
   `item/agentMessage/delta`, `item/completed`, and `turn/completed`.
-- [ ] Convert `approval/request` and tool/user-input requests into backend
-  pending tasks that operators or end users can answer.
+- [ ] Convert `approval/request` into a backend pending task that an operator or
+  end user can answer through a matching response or `approval/resolve`.
 - [ ] Store server request ids with the pending task so the backend response can
   resolve the exact App Server callback.
 - [ ] Use `thread/read` or `thread/resume` after worker restart to rebuild the
@@ -44,6 +44,8 @@ This checklist describes how a backend service or worker can host the
   retry attempts remain idempotent at the product layer.
 - [ ] Continue reading stdout from stdio App Server processes while work is
   active; slow readers can trigger transport backpressure.
+- [ ] Treat parse errors as per-line protocol failures. Record the `-32700`
+  response and keep the process alive for later valid JSONL messages.
 
 ## Verification
 

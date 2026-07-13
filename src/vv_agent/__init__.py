@@ -1,12 +1,23 @@
 from vv_agent.agent import Agent, RunContext
-from vv_agent.app_server import AppServer, MessageProcessor, OutgoingRouter
-from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
+from vv_agent.app_server import (
+    AgentResolutionRequest,
+    AppServer,
+    AppServerApprovalProvider,
+    AppServerHost,
+    DefaultAppServerHost,
+    MessageProcessor,
+    OutgoingRouter,
+    RunConfigResolutionRequest,
+)
+from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalError, ApprovalProvider, ApprovalRequest
+from vv_agent.background_task import BackgroundAgentTask, BackgroundAgentTaskHandle, BackgroundAgentTaskSnapshot
 from vv_agent.config import (
     ConfigError,
     EndpointConfig,
     EndpointOption,
     ResolvedModelConfig,
     build_openai_llm_from_local_settings,
+    build_vv_llm_from_local_settings,
     load_llm_settings_from_file,
     resolve_model_endpoint,
 )
@@ -17,13 +28,15 @@ from vv_agent.context_providers import (
     ContextRequest,
     ContextSection,
     assemble_context_fragments,
+    collect_context_fragments,
 )
-from vv_agent.event_store import JsonlRunEventStore, RunEventStore
+from vv_agent.event_store import EventStoreError, JsonlRunEventStore, RunEventReplayQuery, RunEventStore
 from vv_agent.events import (
     AgentStartedEvent,
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    CycleStartedEvent,
     HandoffCompletedEvent,
     HandoffEvent,
     HandoffStartedEvent,
@@ -31,10 +44,13 @@ from vv_agent.events import (
     MemoryCompactCompleted,
     MemoryCompactedEvent,
     MemoryCompactStarted,
+    RunCancelledEvent,
     RunCompletedEvent,
     RunEvent,
     RunFailedEvent,
     RunStartedEvent,
+    RunStateChangedEvent,
+    SessionPersistedEvent,
     SubRunCompletedEvent,
     SubRunStartedEvent,
     ToolApprovalRequestedEvent,
@@ -55,16 +71,30 @@ from vv_agent.interactive import (
     InteractiveAgentDefinition,
     create_agent_session,
 )
-from vv_agent.model_settings import ModelSettings, RetrySettings
-from vv_agent.result import RunResult
-from vv_agent.run_config import ModelProvider, RunConfig, ToolPolicy
+from vv_agent.llm import VVLlmClient, VvLlmClient
+from vv_agent.model import ModelError, ModelProvider, ModelRef, ScriptedModelProvider, VvLlmModelProvider
+from vv_agent.model_settings import ModelSettings, ResponseFormat, RetrySettings, ToolChoice
+from vv_agent.result import ApprovalSnapshot, RunResult, RunState
+from vv_agent.run_config import ApprovalPolicy, RunConfig, ToolPolicy
 from vv_agent.run_handle import RunHandle, RunHandleController, RunHandleState
-from vv_agent.runner import Runner
-from vv_agent.sessions import MemorySession, RedisSession, Session, SQLiteSession
+from vv_agent.runner import ConfiguredRunner, Runner
+from vv_agent.sessions import (
+    MemorySession,
+    MemorySessionStore,
+    RedisSession,
+    RedisSessionStore,
+    Session,
+    SessionStore,
+    SQLiteSession,
+    SQLiteSessionStore,
+    session_store_conformance,
+)
 from vv_agent.tools import (
     FunctionTool,
     Tool,
+    ToolCallContext,
     ToolContext,
+    ToolExposure,
     ToolOutput,
     ToolOutputError,
     ToolOutputFile,
@@ -75,11 +105,12 @@ from vv_agent.tools import (
     build_default_registry,
     function_tool,
 )
-from vv_agent.tracing import Span, TraceProcessor
+from vv_agent.tracing import JsonlTraceExporter, Span, TraceProcessor, TraceSink
 from vv_agent.types import AgentStatus, Message
 
 __all__ = [
     "Agent",
+    "AgentResolutionRequest",
     "AgentSession",
     "AgentSessionOptions",
     "AgentSessionRun",
@@ -87,20 +118,33 @@ __all__ = [
     "AgentStartedEvent",
     "AgentStatus",
     "AppServer",
+    "AppServerApprovalProvider",
+    "AppServerHost",
+    "ApprovalBroker",
     "ApprovalDecision",
+    "ApprovalError",
+    "ApprovalPolicy",
     "ApprovalProvider",
     "ApprovalRequest",
     "ApprovalRequestedEvent",
     "ApprovalResolvedEvent",
+    "ApprovalSnapshot",
     "AssistantDeltaEvent",
+    "BackgroundAgentTask",
+    "BackgroundAgentTaskHandle",
+    "BackgroundAgentTaskSnapshot",
     "ConfigError",
+    "ConfiguredRunner",
     "ContextBundle",
     "ContextFragment",
     "ContextProvider",
     "ContextRequest",
     "ContextSection",
+    "CycleStartedEvent",
+    "DefaultAppServerHost",
     "EndpointConfig",
     "EndpointOption",
+    "EventStoreError",
     "FunctionTool",
     "GuardrailResult",
     "Handoff",
@@ -110,23 +154,32 @@ __all__ = [
     "InteractiveAgentClient",
     "InteractiveAgentDefinition",
     "JsonlRunEventStore",
+    "JsonlTraceExporter",
     "LLMStartedEvent",
     "MemoryCompactCompleted",
     "MemoryCompactStarted",
     "MemoryCompactedEvent",
     "MemorySession",
+    "MemorySessionStore",
     "Message",
     "MessageProcessor",
+    "ModelError",
     "ModelProvider",
+    "ModelRef",
     "ModelSettings",
     "OutgoingRouter",
     "RedisSession",
+    "RedisSessionStore",
     "ResolvedModelConfig",
+    "ResponseFormat",
     "RetrySettings",
+    "RunCancelledEvent",
     "RunCompletedEvent",
     "RunConfig",
+    "RunConfigResolutionRequest",
     "RunContext",
     "RunEvent",
+    "RunEventReplayQuery",
     "RunEventStore",
     "RunFailedEvent",
     "RunHandle",
@@ -134,17 +187,26 @@ __all__ = [
     "RunHandleState",
     "RunResult",
     "RunStartedEvent",
+    "RunState",
+    "RunStateChangedEvent",
     "Runner",
     "SQLiteSession",
+    "SQLiteSessionStore",
+    "ScriptedModelProvider",
     "Session",
+    "SessionPersistedEvent",
+    "SessionStore",
     "Span",
     "SubRunCompletedEvent",
     "SubRunStartedEvent",
     "Tool",
     "ToolApprovalRequestedEvent",
     "ToolCallCompletedEvent",
+    "ToolCallContext",
     "ToolCallStartedEvent",
+    "ToolChoice",
     "ToolContext",
+    "ToolExposure",
     "ToolFinishedEvent",
     "ToolOutput",
     "ToolOutputError",
@@ -156,9 +218,15 @@ __all__ = [
     "ToolRegistry",
     "ToolStartedEvent",
     "TraceProcessor",
+    "TraceSink",
+    "VVLlmClient",
+    "VvLlmClient",
+    "VvLlmModelProvider",
     "assemble_context_fragments",
     "build_default_registry",
     "build_openai_llm_from_local_settings",
+    "build_vv_llm_from_local_settings",
+    "collect_context_fragments",
     "create_agent_session",
     "event_from_dict",
     "function_tool",
@@ -167,4 +235,5 @@ __all__ = [
     "load_llm_settings_from_file",
     "output_guardrail",
     "resolve_model_endpoint",
+    "session_store_conformance",
 ]

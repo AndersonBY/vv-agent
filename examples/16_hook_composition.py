@@ -38,7 +38,7 @@ def main() -> None:
         settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
         default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
         workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        runtime_hooks=[TimingHook(), AuditHook()],
+        hooks=[TimingHook(), AuditHook()],
     )
     result = Runner.run_sync(agent, "Describe composed hooks.", run_config=config)
     print(result.final_output)

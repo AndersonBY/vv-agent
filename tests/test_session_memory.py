@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from vv_agent.memory import SessionMemory, SessionMemoryConfig, SessionMemoryEntry
+from vv_agent.memory import SessionMemory, SessionMemoryConfig, SessionMemoryEntry, SessionMemoryState
 from vv_agent.types import Message
 
 
@@ -39,6 +39,12 @@ def test_session_memory_should_extract_handles_negative_growth() -> None:
 
     assert memory.should_extract(40, 2) is False
     assert memory.should_extract(120, 2) is True
+
+
+def test_session_memory_state_preserves_zero_extracted_message_index() -> None:
+    state = SessionMemoryState.from_dict({"last_extracted_message_index": 0})
+
+    assert state.last_extracted_message_index == 0
 
 
 def test_session_memory_extracts_only_new_messages() -> None:
@@ -175,9 +181,7 @@ def test_session_memory_can_persist_load_and_reset_on_compaction(tmp_path) -> No
         workspace=tmp_path,
         storage_scope="task-a",
     )
-    memory.state.entries = [
-        SessionMemoryEntry(category="user_intent", content="finish phase 4", source_cycle=9, importance=10)
-    ]
+    memory.state.entries = [SessionMemoryEntry(category="user_intent", content="finish phase 4", source_cycle=9, importance=10)]
     memory.state.last_extracted_message_index = 12
     memory.state.tokens_at_last_extraction = 320
     memory.state.initialized = True
@@ -207,9 +211,7 @@ def test_session_memory_storage_scope_isolates_new_tasks(tmp_path) -> None:
         workspace=tmp_path,
         storage_scope="session-one",
     )
-    scoped.state.entries = [
-        SessionMemoryEntry(category="key_fact", content="first session fact", source_cycle=2, importance=8)
-    ]
+    scoped.state.entries = [SessionMemoryEntry(category="key_fact", content="first session fact", source_cycle=2, importance=8)]
     scoped._save()
 
     isolated = SessionMemory(

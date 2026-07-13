@@ -18,6 +18,8 @@
 | Turn | one `RunHandle` |
 | Item | `RunEvent` mapped to protocol item |
 | Approval request | `ApprovalBroker` pending request routed through server request id |
+| Tool-call delta | streamed `tool_call_progress` `RunEvent` metadata |
+| Warning | failed run or event-stream exception |
 
 ## Constraints
 

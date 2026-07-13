@@ -8,14 +8,13 @@ from vv_agent import (
     LLMStartedEvent,
     MemoryCompactedEvent,
     RunConfig,
-    RunEvent,
     Runner,
     ToolFinishedEvent,
     ToolStartedEvent,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
-from vv_agent.events import event_from_runtime_log
+from vv_agent.events import CycleStartedEvent, RunFailedEvent, event_from_runtime_log
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -68,7 +67,7 @@ def test_runner_emits_tool_started_and_finished_events(tmp_path: Path) -> None:
     assert finished[0].tool_call_id == "finish"
 
 
-def test_runner_emits_agent_and_llm_started_events(tmp_path: Path) -> None:
+def test_runner_emits_cycle_and_llm_started_events(tmp_path: Path) -> None:
     def model_provider(agent: Agent, run_config: RunConfig):
         del agent, run_config
         return (
@@ -89,13 +88,19 @@ def test_runner_emits_agent_and_llm_started_events(tmp_path: Path) -> None:
         run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
     )
 
-    assert [event.type for event in result.events[:3]] == ["run_started", "agent_started", "llm_started"]
+    assert [event.type for event in result.events[:4]] == [
+        "run_started",
+        "agent_started",
+        "cycle_started",
+        "llm_started",
+    ]
     assert isinstance(result.events[1], AgentStartedEvent)
-    assert isinstance(result.events[2], LLMStartedEvent)
-    assert result.events[2].to_dict()["model"] == "m"
+    assert isinstance(result.events[2], CycleStartedEvent)
+    assert isinstance(result.events[3], LLMStartedEvent)
+    assert result.events[3].to_dict()["model"] == "m"
 
 
-def test_cycle_llm_response_runtime_log_becomes_typed_run_event() -> None:
+def test_cycle_llm_response_runtime_log_does_not_masquerade_as_stream_delta() -> None:
     event = event_from_runtime_log(
         "cycle_llm_response",
         {
@@ -110,14 +115,10 @@ def test_cycle_llm_response_runtime_log_becomes_typed_run_event() -> None:
         session_id="session_1",
     )
 
-    assert isinstance(event, RunEvent)
-    assert event.type == "cycle_llm_response"
-    assert event.cycle_index == 1
-    assert event.metadata["assistant_message"] == "typed answer"
-    assert event.metadata["tool_calls"][0]["id"] == "call_1"
+    assert event is None
 
 
-def test_cycle_failed_runtime_log_becomes_typed_run_event() -> None:
+def test_cycle_failed_runtime_log_becomes_run_failed_event() -> None:
     event = event_from_runtime_log(
         "cycle_failed",
         {
@@ -132,11 +133,37 @@ def test_cycle_failed_runtime_log_becomes_typed_run_event() -> None:
         session_id="session_1",
     )
 
-    assert isinstance(event, RunEvent)
-    assert event.type == "cycle_failed"
+    assert isinstance(event, RunFailedEvent)
+    assert event.type == "run_failed"
     assert event.cycle_index == 1
+    assert event.error == "ValueError: bad endpoint"
     assert event.metadata["error"] == "ValueError: bad endpoint"
     assert event.metadata["details"] == "Traceback..."
+
+
+def test_runtime_mapping_preserves_taxonomy_and_runner_session_identity() -> None:
+    mapped = [
+        event_from_runtime_log(
+            event_type,
+            {"cycle": 3, "model": "model-parity", "session_id": "session_payload"},
+            run_id="run_1",
+            trace_id="trace_1",
+            agent_name="assistant",
+            user_input="hello",
+            session_id="session_fallback",
+        )
+        for event_type in ("agent_started", "cycle_started", "llm_started")
+    ]
+
+    assert isinstance(mapped[0], AgentStartedEvent)
+    assert isinstance(mapped[1], CycleStartedEvent)
+    assert isinstance(mapped[2], LLMStartedEvent)
+    assert [event.type for event in mapped if event is not None] == [
+        "agent_started",
+        "cycle_started",
+        "llm_started",
+    ]
+    assert all(event is not None and event.session_id == "session_fallback" for event in mapped)
 
 
 def test_memory_compacted_event_dict_includes_counts() -> None:

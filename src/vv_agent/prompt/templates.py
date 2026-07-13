@@ -60,16 +60,16 @@ TODO_PROMPT = {
 TOOL_PRIORITY_PROMPT = {
     "en-US": (
         "Tool priority: prefer specialized tools over shell commands. "
-        f"Read with `{READ_FILE_TOOL_NAME}`, write with `{WRITE_FILE_TOOL_NAME}`, "
-        f"edit with `{EDIT_FILE_TOOL_NAME}`, "
-        f"search with `{SEARCH_FILES_TOOL_NAME}`. "
+        "Find candidate files with `find_files`, "
+        f"read with `{READ_FILE_TOOL_NAME}`, search file contents with `{SEARCH_FILES_TOOL_NAME}`, "
+        f"write with `{WRITE_FILE_TOOL_NAME}`, edit with `{EDIT_FILE_TOOL_NAME}`. "
         f"Use `{BASH_TOOL_NAME}` only when specialized tools are insufficient."
     ),
     "zh-CN": (
         "工具优先级: 优先使用专用工具而不是 shell. "
-        f"读取用 `{READ_FILE_TOOL_NAME}`, 写入用 `{WRITE_FILE_TOOL_NAME}`, "
-        f"编辑用 `{EDIT_FILE_TOOL_NAME}`, "
-        f"搜索用 `{SEARCH_FILES_TOOL_NAME}`. "
+        "查找候选文件用 `find_files`, "
+        f"读取用 `{READ_FILE_TOOL_NAME}`, 搜索文件内容用 `{SEARCH_FILES_TOOL_NAME}`, "
+        f"写入用 `{WRITE_FILE_TOOL_NAME}`, 编辑用 `{EDIT_FILE_TOOL_NAME}`. "
         f"仅在专用工具不足时使用 `{BASH_TOOL_NAME}`."
     ),
 }
@@ -77,11 +77,9 @@ TOOL_PRIORITY_PROMPT = {
 def _os_label() -> str:
     system = platform.system()
     if system == "Windows":
-        release = platform.release()
-        return f"Windows ({release})" if release else "Windows"
+        return "Windows"
     if system == "Darwin":
-        version = platform.mac_ver()[0]
-        return f"macOS ({version})" if version else "macOS"
+        return "macOS"
     if system == "Linux":
         return "Linux"
     return system or "Unknown OS"
@@ -152,4 +150,6 @@ def render_available_skills(
 ) -> str:
     header = SKILL_PROMPT_HEADER.get(language, SKILL_PROMPT_HEADER["en-US"])
     entries = normalize_skill_list(available_skills, workspace=workspace)
+    if not entries:
+        return ""
     return header + "\n" + render_skills_xml(entries)

@@ -1,13 +1,26 @@
-from vv_agent.workspace.base import FileInfo, WorkspaceBackend
+from vv_agent.workspace.base import (
+    INVALID_EXCLUDE_FILES_PATTERN_CODE,
+    INVALID_EXCLUDE_FILES_PATTERN_MESSAGE,
+    DiscoveryFilteredWorkspaceBackend,
+    FileInfo,
+    InvalidPortableRegexError,
+    WorkspaceBackend,
+    compile_portable_workspace_regex,
+)
 from vv_agent.workspace.local import LocalWorkspaceBackend
 from vv_agent.workspace.memory import MemoryWorkspaceBackend
 
 __all__ = [
+    "INVALID_EXCLUDE_FILES_PATTERN_CODE",
+    "INVALID_EXCLUDE_FILES_PATTERN_MESSAGE",
+    "DiscoveryFilteredWorkspaceBackend",
     "FileInfo",
+    "InvalidPortableRegexError",
     "LocalWorkspaceBackend",
     "MemoryWorkspaceBackend",
     "S3WorkspaceBackend",
     "WorkspaceBackend",
+    "compile_portable_workspace_regex",
 ]
 
 

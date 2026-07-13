@@ -15,7 +15,7 @@ from vv_agent import (
     build_default_registry,
     function_tool,
 )
-from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
+from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
@@ -50,6 +50,18 @@ class DenyApprovalProvider(ApprovalProvider):
         return ApprovalDecision.deny("not safe")
 
 
+class FailingDecisionApprovalProvider(ApprovalProvider):
+    def __init__(self) -> None:
+        self.request_id = ""
+
+    def should_request(self, request: ApprovalRequest) -> bool:
+        self.request_id = request.request_id
+        return True
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision | None:
+        raise RuntimeError("approval provider unavailable")
+
+
 class BlockingShouldRequestApprovalProvider(ApprovalProvider):
     def __init__(self, *, should_request_result: bool = True) -> None:
         self.entered = Event()
@@ -72,6 +84,49 @@ def _finish_response(message: str = "finished") -> LLMResponse:
         content=message,
         tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": message})],
     )
+
+
+def test_approval_provider_failure_fails_run_without_faking_a_denial() -> None:
+    calls: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def dangerous() -> str:
+        calls.append("ran")
+        return "allowed"
+
+    provider = FailingDecisionApprovalProvider()
+    broker = ApprovalBroker()
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return llm, _resolved_model()
+
+    result = Runner.run_sync(
+        Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous]),
+        "go",
+        run_config=RunConfig(
+            model_provider=model_provider,
+            approval_provider=provider,
+            approval_broker=broker,
+            max_cycles=1,
+        ),
+    )
+
+    assert result.status == AgentStatus.FAILED
+    assert result.raw_result.error == "approval provider unavailable"
+    assert calls == []
+    assert provider.request_id
+    assert broker.pending_request(provider.request_id) is None
+    assert [
+        event.type
+        for event in result.events
+        if event.type in {"approval_requested", "approval_resolved", "run_failed"}
+    ] == ["approval_requested", "run_failed"]
 
 
 def test_approval_request_pauses_tool_until_handle_approves() -> None:

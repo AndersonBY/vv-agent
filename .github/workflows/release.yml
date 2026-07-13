@@ -48,6 +48,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev --extra s3
 
+      - name: Verify locked contract snapshot
+        run: python3 scripts/contract_snapshot.py check
+
+      - name: Require centrally verified contract adoption
+        run: python3 scripts/contract_snapshot.py adoption --implementation python --revision "$(git rev-parse HEAD)"
+
       - name: Run tests
         run: uv run pytest
 

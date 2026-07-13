@@ -39,6 +39,24 @@ def test_schema_description_is_loaded_from_constants() -> None:
     assert "line" in description.lower()
 
 
+def test_task_finish_schema_exposes_todo_completion_guard() -> None:
+    registry = build_default_registry()
+    schema = registry.get_schema(TASK_FINISH_TOOL_NAME)
+
+    parameters = schema["function"]["parameters"]
+    require_all_todos_completed = parameters["properties"]["require_all_todos_completed"]
+
+    assert parameters["required"] == []
+    assert require_all_todos_completed == {
+        "type": "boolean",
+        "description": (
+            "Default true. When true, finish is rejected while TODO items remain pending or in_progress. "
+            "Set false only when intentionally finishing with remaining TODOs, such as when the user "
+            "explicitly accepts deferred work."
+        ),
+    }
+
+
 def test_create_sub_task_schema_uses_agent_id_only() -> None:
     registry = build_default_registry()
     schema = registry.get_schema(CREATE_SUB_TASK_TOOL_NAME)

@@ -20,6 +20,7 @@ class ToolOutputJson:
 class ToolOutputImage:
     url: str | None = None
     path: str | None = None
+    mime_type: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -34,6 +35,7 @@ class ToolOutputFile:
 class ToolOutputError:
     message: str
     error_code: str | None = None
+    retryable: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

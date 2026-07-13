@@ -56,4 +56,5 @@ def test_agent_compiler_builds_runtime_task_from_public_contract() -> None:
     assert task.metadata["team"] == "ops"
     assert task.metadata["request_id"] == "r1"
     assert task.metadata["_vv_agent_allowed_tools"] == [TASK_FINISH_TOOL_NAME, "lookup", "transfer_to_writer"]
-    assert task.runtime_metadata == {"trace_id": "trace-1"}
+    assert task.metadata["trace_id"] == "trace-1"
+    assert not hasattr(task, "runtime_metadata")

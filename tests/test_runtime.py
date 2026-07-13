@@ -11,10 +11,10 @@ from vv_agent.constants import (
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
 )
-from vv_agent.llm import ScriptedLLM
+from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import SessionMemoryEntry, SessionMemoryState
 from vv_agent.runtime import AgentRuntime
-from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
+from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import (
     AgentStatus,
     AgentTask,
@@ -357,7 +357,8 @@ def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path
         encoding="utf-8",
     )
 
-    def assert_session_memory(_model: str, messages: list[Message]) -> LLMResponse:
+    def assert_session_memory(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         assert messages[0].role == "system"
         assert "<Session Memory>" in messages[0].content
         assert "persisted workspace fact" in messages[0].content
@@ -405,7 +406,8 @@ def test_runtime_does_not_load_session_memory_from_other_task_scope(tmp_path: Pa
         encoding="utf-8",
     )
 
-    def assert_no_session_memory(_model: str, messages: list[Message]) -> LLMResponse:
+    def assert_no_session_memory(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         assert messages[0].role == "system"
         assert "<Session Memory>" not in messages[0].content
         assert "old task fact" not in messages[0].content
@@ -457,6 +459,10 @@ def test_runtime_disables_session_memory_for_subtasks_by_default(tmp_path: Path)
         sub_agent_name="worker",
         sub_agent=parent_task.sub_agents["worker"],
         resolved_model_id="demo-model",
+        child_run_id="child-run",
+        trace_id="child-trace",
+        parent_run_id="",
+        parent_tool_call_id="",
         request=SubTaskRequest(agent_name="worker", task_description="do work"),
         parent_shared_state={},
         workspace_path=tmp_path,
@@ -471,7 +477,8 @@ def test_runtime_disables_session_memory_for_subtasks_by_default(tmp_path: Path)
 def test_runtime_uses_prompt_tokens_for_followup_compaction_budget(tmp_path: Path) -> None:
     observed_cycle_two_messages: list[Message] = []
 
-    def inspect_cycle_two_messages(_model: str, messages: list[Message]) -> LLMResponse:
+    def inspect_cycle_two_messages(request: LlmRequest) -> LLMResponse:
+        _model, messages = request.model, request.messages
         observed_cycle_two_messages.extend(messages)
         return LLMResponse(
             content="finish",
@@ -513,7 +520,8 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
     image_path = tmp_path / "img.png"
     image_path.write_bytes(_PNG_1X1)
 
-    def assert_image_message(model: str, messages: list[Message]) -> LLMResponse:
+    def assert_image_message(request: LlmRequest) -> LLMResponse:
+        model, messages = request.model, request.messages
         del model
         image_messages = [msg for msg in messages if msg.role == "user" and isinstance(msg.image_url, str)]
         assert image_messages, "Expected image message with image_url in runtime history."
@@ -657,7 +665,8 @@ def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path
             image_url="data:image/png;base64,AAAA",
         )
 
-    def assert_order(model: str, messages: list[Message]) -> LLMResponse:
+    def assert_order(request: LlmRequest) -> LLMResponse:
+        model, messages = request.model, request.messages
         del model
         assistant_index = next(
             index
@@ -696,7 +705,11 @@ def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path
         ]
     )
     registry = build_default_registry()
-    registry.register(ToolSpec(name="_demo_image", handler=_demo_image))
+    registry.register_tool(
+        name="_demo_image",
+        handler=_demo_image,
+        description="Return a demo image.",
+    )
     runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_image_order",
@@ -722,7 +735,8 @@ def test_runtime_skips_image_notifications_when_multimodal_disabled(tmp_path: Pa
             image_url="data:image/png;base64,AAAA",
         )
 
-    def assert_no_image_message(model: str, messages: list[Message]) -> LLMResponse:
+    def assert_no_image_message(request: LlmRequest) -> LLMResponse:
+        model, messages = request.model, request.messages
         del model
         assert not any(message.role == "user" and message.image_url for message in messages)
         return LLMResponse(
@@ -740,7 +754,11 @@ def test_runtime_skips_image_notifications_when_multimodal_disabled(tmp_path: Pa
         ]
     )
     registry = build_default_registry()
-    registry.register(ToolSpec(name="_demo_image", handler=_demo_image))
+    registry.register_tool(
+        name="_demo_image",
+        handler=_demo_image,
+        description="Return a demo image.",
+    )
     runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
     task = AgentTask(
         task_id="task_no_multimodal",
@@ -754,6 +772,7 @@ def test_runtime_skips_image_notifications_when_multimodal_disabled(tmp_path: Pa
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "ok"
+    assert result.cycles[0].tool_results[0].image_url == "data:image/png;base64,AAAA"
 
 
 def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:

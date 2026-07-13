@@ -1,0 +1,3 @@
+{"version":"v1","type":"run_started","event_id":"evt_parent","run_id":"run_parent","trace_id":"trace_store","created_at":1.0,"agent_name":"parent","input":"start"}
+{"version":"v1","type":"run_started","event_id":
+{"version":"v1","type":"run_started","event_id":"evt_child","run_id":"run_child","trace_id":"trace_store","created_at":3.0,"parent_run_id":"run_parent","agent_name":"child","input":"continue"}

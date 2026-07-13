@@ -4,18 +4,12 @@ from typing import Any
 
 from vv_agent.skills.normalize import normalize_skill_list
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import to_json
+from vv_agent.tools.handlers.common import builtin_error, to_json
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 
 def _error(*, error_code: str, message: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
-        tool_call_id="",
-        status="error",
-        status_code=ToolResultStatus.ERROR,
-        error_code=error_code,
-        content=to_json({"error": message, "error_code": error_code}),
-    )
+    return builtin_error(message, error_code)
 
 
 def activate_skill(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -77,12 +71,8 @@ def activate_skill(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
         response_data["description"] = entry.description
     if entry.location:
         response_data["location"] = entry.location
-    if entry.compatibility:
-        response_data["compatibility"] = entry.compatibility
     if entry.allowed_tools:
         response_data["allowed_tools"] = entry.allowed_tools
-    if entry.metadata:
-        response_data["metadata"] = entry.metadata
     if reason:
         response_data["reason"] = reason
 
@@ -91,5 +81,5 @@ def activate_skill(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
         status="success",
         status_code=ToolResultStatus.SUCCESS,
         content=to_json(response_data),
-        metadata=response_data,
+        metadata={"skill_name": entry.name},
     )

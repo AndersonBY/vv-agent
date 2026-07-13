@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import posixpath
 from datetime import UTC, datetime
 
-from vv_agent.workspace.base import FileInfo
+from vv_agent.workspace.base import FileInfo, _normalize_workspace_path
 
 
 def _glob_match(path: str, pattern: str) -> bool:
@@ -14,10 +13,10 @@ def _glob_match(path: str, pattern: str) -> bool:
     parts: list[str] = []
     i = 0
     while i < len(pattern):
-        if pattern[i:i + 3] == "**/":
+        if pattern[i : i + 3] == "**/":
             parts.append("(?:.+/)?")
             i += 3
-        elif pattern[i:i + 2] == "**":
+        elif pattern[i : i + 2] == "**":
             parts.append(".*")
             i += 2
         elif pattern[i] == "*":
@@ -42,11 +41,11 @@ class MemoryWorkspaceBackend:
 
     @staticmethod
     def _norm(path: str) -> str:
-        return posixpath.normpath(path).lstrip("/")
+        return _normalize_workspace_path(path)
 
     def list_files(self, base: str, glob: str) -> list[str]:
         base_n = self._norm(base)
-        pattern = posixpath.join(base_n, glob) if base_n and base_n != "." else glob
+        pattern = f"{base_n}/{glob}" if base_n else glob
         files = [p for p in self._files if _glob_match(p, pattern)]
         files.sort()
         return files
@@ -71,7 +70,7 @@ class MemoryWorkspaceBackend:
         else:
             self._files[key] = data
         self._ensure_parents(key)
-        return len(content)
+        return len(data)
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._norm(path)
@@ -90,7 +89,7 @@ class MemoryWorkspaceBackend:
             )
         if key in self._dirs:
             return FileInfo(
-                path=key,
+                path=key or ".",
                 is_file=False,
                 is_dir=True,
                 size=0,

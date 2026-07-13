@@ -26,6 +26,14 @@ class AppServerError:
     data: dict[str, Any] | None = field(default=None)
 
     @classmethod
+    def parse_error(cls) -> AppServerError:
+        return cls(code=AppServerErrorCode.PARSE_ERROR, message="Parse error")
+
+    @classmethod
+    def invalid_request(cls, message: str = "Invalid Request") -> AppServerError:
+        return cls(code=AppServerErrorCode.INVALID_REQUEST, message=message)
+
+    @classmethod
     def not_initialized(cls) -> AppServerError:
         return cls(code=AppServerErrorCode.NOT_INITIALIZED, message="Not initialized")
 
@@ -35,7 +43,11 @@ class AppServerError:
 
     @classmethod
     def method_not_found(cls, method: str) -> AppServerError:
-        return cls(code=AppServerErrorCode.METHOD_NOT_FOUND, message=f"Method not found: {method}")
+        return cls(
+            code=AppServerErrorCode.METHOD_NOT_FOUND,
+            message=f"Method not found: {method}",
+            data={"method": method},
+        )
 
     @classmethod
     def invalid_params(cls, message: str, data: dict[str, Any] | None = None) -> AppServerError:

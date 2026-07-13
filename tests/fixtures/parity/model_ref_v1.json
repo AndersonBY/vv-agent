@@ -1,0 +1,1 @@
+{"valid":[{"type":"named","model":"demo"},{"type":"backend_model","backend":"scripted","model":"demo"}],"invalid":[{},{"type":"named","model":""},{"type":"named","model":"demo","backend":"scripted"},{"type":"backend_model","backend":"","model":"demo"},{"type":"resolved","model":"demo"},{"type":"unknown","model":"demo"}]}

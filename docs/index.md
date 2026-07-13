@@ -9,8 +9,11 @@ history.
 | Document | Use it for |
 | --- | --- |
 | `architecture.md` | Runtime structure, module boundaries, execution flow, and invariants. |
+| `parity-contract.md` | Python producer mapping and local adoption commands for the canonical `vv-agent-contract` release. |
 | `development.md` | Local setup, test commands, linting, live-test workflow, and change hygiene. |
 | `model-settings.md` | `LLM_SETTINGS`, local key files, model defaults, and exact model resolution rules. |
+| `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and v1 event producers. |
+| `app-server.md` | JSONL protocol, lifecycle, approval, schema generation, CLI startup, and host boundary. |
 
 ## Existing Entry Points
 

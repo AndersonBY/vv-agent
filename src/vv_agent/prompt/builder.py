@@ -270,7 +270,9 @@ def create_system_prompt_builder(
         tools_lines.append(render_sub_agents(language, available_sub_agents))
     if available_skills:
         workspace_path = Path(workspace).resolve() if workspace is not None else None
-        tools_lines.append(render_available_skills(language, available_skills, workspace=workspace_path))
+        skills_prompt = render_available_skills(language, available_skills, workspace=workspace_path)
+        if skills_prompt:
+            tools_lines.append(skills_prompt)
     tools_lines.append(TASK_FINISH_PROMPT.get(language, TASK_FINISH_PROMPT["en-US"]))
     joined_tools = "\n\n".join(tools_lines)
     builder.add_section(
@@ -281,16 +283,15 @@ def create_system_prompt_builder(
         )
     )
 
-    def _render_time_section() -> str:
-        now = current_time_utc or datetime.now(tz=UTC)
-        now_text = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        time_header = CURRENT_TIME_PROMPT.get(language, CURRENT_TIME_PROMPT["en-US"])
-        return f"<Current Time>\n{time_header}\n{now_text}\n</Current Time>"
+    task_start_time = current_time_utc or datetime.now(tz=UTC)
+    task_start_time_text = task_start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    time_header = CURRENT_TIME_PROMPT.get(language, CURRENT_TIME_PROMPT["en-US"])
+    rendered_time_section = f"<Current Time>\n{time_header}\n{task_start_time_text}\n</Current Time>"
 
     builder.add_section(
         PromptSection(
             id="current_time",
-            compute=_render_time_section,
+            compute=lambda text=rendered_time_section: text,
             stable=False,
         )
     )

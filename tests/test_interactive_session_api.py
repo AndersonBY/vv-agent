@@ -7,16 +7,27 @@ import pytest
 
 import vv_agent
 from vv_agent import (
+    Agent,
     AgentSessionOptions,
     AgentSessionRun,
     AgentStatus,
     InteractiveAgentClient,
     InteractiveAgentDefinition,
     Message,
+    ModelSettings,
+    ScriptedModelProvider,
     create_agent_session,
+    function_tool,
+    handoff,
+    input_guardrail,
+    output_guardrail,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.types import AgentResult
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.guardrails import GuardrailResult
+from vv_agent.llm import LlmRequest
+from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
+from vv_agent.types import AgentResult, LLMResponse, SubAgentConfig, ToolCall
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -109,7 +120,7 @@ def test_agent_session_preserves_session_id_messages_shared_state_and_events(tmp
     assert session.messages[-1].content == "answer: hello"
     assert session.shared_state["last_prompt"] == "hello"
     assert calls[0]["session_id"] == "desktop-session-1"
-    assert calls[0]["initial_messages"] == []
+    assert calls[0]["initial_messages"] is None
     assert calls[0]["cancellation_token"] is not None
     assert events[0][0] == "session_run_start"
     assert events[-1][0] == "session_run_end"
@@ -162,10 +173,16 @@ def test_agent_session_queues_steering_and_follow_up_prompts(tmp_path: Path) -> 
     )
 
     session.steer("interrupt with context")
+    session.steer("second steering message")
     session.follow_up("continue with next turn")
     session.prompt("start")
 
-    assert prompts == ["start", "interrupt with context", "continue with next turn"]
+    assert prompts == [
+        "start",
+        "interrupt with context",
+        "second steering message",
+        "continue with next turn",
+    ]
 
 
 def test_interactive_client_prepare_task_maps_definition_to_runtime_task(tmp_path: Path) -> None:
@@ -235,6 +252,177 @@ def test_interactive_client_create_session_preserves_caller_session_id(tmp_path:
     )
 
     assert session.session_id == "caller-session-id"
+
+
+def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> None:
+    dynamic_contexts: list[tuple[str, str, Path, dict[str, Any]]] = []
+    hook_calls: list[str] = []
+    tool_calls: list[str] = []
+    guardrail_calls: list[str] = []
+    output_guardrail_calls: list[str] = []
+    requests: list[LlmRequest] = []
+
+    @function_tool
+    def remember(value: str) -> str:
+        """Remember a value."""
+        tool_calls.append(value)
+        return value
+
+    @input_guardrail
+    def record_guardrail(context, value: str) -> GuardrailResult:
+        guardrail_calls.append(f"{context.agent_name}:{value}")
+        return GuardrailResult.allow()
+
+    @output_guardrail
+    def rewrite_output(context, value: str) -> GuardrailResult:
+        output_guardrail_calls.append(f"{context.agent_name}:{value}")
+        return GuardrailResult.rewrite('{"status":"guarded"}')
+
+    class RecordHook(BaseRuntimeHook):
+        def before_llm(self, event: BeforeLLMEvent):
+            hook_calls.append(event.task.task_id)
+            return None
+
+    def instructions(context, current_agent) -> str:
+        dynamic_contexts.append((context.agent_name, str(context.model), Path(context.workspace), dict(context.metadata)))
+        assert current_agent is agent
+        return "Dynamic instructions."
+
+    configured_child = SubAgentConfig(model="child-model", description="Research the request.")
+    agent = Agent(
+        name="interactive-agent",
+        instructions=instructions,
+        model="parent-model",
+        model_settings=ModelSettings(temperature=0.25, max_tokens=321),
+        tools=[remember],
+        input_guardrails=[record_guardrail],
+        output_guardrails=[rewrite_output],
+        output_type=dict,
+        hooks=[RecordHook()],
+        metadata={"agent_marker": "kept"},
+        sub_agents={"researcher": configured_child},
+    )
+
+    def capture_request(request: LlmRequest) -> LLMResponse:
+        requests.append(request)
+        tool_names = [str(cast(dict[str, object], item["function"])["name"]) for item in request.tools]
+        assert "remember" in tool_names
+        assert CREATE_SUB_TASK_TOOL_NAME in tool_names
+        if len(requests) == 1:
+            return LLMResponse(
+                content="remember",
+                tool_calls=[ToolCall(id="remember-call", name="remember", arguments={"value": "kept"})],
+            )
+        return LLMResponse(
+            content="finish",
+            tool_calls=[
+                ToolCall(
+                    id="finish-call",
+                    name=TASK_FINISH_TOOL_NAME,
+                    arguments={"message": '{"status":"ok"}'},
+                )
+            ],
+        )
+
+    provider = ScriptedModelProvider.from_callback("test", "parent-model", capture_request)
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="test",
+            workspace=tmp_path,
+            llm_builder=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("builder must not run")),
+        )
+    )
+    agent.model = provider.client(provider.resolve(provider.default_model_ref()))
+    session = client.create_session(agent=agent, session_id="public-agent-session")
+
+    run = session.prompt("preserve everything")
+
+    assert session.agent is agent
+    assert session.definition is None
+    assert session.agent_name == "interactive-agent"
+    assert run.agent_name == "interactive-agent"
+    assert run.final_output == {"status": "guarded"}
+    assert tool_calls == ["kept"]
+    assert guardrail_calls == ["interactive-agent:preserve everything"]
+    assert output_guardrail_calls == ['interactive-agent:{"status":"ok"}']
+    assert len(hook_calls) == 2
+    assert len(dynamic_contexts) == 1
+    agent_name, model, workspace, metadata = dynamic_contexts[0]
+    assert (agent_name, model, workspace) == ("interactive-agent", "direct", tmp_path.resolve())
+    assert metadata["agent_marker"] == "kept"
+    assert metadata["session_id"] == "public-agent-session"
+    assert metadata["trace_id"]
+    assert requests[0].model_settings == ModelSettings(temperature=0.25, max_tokens=321)
+    assert requests[0].metadata["session_id"] == "public-agent-session"
+    assert requests[0].metadata["system_prompt_sources"] == {
+        "agent_instructions": "agent.instructions",
+        "configured_sub_agents": "agent.sub_agents",
+    }
+    assert configured_child.description == "Research the request."
+
+
+def test_interactive_client_preserves_public_agent_handoff(tmp_path: Path) -> None:
+    shared_llm = ScriptedModelProvider.new(
+        "test",
+        "shared-model",
+        [
+            LLMResponse(
+                content="transfer",
+                tool_calls=[
+                    ToolCall(
+                        id="handoff-call",
+                        name="transfer_to_writer",
+                        arguments={"input": "write it"},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="written",
+                tool_calls=[
+                    ToolCall(
+                        id="writer-finish",
+                        name=TASK_FINISH_TOOL_NAME,
+                        arguments={"message": "writer result"},
+                    )
+                ],
+            ),
+        ],
+    ).llm
+    writer = Agent(name="writer", instructions="Write.", model=shared_llm)
+    triage = Agent(
+        name="triage",
+        instructions="Transfer.",
+        model=shared_llm,
+        handoffs=[handoff(agent=writer, description="Write the result.")],
+    )
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="test",
+            workspace=tmp_path,
+        )
+    )
+
+    session = client.create_session(agent=triage)
+    run = session.prompt("route this")
+
+    assert session.agent is triage
+    assert run.agent_name == "writer"
+    assert run.final_output == "writer result"
+    assert [event.type for event in run.events if event.type.startswith("handoff_")] == [
+        "handoff_started",
+        "handoff_completed",
+    ]
+
+
+def test_interactive_definition_rejects_ignored_system_prompt_template() -> None:
+    with pytest.raises(ValueError, match="system_prompt_template is not supported"):
+        InteractiveAgentDefinition(
+            description="desktop agent",
+            model="kimi-k2.6",
+            system_prompt_template="ignored {description}",
+        )
 
 
 def test_interactive_client_requires_debug_dump_capable_llm(tmp_path: Path) -> None:

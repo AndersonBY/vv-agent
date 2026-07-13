@@ -9,84 +9,212 @@ This module provides ``run_single_cycle`` which:
 
 from __future__ import annotations
 
-import importlib
-import logging
+import time
+import uuid
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any
 
+from vv_agent.agent import RunContext
 from vv_agent.config import build_openai_llm_from_local_settings
-from vv_agent.runtime.backends.celery import RuntimeRecipe
+from vv_agent.run_config import ToolPolicy
+from vv_agent.runtime.backends.distributed import (
+    DEFAULT_CYCLE_NAME,
+    DistributedCapabilityRegistry,
+    DistributedRunEnvelope,
+    RuntimeRecipe,
+)
+from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.engine import AgentRuntime, register_sub_agent_session, unregister_sub_agent_session
-from vv_agent.runtime.hooks import RuntimeHook
-from vv_agent.runtime.state import Checkpoint
-from vv_agent.runtime.stores.sqlite import SqliteStateStore
+from vv_agent.runtime.state import CheckpointConflictError, build_state_store
 from vv_agent.runtime.sub_task_manager import SubTaskManager
-from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentResult, AgentStatus, AgentTask
 from vv_agent.workspace import LocalWorkspaceBackend
 
-logger = logging.getLogger(__name__)
+
+class _LeaseHeartbeat:
+    def __init__(
+        self,
+        *,
+        store: Any,
+        envelope: DistributedRunEnvelope,
+        claim_token: str,
+        expected_revision: int,
+    ) -> None:
+        self._store = store
+        self._envelope = envelope
+        self._claim_token = claim_token
+        self._expected_revision = expected_revision
+        self._stopped = Event()
+        self._error: BaseException | None = None
+        interval_seconds = envelope.lease_duration_ms / 3000
+        self._interval_seconds = max(0.01, min(interval_seconds, 30.0))
+        self._thread = Thread(target=self._run, name=f"vv-agent-lease-{envelope.job_id}", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self._thread.join()
+
+    def raise_if_failed(self) -> None:
+        if self._error is not None:
+            raise CheckpointConflictError(f"checkpoint lease heartbeat failed: {self._error}") from self._error
+
+    def _run(self) -> None:
+        while not self._stopped.wait(self._interval_seconds):
+            try:
+                now_ms = time.time_ns() // 1_000_000
+                self._envelope.ensure_not_expired(now_ms=now_ms)
+                lease_expires_at_ms = now_ms + self._envelope.lease_duration_ms
+                if self._envelope.deadline_unix_ms is not None:
+                    lease_expires_at_ms = min(lease_expires_at_ms, self._envelope.deadline_unix_ms)
+                renewed = self._store.renew_checkpoint_claim(
+                    self._envelope.task.task_id,
+                    claim_token=self._claim_token,
+                    expected_revision=self._expected_revision,
+                    lease_expires_at_ms=lease_expires_at_ms,
+                    now_ms=now_ms,
+                )
+                if not renewed:
+                    raise CheckpointConflictError("claim is no longer active")
+            except BaseException as exc:  # the worker must observe heartbeat infrastructure failures
+                self._error = exc
+                self._stopped.set()
+                return
 
 
 def _build_state_store(recipe: RuntimeRecipe) -> Any:
-    """Build a StateStore from the recipe's workspace.
-
-    Uses SQLite by default.  If the workspace contains a
-    ``state_store_url`` metadata key starting with ``redis://``,
-    a RedisStateStore is used instead.
-    """
-    workspace = Path(recipe.workspace).resolve()
-    db_path = workspace / ".vv-agent-state" / "checkpoints.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    return SqliteStateStore(db_path=db_path)
+    """Rebuild the exact durable store selected by the scheduler."""
+    if recipe.state_store is None:
+        raise ValueError("distributed RuntimeRecipe is missing state_store")
+    return build_state_store(recipe.state_store)
 
 
-def _load_hooks(class_paths: list[str]) -> list[RuntimeHook]:
-    """Import hook classes by dotted path and instantiate them."""
-    hooks: list[RuntimeHook] = []
-    for path in class_paths:
-        module_path, _, class_name = path.rpartition(".")
-        if not module_path:
-            logger.warning(f"Invalid hook class path: {path}")
-            continue
-        try:
-            mod = importlib.import_module(module_path)
-            cls = getattr(mod, class_name)
-            hooks.append(cls())
-        except Exception:
-            logger.warning(f"Failed to load hook {path}", exc_info=True)
-    return hooks
+def _resolve_many(
+    registry: DistributedCapabilityRegistry,
+    kind: Any,
+    references: tuple[Any, ...],
+) -> list[Any]:
+    return [registry.resolve(kind, reference) for reference in references]
 
 
-def _rebuild_runtime(recipe: RuntimeRecipe) -> AgentRuntime:
+def _rebuild_runtime(
+    recipe: RuntimeRecipe,
+    capability_registry: DistributedCapabilityRegistry,
+) -> tuple[AgentRuntime, ExecutionContext, SubTaskManager, ToolPolicy]:
     """Reconstruct an AgentRuntime from a RuntimeRecipe on the worker."""
+    capabilities = recipe.capabilities
+    capability_registry.validate(capabilities)
     workspace = Path(recipe.workspace).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
-    llm, _resolved = build_openai_llm_from_local_settings(
-        recipe.settings_file,
-        backend=recipe.backend,
-        model=recipe.model,
-        timeout_seconds=recipe.timeout_seconds,
+    if capabilities.llm_client_ref is not None:
+        llm = capability_registry.resolve("llm_client", capabilities.llm_client_ref)
+    else:
+        llm, _resolved = build_openai_llm_from_local_settings(
+            recipe.settings_file,
+            backend=recipe.backend,
+            model=recipe.model,
+            timeout_seconds=recipe.timeout_seconds,
+        )
+    tool_registry = capability_registry.resolve_toolset(capabilities.toolset_ref)
+    tool_policy = capabilities.tool_policy.resolve(capability_registry)
+    hooks = _resolve_many(capability_registry, "hook", capabilities.hook_refs)
+    observers = _resolve_many(capability_registry, "observer", capabilities.observer_refs)
+    event_sink = (
+        capability_registry.resolve("event_sink", capabilities.event_sink_ref)
+        if capabilities.event_sink_ref is not None
+        else None
     )
-    hooks = _load_hooks(recipe.hook_class_paths)
 
-    return AgentRuntime(
+    def log_handler(event: str, payload: dict[str, Any]) -> None:
+        for observer in observers:
+            observer(event, dict(payload))
+
+    workspace_backend = (
+        capability_registry.resolve("workspace_backend", capabilities.workspace_backend_ref)
+        if capabilities.workspace_backend_ref is not None
+        else LocalWorkspaceBackend(workspace)
+    )
+    runtime = AgentRuntime(
         llm_client=llm,
-        tool_registry=build_default_registry(),
+        tool_registry=tool_registry,
         default_workspace=workspace,
+        log_handler=log_handler if observers else None,
         log_preview_chars=recipe.log_preview_chars,
         settings_file=recipe.settings_file,
         default_backend=recipe.backend,
         hooks=hooks,
+        workspace_backend=workspace_backend,
     )
+    metadata: dict[str, Any] = {
+        "_vv_agent_run_id": "",
+        "_vv_agent_allowed_tools": (
+            list(tool_policy.allowed_tools) if tool_policy.allowed_tools is not None else None
+        ),
+        "_vv_agent_disallowed_tools": list(tool_policy.disallowed_tools),
+        "_vv_agent_tool_policy_approval": tool_policy.approval,
+    }
+    if tool_policy.can_use_tool is not None:
+        metadata["_vv_agent_tool_policy_can_use_tool"] = tool_policy.can_use_tool
+    if event_sink is not None:
+        metadata["_vv_agent_emit_event"] = event_sink
+    if capabilities.approval_provider_ref is not None:
+        approval_broker_ref = capabilities.approval_broker_ref
+        assert approval_broker_ref is not None
+        metadata["_vv_agent_approval_provider"] = capability_registry.resolve(
+            "approval_provider", capabilities.approval_provider_ref
+        )
+        metadata["_vv_agent_approval_broker"] = capability_registry.resolve(
+            "approval_broker", approval_broker_ref
+        )
+        metadata["_vv_agent_approval_timeout_seconds"] = capabilities.approval_timeout_seconds
+    memory_providers = _resolve_many(
+        capability_registry,
+        "memory_provider",
+        capabilities.memory_provider_refs,
+    )
+    if memory_providers:
+        metadata["_vv_agent_memory_providers"] = memory_providers
+    app_state = (
+        capability_registry.resolve("app_state", capabilities.app_state_ref)
+        if capabilities.app_state_ref is not None
+        else None
+    )
+    metadata["_vv_agent_run_context"] = RunContext(
+        context=app_state,
+        model=recipe.model,
+        workspace=workspace_backend,
+    )
+    cancellation_token = (
+        capability_registry.resolve("cancellation", capabilities.cancellation_ref)
+        if capabilities.cancellation_ref is not None
+        else None
+    )
+    context = ExecutionContext(
+        cancellation_token=cancellation_token,
+        metadata=metadata,
+    )
+    sub_task_manager = (
+        capability_registry.resolve("sub_task_manager", capabilities.sub_task_manager_ref)
+        if capabilities.sub_task_manager_ref is not None
+        else SubTaskManager(
+            register_session=register_sub_agent_session,
+            unregister_session=unregister_sub_agent_session,
+        )
+    )
+    return runtime, context, sub_task_manager, tool_policy
 
 
 def run_single_cycle(
     *,
-    task_dict: dict[str, Any],
-    recipe_dict: dict[str, Any],
-    cycle_index: int,
+    envelope_dict: dict[str, Any] | None = None,
+    capability_registry: DistributedCapabilityRegistry | None = None,
+    task_dict: dict[str, Any] | None = None,
+    recipe_dict: dict[str, Any] | None = None,
+    cycle_index: int | None = None,
 ) -> dict[str, Any]:
     """Execute a single agent cycle on a Celery worker.
 
@@ -94,12 +222,61 @@ def run_single_cycle(
     - ``finished``: bool — whether the agent reached a terminal state
     - ``result``: dict — serialised AgentResult (only when finished)
     """
-    recipe = RuntimeRecipe.from_dict(recipe_dict)
-    task = AgentTask.from_dict(task_dict)
+    if envelope_dict is None:
+        if task_dict is None or recipe_dict is None or cycle_index is None:
+            raise TypeError("run_single_cycle requires envelope_dict")
+        task = AgentTask.from_dict(task_dict)
+        recipe = RuntimeRecipe.from_dict(recipe_dict)
+        envelope = DistributedRunEnvelope.for_cycle(
+            task=task,
+            recipe=recipe,
+            cycle_index=cycle_index,
+            cycle_name=DEFAULT_CYCLE_NAME,
+        )
+    else:
+        envelope = DistributedRunEnvelope.from_dict(envelope_dict)
+        task = envelope.task
+        recipe = envelope.recipe
+        cycle_index = envelope.cycle_index
 
     # Load checkpoint saved by the scheduler (or previous cycle).
     store = _build_state_store(recipe)
-    checkpoint = store.load_checkpoint(task.task_id)
+    existing = store.load_checkpoint(task.task_id)
+    if existing is not None and existing.terminal_result is not None:
+        return {
+            "finished": True,
+            "result": existing.terminal_result.to_dict(),
+            "checkpoint_revision": existing.revision,
+        }
+    envelope.ensure_not_expired()
+    registry = capability_registry or DistributedCapabilityRegistry()
+    runtime, ctx, sub_task_manager, tool_policy = _rebuild_runtime(recipe, registry)
+    if tool_policy.allowed_tools is None:
+        task.metadata.pop("_vv_agent_allowed_tools", None)
+    else:
+        task.metadata["_vv_agent_allowed_tools"] = list(tool_policy.allowed_tools)
+    if tool_policy.disallowed_tools:
+        task.metadata["_vv_agent_disallowed_tools"] = list(tool_policy.disallowed_tools)
+    else:
+        task.metadata.pop("_vv_agent_disallowed_tools", None)
+    ctx.state_store = store
+    ctx.metadata["_vv_agent_run_id"] = envelope.run_id
+    run_context = ctx.metadata.get("_vv_agent_run_context")
+    if isinstance(run_context, RunContext):
+        run_context.run_id = envelope.run_id
+
+    now_ms = time.time_ns() // 1_000_000
+    claim_token = uuid.uuid4().hex
+    try:
+        checkpoint = store.claim_checkpoint(
+            task.task_id,
+            cycle_index,
+            claim_token=claim_token,
+            lease_expires_at_ms=now_ms + envelope.lease_duration_ms,
+            now_ms=now_ms,
+        )
+    except CheckpointConflictError as exc:
+        raise CheckpointConflictError(f"retryable distributed delivery conflict: {exc}") from exc
     if checkpoint is None:
         return {
             "finished": True,
@@ -112,17 +289,11 @@ def run_single_cycle(
             ).to_dict(),
         }
 
-    runtime = _rebuild_runtime(recipe)
-
     # Build the cycle executor closure on the worker side.
     workspace_path = Path(recipe.workspace).resolve()
     memory_manager = runtime._build_memory_manager(
         task=task,
         workspace_path=workspace_path,
-    )
-    sub_task_manager = SubTaskManager(
-        register_session=register_sub_agent_session,
-        unregister_session=unregister_sub_agent_session,
     )
     cycle_executor = runtime._build_cycle_executor(
         task=task,
@@ -139,28 +310,54 @@ def run_single_cycle(
     shared_state = checkpoint.shared_state
 
     # Execute exactly one cycle.
-    result = cycle_executor(
-        cycle_index,
-        messages,
-        cycles,
-        shared_state,
-        None,
+    heartbeat = _LeaseHeartbeat(
+        store=store,
+        envelope=envelope,
+        claim_token=claim_token,
+        expected_revision=checkpoint.revision,
     )
+    heartbeat.start()
+    try:
+        result = cycle_executor(
+            cycle_index,
+            messages,
+            cycles,
+            shared_state,
+            ctx,
+        )
+    finally:
+        heartbeat.stop()
+    heartbeat.raise_if_failed()
 
     if result is not None:
-        # Terminal state — clean up checkpoint and return result.
-        store.delete_checkpoint(task.task_id)
-        return {"finished": True, "result": result.to_dict()}
+        checkpoint.cycle_index = cycle_index
+        checkpoint.status = result.status
+        checkpoint.messages = result.messages
+        checkpoint.cycles = result.cycles
+        checkpoint.shared_state = result.shared_state
+        checkpoint.terminal_result = result
+        expected_revision = checkpoint.revision
+        if not store.commit_checkpoint(checkpoint, claim_token=claim_token, expected_revision=expected_revision):
+            raise CheckpointConflictError(
+                f"checkpoint changed while terminal cycle {cycle_index} was running for task {task.task_id}"
+            )
+        return {
+            "finished": True,
+            "result": result.to_dict(),
+            "checkpoint_revision": expected_revision + 1,
+        }
 
     # Non-terminal — save updated checkpoint for the next cycle.
-    store.save_checkpoint(
-        Checkpoint(
-            task_id=task.task_id,
-            cycle_index=cycle_index,
-            status=AgentStatus.RUNNING,
-            messages=messages,
-            cycles=cycles,
-            shared_state=shared_state,
-        )
-    )
+    checkpoint.cycle_index = cycle_index
+    checkpoint.status = AgentStatus.RUNNING
+    checkpoint.messages = messages
+    checkpoint.cycles = cycles
+    checkpoint.shared_state = shared_state
+    expected_revision = checkpoint.revision
+    if not store.commit_checkpoint(
+        checkpoint,
+        claim_token=claim_token,
+        expected_revision=expected_revision,
+    ):
+        raise CheckpointConflictError(f"checkpoint changed while cycle {cycle_index} was running for task {task.task_id}")
     return {"finished": False}

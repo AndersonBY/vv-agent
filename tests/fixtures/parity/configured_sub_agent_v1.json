@@ -1,0 +1,552 @@
+{
+  "version": "v1",
+  "validation": {
+    "empty_model_error_code": "invalid_sub_agent_model",
+    "empty_model_message": "sub-agent model cannot be empty",
+    "empty_system_prompt_error_code": "invalid_sub_agent_system_prompt",
+    "empty_system_prompt_message": "sub-agent system_prompt cannot be empty when provided",
+    "normalized_model_input": "  child-model  ",
+    "normalized_model_value": "child-model",
+    "portable_whitespace": {
+      "edge_codepoints": [
+        "001C",
+        "001D",
+        "001E",
+        "001F"
+      ],
+      "model_input": "\u001cchild-model\u001f",
+      "model_value": "child-model",
+      "blank_model_input": "\u001c",
+      "blank_system_prompt_input": "\u001d",
+      "blank_backend_input": "\u001e"
+    },
+    "wire_defaults": {
+      "description": "",
+      "backend": null,
+      "system_prompt": null,
+      "max_cycles": 8,
+      "exclude_tools": [],
+      "metadata": {}
+    },
+    "wire_rejections": {
+      "backend_non_string": 123,
+      "max_cycles_negative": -1
+    },
+    "unknown_top_level_fields": "ignore"
+  },
+  "model_resolution": {
+    "blank_backend_input": "  ",
+    "blank_backend_treated_as_absent": true,
+    "resolved_without_endpoint": {
+      "backend": "test",
+      "selected_model": "child-model",
+      "model_id": "child-model"
+    },
+    "child_runtime_inherits": {
+      "settings_file": true,
+      "default_backend": true
+    },
+    "explicit_backend_requires_resolver": true,
+    "same_model_reuses_parent_client_only_without_explicit_backend": true,
+    "same_model_parent_client_inherits_token_limits": true,
+    "resolved_token_limits": {
+      "context_length": 32000,
+      "max_output_tokens": 4096,
+      "task_metadata": {
+        "model_context_window": 32000,
+        "reserved_output_tokens": 4096
+      },
+      "explicit_child_metadata_wins": true
+    }
+  },
+  "identity": {
+    "request_metadata_controls_identity": false,
+    "run_id_generated_by_runtime": true,
+    "async_identity_transport": "internal_scoped_invocation",
+    "trace_precedence": [
+      "execution_context",
+      "run_context",
+      "task_metadata",
+      "child_run_id"
+    ],
+    "trace_fallback": "child_run_id",
+    "non_string_metadata_policy": "ignore_and_fall_through",
+    "non_string_metadata_values": [
+      7,
+      true,
+      [
+        "invalid-id"
+      ],
+      {
+        "invalid": "id"
+      }
+    ]
+  },
+  "task_projection": {
+    "model": "child-model",
+    "user_prompt": "Collect facts\n\n<Output Requirements>\nReturn JSON\n</Output Requirements>",
+    "max_cycles": 4,
+    "memory_compact_threshold": 64000,
+    "memory_threshold_percentage": 80,
+    "no_tool_policy": "continue",
+    "allow_interruption": false,
+    "use_workspace": true,
+    "has_sub_agents": false,
+    "agent_type": "computer",
+    "native_multimodal": true,
+    "extra_tool_names": [
+      "custom_tool"
+    ],
+    "exclude_tools": [
+      "create_sub_task",
+      "parent_excluded",
+      "sub_excluded",
+      "sub_task_status"
+    ],
+    "model_settings": {
+      "temperature": 0.25,
+      "max_tokens": 512
+    },
+    "initial_messages": [],
+    "initial_shared_state": {}
+  },
+  "metadata_projection": {
+    "is_sub_task": true,
+    "parent_task_id": "parent-task",
+    "sub_agent_name": "researcher",
+    "session_memory_enabled": false,
+    "workspace": "<workspace>",
+    "language": "en-US",
+    "available_skills": [
+      {
+        "name": "review"
+      }
+    ],
+    "active_skills": [
+      "review"
+    ],
+    "bash_shell": "bash",
+    "sub_config_value": "sub",
+    "request_value": "request",
+    "task_id": "child-task",
+    "session_id": "child-session",
+    "browser_scope_key": "child-session",
+    "run_id": "child-run",
+    "trace_id": "trace-parity",
+    "parent_run_id": "parent-run",
+    "parent_tool_call_id": "delegate",
+    "_vv_agent_run_id": "child-run",
+    "_vv_agent_trace_id": "trace-parity",
+    "_vv_agent_agent_name": "researcher",
+    "_vv_agent_session_id": "child-session",
+    "_vv_agent_parent_run_id": "parent-run",
+    "_vv_agent_parent_tool_call_id": "delegate"
+  },
+  "reserved_metadata_keys": [
+    "_vv_agent_agent_name",
+    "_vv_agent_parent_run_id",
+    "_vv_agent_parent_tool_call_id",
+    "_vv_agent_run_id",
+    "_vv_agent_session_id",
+    "_vv_agent_allowed_tools",
+    "_vv_agent_disallowed_tools",
+    "_vv_agent_tool_policy_approval",
+    "_vv_agent_tool_policy_can_use_tool",
+    "_vv_agent_trace_id",
+    "browser_scope_key",
+    "is_sub_task",
+    "parent_run_id",
+    "parent_task_id",
+    "parent_tool_call_id",
+    "run_id",
+    "session_id",
+    "session_memory_enabled",
+    "sub_agent_name",
+    "task_id",
+    "trace_id",
+    "workspace"
+  ],
+  "capability_projection": {
+    "inherited": [
+      "app_state",
+      "approval_broker",
+      "approval_provider",
+      "approval_timeout",
+      "event_sink",
+      "memory_providers",
+      "model_provider",
+      "state_store",
+      "stream_sink",
+      "trace_context"
+    ],
+    "derived": [
+      "agent_name",
+      "cancellation_token",
+      "run_context",
+      "run_id",
+      "session_id"
+    ],
+    "isolated": [
+      "input",
+      "parent_run_context",
+      "session",
+      "shared_state"
+    ],
+    "lineage": [
+      "parent_run_id",
+      "parent_tool_call_id"
+    ]
+  },
+  "tool_policy_projection": {
+    "inherited": [
+      "allowed_tools",
+      "approval",
+      "can_use_tool",
+      "disallowed_tools"
+    ],
+    "always_disallowed_for_child": [
+      "create_sub_task",
+      "sub_task_status"
+    ],
+    "child_may_only_tighten": true,
+    "schema_and_execution_enforced": true,
+    "approval_modes": {
+      "values": [
+        "default",
+        "always",
+        "never",
+        "on_request"
+      ],
+      "default_is_merge_sentinel": true,
+      "on_request_is_explicit_override": true,
+      "tool_declaration_modes": [
+        "default",
+        "on_request"
+      ],
+      "predicate_bypass_modes": [
+        "always",
+        "never"
+      ]
+    },
+    "execution_order": [
+      "planned_name",
+      "allowed_tools",
+      "disallowed_tools",
+      "can_use_tool",
+      "approval",
+      "executor"
+    ]
+  },
+  "stream_forwarding": {
+    "untrusted_event_policy": "allowlist_and_canonicalize",
+    "allowed_events": [
+      "assistant_delta",
+      "reasoning_delta",
+      "tool_call_started",
+      "tool_call_progress"
+    ],
+    "producer_fields": {
+      "assistant_delta": [
+        "content_chars",
+        "content_delta",
+        "delta",
+        "estimated_tokens",
+        "event"
+      ],
+      "reasoning_delta": [
+        "estimated_tokens",
+        "event",
+        "reasoning_chars",
+        "reasoning_delta"
+      ],
+      "tool_call_started": [
+        "arguments_chars",
+        "estimated_tokens",
+        "event",
+        "function_name",
+        "tool_call_id",
+        "tool_call_index"
+      ],
+      "tool_call_progress": [
+        "arguments_chars",
+        "estimated_tokens",
+        "event",
+        "function_name",
+        "tool_call_id",
+        "tool_call_index"
+      ]
+    },
+    "canonical_identity_fields": [
+      "agent_name",
+      "child_run_id",
+      "child_session_id",
+      "parent_run_id",
+      "parent_tool_call_id",
+      "run_id",
+      "session_id",
+      "sub_agent_name",
+      "task_id",
+      "trace_id"
+    ],
+    "reserved_producer_fields": [
+      "agent_name",
+      "child_run_id",
+      "child_session_id",
+      "created_at",
+      "cycle",
+      "cycle_index",
+      "error",
+      "error_code",
+      "event_id",
+      "final_output",
+      "metadata",
+      "parent_run_id",
+      "parent_tool_call_id",
+      "run_id",
+      "session_id",
+      "status",
+      "sub_agent_name",
+      "task_id",
+      "trace_id",
+      "type",
+      "version"
+    ],
+    "runtime_event_prefixes_reserved": [
+      "agent_",
+      "approval_",
+      "cycle_",
+      "handoff_",
+      "memory_",
+      "run_",
+      "session_",
+      "sub_run_"
+    ],
+    "normal_events_preserved": true,
+    "untrusted_terminal_cannot_suppress_real_terminal": true,
+    "stream_observer_failure_isolated": true,
+    "event_sink_failure_policy": "fail_closed"
+  },
+  "workspace_filter": {
+    "pattern": "^(?:generated|logs)/",
+    "visible_paths": [
+      "notes/readme.md",
+      "src/main.py"
+    ],
+    "excluded_paths": [
+      "generated/cache.bin",
+      "logs/run.log"
+    ],
+    "invalid_error_code": "invalid_exclude_files_pattern",
+    "invalid_message": "exclude_files_pattern must be a valid portable regular expression",
+    "known_path_accessible": true,
+    "security_boundary": false,
+    "portable_cases": {
+      "accepted": [
+        {
+          "pattern": "^(?:generated|logs)/",
+          "matches": [
+            "generated/cache.bin",
+            "logs/run.log"
+          ],
+          "misses": [
+            "src/main.py"
+          ]
+        },
+        {
+          "pattern": "[(?]",
+          "matches": [
+            "notes/(draft).md",
+            "notes/query?.md"
+          ],
+          "misses": [
+            "src/main.py"
+          ]
+        },
+        {
+          "pattern": "^src/.*\\.py$",
+          "matches": [
+            "src/main.py"
+          ],
+          "misses": [
+            "src/main.rs"
+          ]
+        },
+        {
+          "pattern": "(?:^|/)target(?:/|$)",
+          "matches": [
+            "target/debug.bin",
+            "pkg/target/debug.bin"
+          ],
+          "misses": [
+            "pkg/targets/debug.bin"
+          ]
+        },
+        {
+          "pattern": "^文档/",
+          "matches": [
+            "文档/说明.md"
+          ],
+          "misses": [
+            "docs/readme.md"
+          ]
+        },
+        {
+          "pattern": "^\\w$",
+          "matches": [
+            "A",
+            "_",
+            "7"
+          ],
+          "misses": [
+            "é",
+            "\u0301",
+            "\u200c"
+          ]
+        },
+        {
+          "pattern": "^\\s$",
+          "matches": [
+            " ",
+            "\t",
+            "\n",
+            "\r",
+            "\u000b",
+            "\f"
+          ],
+          "misses": [
+            "\u001c",
+            "\u001d",
+            "\u001e",
+            "\u001f",
+            "\u00a0"
+          ]
+        }
+      ],
+      "rejected": [
+        "(?=secret)",
+        "(?<=secret)",
+        "(a)\\1",
+        "\\p{Greek}",
+        "(?i)secret",
+        "(?P<name>a)",
+        "\\Z",
+        "\\z",
+        "\\N{LATIN CAPITAL LETTER A}",
+        "\\x{41}",
+        "\\u0041",
+        "a++",
+        "a{,3}",
+        "a**",
+        "[a&&b]"
+      ]
+    },
+    "custom_backend_path_normalization": {
+      "raw_paths": [
+        "src//main.py",
+        "src/lib.py"
+      ],
+      "pattern": "^src/main\\.py$",
+      "visible_paths": [
+        "src/lib.py"
+      ],
+      "preserve_non_matching_raw_paths": true
+    }
+  },
+  "continuation": {
+    "required_history": [
+      "first prompt",
+      "first answer",
+      "second prompt"
+    ],
+    "include_complete_tool_turn": true,
+    "preserve_shared_state": true,
+    "history_update": "replace_when_existing_prefix_is_rewritten",
+    "duplicate_history_allowed": false,
+    "current_parent_turn_binding": [
+      "cancellation",
+      "event_sink",
+      "parent_run_id",
+      "parent_tool_call_id",
+      "stream_sink",
+      "tool_policy",
+      "trace_id"
+    ],
+    "stable_identity": [
+      "agent_name",
+      "session_id",
+      "task_id"
+    ],
+    "fresh_run_id": true,
+    "failure_error_code": "sub_task_failed",
+    "empty_tool_call_id_policy": "drop_incomplete_turn",
+    "tool_result_pairing": "immediately_following_assistant_turn",
+    "tool_result_order": "same_as_tool_calls",
+    "mismatched_tool_result_policy": "retain_ordered_prefix",
+    "duplicate_tool_call_id_policy": "drop_ambiguous_call_and_results",
+    "out_of_order_tool_result_policy": "drop_orphan_result"
+  },
+  "cancellation": {
+    "modes": [
+      "sync",
+      "async",
+      "batch",
+      "continuation"
+    ],
+    "direction": "parent_to_child",
+    "child_does_not_cancel_parent": true,
+    "terminal_status": "failed"
+  },
+  "lifecycle": {
+    "event_sequence": [
+      "sub_run_started",
+      "sub_run_completed"
+    ],
+    "started_before_model_resolution": true,
+    "completed_after_every_started": true,
+    "resolution_failure_status": "failed",
+    "async_may_finish_after_parent": true,
+    "failure_error_code_in_metadata": true,
+    "failure_error_code_fallback": "sub_task_failed",
+    "omit_token_usage_when_unavailable": true,
+    "preserve_successful_zero_token_usage": true,
+    "preserve_failed_usage_after_completed_cycle": true,
+    "panic_or_exception_cleanup": {
+      "active_state_cleared": true,
+      "completed_event_emitted_once": true,
+      "global_session_unregistered": true,
+      "retained_session_can_continue": true
+    }
+  },
+  "manager": {
+    "persists_parent_lineage": true,
+    "parent_lineage_precedence": [
+      "run_context",
+      "execution_context",
+      "request_metadata"
+    ],
+    "fabricates_parent_run_id_from_task_id": false,
+    "timeout_fabricates_terminal_state": false,
+    "snapshot_remains_queryable_after_timeout": true,
+    "continue_running_rejected": true,
+    "continuation_admission_atomic": true,
+    "continue_max_cycles_rejected": true,
+    "initial_lineage_ignores_task_metadata": true,
+    "session_not_ready_error_code": "sub_task_session_not_ready",
+    "task_id_policy": "opaque_exact_key",
+    "tool_and_wire_ingress_trim_task_ids": true,
+    "terminal_task_id_reuse": "new_generation",
+    "spawn_failure_restores_previous_generation": true,
+    "async_submission": {
+      "single_error_code": "sub_task_submit_failed",
+      "batch_continues_after_item_failure": true,
+      "all_failed_error_code": "create_sub_task_batch_failed"
+    },
+    "continuation_errors": {
+      "empty_prompt": "Follow-up prompt cannot be empty.",
+      "not_found": "Sub-task {task_id} not found.",
+      "already_running": "Sub-task {task_id} is already running.",
+      "session_not_attached": "Sub-task {task_id} session is not attached.",
+      "max_cycles": "Sub-task {task_id} reached max cycles and cannot continue."
+    }
+  }
+}

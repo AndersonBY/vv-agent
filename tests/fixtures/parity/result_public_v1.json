@@ -1,0 +1,97 @@
+{
+  "version": "result_public_v1",
+  "agent_result": {
+    "status": "wait_user",
+    "messages": [],
+    "cycles": [
+      {
+        "index": 2,
+        "assistant_message": "",
+        "tool_calls": [],
+        "tool_results": [
+          {
+            "tool_call_id": "call_1",
+            "content": "Approval is required.",
+            "status": "error",
+            "status_code": "ERROR",
+            "directive": "wait_user",
+            "error_code": "approval_required",
+            "metadata": {
+              "approval_interruption_id": "approval_1",
+              "mode": "approval_requested",
+              "approval_required": true,
+              "tool_name": "dangerous",
+              "arguments": {
+                "path": "target.txt"
+              },
+              "message": "Approve dangerous."
+            }
+          },
+          {
+            "tool_call_id": "call_duplicate",
+            "content": "Duplicate event.",
+            "status": "error",
+            "status_code": "ERROR",
+            "directive": "wait_user",
+            "metadata": {
+              "approval_interruption_id": "approval_1",
+              "mode": "approval_requested",
+              "tool_name": "duplicate"
+            }
+          },
+          {
+            "tool_call_id": "call_irrelevant",
+            "content": "Not an approval.",
+            "status": "success",
+            "status_code": "SUCCESS",
+            "directive": "continue",
+            "metadata": {
+              "request_id": "not_approval",
+              "mode": "ordinary"
+            }
+          }
+        ],
+        "memory_compacted": false,
+        "token_usage": {}
+      }
+    ],
+    "final_answer": null,
+    "wait_reason": "Approval is required.",
+    "error": null,
+    "shared_state": {},
+    "token_usage": {}
+  },
+  "expected_approvals": [
+    {
+      "interruption_id": "approval_1",
+      "tool_name": "dangerous",
+      "tool_call_id": "call_1",
+      "arguments": {
+        "path": "target.txt"
+      },
+      "message": "Approve dangerous.",
+      "cycle_index": 2,
+      "approved": false
+    }
+  ],
+  "projection_keys": [
+    "agent_name",
+    "events",
+    "final_output",
+    "input",
+    "metadata",
+    "new_items",
+    "resolved_model",
+    "run_id",
+    "status",
+    "token_usage",
+    "trace_id"
+  ],
+  "resolved_model_projection": {
+    "backend": "test",
+    "requested_model": "requested",
+    "selected_model": "selected",
+    "model_id": "model-id",
+    "endpoint": "endpoint-public"
+  }
+}

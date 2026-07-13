@@ -9,8 +9,9 @@ from typing import Any
 from vv_agent import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
-from vv_agent.llm import ScriptedLLM
-from vv_agent.types import AgentStatus, LLMResponse, Message, SubAgentConfig, ToolCall
+from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.runtime import CancellationToken
+from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
 
 def _resolved(*, backend: str = "test", model: str = "test-model") -> ResolvedModelConfig:
@@ -25,7 +26,17 @@ def _resolved(*, backend: str = "test", model: str = "test-model") -> ResolvedMo
 
 
 def _llm_builder(*_: Any, **__: Any):
-    return ScriptedLLM(steps=[LLMResponse(content="answer", tool_calls=[])]), _resolved()
+    return (
+        ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="answer",
+                    tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "answer"})],
+                )
+            ]
+        ),
+        _resolved(),
+    )
 
 
 def test_interactive_session_emits_v1_events_from_run_handle(tmp_path) -> None:
@@ -55,8 +66,8 @@ def test_interactive_session_emits_v1_events_from_run_handle(tmp_path) -> None:
 def test_interactive_session_steering_queue_reaches_run_handle_runtime(tmp_path) -> None:
     seen_user_messages: list[list[str]] = []
 
-    def respond(_: str, messages: list[Message]) -> LLMResponse:
-        seen_user_messages.append([message.content for message in messages if message.role == "user"])
+    def respond(request: LlmRequest) -> LLMResponse:
+        seen_user_messages.append([message.content for message in request.messages if message.role == "user"])
         return LLMResponse(
             content="answer",
             tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
@@ -85,19 +96,65 @@ def test_interactive_session_steering_queue_reaches_run_handle_runtime(tmp_path)
     assert seen_user_messages == [["hello", "queued context"]]
 
 
+def test_interactive_session_derives_each_run_from_host_cancellation_token(tmp_path) -> None:
+    parent_token = CancellationToken()
+    first_step_ready = threading.Event()
+    release_first_step = threading.Event()
+
+    def respond(_: LlmRequest) -> LLMResponse:
+        first_step_ready.set()
+        assert release_first_step.wait(timeout=3)
+        return LLMResponse(content="continue", tool_calls=[])
+
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="test",
+            workspace=tmp_path,
+            cancellation_token=parent_token,
+            llm_builder=lambda *_args, **_kwargs: (ScriptedLLM(steps=[respond]), _resolved()),
+        )
+    )
+    session = client.create_session(
+        agent=InteractiveAgentDefinition(description="assistant", model="test-model", max_cycles=2)
+    )
+    result_queue: queue.Queue[Any] = queue.Queue()
+
+    def run_prompt() -> None:
+        try:
+            result_queue.put(session.prompt("hello", auto_follow_up=False))
+        except BaseException as exc:
+            result_queue.put(exc)
+
+    worker = threading.Thread(target=run_prompt, daemon=True)
+    worker.start()
+    assert first_step_ready.wait(timeout=3)
+
+    parent_token.cancel("host shutdown")
+    release_first_step.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    outcome = result_queue.get_nowait()
+    assert not isinstance(outcome, BaseException)
+    assert outcome.result.status == AgentStatus.FAILED
+    assert "host shutdown" in (outcome.result.error or "")
+    assert [event.type for event in outcome.events if event.type == "run_cancelled"] == ["run_cancelled"]
+
+
 def test_active_run_handle_steer_queues_session_context(tmp_path) -> None:
     first_step_ready = threading.Event()
     first_step_can_finish = threading.Event()
     seen_user_messages: list[list[str]] = []
     steps: list[Any] = []
 
-    def first_step(_: str, __: list[Message]) -> LLMResponse:
+    def first_step(_: LlmRequest) -> LLMResponse:
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=3)
         return LLMResponse(content="continue", tool_calls=[])
 
-    def second_step(_: str, messages: list[Message]) -> LLMResponse:
-        seen_user_messages.append([message.content for message in messages if message.role == "user"])
+    def second_step(request: LlmRequest) -> LLMResponse:
+        seen_user_messages.append([message.content for message in request.messages if message.role == "user"])
         return LLMResponse(
             content="finish",
             tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
@@ -130,6 +187,7 @@ def test_active_run_handle_steer_queues_session_context(tmp_path) -> None:
 
     handle = _wait_for_active_handle(session)
     handle.steer("queued from handle")
+    handle.steer("second queued from handle")
     first_step_can_finish.set()
     worker.join(timeout=3)
 
@@ -140,6 +198,7 @@ def test_active_run_handle_steer_queues_session_context(tmp_path) -> None:
             "hello",
             "No tool call was produced. Continue the task and call `task_finish` when all todo items are done.",
             "queued from handle",
+            "second queued from handle",
         ]
     ]
 
@@ -150,7 +209,7 @@ def test_active_run_handle_follow_up_queues_next_session_turn(tmp_path) -> None:
     seen_user_messages: list[list[str]] = []
     steps: list[Any] = []
 
-    def first_step(_: str, __: list[Message]) -> LLMResponse:
+    def first_step(_: LlmRequest) -> LLMResponse:
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=3)
         return LLMResponse(
@@ -158,8 +217,8 @@ def test_active_run_handle_follow_up_queues_next_session_turn(tmp_path) -> None:
             tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "first done"})],
         )
 
-    def second_step(_: str, messages: list[Message]) -> LLMResponse:
-        seen_user_messages.append([message.content for message in messages if message.role == "user"])
+    def second_step(request: LlmRequest) -> LLMResponse:
+        seen_user_messages.append([message.content for message in request.messages if message.role == "user"])
         return LLMResponse(
             content="finish second",
             tool_calls=[ToolCall(id="finish-2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "second done"})],

@@ -3,12 +3,15 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from types import NoneType
 from typing import TYPE_CHECKING, Any, Protocol, Union, get_args, get_origin, get_type_hints, overload
 
 from vv_agent.tools.base import ToolContext
+from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.outputs import ToolOutput, ToolOutputError, ToolOutputFile, ToolOutputImage, ToolOutputJson, ToolOutputText
 from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
 
@@ -27,6 +30,8 @@ class Tool(Protocol):
     is_enabled: bool | Callable[[Any, Any], bool]
     needs_approval: bool | ApprovalPredicate
 
+    def invoke(self, context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput: ...
+
 
 @dataclass(slots=True)
 class FunctionTool:
@@ -38,8 +43,13 @@ class FunctionTool:
     needs_approval: bool | ApprovalPredicate = False
     strict_json_schema: bool = True
     timeout_seconds: float | None = None
+    exposure: ToolExposure = ToolExposure.DIRECT
     failure_error_function: ToolErrorFormatter | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be greater than zero")
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -48,8 +58,36 @@ class FunctionTool:
                 "name": self.name,
                 "description": self.description,
                 "parameters": dict(self.params_json_schema),
+                "strict": self.strict_json_schema,
             },
         }
+
+    def invoke(self, context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput:
+        try:
+            if self.timeout_seconds is None:
+                return self.on_invoke(context, arguments)
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"vv-agent-tool-{self.name}")
+            future = executor.submit(self.on_invoke, context, arguments)
+            try:
+                return future.result(timeout=self.timeout_seconds)
+            except FutureTimeoutError:
+                future.cancel()
+                return ToolOutputError(
+                    message=f"Tool {self.name} timed out after {self.timeout_seconds:g} seconds.",
+                    error_code="tool_timeout",
+                    retryable=True,
+                )
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as exc:
+            if _is_cancelled_error(exc):
+                raise
+            message = (
+                self.failure_error_function(exc)
+                if self.failure_error_function is not None
+                else f"Tool execution failed ({self.name}): {exc}"
+            )
+            return ToolOutputError(message=message, error_code="tool_execution_failed")
 
     def to_executor(self) -> FunctionToolExecutor:
         from vv_agent.tools.executor import FunctionToolExecutor
@@ -65,33 +103,51 @@ class FunctionTool:
         if isinstance(output, ToolOutputText):
             return ToolExecutionResult(tool_call_id=tool_call_id, content=output.text, metadata=dict(output.metadata))
         if isinstance(output, ToolOutputJson):
+            metadata = {"output_type": "json", **dict(output.metadata)}
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
                 content=json.dumps(output.data, ensure_ascii=False),
-                metadata=dict(output.metadata),
+                metadata=metadata,
             )
         if isinstance(output, ToolOutputImage):
+            metadata = {"output_type": "image", **dict(output.metadata)}
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
-                content=json.dumps({"url": output.url, "path": output.path}, ensure_ascii=False),
+                content=json.dumps(
+                    {"url": output.url, "path": output.path, "mime_type": output.mime_type}, ensure_ascii=False
+                ),
                 image_url=output.url,
                 image_path=output.path,
-                metadata=dict(output.metadata),
+                metadata=metadata,
             )
         if isinstance(output, ToolOutputFile):
+            metadata = {"output_type": "file", **dict(output.metadata)}
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
                 content=json.dumps({"path": output.path, "mime_type": output.mime_type}, ensure_ascii=False),
-                metadata=dict(output.metadata),
+                metadata=metadata,
             )
         if isinstance(output, ToolOutputError):
+            metadata = {
+                "output_type": "error",
+                "retryable": output.retryable,
+                **dict(output.metadata),
+            }
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
                 status="error",
                 status_code=ToolResultStatus.ERROR,
                 error_code=output.error_code,
-                content=output.message,
-                metadata=dict(output.metadata),
+                content=json.dumps(
+                    {
+                        "ok": False,
+                        "error": output.message,
+                        "error_code": output.error_code,
+                        "retryable": output.retryable,
+                    },
+                    ensure_ascii=False,
+                ),
+                metadata=metadata,
             )
         return ToolExecutionResult(
             tool_call_id=tool_call_id,
@@ -111,6 +167,7 @@ def function_tool(
     is_enabled: bool | Callable[[Any, Any], bool] = True,
     needs_approval: bool | ApprovalPredicate = False,
     timeout_seconds: float | None = None,
+    exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
 ) -> FunctionTool: ...
 
@@ -126,6 +183,7 @@ def function_tool(
     is_enabled: bool | Callable[[Any, Any], bool] = True,
     needs_approval: bool | ApprovalPredicate = False,
     timeout_seconds: float | None = None,
+    exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 
@@ -140,6 +198,7 @@ def function_tool(
     is_enabled: bool | Callable[[Any, Any], bool] = True,
     needs_approval: bool | ApprovalPredicate = False,
     timeout_seconds: float | None = None,
+    exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     current_frame = inspect.currentframe()
@@ -161,13 +220,8 @@ def function_tool(
         )
 
         def invoke(context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput:
-            try:
-                positional, keyword = argument_builder(arguments)
-                result = target(context, *positional, **keyword) if pass_context else target(*positional, **keyword)
-            except Exception as exc:
-                if failure_error_function is not None:
-                    return ToolOutputError(message=failure_error_function(exc), error_code="tool_execution_failed")
-                raise
+            positional, keyword = argument_builder(arguments)
+            result = target(context, *positional, **keyword) if pass_context else target(*positional, **keyword)
             return _coerce_tool_output(result)
 
         return FunctionTool(
@@ -179,12 +233,65 @@ def function_tool(
             needs_approval=needs_approval,
             strict_json_schema=strict_json_schema,
             timeout_seconds=timeout_seconds,
+            exposure=exposure,
             failure_error_function=failure_error_function,
         )
 
     if func is not None:
         return decorate(func)
     return decorate
+
+
+def adapt_tool(tool: Tool) -> FunctionTool:
+    if isinstance(tool, FunctionTool):
+        return tool
+
+    required_attributes = (
+        "name",
+        "description",
+        "params_json_schema",
+        "strict_json_schema",
+        "is_enabled",
+        "needs_approval",
+        "invoke",
+    )
+    missing = [attribute for attribute in required_attributes if not hasattr(tool, attribute)]
+    if missing:
+        raise TypeError(
+            f"Agent tool must be a FunctionTool, ToolExecutor, or implement the Tool protocol; missing: {', '.join(missing)}"
+        )
+    invoke = tool.invoke
+    if not callable(invoke):
+        raise TypeError("Tool protocol attribute 'invoke' must be callable")
+    params_json_schema = tool.params_json_schema
+    if not isinstance(params_json_schema, dict):
+        raise TypeError("Tool protocol attribute 'params_json_schema' must be a dict")
+
+    raw_exposure = getattr(tool, "exposure", ToolExposure.DIRECT)
+    try:
+        exposure = ToolExposure(raw_exposure)
+    except ValueError as exc:
+        raise TypeError(f"Unsupported tool exposure: {raw_exposure!r}") from exc
+    metadata = getattr(tool, "metadata", {})
+    if not isinstance(metadata, dict):
+        raise TypeError("Tool protocol attribute 'metadata' must be a dict when provided")
+
+    def on_invoke(context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput:
+        return _coerce_tool_output(invoke(context, arguments))
+
+    return FunctionTool(
+        name=str(tool.name),
+        description=str(tool.description),
+        params_json_schema=dict(params_json_schema),
+        on_invoke=on_invoke,
+        is_enabled=tool.is_enabled,
+        needs_approval=tool.needs_approval,
+        strict_json_schema=bool(tool.strict_json_schema),
+        timeout_seconds=getattr(tool, "timeout_seconds", None),
+        exposure=exposure,
+        failure_error_function=getattr(tool, "failure_error_function", None),
+        metadata=dict(metadata),
+    )
 
 
 def _schema_and_argument_builder(
@@ -259,6 +366,10 @@ def _coerce_tool_output(value: Any) -> ToolOutput:
     if isinstance(value, dict | list | tuple | int | float | bool) or value is None:
         return ToolOutputJson(data=value)
     return ToolOutputText(text=str(value))
+
+
+def _is_cancelled_error(exc: Exception) -> bool:
+    return exc.__class__.__name__ == "CancelledError" and exc.__class__.__module__ == "vv_agent.runtime.cancellation"
 
 
 def _schema_from_signature(parameters: list[inspect.Parameter], hints: dict[str, Any]) -> dict[str, Any]:

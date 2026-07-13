@@ -92,6 +92,7 @@ def main() -> None:
         },
     )
     _drain_until(transport, response_id=0)
+    _send(server, transport, {"method": "initialized"})
 
     _send(server, transport, {"id": 1, "method": "thread/start", "params": {"agentKey": "default", "cwd": "./workspace"}})
     _drain_until(transport, response_id=1)

@@ -1,0 +1,26 @@
+{
+  "version": "v1",
+  "subscribers": {
+    "independent": true,
+    "start_from_complete_backlog": true,
+    "lossless_after_live_capacity": true,
+    "burst_event_count": 1100
+  },
+  "completion": {
+    "result_may_precede_async_children": true,
+    "events_wait_for_started_children": true
+  },
+  "cancellation": {
+    "accepted_state": {
+      "status": "running",
+      "done": false,
+      "cancelled": true
+    },
+    "terminal_status": "cancelled",
+    "repeated_request_accepted": false,
+    "late_request_accepted": false,
+    "reason": "host requested cancellation",
+    "child_reason_propagates": true,
+    "shared_broker_isolated": true
+  }
+}
