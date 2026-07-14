@@ -6,7 +6,7 @@ from typing import Any
 from vv_agent.runtime.backends.base import CycleExecutor
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.token_usage import summarize_task_token_usage
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, CycleRecord, Message
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason, CycleRecord, Message, _last_assistant_output
 
 
 class InlineBackend:
@@ -32,6 +32,8 @@ class InlineBackend:
                 except Exception:
                     return AgentResult(
                         status=AgentStatus.FAILED,
+                        completion_reason=CompletionReason.CANCELLED,
+                        partial_output=_last_assistant_output(cycles),
                         messages=messages,
                         cycles=cycles,
                         error="Operation was cancelled",
@@ -45,6 +47,8 @@ class InlineBackend:
 
         return AgentResult(
             status=AgentStatus.MAX_CYCLES,
+            completion_reason=CompletionReason.MAX_CYCLES,
+            partial_output=_last_assistant_output(cycles),
             messages=messages,
             cycles=cycles,
             final_answer="Reached max cycles without finish signal.",

@@ -2,7 +2,8 @@
   "version": 1,
   "framework_defaults": {
     "max_cycles": 10,
-    "max_handoffs": 10
+    "max_handoffs": 10,
+    "no_tool_policy": "continue"
   },
   "app_server_defaults": {
     "max_cycles": 80,
@@ -49,6 +50,23 @@
       "python": "max_cycles plus max_handoffs",
       "rust": "max_cycles plus max_handoffs",
       "status": "equivalent"
+    },
+    {
+      "capability": "no_tool_policy",
+      "python": "NoToolPolicy on Agent and RunConfig",
+      "rust": "NoToolPolicy on AgentBuilder and RunConfigBuilder",
+      "status": "equivalent",
+      "values": [
+        "continue",
+        "wait_user",
+        "finish"
+      ],
+      "precedence": [
+        "run_config",
+        "runner_default_run_config",
+        "agent",
+        "framework_default"
+      ]
     },
     {
       "capability": "tool_policy",

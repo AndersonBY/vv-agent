@@ -12,7 +12,7 @@ from vv_agent.model_settings import ModelSettings
 from vv_agent.run_config import _validate_bounded_int
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.outputs import ToolOutputText
-from vv_agent.types import SubAgentConfig, _trim_portable_whitespace
+from vv_agent.types import NoToolPolicy, SubAgentConfig, _trim_portable_whitespace, _validate_no_tool_policy
 
 if TYPE_CHECKING:
     from vv_agent.run_config import ToolPolicy
@@ -53,6 +53,7 @@ class Agent[TContext]:
     stop_at_tool_names: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)
+    no_tool_policy: NoToolPolicy | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -60,6 +61,7 @@ class Agent[TContext]:
         if isinstance(self.instructions, str) and not self.instructions.strip():
             raise ValueError("agent instructions cannot be empty")
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
+        _validate_no_tool_policy(self.no_tool_policy, "Agent.no_tool_policy")
 
         normalized_sub_agents: dict[str, SubAgentConfig] = {}
         for sub_agent_id, config in self.sub_agents.items():

@@ -148,6 +148,7 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "python": "vv_agent.agent.ToolUseBehavior",
                 "rust": "vv_agent::agent::ToolUseBehavior",
             },
+            {"id": "agent.no_tool_policy", "python": "vv_agent.NoToolPolicy", "rust": "vv_agent::NoToolPolicy"},
             {"id": "agent.handoff", "python": "vv_agent.Handoff", "rust": "vv_agent::Handoff"},
             {
                 "id": "agent.background_task",
@@ -178,6 +179,11 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
         "id": "run_config",
         "capabilities": [
             {"id": "run_config.options", "python": "vv_agent.RunConfig", "rust": "vv_agent::RunConfig"},
+            {
+                "id": "run_config.no_tool_policy",
+                "python": "vv_agent.NoToolPolicy",
+                "rust": "vv_agent::NoToolPolicy",
+            },
             {
                 "id": "run_config.tool_policy",
                 "python": "vv_agent.ToolPolicy",
@@ -221,6 +227,11 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::AgentResult",
             },
             {"id": "result.status", "python": "vv_agent.AgentStatus", "rust": "vv_agent::AgentStatus"},
+            {
+                "id": "result.completion_reason",
+                "python": "vv_agent.CompletionReason",
+                "rust": "vv_agent::CompletionReason",
+            },
             {
                 "id": "result.usage_source",
                 "python": "vv_agent.UsageSource",
@@ -741,6 +752,7 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             ),
             _field("hooks", "hooks", "hooks", rust_kind="method"),
             _field("max_cycles", "max_cycles", "max_cycles", rust_kind="method"),
+            _field("no_tool_policy", "no_tool_policy", "no_tool_policy", rust_kind="method"),
             _field("tool_policy", "tool_policy", "tool_policy", rust_kind="method"),
             _field(
                 "tool_use_behavior",
@@ -807,6 +819,7 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _field("session", "session", "session"),
             _field("initial_messages", "initial_messages", "initial_messages"),
             _field("max_cycles", "max_cycles", "max_cycles"),
+            _field("no_tool_policy", "no_tool_policy", "no_tool_policy"),
             _field("max_handoffs", "max_handoffs", "max_handoffs"),
             _field("tool_policy", "tool_policy", "tool_policy"),
             _field("execution_backend", "execution_backend", "execution_backend"),
@@ -907,6 +920,27 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _field("new_items", "new_items", "new_items", rust_kind="method"),
             _field("final_output", "final_output", "final_output", rust_kind="method"),
             _field("status", "status", "status", rust_kind="method"),
+            _field(
+                "completion_reason",
+                "completion_reason",
+                "completion_reason",
+                python_kind="property",
+                rust_kind="method",
+            ),
+            _field(
+                "completion_tool_name",
+                "completion_tool_name",
+                "completion_tool_name",
+                python_kind="property",
+                rust_kind="method",
+            ),
+            _field(
+                "partial_output",
+                "partial_output",
+                "partial_output",
+                python_kind="property",
+                rust_kind="method",
+            ),
             _field(
                 "raw_result",
                 "raw_result",
@@ -1681,10 +1715,18 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 114
+    assert len(capability_ids) == 117
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
+    assert (
+        sum(
+            len(surface.get(group, []))
+            for surface in fixture["surfaces"]
+            for group in ("members", "protocol_operations", "supporting_operations")
+        )
+        == 216
+    )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS
     assert (

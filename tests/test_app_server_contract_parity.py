@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -28,7 +28,10 @@ from vv_agent.app_server.run_adapter import RunAdapter, StartedTurn
 from vv_agent.app_server.schema import _schema_bundle, typescript_schema_bundle
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadStore
+from vv_agent.result import RunResult
+from vv_agent.run_handle import RunHandle
 from vv_agent.runner import Runner
+from vv_agent.types import AgentResult, AgentStatus, CompletionReason
 
 
 def _observable_contract() -> dict[str, Any]:
@@ -246,6 +249,63 @@ def test_shared_fixture_turn_start_and_terminal_order(monkeypatch: pytest.Monkey
     ]
     assert terminal_order == contract["ordering"]["turnTerminal"]
     assert state.status(thread.thread_id) == contract["terminal"]["threadStatusAfterTurn"]
+
+
+def test_wait_user_turn_projects_as_interrupted_without_failure_error() -> None:
+    contract = _observable_contract()
+    processor, transport, store, state = _initialized_processor()
+    thread = store.create_thread(agent_key="default")
+    turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
+    state.subscribe(thread.thread_id, "conn_1")
+    adapter = RunAdapter(
+        host=_ContractHost(),
+        store=store,
+        state_manager=state,
+        router=processor._router,
+    )
+    raw_result = AgentResult(
+        status=AgentStatus.WAIT_USER,
+        messages=[],
+        cycles=[],
+        wait_reason="Choose one",
+        completion_reason=CompletionReason.WAIT_USER,
+        partial_output="assistant draft",
+    )
+    result = RunResult(
+        input="choose",
+        new_items=[],
+        final_output="Choose one",
+        status=AgentStatus.WAIT_USER,
+        raw_result=raw_result,
+        run_id="run_wait_user",
+        trace_id="trace_wait_user",
+        agent_name="default",
+    )
+
+    adapter._complete_turn(
+        "conn_1",
+        StartedTurn(thread=thread, turn=turn, handle=cast(RunHandle, object())),
+        result=result,
+        error=None,
+    )
+
+    messages: list[dict[str, Any]] = []
+    while True:
+        message = transport.receive_outbound(timeout=1)
+        messages.append(message)
+        if message.get("method") == "turn/completed":
+            break
+    payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
+    stored_turn = store.read_thread(thread.thread_id).turns[0]
+
+    assert payload["status"] == "interrupted"
+    assert payload["status"] in contract["terminal"]["turnStatuses"]
+    assert payload["completionReason"] == CompletionReason.WAIT_USER.value
+    assert payload["partialOutput"] == "assistant draft"
+    assert "error" not in payload
+    assert stored_turn.status == "interrupted"
+    assert stored_turn.result["completionReason"] == CompletionReason.WAIT_USER.value
+    assert "error" not in stored_turn.result
 
 
 def test_shared_fixture_snapshot_nullability_and_restart_recovery(tmp_path: Path) -> None:

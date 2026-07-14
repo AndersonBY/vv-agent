@@ -2,8 +2,8 @@
 
 `vv-agent` is a Python agent runtime extracted from VectorVein's production
 runtime. It is organized around a cycle loop: prepare context, call an LLM,
-dispatch tool calls, update memory/state, and repeat until the agent explicitly
-finishes or asks the user for input.
+dispatch tool calls, update memory/state, and repeat until an explicit tool
+directive or the configured no-tool policy ends or pauses the run.
 
 ## Top-Level Flow
 
@@ -46,9 +46,11 @@ CLI / legacy runtime API
   -> AgentResult
 ```
 
-Task completion is tool-driven. The model must call `task_finish` or `ask_user`
-to end the run or wait for user input; the runtime does not infer completion
-from the assistant's last message.
+The backward-compatible default remains tool-driven: `task_finish` ends the run
+and `ask_user` waits for input. Hosts can explicitly set `no_tool_policy` to
+`finish` or `wait_user` when a normal assistant response should be terminal.
+The runtime applies that declared control without classifying the response text
+or inferring task-specific completion.
 
 ## Runtime Boundary
 

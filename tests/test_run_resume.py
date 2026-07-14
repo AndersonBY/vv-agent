@@ -6,12 +6,25 @@ from pathlib import Path
 
 import pytest
 
-from vv_agent import Agent, ApprovalRequestedEvent, MemorySession, RunConfig, Runner, ToolContext, ToolPolicy, function_tool
+from vv_agent import (
+    Agent,
+    ApprovalRequestedEvent,
+    GuardrailResult,
+    MemorySession,
+    RunConfig,
+    Runner,
+    ToolContext,
+    ToolPolicy,
+    function_tool,
+    output_guardrail,
+)
+from vv_agent.agent import ToolUseBehavior
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.event_store import JsonlRunEventStore
 from vv_agent.llm import ScriptedLLM
 from vv_agent.result import RunState
 from vv_agent.runtime import InlineBackend
-from vv_agent.types import AgentStatus, LLMResponse, ToolCall
+from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -52,7 +65,13 @@ def test_interrupted_result_snapshot_and_runner_resume_execute_approved_call_onc
         )
 
     result = Runner.run_sync(
-        Agent(name="approver", instructions="Delete after approval.", model="approval-model", tools=[delete_file]),
+        Agent(
+            name="approver",
+            instructions="Delete after approval.",
+            model="approval-model",
+            tools=[delete_file],
+            tool_use_behavior="stop_on_first_tool",
+        ),
         "delete danger.txt",
         run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
     )
@@ -79,6 +98,218 @@ def test_interrupted_result_snapshot_and_runner_resume_execute_approved_call_onc
     assert llm_calls == 1
 
 
+def test_approved_continue_tool_returns_to_the_model_loop(tmp_path: Path) -> None:
+    executions: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def lookup(value: str) -> str:
+        executions.append(value)
+        return f"approved:{value}"
+
+    def finish_after_tool(request):
+        assert any(
+            message.role == "tool" and message.tool_call_id == "lookup-call" and message.content == "approved:item"
+            for message in request.messages
+        )
+        return LLMResponse(
+            content="ready to finish",
+            tool_calls=[ToolCall(id="finish-call", name="task_finish", arguments={"message": "finished after approval"})],
+        )
+
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="checking",
+                tool_calls=[ToolCall(id="lookup-call", name="lookup", arguments={"value": "item"})],
+            ),
+            finish_after_tool,
+        ]
+    )
+    interrupted = Runner.run_sync(
+        Agent(name="approver", instructions="Continue after the approved lookup.", model=model, tools=[lookup]),
+        "look up item",
+        run_config=RunConfig(workspace=tmp_path),
+    )
+    state = interrupted.into_state()
+    state.approve(state.pending_approval_ids()[0])
+
+    resumed = Runner.resume(state)
+
+    assert resumed.status == AgentStatus.COMPLETED
+    assert resumed.final_output == "finished after approval"
+    assert resumed.completion_reason == CompletionReason.TOOL_FINISH
+    assert executions == ["item"]
+    assert model.steps == []
+
+
+@pytest.mark.parametrize(
+    ("tool_use_behavior", "stop_at_tool_names", "expected_reason"),
+    [
+        ("stop_on_first_tool", [], CompletionReason.STOP_ON_FIRST_TOOL),
+        ("stop_at_tool_names", ["lookup"], CompletionReason.STOP_AT_TOOL_NAME),
+    ],
+)
+def test_approved_continue_tool_honors_tool_stop_policy(
+    tmp_path: Path,
+    tool_use_behavior: ToolUseBehavior,
+    stop_at_tool_names: list[str],
+    expected_reason: CompletionReason,
+) -> None:
+    @function_tool(needs_approval=True)
+    def lookup() -> str:
+        return "approved result"
+
+    event_store = JsonlRunEventStore(tmp_path / f"{expected_reason.value}.jsonl")
+    interrupted = Runner.run_sync(
+        Agent(
+            name="approver",
+            instructions="Stop according to the declared tool policy.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="lookup draft",
+                        tool_calls=[ToolCall(id="lookup-call", name="lookup", arguments={})],
+                    )
+                ]
+            ),
+            tools=[lookup],
+            tool_use_behavior=tool_use_behavior,
+            stop_at_tool_names=stop_at_tool_names,
+        ),
+        "look up",
+        run_config=RunConfig(workspace=tmp_path, event_store=event_store),
+    )
+    state = interrupted.into_state()
+    state.approve(state.pending_approval_ids()[0])
+
+    resumed = Runner.resume(state)
+
+    assert resumed.status == AgentStatus.COMPLETED
+    assert resumed.run_id != interrupted.run_id
+    assert resumed.final_output == "approved result"
+    assert resumed.completion_reason == expected_reason
+    assert resumed.completion_tool_name == "lookup"
+    assert resumed.events[-1].to_dict()["completion_reason"] == expected_reason.value
+    result_terminals = [event for event in resumed.events if event.type in {"run_completed", "run_failed", "run_cancelled"}]
+    assert {event.run_id for event in result_terminals} == {interrupted.run_id, resumed.run_id}
+    assert len([event for event in result_terminals if event.run_id == resumed.run_id]) == 1
+    replayed = list(event_store.replay(run_id=resumed.run_id))
+    assert len([event for event in replayed if event.type in {"run_completed", "run_failed", "run_cancelled"}]) == 1
+    assert replayed[-1].to_dict()["completion_reason"] == expected_reason.value
+
+
+def test_approved_terminal_tool_applies_output_guardrails_and_updates_terminal_event(tmp_path: Path) -> None:
+    @function_tool(needs_approval=True)
+    def unsafe_action() -> str:
+        return "unsafe tool result"
+
+    @output_guardrail
+    def block_after_approval(_context, output):
+        if isinstance(output, str) and output.startswith("Approval required"):
+            return GuardrailResult.allow()
+        return GuardrailResult.block("blocked approved output")
+
+    event_store = JsonlRunEventStore(tmp_path / "approval-guardrail.jsonl")
+    interrupted = Runner.run_sync(
+        Agent(
+            name="approver",
+            instructions="Run only after approval.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="assistant draft before unsafe tool",
+                        tool_calls=[ToolCall(id="unsafe-call", name="unsafe_action", arguments={})],
+                    )
+                ]
+            ),
+            tools=[unsafe_action],
+            output_guardrails=[block_after_approval],
+            tool_use_behavior="stop_on_first_tool",
+        ),
+        "run unsafe action",
+        run_config=RunConfig(workspace=tmp_path, event_store=event_store),
+    )
+    state = interrupted.into_state()
+    state.approve(state.pending_approval_ids()[0])
+
+    resumed = Runner.resume(state)
+
+    assert resumed.status == AgentStatus.FAILED
+    assert resumed.run_id != interrupted.run_id
+    assert resumed.completion_reason == CompletionReason.FAILED
+    assert resumed.completion_tool_name is None
+    assert resumed.partial_output == "assistant draft before unsafe tool"
+    assert resumed.final_output == "blocked approved output"
+    assert resumed.events[-1].type == "run_failed"
+    assert resumed.events[-1].to_dict()["completion_reason"] == CompletionReason.FAILED.value
+    assert (
+        len(
+            [
+                event
+                for event in resumed.events
+                if event.run_id == resumed.run_id and event.type in {"run_completed", "run_failed", "run_cancelled"}
+            ]
+        )
+        == 1
+    )
+    replayed = list(event_store.replay(run_id=resumed.run_id))
+    assert len([event for event in replayed if event.type in {"run_completed", "run_failed", "run_cancelled"}]) == 1
+    assert replayed[-1].type == "run_failed"
+    assert replayed[-1].to_dict()["completion_reason"] == CompletionReason.FAILED.value
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected_status", "expected_reason", "expected_output"),
+    [
+        ("ask_user", {"question": "Choose one"}, AgentStatus.WAIT_USER, CompletionReason.WAIT_USER, "Choose one"),
+        (
+            "task_finish",
+            {"message": "approved finish"},
+            AgentStatus.COMPLETED,
+            CompletionReason.TOOL_FINISH,
+            "approved finish",
+        ),
+    ],
+)
+def test_approved_explicit_directive_preserves_wait_or_finish_semantics(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict[str, str],
+    expected_status: AgentStatus,
+    expected_reason: CompletionReason,
+    expected_output: str,
+) -> None:
+    interrupted = Runner.run_sync(
+        Agent(
+            name="approver",
+            instructions="Execute the explicitly controlled tool.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="assistant draft before approval",
+                        tool_calls=[ToolCall(id="controlled-call", name=tool_name, arguments=arguments)],
+                    )
+                ]
+            ),
+        ),
+        "run controlled tool",
+        run_config=RunConfig(workspace=tmp_path, tool_policy=ToolPolicy(approval="always")),
+    )
+    state = interrupted.into_state()
+    state.approve(state.pending_approval_ids()[0])
+
+    resumed = Runner.resume(state)
+
+    assert resumed.status == expected_status
+    assert resumed.run_id != interrupted.run_id
+    assert resumed.completion_reason == expected_reason
+    assert resumed.completion_tool_name == tool_name
+    assert resumed.final_output == expected_output
+    assert resumed.partial_output == ("assistant draft before approval" if expected_status == AgentStatus.WAIT_USER else None)
+    assert resumed.events[-1].to_dict()["status"] == expected_status.value
+    assert resumed.events[-1].to_dict()["completion_reason"] == expected_reason.value
+
+
 def test_run_handle_resume_uses_interrupted_result_state(tmp_path: Path) -> None:
     executions: list[str] = []
 
@@ -102,7 +333,13 @@ def test_run_handle_resume_uses_interrupted_result_state(tmp_path: Path) -> None
         )
 
     handle = Runner.start(
-        Agent(name="writer", instructions="Write after approval.", model="approval-model", tools=[guarded_write]),
+        Agent(
+            name="writer",
+            instructions="Write after approval.",
+            model="approval-model",
+            tools=[guarded_write],
+            tool_use_behavior="stop_on_first_tool",
+        ),
         "write",
         run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
     )
@@ -134,22 +371,36 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
         context.shared_state["resumed"] = value
         return value
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="write",
-                        tool_calls=[ToolCall(id="guarded-call", name="guarded_write", arguments={"value": "approved"})],
-                    )
-                ]
-            ),
-            _resolved(),
+    def approval_call() -> LLMResponse:
+        return LLMResponse(
+            content="write",
+            tool_calls=[ToolCall(id="guarded-call", name="guarded_write", arguments={"value": "approved"})],
         )
 
+    def finish_after_denial(request) -> LLMResponse:
+        assert any(
+            message.role == "tool" and message.tool_call_id == "guarded-call" and "not allowed" in message.content.lower()
+            for message in request.messages
+        )
+        return LLMResponse(
+            content="handled denied tool",
+            tool_calls=[ToolCall(id="denied-finish", name="task_finish", arguments={"message": "denial handled"})],
+        )
+
+    active_model = ScriptedLLM(steps=[approval_call(), finish_after_denial])
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return active_model, _resolved()
+
     result = Runner.run_sync(
-        Agent(name="writer", instructions="Write after approval.", model="approval-model", tools=[guarded_write]),
+        Agent(
+            name="writer",
+            instructions="Write after approval.",
+            model="approval-model",
+            tools=[guarded_write],
+            tool_use_behavior="stop_on_first_tool",
+        ),
         "write",
         run_config=RunConfig(
             workspace=tmp_path,
@@ -157,21 +408,29 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
             sub_task_manager=manager,
             execution_backend=backend,
             shared_state={"original": True},
-            tool_policy=ToolPolicy(can_use_tool=lambda _name, _arguments: allowed),
+            tool_policy=ToolPolicy(can_use_tool=lambda name, _arguments: allowed or name != "guarded_write"),
         ),
     )
     state = result.into_state()
     state.approve(state.pending_approval_ids()[0])
     allowed = False
 
-    with pytest.raises(RuntimeError, match="not allowed"):
-        Runner.resume(state)
+    denied = Runner.resume(state)
 
+    assert denied.status == AgentStatus.COMPLETED
+    assert denied.final_output == "denial handled"
     assert executions == []
 
     allowed = True
+    active_model = ScriptedLLM(steps=[approval_call()])
     result = Runner.run_sync(
-        Agent(name="writer", instructions="Write after approval.", model="approval-model", tools=[guarded_write]),
+        Agent(
+            name="writer",
+            instructions="Write after approval.",
+            model="approval-model",
+            tools=[guarded_write],
+            tool_use_behavior="stop_on_first_tool",
+        ),
         "write",
         run_config=RunConfig(
             workspace=tmp_path,
@@ -179,7 +438,7 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
             sub_task_manager=manager,
             execution_backend=backend,
             shared_state={"original": True},
-            tool_policy=ToolPolicy(can_use_tool=lambda _name, _arguments: allowed),
+            tool_policy=ToolPolicy(can_use_tool=lambda name, _arguments: allowed or name != "guarded_write"),
         ),
     )
     state = result.into_state()
@@ -225,6 +484,7 @@ def test_approval_snapshot_nested_arguments_are_isolated_and_resume_is_once_only
                 steps=[LLMResponse(content="guard", tool_calls=[ToolCall(id="guard", name="guarded", arguments=arguments)])]
             ),
             tools=[guarded],
+            tool_use_behavior="stop_on_first_tool",
         ),
         "go",
         run_config=RunConfig(workspace=tmp_path, session=session),
@@ -270,6 +530,7 @@ def test_approval_resume_claim_is_shared_across_concurrent_state_uses(tmp_path: 
                 ]
             ),
             tools=[guarded],
+            tool_use_behavior="stop_on_first_tool",
         ),
         "go",
         run_config=RunConfig(workspace=tmp_path),

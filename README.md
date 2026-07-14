@@ -26,7 +26,7 @@ integrations. Extension points that live in package modules include
 Lower-level runtime implementation details include `RuntimeTask`, `AgentResult`,
 `Message`, `CycleRecord`, and `ToolCall`.
 
-Task completion is tool-driven: the agent calls `task_finish` or `ask_user` to signal terminal states. No implicit "last message = answer" heuristics.
+Task completion is explicit: tool directives are the backward-compatible default, while an opt-in no-tool policy can finish or pause on a normal assistant response. No implicit "last message = answer" heuristics.
 
 ## Setup
 
@@ -264,6 +264,16 @@ target Agent resolves its own model and model settings, while the active
 session, cancellation token, and mutated shared state continue across the
 transition. `max_handoffs` defaults to `10` and limits control transfers
 independently from `max_cycles`. Approval resume preserves the same behavior.
+
+No-tool completion is an explicit control, not a task or answer classifier.
+Set `Agent(no_tool_policy="finish")` when a normal assistant response should
+finish the run without `task_finish`, or override it for one call with
+`RunConfig(no_tool_policy="continue" | "wait_user" | "finish")`. Per-run
+configuration wins over a configured Runner default, which wins over the
+Agent value; omitting every layer keeps the backward-compatible `continue`
+behavior. Inspect `result.completion_reason`, `result.completion_tool_name`,
+and `result.partial_output` to distinguish natural completion, tool-driven
+completion, waits, cancellation, failure, and max-cycle exhaustion.
 
 Tools can request approval with `@function_tool(needs_approval=True)`. By
 default the run enters `WAIT_USER` before the tool body is called and emits a

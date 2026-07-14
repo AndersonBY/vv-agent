@@ -13,7 +13,7 @@ from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore, TurnReco
 from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
 from vv_agent.runner import Runner
-from vv_agent.types import Message
+from vv_agent.types import AgentStatus, Message
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +134,12 @@ class RunAdapter:
         error: BaseException | None,
     ) -> None:
         if result is not None:
-            status = "completed" if result.status.value == "completed" else "failed"
+            if result.status == AgentStatus.COMPLETED:
+                status = "completed"
+            elif result.status == AgentStatus.WAIT_USER:
+                status = "interrupted"
+            else:
+                status = "failed"
             token_usage = result.token_usage.to_dict()
             payload: dict[str, Any] = {
                 "threadId": started.thread.thread_id,
@@ -144,6 +149,15 @@ class RunAdapter:
                 "tokenUsage": token_usage,
             }
             stored_result: dict[str, Any] = {"tokenUsage": token_usage}
+            if result.completion_reason is not None:
+                payload["completionReason"] = result.completion_reason.value
+                stored_result["completionReason"] = result.completion_reason.value
+            if result.completion_tool_name is not None:
+                payload["completionToolName"] = result.completion_tool_name
+                stored_result["completionToolName"] = result.completion_tool_name
+            if result.partial_output is not None:
+                payload["partialOutput"] = result.partial_output
+                stored_result["partialOutput"] = result.partial_output
             if result.final_output is not None:
                 payload["finalOutput"] = result.final_output
                 stored_result["finalOutput"] = result.final_output
@@ -163,9 +177,14 @@ class RunAdapter:
                 "threadId": started.thread.thread_id,
                 "turnId": started.turn.turn_id,
                 "status": status,
+                "completionReason": "failed",
                 "error": str(error) if error is not None else "Turn failed",
             }
-            self._store.update_turn(started.turn.turn_id, status=status, result={"error": payload["error"]})
+            self._store.update_turn(
+                started.turn.turn_id,
+                status=status,
+                result={"completionReason": "failed", "error": payload["error"]},
+            )
             self._notify_subscribers(
                 started.thread.thread_id,
                 "error/warning",

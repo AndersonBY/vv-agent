@@ -36,8 +36,10 @@ from vv_agent.types import (
     AgentResult,
     AgentStatus,
     AgentTask,
+    CompletionReason,
     CycleRecord,
     Message,
+    _last_assistant_output,
 )
 
 _CELERY_AVAILABLE = importlib.util.find_spec("celery") is not None
@@ -135,6 +137,8 @@ class CeleryBackend:
                 except Exception:
                     return AgentResult(
                         status=AgentStatus.FAILED,
+                        completion_reason=CompletionReason.CANCELLED,
+                        partial_output=_last_assistant_output(cycles),
                         messages=messages,
                         cycles=cycles,
                         error="Operation was cancelled",
@@ -154,6 +158,8 @@ class CeleryBackend:
 
         return AgentResult(
             status=AgentStatus.MAX_CYCLES,
+            completion_reason=CompletionReason.MAX_CYCLES,
+            partial_output=_last_assistant_output(cycles),
             messages=messages,
             cycles=cycles,
             final_answer="Reached max cycles without finish signal.",
@@ -194,6 +200,7 @@ class CeleryBackend:
         if store_spec is None:
             return AgentResult(
                 status=AgentStatus.FAILED,
+                completion_reason=CompletionReason.FAILED,
                 messages=initial_messages,
                 cycles=[],
                 error="Distributed backend requires a reconstructable SQLite or Redis state store",
@@ -263,7 +270,7 @@ class CeleryBackend:
                     task.task_id,
                     fallback=checkpoint,
                     primary_context=cancellation_reason,
-                    result_factory=lambda current, reason=cancellation_reason: self._failed_result(current, reason),
+                    result_factory=lambda current, reason=cancellation_reason: self._cancelled_result(current, reason),
                 )
 
             try:
@@ -301,7 +308,7 @@ class CeleryBackend:
                     task.task_id,
                     fallback=checkpoint,
                     primary_context=cancellation_reason,
-                    result_factory=lambda current, reason=cancellation_reason: self._failed_result(current, reason),
+                    result_factory=lambda current, reason=cancellation_reason: self._cancelled_result(current, reason),
                 )
             if dispatch_error is not None:
                 return self._handle_dispatch_error(
@@ -732,6 +739,21 @@ class CeleryBackend:
     def _failed_result(checkpoint: Checkpoint, error: str) -> AgentResult:
         return AgentResult(
             status=AgentStatus.FAILED,
+            completion_reason=CompletionReason.FAILED,
+            partial_output=_last_assistant_output(checkpoint.cycles),
+            messages=checkpoint.messages,
+            cycles=checkpoint.cycles,
+            error=error,
+            shared_state=checkpoint.shared_state,
+            token_usage=summarize_task_token_usage(checkpoint.cycles),
+        )
+
+    @staticmethod
+    def _cancelled_result(checkpoint: Checkpoint, error: str) -> AgentResult:
+        return AgentResult(
+            status=AgentStatus.FAILED,
+            completion_reason=CompletionReason.CANCELLED,
+            partial_output=_last_assistant_output(checkpoint.cycles),
             messages=checkpoint.messages,
             cycles=checkpoint.cycles,
             error=error,
@@ -743,6 +765,8 @@ class CeleryBackend:
     def _max_cycles_result(checkpoint: Checkpoint) -> AgentResult:
         return AgentResult(
             status=AgentStatus.MAX_CYCLES,
+            completion_reason=CompletionReason.MAX_CYCLES,
+            partial_output=_last_assistant_output(checkpoint.cycles),
             messages=checkpoint.messages,
             cycles=checkpoint.cycles,
             final_answer="Reached max cycles without finish signal.",
@@ -754,6 +778,8 @@ class CeleryBackend:
     def _coordination_failure(checkpoint: Checkpoint, detail: str) -> AgentResult:
         return AgentResult(
             status=AgentStatus.FAILED,
+            completion_reason=CompletionReason.FAILED,
+            partial_output=_last_assistant_output(checkpoint.cycles),
             messages=checkpoint.messages,
             cycles=checkpoint.cycles,
             error=f"Distributed coordination failure: {detail}",

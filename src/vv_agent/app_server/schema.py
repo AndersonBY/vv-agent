@@ -263,6 +263,9 @@ def _definitions() -> dict[str, dict[str, Any]]:
                 "runId": {"type": "string"},
                 "status": {"type": "string"},
                 "finalOutput": {},
+                "completionReason": {"type": "string"},
+                "completionToolName": {"type": "string"},
+                "partialOutput": {"type": "string"},
                 "tokenUsage": JSON_OBJECT,
                 "error": {"type": "string"},
             },
@@ -635,6 +638,7 @@ export interface ThreadClosedParams { threadId: string; }
 export interface TurnStartedParams { threadId: string; turnId: string; }
 export interface TurnCompletedParams {
   threadId: string; turnId: string; runId?: string; status: TurnStatus; finalOutput?: JsonValue;
+  completionReason?: string; completionToolName?: string; partialOutput?: string;
   tokenUsage?: JsonObject; error?: string;
 }
 export type ApprovalResolveResponse = Record<string, never>;

@@ -28,7 +28,7 @@ from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.engine import AgentRuntime, register_sub_agent_session, unregister_sub_agent_session
 from vv_agent.runtime.state import CheckpointConflictError, build_state_store
 from vv_agent.runtime.sub_task_manager import SubTaskManager
-from vv_agent.types import AgentResult, AgentStatus, AgentTask
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason
 from vv_agent.workspace import LocalWorkspaceBackend
 
 
@@ -282,6 +282,7 @@ def run_single_cycle(
             "finished": True,
             "result": AgentResult(
                 status=AgentStatus.FAILED,
+                completion_reason=CompletionReason.FAILED,
                 messages=[],
                 cycles=[],
                 error=f"No checkpoint found for task {task.task_id}",

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from vv_agent.memory import sanitize_for_resume
-from vv_agent.types import AgentStatus, Message, SubTaskOutcome
+from vv_agent.types import AgentStatus, CompletionReason, Message, SubTaskOutcome
 
 if TYPE_CHECKING:
     from vv_agent.interactive import AgentSessionRun
@@ -512,6 +512,7 @@ class SubTaskManager:
                     session_id=record.session_id,
                     agent_name=record.agent_name,
                     status=AgentStatus.FAILED,
+                    completion_reason=CompletionReason.FAILED,
                     error=str(exc),
                     error_code="sub_task_failed",
                     resolved=dict(record.resolved),
@@ -694,6 +695,7 @@ class SubTaskManager:
                 session_id=current.session_id,
                 agent_name=current.agent_name,
                 status=AgentStatus.FAILED,
+                completion_reason=CompletionReason.FAILED,
                 error=str(error),
                 error_code="sub_task_failed",
                 resolved=dict(current.resolved),
@@ -846,6 +848,9 @@ class SubTaskManager:
             wait_reason=run.result.wait_reason,
             error=run.result.error,
             error_code=("sub_task_failed" if run.result.status == AgentStatus.FAILED else None),
+            completion_reason=run.result.completion_reason,
+            completion_tool_name=run.result.completion_tool_name,
+            partial_output=run.result.partial_output,
             cycles=len(run.result.cycles),
             todo_list=run.result.todo_list,
             resolved=resolved,

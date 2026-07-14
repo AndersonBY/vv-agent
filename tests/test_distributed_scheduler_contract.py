@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from typing import Any, Literal
 
 import pytest
@@ -9,7 +10,7 @@ from vv_agent.runtime.backends.celery import CeleryBackend, RuntimeRecipe
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.state import Checkpoint, InMemoryStateStore, StateStoreSpec
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason, Message
 
 pytest.importorskip("celery")
 
@@ -22,6 +23,7 @@ class _SchedulerStore(InMemoryStateStore):
         self.load_error: Exception | None = None
         self.finalize_mode: Literal["normal", "false", "error"] = "normal"
         self.ack_mode: Literal["normal", "false", "false_after_delete", "error"] = "normal"
+        self.finalized_checkpoints: list[Checkpoint] = []
 
     def state_store_spec(self) -> StateStoreSpec:
         return StateStoreSpec(kind="sqlite", location="/tmp/vv-agent-scheduler-contract.sqlite3")
@@ -36,6 +38,7 @@ class _SchedulerStore(InMemoryStateStore):
             return False
         if self.finalize_mode == "error":
             raise RuntimeError("injected finalize failure")
+        self.finalized_checkpoints.append(deepcopy(checkpoint))
         return super().finalize_checkpoint(checkpoint, expected_revision=expected_revision)
 
     def acknowledge_terminal(self, task_id: str, *, expected_revision: int) -> bool:
@@ -623,4 +626,9 @@ def test_distributed_scheduler_preserves_cancellation_reason() -> None:
 
     assert result.status == AgentStatus.FAILED
     assert result.error == "host shutdown"
+    assert result.completion_reason == CompletionReason.CANCELLED
+    assert len(store.finalized_checkpoints) == 1
+    terminal = store.finalized_checkpoints[0].terminal_result
+    assert terminal is not None
+    assert terminal.completion_reason == CompletionReason.CANCELLED
     assert store.load_checkpoint(task.task_id) is None

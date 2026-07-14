@@ -47,7 +47,7 @@ class AgentCompiler:
             if run_config.tool_policy.disallowed_tools:
                 metadata["_vv_agent_disallowed_tools"] = list(run_config.tool_policy.disallowed_tools)
 
-        no_tool_policy = "continue"
+        no_tool_policy = run_config.no_tool_policy or agent.no_tool_policy or "continue"
         metadata["_vv_agent_tool_use_behavior"] = agent.tool_use_behavior
         if agent.stop_at_tool_names:
             metadata["_vv_agent_stop_at_tool_names"] = list(agent.stop_at_tool_names)

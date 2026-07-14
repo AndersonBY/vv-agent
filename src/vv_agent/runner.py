@@ -50,7 +50,7 @@ from vv_agent.run_config import (
     merge_tool_policy_layers,
 )
 from vv_agent.run_handle import RunHandle, RunHandleRunner
-from vv_agent.runtime import AgentRuntime
+from vv_agent.runtime import AgentRuntime, ToolCallRunner
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.engine import _CanonicalSubAgentStreamPayload
@@ -59,7 +59,17 @@ from vv_agent.tools.executor import ToolExecutor, is_tool_executor
 from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.tracing import Span, TraceProcessor
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message, ToolDirective, ToolExecutionResult, ToolResultStatus
+from vv_agent.types import (
+    AgentResult,
+    AgentStatus,
+    AgentTask,
+    CompletionReason,
+    Message,
+    ToolDirective,
+    ToolExecutionResult,
+    ToolResultStatus,
+    _last_assistant_output,
+)
 
 _TOOL_POLICY_METADATA_KEYS = (
     "_vv_agent_allowed_tools",
@@ -323,14 +333,13 @@ class Runner:
             result=tool_result,
         )
 
-        if tool_result.status_code != ToolResultStatus.SUCCESS:
-            raise RuntimeError(tool_result.content)
+        behavior_reason = ToolCallRunner._apply_tool_use_behavior(
+            task=pending.task,
+            call=call,
+            result=tool_result,
+        )
 
         raw_result = deepcopy(source.raw_result)
-        raw_result.status = AgentStatus.COMPLETED
-        raw_result.final_answer = tool_result.content
-        raw_result.wait_reason = None
-        raw_result.error = None
         raw_result.shared_state = deepcopy(context.shared_state)
         for cycle in raw_result.cycles:
             if cycle.index == approval.cycle_index:
@@ -348,13 +357,78 @@ class Runner:
                 break
         tool_message = tool_result.to_tool_message()
         raw_result.messages = [
-            message
-            for message in raw_result.messages
-            if not (message.role == "tool" and message.tool_call_id == pending.call.id)
+            message for message in raw_result.messages if not (message.role == "tool" and message.tool_call_id == pending.call.id)
         ]
         raw_result.messages.append(tool_message)
         if effective_config.session is not None:
             effective_config.session.add_items([tool_message])
+
+        if tool_result.directive == ToolDirective.CONTINUE:
+            config = replace(
+                resume_context.run_config,
+                initial_messages=deepcopy(raw_result.messages),
+                shared_state=deepcopy(raw_result.shared_state),
+            )
+            continued = resume_context.runner._run(
+                resume_context.agent,
+                resume_context.input,
+                run_config=config,
+            )
+            continued.metadata.update(
+                {
+                    "resumed": True,
+                    "approved_interruption_id": approval.interruption_id,
+                }
+            )
+            return continued
+
+        raw_result.completion_tool_name = call.name
+        raw_result.error = None
+        if tool_result.directive == ToolDirective.WAIT_USER:
+            wait_reason = tool_result.metadata.get("question") if isinstance(tool_result.metadata, dict) else None
+            if not wait_reason:
+                wait_reason = tool_result.content
+            raw_result.status = AgentStatus.WAIT_USER
+            raw_result.completion_reason = CompletionReason.WAIT_USER
+            raw_result.partial_output = _last_assistant_output(raw_result.cycles)
+            raw_result.final_answer = None
+            raw_result.wait_reason = str(wait_reason)
+        else:
+            raw_result.status = AgentStatus.COMPLETED
+            raw_result.completion_reason = behavior_reason or CompletionReason.TOOL_FINISH
+            raw_result.partial_output = None
+            raw_result.final_answer = AgentRuntime._extract_final_message(tool_result)
+            raw_result.wait_reason = None
+
+        guardrail_context = context.run_context
+        if not isinstance(guardrail_context, RunContext):
+            guardrail_context = RunContext(
+                context=effective_config.context,
+                run_id=source.run_id,
+                agent_name=source.agent_name,
+                model=source.resolved_model.model_id if source.resolved_model is not None else None,
+                workspace=effective_config.workspace,
+                metadata={**resume_context.agent.metadata, **effective_config.metadata},
+            )
+        final_output, output_coercion_error = cls._postprocess_output(
+            agent=resume_context.agent,
+            run_context=guardrail_context,
+            raw_result=raw_result,
+            final_output=raw_result.final_answer or raw_result.wait_reason,
+            cancellation_token=effective_config.cancellation_token,
+        )
+        resumed_run_id = f"run_{uuid.uuid4().hex}"
+        terminal_event = cls._terminal_event(
+            result=raw_result,
+            final_output=final_output,
+            run_id=resumed_run_id,
+            trace_id=source.trace_id,
+            agent_name=source.agent_name,
+            session_id=cls._resolve_event_session_id(effective_config),
+            cancellation_token=effective_config.cancellation_token,
+        )
+        cls._emit_chain_event(terminal_event, run_config=effective_config, event_sink=None)
+
         resumed = RunResult(
             input=source.input,
             new_items=[
@@ -365,18 +439,20 @@ class Runner:
                 ],
                 tool_message,
             ],
-            final_output=tool_result.content,
-            status=AgentStatus.COMPLETED,
+            final_output=final_output,
+            status=raw_result.status,
             raw_result=raw_result,
-            events=list(source.events),
+            events=[*source.events, terminal_event],
             token_usage=raw_result.token_usage,
             trace_id=source.trace_id,
-            run_id=source.run_id,
+            run_id=resumed_run_id,
             metadata={**source.metadata, "resumed": True, "approved_interruption_id": approval.interruption_id},
             agent_name=source.agent_name,
             resolved_model=source.resolved_model,
             _resume_context=resume_context,
         )
+        if output_coercion_error is not None:
+            raise output_coercion_error
         handoff_request = cls._extract_handoff(resumed)
         if handoff_request is None:
             return resumed
@@ -451,6 +527,10 @@ class Runner:
             (value for value in (config.max_handoffs, defaults.max_handoffs) if value is not None),
             10,
         )
+        configured_no_tool_policy = next(
+            (value for value in (config.no_tool_policy, defaults.no_tool_policy, agent.no_tool_policy) if value is not None),
+            "continue",
+        )
         effective_max_cycles = _validate_bounded_int(configured_max_cycles, "max_cycles", minimum=1)
         effective_max_handoffs = _validate_bounded_int(configured_max_handoffs, "max_handoffs", minimum=0)
         assert effective_max_cycles is not None
@@ -483,6 +563,7 @@ class Runner:
             session=prefer_run("session"),
             max_cycles=effective_max_cycles,
             max_handoffs=effective_max_handoffs,
+            no_tool_policy=configured_no_tool_policy,
             tool_policy=merge_tool_policy_layers(agent.tool_policy, defaults.tool_policy, config.tool_policy),
             execution_backend=prefer_run("execution_backend"),
             cancellation_token=prefer_run("cancellation_token"),
@@ -818,11 +899,18 @@ class Runner:
                 run_id=run_id,
                 trace_id=trace_id,
                 error=message,
+                completion_reason=CompletionReason.FAILED,
                 agent_name=agent.name,
                 session_id=event_session_id,
             )
             capture_event(failed_event)
-            raw_result = AgentResult(status=AgentStatus.FAILED, messages=[], cycles=[], error=message)
+            raw_result = AgentResult(
+                status=AgentStatus.FAILED,
+                completion_reason=CompletionReason.FAILED,
+                messages=[],
+                cycles=[],
+                error=message,
+            )
             trace_metadata = {"status": "failed", "error": message}
             result = RunResult(
                 input=user_input,
@@ -931,26 +1019,13 @@ class Runner:
             sub_task_manager=run_config.sub_task_manager,
         )
         final_output = raw_result.final_answer or raw_result.wait_reason or raw_result.error
-        output_result = cls._apply_output_guardrails(
+        final_output, output_coercion_error = cls._postprocess_output(
             agent=agent,
             run_context=guardrail_context,
+            raw_result=raw_result,
             final_output=final_output,
+            cancellation_token=run_config.cancellation_token,
         )
-        if output_result.outcome == "rewrite":
-            final_output = output_result.value
-            cls._replace_raw_result_output(raw_result, final_output)
-        elif output_result.outcome in {"block", "require_approval"}:
-            final_output = output_result.message or "Output blocked by guardrail."
-            raw_result.status = AgentStatus.FAILED
-            raw_result.final_answer = None
-            raw_result.wait_reason = None
-            raw_result.error = final_output
-        output_coercion_error: Exception | None = None
-        if raw_result.status == AgentStatus.COMPLETED:
-            try:
-                final_output = cls._coerce_output_type(agent=agent, final_output=final_output)
-            except Exception as exc:
-                output_coercion_error = exc
 
         new_items = cls._new_session_items(initial_messages=initial_messages, result=raw_result)
         if run_config.session is not None:
@@ -974,7 +1049,13 @@ class Runner:
                 cancellation_token=run_config.cancellation_token,
             )
         )
-        trace_metadata = {"status": raw_result.status.value, "final_output": final_output}
+        trace_metadata = {
+            "status": raw_result.status.value,
+            "final_output": final_output,
+            "completion_reason": raw_result.completion_reason.value if raw_result.completion_reason is not None else None,
+            "completion_tool_name": raw_result.completion_tool_name,
+            "partial_output": raw_result.partial_output,
+        }
         if output_coercion_error is not None:
             raise output_coercion_error
         result = RunResult(
@@ -1029,6 +1110,46 @@ class Runner:
             return GuardrailResult.rewrite(current_output)
         return GuardrailResult.allow()
 
+    @classmethod
+    def _postprocess_output(
+        cls,
+        *,
+        agent: Agent,
+        run_context: RunContext[Any],
+        raw_result: AgentResult,
+        final_output: Any,
+        cancellation_token: Any | None,
+    ) -> tuple[Any, Exception | None]:
+        cls._normalize_completion_observation(raw_result, cancellation_token=cancellation_token)
+        if raw_result.completion_reason == CompletionReason.CANCELLED:
+            return final_output, None
+        output_result = cls._apply_output_guardrails(
+            agent=agent,
+            run_context=run_context,
+            final_output=final_output,
+        )
+        if output_result.outcome == "rewrite":
+            final_output = output_result.value
+            cls._replace_raw_result_output(raw_result, final_output)
+        elif output_result.outcome in {"block", "require_approval"}:
+            final_output = output_result.message or "Output blocked by guardrail."
+            raw_result.status = AgentStatus.FAILED
+            raw_result.completion_reason = CompletionReason.FAILED
+            raw_result.completion_tool_name = None
+            raw_result.partial_output = raw_result.partial_output or _last_assistant_output(raw_result.cycles)
+            raw_result.final_answer = None
+            raw_result.wait_reason = None
+            raw_result.error = final_output
+
+        cls._normalize_completion_observation(raw_result, cancellation_token=cancellation_token)
+        output_coercion_error: Exception | None = None
+        if raw_result.status == AgentStatus.COMPLETED:
+            try:
+                final_output = cls._coerce_output_type(agent=agent, final_output=final_output)
+            except Exception as exc:
+                output_coercion_error = exc
+        return final_output, output_coercion_error
+
     @staticmethod
     def _replace_raw_result_output(result: AgentResult, output: Any) -> None:
         value = output if isinstance(output, str) or output is None else json.dumps(output, ensure_ascii=False)
@@ -1060,6 +1181,8 @@ class Runner:
                 session_id=session_id,
                 cycle_index=cycle_index,
                 reason=result.error or cancellation_token.reason or "run cancelled",
+                completion_reason=CompletionReason.CANCELLED,
+                partial_output=result.partial_output,
             )
         if result.status in {AgentStatus.FAILED, AgentStatus.MAX_CYCLES}:
             return RunFailedEvent(
@@ -1069,6 +1192,8 @@ class Runner:
                 session_id=session_id,
                 cycle_index=cycle_index,
                 error=result.error or result.status.value,
+                completion_reason=result.completion_reason,
+                partial_output=result.partial_output,
             )
         event_output = final_output
         if event_output is not None and not isinstance(event_output, str):
@@ -1086,7 +1211,34 @@ class Runner:
             cycle_index=cycle_index,
             final_output=event_output,
             status=result.status.value,
+            completion_reason=result.completion_reason,
+            completion_tool_name=result.completion_tool_name,
+            partial_output=result.partial_output,
         )
+
+    @staticmethod
+    def _normalize_completion_observation(
+        result: AgentResult,
+        *,
+        cancellation_token: Any | None,
+    ) -> None:
+        cancelled = bool(result.status == AgentStatus.FAILED and cancellation_token is not None and cancellation_token.cancelled)
+        if cancelled:
+            result.completion_reason = CompletionReason.CANCELLED
+            result.completion_tool_name = None
+        elif result.status == AgentStatus.WAIT_USER:
+            result.completion_reason = result.completion_reason or CompletionReason.WAIT_USER
+        elif result.status == AgentStatus.MAX_CYCLES:
+            result.completion_reason = CompletionReason.MAX_CYCLES
+            result.completion_tool_name = None
+        elif result.status == AgentStatus.FAILED:
+            result.completion_reason = CompletionReason.FAILED
+            result.completion_tool_name = None
+
+        if result.status == AgentStatus.COMPLETED:
+            result.partial_output = None
+        else:
+            result.partial_output = result.partial_output or _last_assistant_output(result.cycles)
 
     @staticmethod
     def _coerce_output_type(*, agent: Agent, final_output: Any) -> Any:
@@ -1688,6 +1840,8 @@ class Runner:
 
     @staticmethod
     def _extract_handoff(result: RunResult) -> _HandoffRequest | None:
+        if result.status != AgentStatus.COMPLETED:
+            return None
         for cycle in result.raw_result.cycles:
             for tool_result in cycle.tool_results:
                 metadata = tool_result.metadata if isinstance(tool_result.metadata, dict) else {}

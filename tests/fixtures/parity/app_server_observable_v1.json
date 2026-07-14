@@ -94,8 +94,22 @@
     "optionalFieldsOmittedWhenAbsent": [
       "runId",
       "finalOutput",
+      "completionReason",
+      "completionToolName",
+      "partialOutput",
       "error",
       "tokenUsage"
+    ],
+    "completionReasonValues": [
+      "tool_finish",
+      "no_tool_finish",
+      "stop_on_first_tool",
+      "stop_at_tool_name",
+      "wait_user",
+      "max_cycles",
+      "cancelled",
+      "failed",
+      "budget_exhausted"
     ]
   },
   "nullability": {
