@@ -21,7 +21,7 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "checkpoint_codec
 RUST_FIXTURE_PATH = (
     Path(__file__).parents[2] / "vv-agent-rs" / "crates" / "vv-agent" / "tests" / "fixtures" / "parity" / FIXTURE_PATH.name
 )
-FIXTURE_SHA256 = "375baeb13c961a3a50ae23501e000839ac6baf5d2e2878d7858d79d3bab91cb8"
+FIXTURE_SHA256 = "1a08f6a202ce8922e52c90d05dc718b90b05fdd65146f66becf360502d4aa8d0"
 
 
 class _FakeWatchError(Exception):

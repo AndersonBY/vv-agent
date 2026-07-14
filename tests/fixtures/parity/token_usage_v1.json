@@ -1,0 +1,429 @@
+{
+  "contract": "token_usage_v1",
+  "schema_version": 1,
+  "usage_sources": [
+    "provider_reported",
+    "estimated",
+    "accounting_missing"
+  ],
+  "cache_statuses": [
+    "provider_reported",
+    "accounting_missing",
+    "unsupported"
+  ],
+  "normalization_cases": [
+    {
+      "name": "openai_cached_positive",
+      "input": {
+        "raw_usage": {
+          "prompt_tokens": 1000,
+          "completion_tokens": 120,
+          "total_tokens": 1120,
+          "prompt_tokens_details": {
+            "cached_tokens": 640
+          }
+        },
+        "usage_source_hint": "provider_reported",
+        "cache_status_hint": null
+      },
+      "expected": {
+        "prompt_tokens": 1000,
+        "completion_tokens": 120,
+        "total_tokens": 1120,
+        "cached_tokens": 640,
+        "reasoning_tokens": 0,
+        "input_tokens": 1000,
+        "output_tokens": 120,
+        "cache_creation_tokens": 0,
+        "usage_source": "provider_reported",
+        "cache_usage": {
+          "status": "provider_reported",
+          "read_tokens": 640,
+          "write_tokens": null,
+          "uncached_input_tokens": 360,
+          "source": "provider_usage"
+        },
+        "raw": {
+          "prompt_tokens": 1000,
+          "completion_tokens": 120,
+          "total_tokens": 1120,
+          "prompt_tokens_details": {
+            "cached_tokens": 640
+          }
+        }
+      }
+    },
+    {
+      "name": "openai_cached_explicit_zero",
+      "input": {
+        "raw_usage": {
+          "prompt_tokens": 1000,
+          "completion_tokens": 100,
+          "total_tokens": 1100,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "usage_source_hint": "provider_reported",
+        "cache_status_hint": null
+      },
+      "expected": {
+        "prompt_tokens": 1000,
+        "completion_tokens": 100,
+        "total_tokens": 1100,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "cache_creation_tokens": 0,
+        "usage_source": "provider_reported",
+        "cache_usage": {
+          "status": "provider_reported",
+          "read_tokens": 0,
+          "write_tokens": null,
+          "uncached_input_tokens": 1000,
+          "source": "provider_usage"
+        },
+        "raw": {
+          "prompt_tokens": 1000,
+          "completion_tokens": 100,
+          "total_tokens": 1100,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "anthropic_cache_read_and_creation",
+      "input": {
+        "raw_usage": {
+          "input_tokens": 300,
+          "output_tokens": 50,
+          "cache_read_input_tokens": 600,
+          "cache_creation_input_tokens": 100
+        },
+        "usage_source_hint": "provider_reported",
+        "cache_status_hint": null
+      },
+      "expected": {
+        "prompt_tokens": 300,
+        "completion_tokens": 50,
+        "total_tokens": 350,
+        "cached_tokens": 600,
+        "reasoning_tokens": 0,
+        "input_tokens": 300,
+        "output_tokens": 50,
+        "cache_creation_tokens": 100,
+        "usage_source": "provider_reported",
+        "cache_usage": {
+          "status": "provider_reported",
+          "read_tokens": 600,
+          "write_tokens": 100,
+          "uncached_input_tokens": 300,
+          "source": "provider_usage"
+        },
+        "raw": {
+          "input_tokens": 300,
+          "output_tokens": 50,
+          "cache_read_input_tokens": 600,
+          "cache_creation_input_tokens": 100
+        }
+      }
+    },
+    {
+      "name": "provider_normalized_cache_fields",
+      "input": {
+        "raw_usage": {
+          "prompt_tokens": 900,
+          "completion_tokens": 75,
+          "total_tokens": 975,
+          "cache_read_tokens": 500,
+          "cache_creation_tokens": 100,
+          "uncached_input_tokens": 300
+        },
+        "usage_source_hint": "provider_reported",
+        "cache_status_hint": null
+      },
+      "expected": {
+        "prompt_tokens": 900,
+        "completion_tokens": 75,
+        "total_tokens": 975,
+        "cached_tokens": 500,
+        "reasoning_tokens": 0,
+        "input_tokens": 900,
+        "output_tokens": 75,
+        "cache_creation_tokens": 100,
+        "usage_source": "provider_reported",
+        "cache_usage": {
+          "status": "provider_reported",
+          "read_tokens": 500,
+          "write_tokens": 100,
+          "uncached_input_tokens": 300,
+          "source": "provider_usage"
+        },
+        "raw": {
+          "prompt_tokens": 900,
+          "completion_tokens": 75,
+          "total_tokens": 975,
+          "cache_read_tokens": 500,
+          "cache_creation_tokens": 100,
+          "uncached_input_tokens": 300
+        }
+      }
+    },
+    {
+      "name": "estimated_usage",
+      "input": {
+        "raw_usage": {
+          "prompt_tokens": 80,
+          "completion_tokens": 20,
+          "total_tokens": 100
+        },
+        "usage_source_hint": "estimated",
+        "cache_status_hint": null
+      },
+      "expected": {
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "cache_creation_tokens": 0,
+        "usage_source": "estimated",
+        "cache_usage": {
+          "status": "accounting_missing",
+          "read_tokens": null,
+          "write_tokens": null,
+          "uncached_input_tokens": null,
+          "source": null
+        },
+        "raw": {
+          "prompt_tokens": 80,
+          "completion_tokens": 20,
+          "total_tokens": 100
+        }
+      }
+    },
+    {
+      "name": "provider_usage_without_cache_details",
+      "input": {
+        "raw_usage": {
+          "prompt_tokens": 80,
+          "completion_tokens": 20,
+          "total_tokens": 100
+        },
+        "usage_source_hint": "provider_reported",
+        "cache_status_hint": null
+      },
+      "expected": {
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "cache_creation_tokens": 0,
+        "usage_source": "provider_reported",
+        "cache_usage": {
+          "status": "accounting_missing",
+          "read_tokens": null,
+          "write_tokens": null,
+          "uncached_input_tokens": null,
+          "source": null
+        },
+        "raw": {
+          "prompt_tokens": 80,
+          "completion_tokens": 20,
+          "total_tokens": 100
+        }
+      }
+    },
+    {
+      "name": "adapter_declares_cache_unsupported",
+      "input": {
+        "raw_usage": {
+          "prompt_tokens": 80,
+          "completion_tokens": 20,
+          "total_tokens": 100
+        },
+        "usage_source_hint": "provider_reported",
+        "cache_status_hint": "unsupported"
+      },
+      "expected": {
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "cache_creation_tokens": 0,
+        "usage_source": "provider_reported",
+        "cache_usage": {
+          "status": "unsupported",
+          "read_tokens": null,
+          "write_tokens": null,
+          "uncached_input_tokens": null,
+          "source": "adapter_capability"
+        },
+        "raw": {
+          "prompt_tokens": 80,
+          "completion_tokens": 20,
+          "total_tokens": 100
+        }
+      }
+    },
+    {
+      "name": "missing_usage",
+      "input": {
+        "raw_usage": null,
+        "usage_source_hint": null,
+        "cache_status_hint": null
+      },
+      "expected": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_tokens": 0,
+        "usage_source": "accounting_missing",
+        "cache_usage": {
+          "status": "accounting_missing",
+          "read_tokens": null,
+          "write_tokens": null,
+          "uncached_input_tokens": null,
+          "source": null
+        },
+        "raw": {}
+      }
+    },
+    {
+      "name": "invalid_cache_numbers_are_not_zero",
+      "input": {
+        "raw_usage": {
+          "prompt_tokens": 80,
+          "completion_tokens": 20,
+          "total_tokens": 100,
+          "cache_read_tokens": "not-a-number",
+          "cache_creation_tokens": -1,
+          "uncached_input_tokens": 12.5
+        },
+        "usage_source_hint": "provider_reported",
+        "cache_status_hint": null
+      },
+      "expected": {
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "input_tokens": 80,
+        "output_tokens": 20,
+        "cache_creation_tokens": 0,
+        "usage_source": "provider_reported",
+        "cache_usage": {
+          "status": "accounting_missing",
+          "read_tokens": null,
+          "write_tokens": null,
+          "uncached_input_tokens": null,
+          "source": null
+        },
+        "raw": {
+          "prompt_tokens": 80,
+          "completion_tokens": 20,
+          "total_tokens": 100,
+          "cache_read_tokens": "not-a-number",
+          "cache_creation_tokens": -1,
+          "uncached_input_tokens": 12.5
+        }
+      }
+    }
+  ],
+  "aggregation_cases": [
+    {
+      "name": "complete_provider_cache_observations",
+      "cycles": [
+        {
+          "status": "provider_reported",
+          "read_tokens": 640,
+          "write_tokens": null,
+          "uncached_input_tokens": 360,
+          "source": "provider_usage"
+        },
+        {
+          "status": "provider_reported",
+          "read_tokens": 0,
+          "write_tokens": null,
+          "uncached_input_tokens": 1000,
+          "source": "provider_usage"
+        }
+      ],
+      "expected": {
+        "status": "provider_reported",
+        "read_tokens": 640,
+        "write_tokens": null,
+        "uncached_input_tokens": 1360,
+        "source": "aggregate"
+      }
+    },
+    {
+      "name": "partial_observation_is_not_a_partial_total",
+      "cycles": [
+        {
+          "status": "provider_reported",
+          "read_tokens": 640,
+          "write_tokens": null,
+          "uncached_input_tokens": 360,
+          "source": "provider_usage"
+        },
+        {
+          "status": "accounting_missing",
+          "read_tokens": null,
+          "write_tokens": null,
+          "uncached_input_tokens": null,
+          "source": null
+        }
+      ],
+      "expected": {
+        "status": "accounting_missing",
+        "read_tokens": null,
+        "write_tokens": null,
+        "uncached_input_tokens": null,
+        "source": "aggregate"
+      }
+    },
+    {
+      "name": "all_cycles_explicitly_unsupported",
+      "cycles": [
+        {
+          "status": "unsupported",
+          "read_tokens": null,
+          "write_tokens": null,
+          "uncached_input_tokens": null,
+          "source": "adapter_capability"
+        },
+        {
+          "status": "unsupported",
+          "read_tokens": null,
+          "write_tokens": null,
+          "uncached_input_tokens": null,
+          "source": "adapter_capability"
+        }
+      ],
+      "expected": {
+        "status": "unsupported",
+        "read_tokens": null,
+        "write_tokens": null,
+        "uncached_input_tokens": null,
+        "source": "aggregate"
+      }
+    }
+  ]
+}

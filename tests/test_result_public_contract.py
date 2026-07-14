@@ -69,6 +69,7 @@ def test_run_result_public_projection_matches_shared_contract_without_credential
     assert sorted(projection) == contract["projection_keys"]
     assert projection["status"] == "wait_user"
     assert projection["final_output"] == "Approval is required."
+    assert projection["token_usage"] == contract["agent_result"]["token_usage"]
     assert projection["resolved_model"] == contract["resolved_model_projection"]
     assert "secret-must-not-serialize" not in json.dumps(projection, sort_keys=True)
 

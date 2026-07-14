@@ -249,7 +249,11 @@ class CycleRunner:
             assistant_message=llm_response.content,
             tool_calls=deepcopy(llm_response.tool_calls),
             memory_compacted=memory_compacted,
-            token_usage=normalize_token_usage(llm_response.raw.get("usage")),
+            token_usage=normalize_token_usage(
+                llm_response.raw.get("usage"),
+                usage_source=llm_response.raw.get("usage_source"),
+                cache_status=llm_response.raw.get("cache_status"),
+            ),
             _planned_tool_names=tuple(
                 name
                 for schema in request_tool_schemas

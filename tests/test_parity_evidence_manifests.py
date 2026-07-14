@@ -221,6 +221,31 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::AgentResult",
             },
             {"id": "result.status", "python": "vv_agent.AgentStatus", "rust": "vv_agent::AgentStatus"},
+            {
+                "id": "result.usage_source",
+                "python": "vv_agent.UsageSource",
+                "rust": "vv_agent::UsageSource",
+            },
+            {
+                "id": "result.cache_usage_status",
+                "python": "vv_agent.CacheUsageStatus",
+                "rust": "vv_agent::CacheUsageStatus",
+            },
+            {
+                "id": "result.cache_usage",
+                "python": "vv_agent.CacheUsage",
+                "rust": "vv_agent::CacheUsage",
+            },
+            {
+                "id": "result.token_usage",
+                "python": "vv_agent.TokenUsage",
+                "rust": "vv_agent::TokenUsage",
+            },
+            {
+                "id": "result.task_token_usage",
+                "python": "vv_agent.TaskTokenUsage",
+                "rust": "vv_agent::TaskTokenUsage",
+            },
         ],
     },
     {
@@ -1656,7 +1681,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 109
+    assert len(capability_ids) == 114
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])

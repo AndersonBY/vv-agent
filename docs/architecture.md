@@ -81,6 +81,13 @@ implementing providers instead of patching runtime internals:
 Raw runtime logs remain available for compatibility, but typed `RunEvent` is
 the primary state contract for host UIs.
 
+Token accounting keeps provider truth separate from compatibility values.
+`TokenUsage.usage_source` identifies provider-reported, estimated, or missing
+totals. `CacheUsage` distinguishes an explicit zero cache read from missing
+accounting and adapter-declared lack of support. `TaskTokenUsage` exposes a
+cache total only when every included cycle reports that metric; legacy numeric
+fields remain available but do not prove cache-accounting availability.
+
 ## Module Map
 
 | Path | Responsibility |

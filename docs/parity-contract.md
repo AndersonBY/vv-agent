@@ -68,6 +68,7 @@ Never repair a contract failure by editing a file under
 | Delegation and background tasks | `src/vv_agent/background_task.py`, `src/vv_agent/handoffs.py`, `src/vv_agent/runtime/sub_task_manager.py` |
 | Sessions and stores | `src/vv_agent/sessions/`, `src/vv_agent/runtime/stores/`, `tests/test_session_store_parity.py` |
 | Events and tracing | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `src/vv_agent/tracing.py` |
+| Token and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py` |
 | Distributed runtime | `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/checkpoint_codec.py` |
 | App Server | `src/vv_agent/app_server/`, `tests/test_app_server_contract_parity.py` |
 | Real closure tests | `tests/test_parity_evidence_manifests.py`, `tests/test_runner_events_producer_parity.py` |

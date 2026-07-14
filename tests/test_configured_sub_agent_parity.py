@@ -64,7 +64,7 @@ from vv_agent.workspace import (
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
 EVENT_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_events_v1.jsonl"
 CONTRACT_SHA256 = "22467e29409d834635d40cae52aaebac18135d4019981943f61042bc0eb39672"
-EVENT_CONTRACT_SHA256 = "d00e03e0dd05ed49f4fbc86f6e4e8b63ce884b99381fd260e3212bc71717817f"
+EVENT_CONTRACT_SHA256 = "0fc2e5b09bf7cc9b8e06743d02c0a7bd11e54ca83814f9ab73aec256b3c80618"
 
 
 def _contract() -> dict[str, Any]:
