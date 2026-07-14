@@ -3,18 +3,28 @@
   "success_with_session": {
     "tail": ["session_persisted", "run_completed"],
     "terminal": "run_completed",
-    "status": "completed"
+    "status": "completed",
+    "completion_reason": "tool_finish"
   },
   "output_guardrail_block": {
     "tail": ["session_persisted", "run_failed"],
     "terminal": "run_failed",
     "status": "failed",
+    "completion_reason": "failed",
+    "partial_output": "blocked final output candidate",
     "error": "blocked final output",
     "later_guardrails_run": false
   },
   "cancellation": {
     "terminal": "run_cancelled",
-    "terminal_count": 1
+    "terminal_count": 1,
+    "completion_reason": "cancelled"
+  },
+  "max_cycles": {
+    "terminal": "run_failed",
+    "status": "max_cycles",
+    "completion_reason": "max_cycles",
+    "partial_output": "unfinished draft"
   },
   "event_store_fail_closed": {
     "error": "run event store append failed: store down",

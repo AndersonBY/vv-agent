@@ -6,7 +6,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.events import RunEvent
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message, TaskTokenUsage, ToolCall
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason, Message, TaskTokenUsage, ToolCall
 
 if TYPE_CHECKING:
     from vv_agent.agent import Agent
@@ -104,6 +104,18 @@ class RunResult:
         return list(self.raw_result.cycles)
 
     @property
+    def completion_reason(self) -> CompletionReason | None:
+        return self.raw_result.completion_reason
+
+    @property
+    def completion_tool_name(self) -> str | None:
+        return self.raw_result.completion_tool_name
+
+    @property
+    def partial_output(self) -> str | None:
+        return self.raw_result.partial_output
+
+    @property
     def approvals(self) -> tuple[ApprovalSnapshot, ...]:
         return self.approval_snapshot()
 
@@ -119,6 +131,9 @@ class RunResult:
             "new_items": [item.to_dict() for item in self.new_items],
             "final_output": self._serializable_output(self.final_output),
             "status": self.status.value,
+            "completion_reason": self.completion_reason.value if self.completion_reason is not None else None,
+            "completion_tool_name": self.completion_tool_name,
+            "partial_output": self.partial_output,
             "events": [event.to_dict() for event in self.events],
             "token_usage": self.token_usage.to_dict(),
             "trace_id": self.trace_id,

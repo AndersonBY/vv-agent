@@ -13,7 +13,16 @@ from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.runtime.tool_planner import plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
 from vv_agent.tools.orchestrator import ToolOrchestrator
-from vv_agent.types import AgentTask, CycleRecord, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
+from vv_agent.types import (
+    AgentTask,
+    CompletionReason,
+    CycleRecord,
+    Message,
+    ToolCall,
+    ToolDirective,
+    ToolExecutionResult,
+    ToolResultStatus,
+)
 
 if TYPE_CHECKING:
     from vv_agent.runtime.context import ExecutionContext
@@ -22,6 +31,8 @@ if TYPE_CHECKING:
 @dataclass(slots=True)
 class ToolRunOutcome:
     directive_result: ToolExecutionResult | None = None
+    completion_reason: CompletionReason | None = None
+    completion_tool_name: str | None = None
     interruption_messages: list[Message] = field(default_factory=list)
 
 
@@ -49,6 +60,8 @@ class ToolCallRunner:
         ctx: ExecutionContext | None = None,
     ) -> ToolRunOutcome:
         latest_directive_result: ToolExecutionResult | None = None
+        completion_reason: CompletionReason | None = None
+        completion_tool_name: str | None = None
         interruption_messages: list[Message] = []
         image_notifications: list[Message] = []
         planned_tool_names = cycle_record._planned_tool_names
@@ -114,7 +127,7 @@ class ToolCallRunner:
             )
             if self._needs_tool_call_id(result.tool_call_id):
                 result.tool_call_id = patched_call.id
-            self._apply_tool_use_behavior(task=task, call=patched_call, result=result)
+            behavior_reason = self._apply_tool_use_behavior(task=task, call=patched_call, result=result)
 
             cycle_record.tool_results.append(result)
             messages.append(result.to_tool_message())
@@ -134,6 +147,12 @@ class ToolCallRunner:
 
             if result.directive in (ToolDirective.WAIT_USER, ToolDirective.FINISH):
                 latest_directive_result = result
+                completion_reason = behavior_reason or (
+                    CompletionReason.WAIT_USER
+                    if result.directive == ToolDirective.WAIT_USER
+                    else CompletionReason.TOOL_FINISH
+                )
+                completion_tool_name = patched_call.name
                 skip_code = "skipped_due_to_wait_user" if result.directive == ToolDirective.WAIT_USER else "skipped_due_to_finish"
                 skip_message = (
                     "Tool skipped because a previous tool requested user input."
@@ -173,6 +192,8 @@ class ToolCallRunner:
 
         return ToolRunOutcome(
             directive_result=latest_directive_result,
+            completion_reason=completion_reason,
+            completion_tool_name=completion_tool_name,
             interruption_messages=interruption_messages,
         )
 
@@ -186,9 +207,9 @@ class ToolCallRunner:
         task: AgentTask,
         call: ToolCall,
         result: ToolExecutionResult,
-    ) -> None:
+    ) -> CompletionReason | None:
         if result.directive != ToolDirective.CONTINUE or result.status_code != ToolResultStatus.SUCCESS:
-            return
+            return None
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
         behavior = str(metadata.get("_vv_agent_tool_use_behavior") or "run_llm_again")
         should_stop = behavior == "stop_on_first_tool"
@@ -198,6 +219,12 @@ class ToolCallRunner:
             should_stop = call.name in stop_names
         if should_stop:
             result.directive = ToolDirective.FINISH
+            return (
+                CompletionReason.STOP_ON_FIRST_TOOL
+                if behavior == "stop_on_first_tool"
+                else CompletionReason.STOP_AT_TOOL_NAME
+            )
+        return None
 
     @staticmethod
     def _needs_tool_call_id(value: str | None) -> bool:

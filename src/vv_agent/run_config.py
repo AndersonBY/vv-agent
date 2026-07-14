@@ -15,7 +15,7 @@ from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.tools.registry import ToolRegistry
-from vv_agent.types import Message
+from vv_agent.types import Message, NoToolPolicy, _validate_no_tool_policy
 
 if TYPE_CHECKING:
     from vv_agent.memory.provider import MemoryProvider
@@ -164,10 +164,12 @@ class RunConfig:
     sub_task_manager: Any | None = None
     runtime_log_handler: RuntimeLogHandler | None = None
     runtime_stream_callback: StreamHandler | None = None
+    no_tool_policy: NoToolPolicy | None = None
 
     def __post_init__(self) -> None:
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
         _validate_bounded_int(self.max_handoffs, "max_handoffs", minimum=0)
+        _validate_no_tool_policy(self.no_tool_policy, "RunConfig.no_tool_policy")
 
     def with_cancellation_token(self, cancellation_token: CancellationToken) -> RunConfig:
         return replace(self, cancellation_token=cancellation_token)

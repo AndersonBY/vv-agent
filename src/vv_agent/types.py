@@ -9,6 +9,7 @@ from vv_agent.model_settings import ModelSettings
 
 Role = Literal["system", "user", "assistant", "tool"]
 NoToolPolicy = Literal["continue", "wait_user", "finish"]
+_NO_TOOL_POLICIES = frozenset({"continue", "wait_user", "finish"})
 _MAX_U32 = (1 << 32) - 1
 _MAX_U64 = (1 << 64) - 1
 _MAX_U8 = (1 << 8) - 1
@@ -31,6 +32,27 @@ class AgentStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     MAX_CYCLES = "max_cycles"
+
+
+class CompletionReason(StrEnum):
+    TOOL_FINISH = "tool_finish"
+    NO_TOOL_FINISH = "no_tool_finish"
+    STOP_ON_FIRST_TOOL = "stop_on_first_tool"
+    STOP_AT_TOOL_NAME = "stop_at_tool_name"
+    WAIT_USER = "wait_user"
+    MAX_CYCLES = "max_cycles"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+
+
+def _validate_no_tool_policy(value: object, field_name: str) -> NoToolPolicy | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in _NO_TOOL_POLICIES:
+        supported = ", ".join(sorted(_NO_TOOL_POLICIES))
+        raise ValueError(f"{field_name} must be one of: {supported}")
+    return cast(NoToolPolicy, value)
 
 
 class ToolDirective(StrEnum):
@@ -772,6 +794,13 @@ class SubTaskRequest:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _last_assistant_output(cycles: list[CycleRecord]) -> str | None:
+    for cycle in reversed(cycles):
+        if cycle.assistant_message.strip():
+            return cycle.assistant_message
+    return None
+
+
 @dataclass(slots=True)
 class SubTaskOutcome:
     task_id: str
@@ -785,6 +814,9 @@ class SubTaskOutcome:
     cycles: int = 0
     todo_list: list[dict[str, Any]] = field(default_factory=list)
     resolved: dict[str, str] = field(default_factory=dict)
+    completion_reason: CompletionReason | None = None
+    completion_tool_name: str | None = None
+    partial_output: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -801,6 +833,12 @@ class SubTaskOutcome:
         }
         if self.error_code is not None:
             payload["error_code"] = self.error_code
+        if self.completion_reason is not None:
+            payload["completion_reason"] = self.completion_reason.value
+        if self.completion_tool_name is not None:
+            payload["completion_tool_name"] = self.completion_tool_name
+        if self.partial_output is not None:
+            payload["partial_output"] = self.partial_output
         return payload
 
 
@@ -814,6 +852,9 @@ class AgentResult:
     error: str | None = None
     shared_state: dict[str, Any] = field(default_factory=dict)
     token_usage: TaskTokenUsage = field(default_factory=TaskTokenUsage)
+    completion_reason: CompletionReason | None = None
+    completion_tool_name: str | None = None
+    partial_output: str | None = None
 
     @property
     def todo_list(self) -> list[dict[str, Any]]:
@@ -825,6 +866,9 @@ class AgentResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status.value,
+            "completion_reason": self.completion_reason.value if self.completion_reason is not None else None,
+            "completion_tool_name": self.completion_tool_name,
+            "partial_output": self.partial_output,
             "messages": [m.to_dict() for m in self.messages],
             "cycles": [c.to_dict() for c in self.cycles],
             "final_answer": self.final_answer,
@@ -840,8 +884,20 @@ class AgentResult:
         token_usage = TaskTokenUsage()
         if isinstance(token_usage_raw, dict):
             token_usage = TaskTokenUsage.from_dict(token_usage_raw)
+        completion_reason_raw = data.get("completion_reason")
+        if completion_reason_raw is not None and not isinstance(completion_reason_raw, str):
+            raise TypeError("AgentResult field 'completion_reason' must be a string or None")
+        completion_tool_name = data.get("completion_tool_name")
+        if completion_tool_name is not None and not isinstance(completion_tool_name, str):
+            raise TypeError("AgentResult field 'completion_tool_name' must be a string or None")
+        partial_output = data.get("partial_output")
+        if partial_output is not None and not isinstance(partial_output, str):
+            raise TypeError("AgentResult field 'partial_output' must be a string or None")
         return cls(
             status=AgentStatus(data["status"]),
+            completion_reason=(CompletionReason(completion_reason_raw) if completion_reason_raw is not None else None),
+            completion_tool_name=completion_tool_name,
+            partial_output=partial_output,
             messages=[Message.from_dict(m) for m in data.get("messages", [])],
             cycles=[CycleRecord.from_dict(c) for c in data.get("cycles", [])],
             final_answer=data.get("final_answer"),

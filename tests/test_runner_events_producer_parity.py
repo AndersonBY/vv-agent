@@ -13,7 +13,7 @@ from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 RUNNER_EVENTS_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "runner_events_v1.jsonl"
-RUNNER_EVENTS_FIXTURE_SHA256 = "15f23c49cac673766db17c42c96b403d2cc1ece8e876c40d772e8d198bfb8adc"
+RUNNER_EVENTS_FIXTURE_SHA256 = "3000b4d1647b39a5b938465a2e9aad2bff49eeb75d4ba31a8a326bf456f80965"
 
 
 class StreamingGoldenLLM:

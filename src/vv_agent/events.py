@@ -6,9 +6,19 @@ from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, Literal, cast
 
+from vv_agent.types import CompletionReason
+
 RUN_EVENT_VERSION = "v1"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
 _APPROVAL_ACTIONS = frozenset({"allow", "allow_session", "deny", "timeout"})
+
+
+def _completion_reason(value: Any) -> CompletionReason | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("completion_reason must be a string or None")
+    return CompletionReason(value)
 
 
 def new_event_id() -> str:
@@ -809,6 +819,9 @@ class SubRunCompletedEvent(RunEvent):
     final_output: str | None = None
     wait_reason: str | None = None
     error: str | None = None
+    completion_reason: CompletionReason | None = None
+    completion_tool_name: str | None = None
+    partial_output: str | None = None
     token_usage: dict[str, Any] | None = None
 
     def __init__(
@@ -824,6 +837,9 @@ class SubRunCompletedEvent(RunEvent):
         final_output: str | None = None,
         wait_reason: str | None = None,
         error: str | None = None,
+        completion_reason: CompletionReason | None = None,
+        completion_tool_name: str | None = None,
+        partial_output: str | None = None,
         token_usage: dict[str, Any] | None = None,
         session_id: str | None = None,
         parent_event_id: str | None = None,
@@ -852,6 +868,9 @@ class SubRunCompletedEvent(RunEvent):
         object.__setattr__(self, "final_output", final_output)
         object.__setattr__(self, "wait_reason", wait_reason)
         object.__setattr__(self, "error", error)
+        object.__setattr__(self, "completion_reason", completion_reason)
+        object.__setattr__(self, "completion_tool_name", completion_tool_name)
+        object.__setattr__(self, "partial_output", partial_output)
         object.__setattr__(self, "token_usage", dict(token_usage) if token_usage is not None else None)
 
     def to_dict(self) -> dict[str, Any]:
@@ -868,6 +887,12 @@ class SubRunCompletedEvent(RunEvent):
             payload["wait_reason"] = self.wait_reason
         if self.error is not None:
             payload["error"] = self.error
+        if self.completion_reason is not None:
+            payload["completion_reason"] = self.completion_reason.value
+        if self.completion_tool_name is not None:
+            payload["completion_tool_name"] = self.completion_tool_name
+        if self.partial_output is not None:
+            payload["partial_output"] = self.partial_output
         if self.token_usage is not None:
             payload["token_usage"] = dict(self.token_usage)
         return payload
@@ -1028,6 +1053,9 @@ class SessionPersistedEvent(RunEvent):
 class RunCompletedEvent(RunEvent):
     final_output: str | None = None
     status: str = ""
+    completion_reason: CompletionReason | None = None
+    completion_tool_name: str | None = None
+    partial_output: str | None = None
 
     def __init__(
         self,
@@ -1036,6 +1064,9 @@ class RunCompletedEvent(RunEvent):
         trace_id: str,
         final_output: str | None,
         status: str,
+        completion_reason: CompletionReason | None = None,
+        completion_tool_name: str | None = None,
+        partial_output: str | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1061,17 +1092,28 @@ class RunCompletedEvent(RunEvent):
         )
         object.__setattr__(self, "final_output", final_output)
         object.__setattr__(self, "status", status)
+        object.__setattr__(self, "completion_reason", completion_reason)
+        object.__setattr__(self, "completion_tool_name", completion_tool_name)
+        object.__setattr__(self, "partial_output", partial_output)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["final_output"] = self.final_output
         payload["status"] = self.status
+        if self.completion_reason is not None:
+            payload["completion_reason"] = self.completion_reason.value
+        if self.completion_tool_name is not None:
+            payload["completion_tool_name"] = self.completion_tool_name
+        if self.partial_output is not None:
+            payload["partial_output"] = self.partial_output
         return payload
 
 
 @dataclass(frozen=True, slots=True)
 class RunFailedEvent(RunEvent):
     error: str = ""
+    completion_reason: CompletionReason | None = None
+    partial_output: str | None = None
 
     def __init__(
         self,
@@ -1079,6 +1121,8 @@ class RunFailedEvent(RunEvent):
         run_id: str,
         trace_id: str,
         error: str,
+        completion_reason: CompletionReason | None = None,
+        partial_output: str | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1103,16 +1147,24 @@ class RunFailedEvent(RunEvent):
             metadata=metadata,
         )
         object.__setattr__(self, "error", error)
+        object.__setattr__(self, "completion_reason", completion_reason)
+        object.__setattr__(self, "partial_output", partial_output)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["error"] = self.error
+        if self.completion_reason is not None:
+            payload["completion_reason"] = self.completion_reason.value
+        if self.partial_output is not None:
+            payload["partial_output"] = self.partial_output
         return payload
 
 
 @dataclass(frozen=True, slots=True)
 class RunCancelledEvent(RunEvent):
     reason: str = ""
+    completion_reason: CompletionReason | None = None
+    partial_output: str | None = None
 
     def __init__(
         self,
@@ -1120,6 +1172,8 @@ class RunCancelledEvent(RunEvent):
         run_id: str,
         trace_id: str,
         reason: str,
+        completion_reason: CompletionReason | None = None,
+        partial_output: str | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1144,10 +1198,16 @@ class RunCancelledEvent(RunEvent):
             metadata=metadata,
         )
         object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "completion_reason", completion_reason)
+        object.__setattr__(self, "partial_output", partial_output)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["reason"] = self.reason
+        if self.completion_reason is not None:
+            payload["completion_reason"] = self.completion_reason.value
+        if self.partial_output is not None:
+            payload["partial_output"] = self.partial_output
         return payload
 
 
@@ -1324,6 +1384,11 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             final_output=payload.get("final_output") if payload.get("final_output") is not None else None,
             wait_reason=payload.get("wait_reason") if payload.get("wait_reason") is not None else None,
             error=payload.get("error") if payload.get("error") is not None else None,
+            completion_reason=_completion_reason(payload.get("completion_reason")),
+            completion_tool_name=(
+                payload.get("completion_tool_name") if isinstance(payload.get("completion_tool_name"), str) else None
+            ),
+            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
             token_usage=token_usage if isinstance(token_usage, dict) else None,
             **common,
         )
@@ -1369,13 +1434,25 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         return RunCompletedEvent(
             final_output=str(final_output) if final_output is not None else None,
             status=str(payload.get("status") or ""),
+            completion_reason=_completion_reason(payload.get("completion_reason")),
+            completion_tool_name=(
+                payload.get("completion_tool_name") if isinstance(payload.get("completion_tool_name"), str) else None
+            ),
+            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "run_failed":
-        return RunFailedEvent(error=str(payload.get("error") or ""), **_with_cycle_and_agent(payload, common))
+        return RunFailedEvent(
+            error=str(payload.get("error") or ""),
+            completion_reason=_completion_reason(payload.get("completion_reason")),
+            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            **_with_cycle_and_agent(payload, common),
+        )
     if event_type == "run_cancelled":
         return RunCancelledEvent(
             reason=str(payload.get("reason") or ""),
+            completion_reason=_completion_reason(payload.get("completion_reason")),
+            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
             **_with_cycle_and_agent(payload, common),
         )
 
@@ -1612,6 +1689,11 @@ def event_from_runtime_log(
             cycle_index=cycle_index,
             final_output=payload.get("final_output", payload.get("final_answer")),
             status="completed",
+            completion_reason=_completion_reason(payload.get("completion_reason")),
+            completion_tool_name=(
+                payload.get("completion_tool_name") if isinstance(payload.get("completion_tool_name"), str) else None
+            ),
+            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
             metadata=dict(payload),
         )
     if event == "run_wait_user":
@@ -1623,6 +1705,11 @@ def event_from_runtime_log(
             cycle_index=cycle_index,
             final_output=payload.get("wait_reason"),
             status="wait_user",
+            completion_reason=_completion_reason(payload.get("completion_reason")) or CompletionReason.WAIT_USER,
+            completion_tool_name=(
+                payload.get("completion_tool_name") if isinstance(payload.get("completion_tool_name"), str) else None
+            ),
+            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
             metadata=dict(payload),
         )
     if event in {"run_failed", "run_max_cycles"}:
@@ -1633,6 +1720,11 @@ def event_from_runtime_log(
             session_id=session_id,
             cycle_index=cycle_index,
             error=str(payload.get("error") or event),
+            completion_reason=(
+                _completion_reason(payload.get("completion_reason"))
+                or (CompletionReason.MAX_CYCLES if event == "run_max_cycles" else CompletionReason.FAILED)
+            ),
+            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
             metadata=dict(payload),
         )
     if event == "run_cancelled":
@@ -1643,6 +1735,8 @@ def event_from_runtime_log(
             session_id=session_id,
             cycle_index=cycle_index,
             reason=str(payload.get("reason") or payload.get("error") or "run cancelled"),
+            completion_reason=_completion_reason(payload.get("completion_reason")) or CompletionReason.CANCELLED,
+            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
             metadata=dict(payload),
         )
     return None

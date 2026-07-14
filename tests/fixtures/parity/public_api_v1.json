@@ -19,6 +19,11 @@
           "rust": "vv_agent::agent::ToolUseBehavior"
         },
         {
+          "id": "agent.no_tool_policy",
+          "python": "vv_agent.NoToolPolicy",
+          "rust": "vv_agent::NoToolPolicy"
+        },
+        {
           "id": "agent.handoff",
           "python": "vv_agent.Handoff",
           "rust": "vv_agent::Handoff"
@@ -59,6 +64,11 @@
           "id": "run_config.options",
           "python": "vv_agent.RunConfig",
           "rust": "vv_agent::RunConfig"
+        },
+        {
+          "id": "run_config.no_tool_policy",
+          "python": "vv_agent.NoToolPolicy",
+          "rust": "vv_agent::NoToolPolicy"
         },
         {
           "id": "run_config.tool_policy",
@@ -114,6 +124,11 @@
           "id": "result.status",
           "python": "vv_agent.AgentStatus",
           "rust": "vv_agent::AgentStatus"
+        },
+        {
+          "id": "result.completion_reason",
+          "python": "vv_agent.CompletionReason",
+          "rust": "vv_agent::CompletionReason"
         },
         {
           "id": "result.usage_source",
@@ -807,6 +822,19 @@
           }
         },
         {
+          "id": "no_tool_policy",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "no_tool_policy"
+          },
+          "rust": {
+            "kind": "method",
+            "name": "no_tool_policy"
+          }
+        },
+        {
           "id": "tool_policy",
           "kind": "field",
           "python": {
@@ -1228,6 +1256,19 @@
           "rust": {
             "kind": "field",
             "name": "max_cycles"
+          }
+        },
+        {
+          "id": "no_tool_policy",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "no_tool_policy"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "no_tool_policy"
           }
         },
         {
@@ -1715,6 +1756,75 @@
           "rust": {
             "kind": "method",
             "name": "status"
+          }
+        },
+        {
+          "id": "completion_reason",
+          "kind": "field",
+          "python": {
+            "declaration": "property",
+            "kind": "property",
+            "name": "completion_reason",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "completion_reason"
+          }
+        },
+        {
+          "id": "completion_tool_name",
+          "kind": "field",
+          "python": {
+            "declaration": "property",
+            "kind": "property",
+            "name": "completion_tool_name",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "completion_tool_name"
+          }
+        },
+        {
+          "id": "partial_output",
+          "kind": "field",
+          "python": {
+            "declaration": "property",
+            "kind": "property",
+            "name": "partial_output",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "partial_output"
           }
         },
         {

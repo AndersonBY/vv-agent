@@ -34,7 +34,7 @@ from vv_agent import (
 )
 
 PARITY_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1.jsonl"
-PARITY_FIXTURE_SHA256 = "6636e5aaf840173cfb06302bf40b90b72d74307fcaf396d1d150b3dcd1cb220b"
+PARITY_FIXTURE_SHA256 = "7d0d80a2587f242c2bdc04afc7452a632fab781845f2ea9a63742d2c62a0174e"
 PARITY_EVENT_TYPES = [
     "run_started",
     "agent_started",

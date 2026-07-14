@@ -220,10 +220,12 @@
   "sync_failed_outcome": {
     "expected": {
       "agent_name": "researcher",
+      "completion_reason": "failed",
       "cycles": 0,
       "error": "child failed",
       "error_code": "sub_task_failed",
       "final_answer": null,
+      "partial_output": "last child draft",
       "resolved": {},
       "session_id": null,
       "status": "failed",
@@ -232,6 +234,24 @@
       "wait_reason": null
     },
     "input_error_code": " "
+  },
+  "sync_wait_outcome": {
+    "expected": {
+      "agent_name": "researcher",
+      "completion_reason": "wait_user",
+      "completion_tool_name": "dangerous",
+      "cycles": 1,
+      "error": null,
+      "error_code": "sub_task_wait_user",
+      "final_answer": null,
+      "partial_output": "proposed change",
+      "resolved": {},
+      "session_id": "wait-session",
+      "status": "wait_user",
+      "task_id": "wait-child",
+      "todo_list": [],
+      "wait_reason": "Approve dangerous."
+    }
   },
   "worker_visibility": {
     "running_status_authoritative": true,

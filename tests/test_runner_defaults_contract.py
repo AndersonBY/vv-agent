@@ -193,7 +193,12 @@ def test_configured_runner_start_and_resume_preserve_runner_defaults(tmp_path: P
             metadata={"runner_default": True},
         )
     )
-    agent = Agent(name="writer", instructions="Write after approval.", tools=[guarded_write])
+    agent = Agent(
+        name="writer",
+        instructions="Write after approval.",
+        tools=[guarded_write],
+        tool_use_behavior="stop_on_first_tool",
+    )
 
     handle = runner.start(agent, "write")
     interrupted = handle.result(timeout=2)

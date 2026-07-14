@@ -103,6 +103,9 @@
         "revision": 8,
         "terminal_result": {
           "status": "max_cycles",
+          "completion_reason": "max_cycles",
+          "completion_tool_name": null,
+          "partial_output": null,
           "messages": [],
           "cycles": [],
           "final_answer": "Reached max cycles without finish signal.",

@@ -14,7 +14,11 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
     controls = {entry["capability"]: entry for entry in contract["per_run_controls"]}
 
     assert contract["version"] == 1
-    assert contract["framework_defaults"] == {"max_cycles": 10, "max_handoffs": 10}
+    assert contract["framework_defaults"] == {
+        "max_cycles": 10,
+        "max_handoffs": 10,
+        "no_tool_policy": "continue",
+    }
     assert contract["app_server_defaults"]["max_cycles"] == 80
     assert all(entry["status"] == "equivalent" for entry in controls.values())
     assert set(controls) == {
@@ -23,6 +27,7 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "workspace",
         "session_history",
         "cycle_and_handoff_limits",
+        "no_tool_policy",
         "tool_policy",
         "per_run_tool_registry",
         "execution_backend",
@@ -50,6 +55,7 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "session",
         "max_cycles",
         "max_handoffs",
+        "no_tool_policy",
         "tool_policy",
         "tool_registry_factory",
         "execution_backend",

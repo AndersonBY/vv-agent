@@ -9,11 +9,11 @@ import pytest
 
 from vv_agent.runtime import SubTaskManager
 from vv_agent.tools import ToolContext, build_default_registry
-from vv_agent.types import AgentStatus, SubTaskOutcome, ToolResultStatus
+from vv_agent.types import AgentStatus, CompletionReason, SubTaskOutcome, ToolResultStatus
 from vv_agent.workspace import MemoryWorkspaceBackend
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "manager_tool_envelope_v1.json"
-FIXTURE_SHA256 = "c43d111cc29e009c5c071467a33c4a5a5e1e6c7435ffe3a6bf353123c0fa9bda"
+FIXTURE_SHA256 = "a4fce56b3051939b2c8e02568bac79746010daff0dd703cc8dced52ff602bd0f"
 
 
 def _fixture() -> dict[str, Any]:
@@ -95,6 +95,8 @@ def test_sync_failed_outcome_normalizes_blank_error_code(tmp_path: Path) -> None
         task_id="failed-child",
         agent_name="researcher",
         status=AgentStatus.FAILED,
+        completion_reason=CompletionReason.FAILED,
+        partial_output="last child draft",
         error="child failed",
         error_code=contract["input_error_code"],
     )
@@ -107,6 +109,32 @@ def test_sync_failed_outcome_normalizes_blank_error_code(tmp_path: Path) -> None
     payload = json.loads(result.content)
     assert payload == contract["expected"]
     assert result.error_code == contract["expected"]["error_code"]
+    _assert_error_metadata_matches_content(result)
+
+
+def test_sync_wait_outcome_preserves_completion_observation(tmp_path: Path) -> None:
+    contract = _fixture()["sync_wait_outcome"]
+    context = _context(tmp_path)
+    context.sub_task_runner = lambda _request: SubTaskOutcome(
+        task_id="wait-child",
+        agent_name="researcher",
+        status=AgentStatus.WAIT_USER,
+        session_id="wait-session",
+        wait_reason="Approve dangerous.",
+        completion_reason=CompletionReason.WAIT_USER,
+        completion_tool_name="dangerous",
+        partial_output="proposed change",
+        cycles=1,
+    )
+
+    result = build_default_registry().get("create_sub_task").handler(
+        context,
+        {"agent_id": "researcher", "task_description": "wait"},
+    )
+
+    payload = json.loads(result.content)
+    assert payload == contract["expected"]
+    assert result.error_code == "sub_task_wait_user"
     _assert_error_metadata_matches_content(result)
 
 

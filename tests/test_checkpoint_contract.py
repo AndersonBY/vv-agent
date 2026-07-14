@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -18,10 +19,9 @@ from vv_agent.runtime.stores.sqlite import SqliteStateStore
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "checkpoint_codec_v1.json"
-RUST_FIXTURE_PATH = (
-    Path(__file__).parents[2] / "vv-agent-rs" / "crates" / "vv-agent" / "tests" / "fixtures" / "parity" / FIXTURE_PATH.name
-)
-FIXTURE_SHA256 = "1a08f6a202ce8922e52c90d05dc718b90b05fdd65146f66becf360502d4aa8d0"
+RUST_REPO = Path(os.environ.get("VV_AGENT_RS_REPO", Path(__file__).parents[2] / "vv-agent-rs"))
+RUST_FIXTURE_PATH = RUST_REPO / "crates" / "vv-agent" / "tests" / "fixtures" / "parity" / FIXTURE_PATH.name
+FIXTURE_SHA256 = "7a4b8ae2472eca3e643b37a6fa7f4f10202a31c53fe5e1aeeafe34d524b6069f"
 
 
 class _FakeWatchError(Exception):

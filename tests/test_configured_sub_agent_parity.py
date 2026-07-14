@@ -64,7 +64,7 @@ from vv_agent.workspace import (
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
 EVENT_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_events_v1.jsonl"
 CONTRACT_SHA256 = "22467e29409d834635d40cae52aaebac18135d4019981943f61042bc0eb39672"
-EVENT_CONTRACT_SHA256 = "0fc2e5b09bf7cc9b8e06743d02c0a7bd11e54ca83814f9ab73aec256b3c80618"
+EVENT_CONTRACT_SHA256 = "c2816a3962a44a3c0f5172edbffe4c88352142fee13f457da9a0667ceef996b0"
 
 
 def _contract() -> dict[str, Any]:
@@ -2286,6 +2286,7 @@ def test_manual_approval_resume_runs_sub_task_status_with_accepting_turn_snapsho
         sub_agents={
             "researcher": SubAgentConfig(model="approval-model", description="Retained child")
         },
+        metadata={"_vv_agent_tool_use_behavior": "stop_on_first_tool"},
     )
     interrupted = Runner._run_compiled_sync(
         Agent(name="parent", instructions="Manage child.", model="approval-model"),

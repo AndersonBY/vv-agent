@@ -14,10 +14,11 @@ from vv_agent.event_store import RunEventReplayQuery
 from vv_agent.events import RunEvent
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
-from vv_agent.types import AgentStatus, LLMResponse, ToolCall
+from vv_agent.runtime import CancellationToken
+from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "runner_terminal_v1.json"
-FIXTURE_SHA256 = "4600b26cd3313a790cb84b0a0e1981f9046027b3095450e9b2522db42292939f"
+FIXTURE_SHA256 = "927c76bcb770364314fd42966a942b552ec6f3ccc1afcdcc419c571358ffc3de"
 TERMINAL_TYPES = {"run_completed", "run_failed", "run_cancelled"}
 
 
@@ -27,19 +28,19 @@ def _contract() -> dict[str, Any]:
     return json.loads(payload)
 
 
-def _agent(*, output_guardrails=None) -> Agent:
+def _agent(*, output_guardrails=None, assistant_message: str = "finish", final_message: str = "done") -> Agent:
     return Agent(
         name="terminal-agent",
         instructions="Finish.",
         model=ScriptedLLM(
             steps=[
                 LLMResponse(
-                    content="finish",
+                    content=assistant_message,
                     tool_calls=[
                         ToolCall(
                             id="finish",
                             name=TASK_FINISH_TOOL_NAME,
-                            arguments={"message": "done"},
+                            arguments={"message": final_message},
                         )
                     ],
                 )
@@ -61,6 +62,8 @@ def test_session_persists_before_the_only_success_terminal() -> None:
     assert types[-2:] == expected["tail"]
     assert [event.type for event in result.events if event.type in TERMINAL_TYPES] == [expected["terminal"]]
     assert result.status.value == expected["status"]
+    assert result.completion_reason == CompletionReason(expected["completion_reason"])
+    assert result.events[-1].to_dict()["completion_reason"] == expected["completion_reason"]
 
 
 def test_output_guardrail_block_short_circuits_and_owns_final_terminal() -> None:
@@ -78,7 +81,11 @@ def test_output_guardrail_block_short_circuits_and_owns_final_terminal() -> None
         return GuardrailResult.rewrite(output)
 
     result = Runner.run_sync(
-        _agent(output_guardrails=[block, later]),
+        _agent(
+            output_guardrails=[block, later],
+            assistant_message=expected["partial_output"],
+            final_message="tool result must not become partial output",
+        ),
         "go",
         run_config=RunConfig(session=MemorySession("blocked-session")),
     )
@@ -90,7 +97,83 @@ def test_output_guardrail_block_short_circuits_and_owns_final_terminal() -> None
     assert result.final_output == expected["error"]
     assert result.raw_result.final_answer is None
     assert result.raw_result.error == expected["error"]
+    assert result.completion_reason == CompletionReason(expected["completion_reason"])
+    assert result.partial_output == expected["partial_output"]
+    assert result.events[-1].to_dict()["completion_reason"] == expected["completion_reason"]
+    assert result.events[-1].to_dict()["partial_output"] == expected["partial_output"]
     assert (later_calls > 0) is expected["later_guardrails_run"]
+
+
+def test_max_cycles_preserves_partial_output_and_typed_reason() -> None:
+    expected = _contract()["max_cycles"]
+    result = Runner.run_sync(
+        Agent(
+            name="max-cycles-agent",
+            instructions="Continue until stopped.",
+            model=ScriptedLLM(steps=[LLMResponse(content=expected["partial_output"])]),
+        ),
+        "go",
+        run_config=RunConfig(max_cycles=1),
+    )
+
+    assert result.status == AgentStatus(expected["status"])
+    assert result.completion_reason == CompletionReason(expected["completion_reason"])
+    assert result.partial_output == expected["partial_output"]
+    assert result.events[-1].type == expected["terminal"]
+    assert result.events[-1].to_dict()["completion_reason"] == expected["completion_reason"]
+    assert result.events[-1].to_dict()["partial_output"] == expected["partial_output"]
+
+
+def test_cancellation_has_typed_reason_and_single_terminal() -> None:
+    expected = _contract()["cancellation"]
+    cancellation = CancellationToken()
+    cancellation.cancel("test cancellation")
+    result = Runner.run_sync(
+        Agent(
+            name="cancelled-agent",
+            instructions="This model must not be called.",
+            model=ScriptedLLM(steps=[]),
+        ),
+        "go",
+        run_config=RunConfig(cancellation_token=cancellation),
+    )
+    terminals = [event for event in result.events if event.type in TERMINAL_TYPES]
+
+    assert len(terminals) == expected["terminal_count"]
+    assert terminals[0].type == expected["terminal"]
+    assert result.completion_reason == CompletionReason(expected["completion_reason"])
+    assert terminals[0].to_dict()["completion_reason"] == expected["completion_reason"]
+
+
+def test_cancellation_reason_precedes_output_guardrail_failure() -> None:
+    cancellation = CancellationToken()
+    cancellation.cancel("test cancellation")
+    guardrail_calls = 0
+
+    @output_guardrail
+    def block(_context, _output):
+        nonlocal guardrail_calls
+        guardrail_calls += 1
+        return GuardrailResult.block("guardrail also blocked")
+
+    result = Runner.run_sync(
+        Agent(
+            name="cancelled-guardrail-agent",
+            instructions="This model must not be called.",
+            model=ScriptedLLM(steps=[]),
+            output_guardrails=[block],
+        ),
+        "go",
+        run_config=RunConfig(cancellation_token=cancellation),
+    )
+
+    assert result.status == AgentStatus.FAILED
+    assert result.completion_reason == CompletionReason.CANCELLED
+    assert result.final_output == result.raw_result.error
+    assert "cancel" in str(result.final_output).lower()
+    assert guardrail_calls == 0
+    assert result.events[-1].type == "run_cancelled"
+    assert result.events[-1].to_dict()["completion_reason"] == CompletionReason.CANCELLED.value
 
 
 def test_event_store_fail_closed_is_a_normal_runner_error() -> None:

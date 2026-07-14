@@ -39,6 +39,7 @@ from vv_agent.types import (
     AgentResult,
     AgentStatus,
     AgentTask,
+    CompletionReason,
     CycleRecord,
     Message,
     SubAgentConfig,
@@ -47,6 +48,7 @@ from vv_agent.types import (
     ToolCall,
     ToolDirective,
     ToolExecutionResult,
+    _last_assistant_output,
     _trim_portable_whitespace,
 )
 from vv_agent.workspace import (
@@ -383,18 +385,31 @@ class AgentRuntime:
         )
         cancelled = bool(runtime_ctx.cancellation_token is not None and runtime_ctx.cancellation_token.cancelled)
         if result.status == AgentStatus.FAILED and cancelled:
+            result.completion_reason = CompletionReason.CANCELLED
+            result.completion_tool_name = None
+            result.partial_output = result.partial_output or _last_assistant_output(result.cycles)
             self._emit_log(
                 "run_cancelled",
                 cycle=len(result.cycles) or None,
                 reason=self._preview_text(result.error or "Operation was cancelled"),
+                completion_reason=result.completion_reason.value,
+                partial_output=self._preview_text(result.partial_output or ""),
             )
         elif result.status == AgentStatus.MAX_CYCLES:
+            result.completion_reason = CompletionReason.MAX_CYCLES
+            result.completion_tool_name = None
+            result.partial_output = result.partial_output or _last_assistant_output(result.cycles)
             self._emit_log(
                 "run_max_cycles",
                 cycle=len(result.cycles),
                 final_answer=self._preview_text(result.final_answer or ""),
                 error=self._preview_text(result.error or ""),
+                completion_reason=result.completion_reason.value,
+                partial_output=self._preview_text(result.partial_output or ""),
             )
+        elif result.status == AgentStatus.FAILED and result.completion_reason is None:
+            result.completion_reason = CompletionReason.FAILED
+            result.partial_output = result.partial_output or _last_assistant_output(result.cycles)
         return result
 
     def _build_cycle_executor(
@@ -470,6 +485,8 @@ class AgentRuntime:
                     self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
                 return AgentResult(
                     status=AgentStatus.FAILED,
+                    completion_reason=CompletionReason.FAILED,
+                    partial_output=_last_assistant_output(cycles),
                     messages=messages,
                     cycles=cycles,
                     error=f"LLM call failed in cycle {cycle_index}: {exc}",
@@ -566,6 +583,8 @@ class AgentRuntime:
                     self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
                     return AgentResult(
                         status=AgentStatus.FAILED,
+                        completion_reason=CompletionReason.FAILED,
+                        partial_output=_last_assistant_output(cycles),
                         messages=messages,
                         cycles=cycles,
                         error=str(exc),
@@ -576,6 +595,8 @@ class AgentRuntime:
                     cycles.append(cycle_record)
                     return AgentResult(
                         status=AgentStatus.FAILED,
+                        completion_reason=CompletionReason.CANCELLED,
+                        partial_output=_last_assistant_output(cycles),
                         messages=messages,
                         cycles=cycles,
                         error=str(exc),
@@ -600,9 +621,15 @@ class AgentRuntime:
                         "run_wait_user",
                         cycle=cycle_index,
                         wait_reason=self._preview_text(str(wait_reason)),
+                        completion_reason=CompletionReason.WAIT_USER.value,
+                        completion_tool_name=tool_outcome.completion_tool_name,
+                        partial_output=self._preview_text(_last_assistant_output(cycles) or ""),
                     )
                     return AgentResult(
                         status=AgentStatus.WAIT_USER,
+                        completion_reason=tool_outcome.completion_reason or CompletionReason.WAIT_USER,
+                        completion_tool_name=tool_outcome.completion_tool_name,
+                        partial_output=_last_assistant_output(cycles),
                         messages=messages,
                         cycles=cycles,
                         wait_reason=str(wait_reason),
@@ -616,9 +643,13 @@ class AgentRuntime:
                         "run_completed",
                         cycle=cycle_index,
                         final_answer=self._preview_text(final_answer),
+                        completion_reason=(tool_outcome.completion_reason or CompletionReason.TOOL_FINISH).value,
+                        completion_tool_name=tool_outcome.completion_tool_name,
                     )
                     return AgentResult(
                         status=AgentStatus.COMPLETED,
+                        completion_reason=tool_outcome.completion_reason or CompletionReason.TOOL_FINISH,
+                        completion_tool_name=tool_outcome.completion_tool_name,
                         messages=messages,
                         cycles=cycles,
                         final_answer=final_answer,
@@ -634,9 +665,11 @@ class AgentRuntime:
                     "run_completed",
                     cycle=cycle_index,
                     final_answer=self._preview_text(cycle_record.assistant_message),
+                    completion_reason=CompletionReason.NO_TOOL_FINISH.value,
                 )
                 return AgentResult(
                     status=AgentStatus.COMPLETED,
+                    completion_reason=CompletionReason.NO_TOOL_FINISH,
                     messages=messages,
                     cycles=cycles,
                     final_answer=cycle_record.assistant_message,
@@ -649,9 +682,13 @@ class AgentRuntime:
                     "run_wait_user",
                     cycle=cycle_index,
                     wait_reason=self._preview_text(cycle_record.assistant_message or "No tool call"),
+                    completion_reason=CompletionReason.WAIT_USER.value,
+                    partial_output=self._preview_text(cycle_record.assistant_message),
                 )
                 return AgentResult(
                     status=AgentStatus.WAIT_USER,
+                    completion_reason=CompletionReason.WAIT_USER,
+                    partial_output=cycle_record.assistant_message or None,
                     messages=messages,
                     cycles=cycles,
                     wait_reason=cycle_record.assistant_message or "No tool call and runtime is waiting for user.",
@@ -1108,6 +1145,7 @@ class AgentRuntime:
                 session_id=sub_session_id,
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
+                completion_reason=CompletionReason.FAILED,
                 error=f"Unknown sub-agent {request.agent_name!r}. Available: {available}",
                 error_code="sub_task_failed",
             )
@@ -1132,6 +1170,7 @@ class AgentRuntime:
                 session_id=sub_session_id,
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
+                completion_reason=CompletionReason.FAILED,
                 error=str(exc),
                 error_code=exc.code,
             )
@@ -1221,6 +1260,9 @@ class AgentRuntime:
                     final_output=outcome.final_answer,
                     wait_reason=outcome.wait_reason,
                     error=outcome.error,
+                    completion_reason=outcome.completion_reason,
+                    completion_tool_name=outcome.completion_tool_name,
+                    partial_output=outcome.partial_output,
                     token_usage=token_usage,
                     metadata=metadata,
                 )
@@ -1275,6 +1317,7 @@ class AgentRuntime:
                     session_id=sub_session_id,
                     agent_name=request.agent_name,
                     status=AgentStatus.FAILED,
+                    completion_reason=CompletionReason.FAILED,
                     error=str(exc),
                     error_code="sub_task_failed",
                 )
@@ -1531,6 +1574,7 @@ class AgentRuntime:
                                 session_id=sub_session_id,
                                 agent_name=request.agent_name,
                                 status=AgentStatus.FAILED,
+                                completion_reason=CompletionReason.FAILED,
                                 error=str(exc),
                                 error_code="sub_task_failed",
                                 cycles=0,
@@ -1553,6 +1597,9 @@ class AgentRuntime:
                         wait_reason=sub_result.wait_reason,
                         error=sub_result.error,
                         error_code=("sub_task_failed" if sub_result.status == AgentStatus.FAILED else None),
+                        completion_reason=sub_result.completion_reason,
+                        completion_tool_name=sub_result.completion_tool_name,
+                        partial_output=sub_result.partial_output,
                         cycles=len(sub_result.cycles),
                         todo_list=sub_result.todo_list,
                         resolved=resolved_payload,
@@ -1577,6 +1624,7 @@ class AgentRuntime:
                                 session_id=sub_session_id,
                                 agent_name=request.agent_name,
                                 status=AgentStatus.FAILED,
+                                completion_reason=CompletionReason.FAILED,
                                 error=str(error),
                                 error_code="sub_task_failed",
                                 cycles=len(sub_result.cycles),
@@ -1644,6 +1692,7 @@ class AgentRuntime:
                 session_id=sub_session_id,
                 agent_name=request.agent_name,
                 status=AgentStatus.FAILED,
+                completion_reason=CompletionReason.FAILED,
                 error=str(exc),
                 error_code=error_code,
             )
@@ -1668,6 +1717,9 @@ class AgentRuntime:
             wait_reason=sub_run.result.wait_reason,
             error=sub_run.result.error,
             error_code=("sub_task_failed" if sub_run.result.status == AgentStatus.FAILED else None),
+            completion_reason=sub_run.result.completion_reason,
+            completion_tool_name=sub_run.result.completion_tool_name,
+            partial_output=sub_run.result.partial_output,
             cycles=len(sub_run.result.cycles),
             todo_list=sub_run.result.todo_list,
             resolved=resolved_payload,
