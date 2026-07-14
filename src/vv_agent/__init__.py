@@ -106,7 +106,15 @@ from vv_agent.tools import (
     function_tool,
 )
 from vv_agent.tracing import JsonlTraceExporter, Span, TraceProcessor, TraceSink
-from vv_agent.types import AgentStatus, Message
+from vv_agent.types import (
+    AgentStatus,
+    CacheUsage,
+    CacheUsageStatus,
+    Message,
+    TaskTokenUsage,
+    TokenUsage,
+    UsageSource,
+)
 
 __all__ = [
     "Agent",
@@ -133,6 +141,8 @@ __all__ = [
     "BackgroundAgentTask",
     "BackgroundAgentTaskHandle",
     "BackgroundAgentTaskSnapshot",
+    "CacheUsage",
+    "CacheUsageStatus",
     "ConfigError",
     "ConfiguredRunner",
     "ContextBundle",
@@ -199,6 +209,8 @@ __all__ = [
     "Span",
     "SubRunCompletedEvent",
     "SubRunStartedEvent",
+    "TaskTokenUsage",
+    "TokenUsage",
     "Tool",
     "ToolApprovalRequestedEvent",
     "ToolCallCompletedEvent",
@@ -219,6 +231,7 @@ __all__ = [
     "ToolStartedEvent",
     "TraceProcessor",
     "TraceSink",
+    "UsageSource",
     "VVLlmClient",
     "VvLlmClient",
     "VvLlmModelProvider",

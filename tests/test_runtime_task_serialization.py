@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from vv_agent.types import AgentTask, CycleRecord, SubAgentConfig, TaskTokenUsage, TokenUsage
+from vv_agent.types import (
+    AgentTask,
+    CacheUsage,
+    CacheUsageStatus,
+    CycleRecord,
+    SubAgentConfig,
+    TaskTokenUsage,
+    TokenUsage,
+    UsageSource,
+)
 
 
 def test_agent_task_round_trips_sub_agents_and_metadata() -> None:
@@ -37,6 +46,14 @@ def test_cycle_record_round_trips_token_usage() -> None:
             input_tokens=11,
             output_tokens=4,
             cache_creation_tokens=1,
+            usage_source=UsageSource.PROVIDER_REPORTED,
+            cache_usage=CacheUsage(
+                status=CacheUsageStatus.PROVIDER_REPORTED,
+                read_tokens=3,
+                write_tokens=1,
+                uncached_input_tokens=7,
+                source="provider_usage",
+            ),
             raw={"provider": "raw"},
         ),
     )
@@ -51,6 +68,9 @@ def test_cycle_record_round_trips_token_usage() -> None:
     assert restored.token_usage.input_tokens == 11
     assert restored.token_usage.output_tokens == 4
     assert restored.token_usage.cache_creation_tokens == 1
+    assert restored.token_usage.usage_source is UsageSource.PROVIDER_REPORTED
+    assert restored.token_usage.cache_usage.read_tokens == 3
+    assert restored.token_usage.cache_usage.uncached_input_tokens == 7
     assert restored.token_usage.raw == {"provider": "raw"}
 
 

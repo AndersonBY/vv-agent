@@ -764,11 +764,13 @@ class VVLlmClient(LLMClient):
 
         content = self._extract_content(self._read_field(response, "content"))
         usage_dump = self._usage_to_dict(self._read_field(response, "usage"))
+        usage_source = "provider_reported" if usage_dump else "estimated"
         if not usage_dump:
             usage_dump = self._estimate_usage(messages=messages, content=content, model=options.model)
 
         raw_payload: dict[str, Any] = {
             "usage": usage_dump,
+            "usage_source": usage_source,
             "stream_collected": False,
         }
         if reasoning_content:
@@ -891,6 +893,7 @@ class VVLlmClient(LLMClient):
                 tool_call_extra_content[tool_id] = slot["extra_content"]
 
         normalized = self._normalize_tool_calls(parsed_tool_calls)
+        usage_source = "provider_reported" if usage_dump is not None else "estimated"
         final_usage = usage_dump or self._estimate_usage(
             messages=messages,
             content="".join(content_parts),
@@ -898,6 +901,7 @@ class VVLlmClient(LLMClient):
         )
         raw_payload: dict[str, Any] = {
             "usage": final_usage,
+            "usage_source": usage_source,
             "stream_collected": True,
         }
         if reasoning_parts:

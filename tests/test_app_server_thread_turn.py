@@ -30,6 +30,14 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
             LLMResponse(
                 content="done",
                 tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+                raw={
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    }
+                },
             )
         ]
     )
@@ -75,6 +83,12 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
     assert "item/started" in methods
     assert "item/completed" in methods
     assert methods[-1] == "turn/completed"
+    completed = next(message for message in outbound if message.get("method") == "turn/completed")
+    completed_params = cast(dict[str, object], completed["params"])
+    token_usage = cast(dict[str, object], completed_params["tokenUsage"])
+    cache_usage = cast(dict[str, object], token_usage["cache_usage"])
+    assert cache_usage["status"] == "provider_reported"
+    assert cache_usage["read_tokens"] == 0
 
 
 def test_turn_start_and_completion_emit_thread_status_changes() -> None:

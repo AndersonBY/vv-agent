@@ -821,9 +821,13 @@ def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
     assert result.token_usage.cycles[0].usage.prompt_tokens == 100
     assert result.token_usage.cycles[0].usage.completion_tokens == 25
     assert result.token_usage.cycles[0].usage.cached_tokens == 40
+    assert result.token_usage.cycles[0].usage.cache_usage.read_tokens == 40
+    assert result.token_usage.cycles[0].usage.cache_usage.uncached_input_tokens == 60
     assert result.token_usage.cycles[1].usage.prompt_tokens == 50
     assert result.token_usage.cycles[1].usage.completion_tokens == 30
     assert result.token_usage.cycles[1].usage.cache_creation_tokens == 12
+    assert result.token_usage.cycles[1].usage.cache_usage.write_tokens == 12
+    assert result.token_usage.cycles[1].usage.cache_usage.uncached_input_tokens is None
 
     assert result.token_usage.prompt_tokens == 150
     assert result.token_usage.completion_tokens == 55
@@ -831,6 +835,9 @@ def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
     assert result.token_usage.cached_tokens == 40
     assert result.token_usage.reasoning_tokens == 10
     assert result.token_usage.cache_creation_tokens == 12
+    assert result.token_usage.cache_usage.read_tokens is None
+    assert result.token_usage.cache_usage.write_tokens is None
+    assert result.token_usage.cache_usage.uncached_input_tokens is None
 
 
 def test_runtime_propagates_available_skills_into_tool_context(tmp_path: Path) -> None:

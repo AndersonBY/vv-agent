@@ -240,6 +240,7 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
 
     assert response.content == "hello world"
     assert response.raw["stream_collected"] is True
+    assert response.raw["usage_source"] == "provider_reported"
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].name == TASK_LIST_TOOL_NAME
     assert response.tool_calls[0].arguments["todos"][0]["title"] == "a"
@@ -984,6 +985,7 @@ def test_llm_estimates_usage_when_backend_missing_usage(monkeypatch) -> None:
     assert result.raw["usage"]["prompt_tokens"] == 10
     assert result.raw["usage"]["completion_tokens"] == 10
     assert result.raw["usage"]["total_tokens"] == 20
+    assert result.raw["usage_source"] == "estimated"
 
 
 def test_llm_stream_collects_raw_content_blocks(monkeypatch) -> None:

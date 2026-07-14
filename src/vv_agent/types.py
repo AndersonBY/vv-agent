@@ -158,6 +158,88 @@ class ToolCall:
             extra_content=extra_content,
         )
 
+class UsageSource(StrEnum):
+    PROVIDER_REPORTED = "provider_reported"
+    ESTIMATED = "estimated"
+    ACCOUNTING_MISSING = "accounting_missing"
+
+
+class CacheUsageStatus(StrEnum):
+    PROVIDER_REPORTED = "provider_reported"
+    ACCOUNTING_MISSING = "accounting_missing"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(slots=True)
+class CacheUsage:
+    status: CacheUsageStatus = CacheUsageStatus.ACCOUNTING_MISSING
+    read_tokens: int | None = None
+    write_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    source: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, CacheUsageStatus):
+            self.status = CacheUsageStatus(self.status)
+        for name in ("read_tokens", "write_tokens", "uncached_input_tokens"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(f"cache usage {name} must be a non-negative integer or None")
+        if self.source is not None and not isinstance(self.source, str):
+            raise TypeError("cache usage source must be a string or None")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "read_tokens": self.read_tokens,
+            "write_tokens": self.write_tokens,
+            "uncached_input_tokens": self.uncached_input_tokens,
+            "source": self.source,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CacheUsage:
+        return cls(
+            status=CacheUsageStatus(data.get("status", CacheUsageStatus.ACCOUNTING_MISSING.value)),
+            read_tokens=_optional_non_negative_int(data.get("read_tokens")),
+            write_tokens=_optional_non_negative_int(data.get("write_tokens")),
+            uncached_input_tokens=_optional_non_negative_int(data.get("uncached_input_tokens")),
+            source=data.get("source") if isinstance(data.get("source"), str) else None,
+        )
+
+def _aggregate_cache_usage(observations: list[CacheUsage]) -> CacheUsage:
+    if not observations:
+        return CacheUsage()
+    statuses = {observation.status for observation in observations}
+    if statuses == {CacheUsageStatus.PROVIDER_REPORTED}:
+        status = CacheUsageStatus.PROVIDER_REPORTED
+    elif statuses == {CacheUsageStatus.UNSUPPORTED}:
+        status = CacheUsageStatus.UNSUPPORTED
+    else:
+        status = CacheUsageStatus.ACCOUNTING_MISSING
+
+    def complete_sum(name: str) -> int | None:
+        values = [getattr(observation, name) for observation in observations]
+        if status is not CacheUsageStatus.PROVIDER_REPORTED or any(value is None for value in values):
+            return None
+        return sum(cast(int, value) for value in values)
+
+    return CacheUsage(
+        status=status,
+        read_tokens=complete_sum("read_tokens"),
+        write_tokens=complete_sum("write_tokens"),
+        uncached_input_tokens=complete_sum("uncached_input_tokens"),
+        source="aggregate",
+    )
+
+
+def _optional_non_negative_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("cache usage readings must be non-negative integers or None")
+    return value
+
 
 @dataclass(slots=True)
 class TokenUsage:
@@ -169,7 +251,15 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_tokens: int = 0
+    usage_source: UsageSource = UsageSource.ACCOUNTING_MISSING
+    cache_usage: CacheUsage = field(default_factory=CacheUsage)
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.usage_source, UsageSource):
+            self.usage_source = UsageSource(self.usage_source)
+        if not isinstance(self.cache_usage, CacheUsage):
+            raise TypeError("cache_usage must be a CacheUsage instance")
 
     def has_usage(self) -> bool:
         return any(
@@ -182,6 +272,8 @@ class TokenUsage:
                 self.input_tokens,
                 self.output_tokens,
                 self.cache_creation_tokens,
+                self.usage_source is not UsageSource.ACCOUNTING_MISSING,
+                self.cache_usage.status is not CacheUsageStatus.ACCOUNTING_MISSING,
             )
         )
 
@@ -195,11 +287,14 @@ class TokenUsage:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_creation_tokens": self.cache_creation_tokens,
+            "usage_source": self.usage_source.value,
+            "cache_usage": self.cache_usage.to_dict(),
             "raw": dict(self.raw),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TokenUsage:
+        cache_usage = data.get("cache_usage")
         return cls(
             prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
             completion_tokens=int(data.get("completion_tokens", 0) or 0),
@@ -209,7 +304,9 @@ class TokenUsage:
             input_tokens=int(data.get("input_tokens", 0) or 0),
             output_tokens=int(data.get("output_tokens", 0) or 0),
             cache_creation_tokens=int(data.get("cache_creation_tokens", 0) or 0),
-            raw=dict(data.get("raw", {})),
+            usage_source=UsageSource(data.get("usage_source", UsageSource.ACCOUNTING_MISSING.value)),
+            cache_usage=CacheUsage.from_dict(cache_usage if isinstance(cache_usage, dict) else {}),
+            raw=dict(data.get("raw", {})) if isinstance(data.get("raw", {}), dict) else {},
         )
 
 
@@ -241,6 +338,7 @@ class TaskTokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_tokens: int = 0
+    cache_usage: CacheUsage = field(default_factory=CacheUsage)
     cycles: list[CycleTokenUsage] = field(default_factory=list)
 
     def add_cycle(self, cycle_index: int, usage: TokenUsage) -> None:
@@ -255,6 +353,7 @@ class TaskTokenUsage:
         self.output_tokens += usage.output_tokens
         self.cache_creation_tokens += usage.cache_creation_tokens
         self.cycles.append(CycleTokenUsage(cycle_index=cycle_index, usage=usage))
+        self.cache_usage = _aggregate_cache_usage([item.usage.cache_usage for item in self.cycles])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -266,11 +365,13 @@ class TaskTokenUsage:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_creation_tokens": self.cache_creation_tokens,
+            "cache_usage": self.cache_usage.to_dict(),
             "cycles": [item.to_dict() for item in self.cycles],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TaskTokenUsage:
+        cache_usage = data.get("cache_usage")
         usage = cls(
             prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
             completion_tokens=int(data.get("completion_tokens", 0) or 0),
@@ -280,6 +381,7 @@ class TaskTokenUsage:
             input_tokens=int(data.get("input_tokens", 0) or 0),
             output_tokens=int(data.get("output_tokens", 0) or 0),
             cache_creation_tokens=int(data.get("cache_creation_tokens", 0) or 0),
+            cache_usage=CacheUsage.from_dict(cache_usage if isinstance(cache_usage, dict) else {}),
         )
         cycles = data.get("cycles", [])
         if isinstance(cycles, list):

@@ -39,6 +39,14 @@
           "input_tokens": 0,
           "output_tokens": 0,
           "cache_creation_tokens": 0,
+          "usage_source": "provider_reported",
+          "cache_usage": {
+            "status": "provider_reported",
+            "read_tokens": 0,
+            "write_tokens": null,
+            "uncached_input_tokens": 0,
+            "source": "provider_usage"
+          },
           "raw": {}
         }
       }
@@ -110,6 +118,13 @@
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_creation_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_tokens": null,
+              "write_tokens": null,
+              "uncached_input_tokens": null,
+              "source": null
+            },
             "cycles": []
           }
         }
