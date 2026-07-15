@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,8 +25,15 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.event_store import JsonlRunEventStore
 from vv_agent.llm import ScriptedLLM
 from vv_agent.result import RunState
-from vv_agent.runtime import InlineBackend
+from vv_agent.runtime import CancellationToken, InlineBackend
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
+
+
+def _approval_resume_case(name: str) -> dict[str, Any]:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "parity" / "completion_policy_v1.json").read_text(encoding="utf-8")
+    )
+    return next(case for case in fixture["approval_resume"]["cases"] if case["name"] == name)
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -99,6 +108,9 @@ def test_interrupted_result_snapshot_and_runner_resume_execute_approved_call_onc
 
 
 def test_approved_continue_tool_returns_to_the_model_loop(tmp_path: Path) -> None:
+    contract = _approval_resume_case("approved_continue_uses_full_fresh_cycle_budget")
+    expected = contract["expected"]
+    assert isinstance(expected, dict)
     executions: list[str] = []
 
     @function_tool(needs_approval=True)
@@ -128,7 +140,7 @@ def test_approved_continue_tool_returns_to_the_model_loop(tmp_path: Path) -> Non
     interrupted = Runner.run_sync(
         Agent(name="approver", instructions="Continue after the approved lookup.", model=model, tools=[lookup]),
         "look up item",
-        run_config=RunConfig(workspace=tmp_path),
+        run_config=RunConfig(workspace=tmp_path, max_cycles=int(contract["configured_max_cycles"])),
     )
     state = interrupted.into_state()
     state.approve(state.pending_approval_ids()[0])
@@ -137,7 +149,10 @@ def test_approved_continue_tool_returns_to_the_model_loop(tmp_path: Path) -> Non
 
     assert resumed.status == AgentStatus.COMPLETED
     assert resumed.final_output == "finished after approval"
-    assert resumed.completion_reason == CompletionReason.TOOL_FINISH
+    assert resumed.completion_reason == CompletionReason(str(expected["completion_reason"]))
+    assert resumed.run_id != interrupted.run_id
+    assert resumed.trace_id == interrupted.trace_id
+    assert len(resumed.raw_result.cycles) == expected["cycles"]
     assert executions == ["item"]
     assert model.steps == []
 
@@ -551,3 +566,227 @@ def test_approval_resume_claim_is_shared_across_concurrent_state_uses(tmp_path: 
 
     assert executions == 1
     assert sorted(outcomes) == ["approval_already_consumed", "ok"]
+
+
+def test_approved_resume_rejects_input_without_consuming_shared_claim(tmp_path: Path) -> None:
+    contract = _approval_resume_case("approved_resume_rejects_input_before_claim")
+    expected = contract["expected"]
+    assert isinstance(expected, dict)
+    executions: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def guarded(value: str) -> str:
+        executions.append(value)
+        return value
+
+    interrupted = Runner.run_sync(
+        Agent(
+            name="approver",
+            instructions="Run once.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="guard",
+                        tool_calls=[ToolCall(id="guard", name="guarded", arguments={"value": "ok"})],
+                    )
+                ]
+            ),
+            tools=[guarded],
+            tool_use_behavior="stop_on_first_tool",
+        ),
+        "go",
+        run_config=RunConfig(workspace=tmp_path),
+    )
+    state = interrupted.into_state()
+    interruption_id = state.pending_approval_ids()[0]
+    state.approve(interruption_id)
+    cloned_state = RunState(result=state.result)
+    cloned_state.approve(interruption_id)
+
+    with pytest.raises(ValueError, match=str(expected["error"])):
+        Runner.resume(state, input=str(contract["resume_input"]))
+
+    assert len(executions) == expected["tool_execution_count"]
+    resumed = Runner.resume(cloned_state)
+    assert resumed.status == AgentStatus.COMPLETED
+    assert resumed.final_output == "ok"
+    assert executions == ["ok"]
+    with pytest.raises(RuntimeError, match="approval_already_consumed"):
+        Runner.resume(state)
+
+
+def test_pre_cancelled_approved_resume_with_input_rejects_before_cancellation(tmp_path: Path) -> None:
+    contract = _approval_resume_case("pre_cancelled_approved_resume_with_input_rejects_before_cancellation")
+    expected = contract["expected"]
+    assert isinstance(expected, dict)
+    executions: list[str] = []
+    guardrail_calls = 0
+    cancellation = CancellationToken()
+    event_store = JsonlRunEventStore(tmp_path / "cancelled-approval-input.jsonl")
+
+    @function_tool(needs_approval=True)
+    def guarded() -> str:
+        executions.append("executed")
+        return "executed"
+
+    @output_guardrail
+    def observe_guardrail(_context, _output):
+        nonlocal guardrail_calls
+        guardrail_calls += 1
+        return GuardrailResult.allow()
+
+    interrupted = Runner.run_sync(
+        Agent(
+            name="approver",
+            instructions="Run after approval.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="guard",
+                        tool_calls=[ToolCall(id="guard", name="guarded", arguments={})],
+                    )
+                ]
+            ),
+            tools=[guarded],
+            output_guardrails=[observe_guardrail],
+        ),
+        "go",
+        run_config=RunConfig(workspace=tmp_path, cancellation_token=cancellation, event_store=event_store),
+    )
+    state = interrupted.into_state()
+    state.approve(state.pending_approval_ids()[0])
+    guardrail_calls_before_resume = guardrail_calls
+    cancellation.cancel(str(contract["cancellation_reason"]))
+
+    with pytest.raises(ValueError, match=str(expected["error"])):
+        Runner.resume(state, input=str(contract["resume_input"]))
+
+    assert len(executions) == expected["tool_execution_count"]
+    assert guardrail_calls - guardrail_calls_before_resume == expected["output_guardrail_count"]
+    stored_payloads = [json.loads(line) for line in event_store.path.read_text(encoding="utf-8").splitlines()]
+    fresh_terminals = [
+        payload
+        for payload in stored_payloads
+        if payload["run_id"] != interrupted.run_id and payload["type"] in {"run_completed", "run_failed", "run_cancelled"}
+    ]
+    assert len(fresh_terminals) == expected["terminal_count"]
+
+
+def test_pre_cancelled_approved_resume_has_no_side_effect_or_guardrail_and_one_fresh_terminal(
+    tmp_path: Path,
+) -> None:
+    contract = _approval_resume_case("pre_cancelled_approved_resume_has_no_side_effects")
+    expected = contract["expected"]
+    assert isinstance(expected, dict)
+    executions: list[str] = []
+    guardrail_calls = 0
+    cancellation = CancellationToken()
+    event_store = JsonlRunEventStore(tmp_path / "cancelled-approval-resume.jsonl")
+
+    @function_tool(needs_approval=True)
+    def guarded(value: str) -> str:
+        executions.append(value)
+        return value
+
+    @output_guardrail
+    def observe_guardrail(_context, _output):
+        nonlocal guardrail_calls
+        guardrail_calls += 1
+        return GuardrailResult.allow()
+
+    runner = Runner.configured(RunConfig(cancellation_token=cancellation))
+    interrupted = runner.run_sync(
+        Agent(
+            name="approver",
+            instructions="Run only after approval.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="assistant draft before approval",
+                        tool_calls=[ToolCall(id="guard", name="guarded", arguments={"value": "unsafe"})],
+                    )
+                ]
+            ),
+            tools=[guarded],
+            output_guardrails=[observe_guardrail],
+            tool_use_behavior="stop_on_first_tool",
+        ),
+        "go",
+        run_config=RunConfig(workspace=tmp_path, event_store=event_store),
+    )
+    state = interrupted.into_state()
+    state.approve(state.pending_approval_ids()[0])
+    guardrail_calls_before_resume = guardrail_calls
+    assert guardrail_calls_before_resume == 1
+    cancellation.cancel(str(contract["cancellation_reason"]))
+
+    resumed = runner.resume(state)
+
+    assert resumed.status == AgentStatus(str(expected["status"]))
+    assert resumed.completion_reason == CompletionReason(str(expected["completion_reason"]))
+    assert resumed.completion_tool_name == expected["completion_tool_name"]
+    assert resumed.partial_output == expected["partial_output"]
+    assert resumed.final_output == expected["final_output"]
+    assert resumed.run_id != interrupted.run_id
+    assert resumed.trace_id == interrupted.trace_id
+    assert len(executions) == expected["tool_execution_count"]
+    assert guardrail_calls - guardrail_calls_before_resume == expected["output_guardrail_count"]
+    terminals = [
+        event
+        for event in resumed.events
+        if event.run_id == resumed.run_id and event.type in {"run_completed", "run_failed", "run_cancelled"}
+    ]
+    assert len(terminals) == expected["terminal_count"]
+    assert terminals[0].type == expected["terminal_event"]
+    assert terminals[0].to_dict()["completion_reason"] == expected["completion_reason"]
+    replayed = list(event_store.replay(run_id=resumed.run_id))
+    replayed_terminals = [event for event in replayed if event.type in {"run_completed", "run_failed", "run_cancelled"}]
+    assert len(replayed_terminals) == expected["terminal_count"]
+    assert replayed_terminals[0].type == expected["terminal_event"]
+
+
+def test_approval_typed_output_error_follows_fresh_terminal(tmp_path: Path) -> None:
+    contract = _approval_resume_case("approval_typed_output_error_follows_fresh_terminal")
+    expected = contract["expected"]
+    assert isinstance(expected, dict)
+    event_store = JsonlRunEventStore(tmp_path / "approval-typed-output.jsonl")
+    interrupted = Runner.run_sync(
+        Agent(
+            name="typed-approver",
+            instructions="Return typed output.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="typed candidate",
+                        tool_calls=[ToolCall(id="finish", name="task_finish", arguments={"message": "not-json"})],
+                    )
+                ]
+            ),
+            output_type=dict,
+        ),
+        "go",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            event_store=event_store,
+            tool_policy=ToolPolicy(approval="always"),
+        ),
+    )
+    state = interrupted.into_state()
+    interruption_id = state.pending_approval_ids()[0]
+    state.approve(interruption_id)
+    retry = RunState(result=state.result)
+    retry.approve(interruption_id)
+
+    with pytest.raises(ValueError, match=str(expected["error_contains"])):
+        Runner.resume(state)
+
+    stored_payloads = [json.loads(line) for line in event_store.path.read_text(encoding="utf-8").splitlines()]
+    fresh_terminals = [
+        payload
+        for payload in stored_payloads
+        if payload["run_id"] != interrupted.run_id and payload["type"] in {"run_completed", "run_failed", "run_cancelled"}
+    ]
+    assert len(fresh_terminals) == 1
+    assert (fresh_terminals[0]["run_id"] != interrupted.run_id) is expected["fresh_run_id"]
+    with pytest.raises(RuntimeError, match="approval_already_consumed"):
+        Runner.resume(retry)

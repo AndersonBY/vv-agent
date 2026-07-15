@@ -110,6 +110,22 @@
       "cancelled",
       "failed",
       "budget_exhausted"
+    ],
+    "agentStatusProjection": [
+      {
+        "name": "wait_user_is_interrupted_without_error",
+        "agentStatus": "wait_user",
+        "turnStatus": "interrupted",
+        "completionReason": "wait_user",
+        "errorField": "omitted"
+      },
+      {
+        "name": "cancelled_failure_stays_failed",
+        "agentStatus": "failed",
+        "turnStatus": "failed",
+        "completionReason": "cancelled",
+        "errorField": "present"
+      }
     ]
   },
   "nullability": {

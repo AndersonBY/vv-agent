@@ -39,6 +39,10 @@ def _observable_contract() -> dict[str, Any]:
     return json.loads(fixture.read_text(encoding="utf-8"))
 
 
+def _status_projection(name: str) -> dict[str, Any]:
+    return next(case for case in _observable_contract()["terminal"]["agentStatusProjection"] if case["name"] == name)
+
+
 class _ContractHost:
     def __init__(self) -> None:
         self.model_requests: list[ModelListRequest] = []
@@ -253,6 +257,7 @@ def test_shared_fixture_turn_start_and_terminal_order(monkeypatch: pytest.Monkey
 
 def test_wait_user_turn_projects_as_interrupted_without_failure_error() -> None:
     contract = _observable_contract()
+    expected = _status_projection("wait_user_is_interrupted_without_error")
     processor, transport, store, state = _initialized_processor()
     thread = store.create_thread(agent_key="default")
     turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
@@ -298,14 +303,68 @@ def test_wait_user_turn_projects_as_interrupted_without_failure_error() -> None:
     payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
     stored_turn = store.read_thread(thread.thread_id).turns[0]
 
-    assert payload["status"] == "interrupted"
+    assert payload["status"] == expected["turnStatus"]
     assert payload["status"] in contract["terminal"]["turnStatuses"]
-    assert payload["completionReason"] == CompletionReason.WAIT_USER.value
+    assert payload["completionReason"] == expected["completionReason"]
     assert payload["partialOutput"] == "assistant draft"
-    assert "error" not in payload
-    assert stored_turn.status == "interrupted"
-    assert stored_turn.result["completionReason"] == CompletionReason.WAIT_USER.value
-    assert "error" not in stored_turn.result
+    assert ("error" in payload) is (expected["errorField"] == "present")
+    assert stored_turn.status == expected["turnStatus"]
+    assert stored_turn.result["completionReason"] == expected["completionReason"]
+    assert ("error" in stored_turn.result) is (expected["errorField"] == "present")
+
+
+def test_cancelled_turn_projects_as_failed_with_error() -> None:
+    expected = _status_projection("cancelled_failure_stays_failed")
+    processor, transport, store, state = _initialized_processor()
+    thread = store.create_thread(agent_key="default")
+    turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
+    state.subscribe(thread.thread_id, "conn_1")
+    adapter = RunAdapter(
+        host=_ContractHost(),
+        store=store,
+        state_manager=state,
+        router=processor._router,
+    )
+    raw_result = AgentResult(
+        status=AgentStatus.FAILED,
+        messages=[],
+        cycles=[],
+        error="run cancelled",
+        completion_reason=CompletionReason.CANCELLED,
+    )
+    result = RunResult(
+        input="cancel",
+        new_items=[],
+        final_output="run cancelled",
+        status=AgentStatus.FAILED,
+        raw_result=raw_result,
+        run_id="run_cancelled",
+        trace_id="trace_cancelled",
+        agent_name="default",
+    )
+
+    adapter._complete_turn(
+        "conn_1",
+        StartedTurn(thread=thread, turn=turn, handle=cast(RunHandle, object())),
+        result=result,
+        error=None,
+    )
+
+    messages: list[dict[str, Any]] = []
+    while True:
+        message = transport.receive_outbound(timeout=1)
+        messages.append(message)
+        if message.get("method") == "turn/completed":
+            break
+    payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
+    stored_turn = store.read_thread(thread.thread_id).turns[0]
+
+    assert payload["status"] == expected["turnStatus"]
+    assert payload["completionReason"] == expected["completionReason"]
+    assert ("error" in payload) is (expected["errorField"] == "present")
+    assert stored_turn.status == expected["turnStatus"]
+    assert stored_turn.result["completionReason"] == expected["completionReason"]
+    assert ("error" in stored_turn.result) is (expected["errorField"] == "present")
 
 
 def test_shared_fixture_snapshot_nullability_and_restart_recovery(tmp_path: Path) -> None:
