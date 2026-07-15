@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from threading import RLock
@@ -85,6 +86,18 @@ class StateStore(Protocol):
     def state_store_spec(self) -> StateStoreSpec | None: ...
 
 
+class _LeaseOperationClock:
+    """Advance a caller-provided wall-clock snapshot with monotonic elapsed time."""
+
+    def __init__(self, now_ms: int) -> None:
+        self._now_ms = now_ms
+        self._started_ns = time.monotonic_ns()
+
+    def now_ms(self) -> int:
+        elapsed_ms = max(0, time.monotonic_ns() - self._started_ns) // 1_000_000
+        return min((1 << 64) - 1, self._now_ms + elapsed_ms)
+
+
 class InMemoryStateStore:
     """Simple in-memory state store for testing and single-process use."""
 
@@ -168,13 +181,16 @@ class InMemoryStateStore:
         now_ms: int,
     ) -> bool:
         _validate_renew(claim_token, expected_revision, lease_expires_at_ms, now_ms)
+        clock = _LeaseOperationClock(now_ms)
         with self._lock:
+            current_now_ms = clock.now_ms()
             checkpoint = self._store.get(task_id)
             if (
                 checkpoint is None
                 or checkpoint.revision != expected_revision
                 or checkpoint.claim_token != claim_token
-                or (checkpoint.lease_expires_at_ms or 0) <= now_ms
+                or (checkpoint.lease_expires_at_ms or 0) <= current_now_ms
+                or lease_expires_at_ms <= current_now_ms
             ):
                 return False
             checkpoint.lease_expires_at_ms = lease_expires_at_ms
