@@ -236,6 +236,10 @@
     "input_error_code": " "
   },
   "sync_wait_outcome": {
+    "internal_error_code": null,
+    "manager_status_error_code_field": "omitted",
+    "sub_run_event_error_code_field": "omitted",
+    "sync_single_tool_envelope_error_code": "sub_task_wait_user",
     "expected": {
       "agent_name": "researcher",
       "completion_reason": "wait_user",
