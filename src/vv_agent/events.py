@@ -17,8 +17,19 @@ def _completion_reason(value: Any) -> CompletionReason | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise TypeError("completion_reason must be a string or None")
-    return CompletionReason(value)
+        raise ValueError("Run event completion_reason must be a string or null")
+    try:
+        return CompletionReason(value)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported run event completion_reason: {value!r}") from exc
+
+
+def _completion_text(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Run event {field_name} must be a string or null")
+    return value
 
 
 def new_event_id() -> str:
@@ -1272,6 +1283,10 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
     if payload["type"] == "tool_call_started" and "arguments" in payload and not isinstance(payload["arguments"], dict):
         raise ValueError("Run event tool arguments must be an object")
 
+    _completion_reason(payload.get("completion_reason"))
+    _completion_text(payload.get("completion_tool_name"), "completion_tool_name")
+    _completion_text(payload.get("partial_output"), "partial_output")
+
 
 def event_from_dict(payload: dict[str, Any]) -> RunEvent:
     _validate_event_wire(payload)
@@ -1385,10 +1400,8 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             wait_reason=payload.get("wait_reason") if payload.get("wait_reason") is not None else None,
             error=payload.get("error") if payload.get("error") is not None else None,
             completion_reason=_completion_reason(payload.get("completion_reason")),
-            completion_tool_name=(
-                payload.get("completion_tool_name") if isinstance(payload.get("completion_tool_name"), str) else None
-            ),
-            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
+            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             token_usage=token_usage if isinstance(token_usage, dict) else None,
             **common,
         )
@@ -1435,24 +1448,22 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             final_output=str(final_output) if final_output is not None else None,
             status=str(payload.get("status") or ""),
             completion_reason=_completion_reason(payload.get("completion_reason")),
-            completion_tool_name=(
-                payload.get("completion_tool_name") if isinstance(payload.get("completion_tool_name"), str) else None
-            ),
-            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
+            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "run_failed":
         return RunFailedEvent(
             error=str(payload.get("error") or ""),
             completion_reason=_completion_reason(payload.get("completion_reason")),
-            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "run_cancelled":
         return RunCancelledEvent(
             reason=str(payload.get("reason") or ""),
             completion_reason=_completion_reason(payload.get("completion_reason")),
-            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             **_with_cycle_and_agent(payload, common),
         )
 
@@ -1690,10 +1701,8 @@ def event_from_runtime_log(
             final_output=payload.get("final_output", payload.get("final_answer")),
             status="completed",
             completion_reason=_completion_reason(payload.get("completion_reason")),
-            completion_tool_name=(
-                payload.get("completion_tool_name") if isinstance(payload.get("completion_tool_name"), str) else None
-            ),
-            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
+            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             metadata=dict(payload),
         )
     if event == "run_wait_user":
@@ -1706,10 +1715,8 @@ def event_from_runtime_log(
             final_output=payload.get("wait_reason"),
             status="wait_user",
             completion_reason=_completion_reason(payload.get("completion_reason")) or CompletionReason.WAIT_USER,
-            completion_tool_name=(
-                payload.get("completion_tool_name") if isinstance(payload.get("completion_tool_name"), str) else None
-            ),
-            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
+            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             metadata=dict(payload),
         )
     if event in {"run_failed", "run_max_cycles"}:
@@ -1724,7 +1731,7 @@ def event_from_runtime_log(
                 _completion_reason(payload.get("completion_reason"))
                 or (CompletionReason.MAX_CYCLES if event == "run_max_cycles" else CompletionReason.FAILED)
             ),
-            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             metadata=dict(payload),
         )
     if event == "run_cancelled":
@@ -1736,7 +1743,7 @@ def event_from_runtime_log(
             cycle_index=cycle_index,
             reason=str(payload.get("reason") or payload.get("error") or "run cancelled"),
             completion_reason=_completion_reason(payload.get("completion_reason")) or CompletionReason.CANCELLED,
-            partial_output=payload.get("partial_output") if isinstance(payload.get("partial_output"), str) else None,
+            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             metadata=dict(payload),
         )
     return None

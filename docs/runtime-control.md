@@ -91,6 +91,16 @@ different path: the run remains active and the host calls
 `RunHandle.approve(request_id, decision)` through the broker. Result resume does
 not replace or intercept that live flow.
 
+Approved result resume creates a fresh run ID inside the source trace. If the
+tool returns `continue`, the new model loop receives the full configured
+`max_cycles`; cycles from the interrupted predecessor do not consume that
+budget. Passing new input for an approved tool call is rejected before
+cancellation is projected or the approval is claimed. With valid input, an
+already-cancelled resume emits one fresh cancelled terminal without claiming
+the approval, executing the tool, or running output guardrails. If approved
+terminal output fails typed-output validation, its fresh terminal is persisted
+before the validation error is returned to the caller.
+
 ## Session Approvals
 
 `ApprovalDecision.allow_session()` grants the named tool for the lifetime of

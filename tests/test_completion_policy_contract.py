@@ -17,6 +17,7 @@ from vv_agent import (
     Runner,
     TaskTokenUsage,
     ToolPolicy,
+    output_guardrail,
 )
 from vv_agent.agent import ToolUseBehavior
 from vv_agent.llm import LlmRequest, ScriptedLLM
@@ -216,3 +217,66 @@ def test_input_guardrail_failure_emits_the_canonical_reason() -> None:
     assert result.completion_reason == CompletionReason(expected["expected_reason"])
     assert result.partial_output == expected["expected_partial_output"]
     assert result.events[-1].to_dict()["completion_reason"] == expected["expected_reason"]
+
+
+def test_output_guardrail_rewrites_wait_output_but_preserves_completion_observation(tmp_path: Path) -> None:
+    contract = _contract()["output_guardrail_allow"]
+    case = contract["case"]
+
+    @output_guardrail
+    def rewrite_wait_output(_context: Any, _output: Any) -> GuardrailResult:
+        return GuardrailResult.rewrite(case["guardrail_rewrite_output"])
+
+    candidate = case["candidate_observation"]
+    result = Runner.run_sync(
+        Agent(
+            name="guardrail-wait-contract",
+            instructions="Ask the scripted question.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content=candidate["partial_output"],
+                        tool_calls=[
+                            ToolCall(
+                                id="ask-contract",
+                                name="ask_user",
+                                arguments={"question": case["candidate_output"]},
+                            )
+                        ],
+                    )
+                ]
+            ),
+            output_guardrails=[rewrite_wait_output],
+        ),
+        "ask",
+        run_config=RunConfig(workspace=tmp_path),
+    )
+
+    expected = case["expected_observation"]
+    assert contract["output_rewrite_is_applied"] is True
+    assert result.final_output == case["expected_output"]
+    assert result.status.value == expected["status"]
+    assert result.completion_reason == CompletionReason(expected["completion_reason"])
+    assert result.completion_tool_name == expected["completion_tool_name"]
+    assert result.partial_output == expected["partial_output"]
+
+
+def test_ordinary_llm_failure_returns_typed_terminal() -> None:
+    expected = _contract()["ordinary_llm_failure"]
+    result = Runner.run_sync(
+        Agent(
+            name="llm-failure-contract",
+            instructions="This scripted queue is intentionally empty.",
+            model=ScriptedLLM(steps=[]),
+        ),
+        "go",
+    )
+    terminals = [event for event in result.events if event.type in {"run_completed", "run_failed", "run_cancelled"}]
+
+    assert expected["runner_outcome"] == "typed_result"
+    assert result.status.value == expected["status"]
+    assert result.completion_reason == CompletionReason(expected["completion_reason"])
+    assert result.completion_tool_name == expected["completion_tool_name"]
+    assert result.partial_output == expected["partial_output"]
+    assert len(terminals) == expected["terminal_count"]
+    assert terminals[0].type == expected["terminal_event"]

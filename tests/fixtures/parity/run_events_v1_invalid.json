@@ -5,7 +5,30 @@
     "unknown_top_level_fields": "ignore",
     "unknown_event_types": "reject",
     "legacy_created_at_ms": "read_and_canonicalize",
-    "legacy_approved": "read_and_derive_action"
+    "legacy_approved": "read_and_derive_action",
+    "completion_fields": {
+      "completion_reason": {
+        "type": "string_or_null",
+        "values": [
+          "tool_finish",
+          "no_tool_finish",
+          "stop_on_first_tool",
+          "stop_at_tool_name",
+          "wait_user",
+          "max_cycles",
+          "cancelled",
+          "failed",
+          "budget_exhausted"
+        ],
+        "unknown_values": "reject"
+      },
+      "completion_tool_name": {
+        "type": "string_or_null"
+      },
+      "partial_output": {
+        "type": "string_or_null"
+      }
+    }
   },
   "canonicalize": [
     {
@@ -280,6 +303,64 @@
         "tool_call_id": "call_invalid",
         "action": "timeout",
         "approved": true
+      }
+    },
+    {
+      "id": "unknown_completion_reason",
+      "input": {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_invalid_completion_reason",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "status": "completed",
+        "final_output": "done",
+        "completion_reason": "future_reason"
+      }
+    },
+    {
+      "id": "completion_reason_is_not_a_string_or_null",
+      "input": {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_invalid_completion_reason_type",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "status": "completed",
+        "final_output": "done",
+        "completion_reason": 7
+      }
+    },
+    {
+      "id": "completion_tool_name_is_not_a_string_or_null",
+      "input": {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_invalid_completion_tool_name_type",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "status": "completed",
+        "final_output": "done",
+        "completion_tool_name": false
+      }
+    },
+    {
+      "id": "partial_output_is_not_a_string_or_null",
+      "input": {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_invalid_partial_output_type",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "status": "completed",
+        "final_output": "done",
+        "partial_output": {
+          "text": "draft"
+        }
       }
     }
   ]

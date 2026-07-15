@@ -284,7 +284,7 @@ class Runner:
             None,
         )
         if approved is not None:
-            return cls._resume_approved_tool_call(source, resume_context, approved)
+            return cls._resume_approved_tool_call(source, resume_context, approved, resume_input=input)
 
         config = replace(
             resume_context.run_config,
@@ -303,6 +303,8 @@ class Runner:
         source: RunResult,
         resume_context: _RunResumeContext,
         approval: ApprovalSnapshot,
+        *,
+        resume_input: str | None,
     ) -> RunResult:
         effective_config = resume_context.effective_run_config or resume_context.run_config
         pending = resume_context.pending_tool_approval
@@ -310,6 +312,16 @@ class Runner:
             raise ValueError("approved tool call is missing its captured interruption context")
         if not cls._approval_snapshot_matches(source, approval, pending):
             raise ValueError("approved tool call does not match the captured interruption")
+        if resume_input is not None:
+            raise ValueError("input cannot be provided when resuming an approved tool call")
+        cancellation_token = effective_config.cancellation_token
+        if cancellation_token is not None and cancellation_token.cancelled:
+            return cls._cancelled_approval_resume_result(
+                source,
+                resume_context,
+                approval,
+                effective_config=effective_config,
+            )
         if not resume_context.claim_approval(approval.interruption_id):
             raise RuntimeError("approval_already_consumed")
         call = pending.call
@@ -364,10 +376,13 @@ class Runner:
             effective_config.session.add_items([tool_message])
 
         if tool_result.directive == ToolDirective.CONTINUE:
+            tracing = dict(resume_context.run_config.tracing) if isinstance(resume_context.run_config.tracing, dict) else {}
+            tracing["trace_id"] = source.trace_id
             config = replace(
                 resume_context.run_config,
                 initial_messages=deepcopy(raw_result.messages),
                 shared_state=deepcopy(raw_result.shared_state),
+                tracing=tracing,
             )
             continued = resume_context.runner._run(
                 resume_context.agent,
@@ -474,6 +489,54 @@ class Runner:
             resume_context.input,
             run_config=resume_context.run_config,
             initial_result=resumed,
+        )
+
+    @classmethod
+    def _cancelled_approval_resume_result(
+        cls,
+        source: RunResult,
+        resume_context: _RunResumeContext,
+        approval: ApprovalSnapshot,
+        *,
+        effective_config: RunConfig,
+    ) -> RunResult:
+        cancellation_token = effective_config.cancellation_token
+        assert cancellation_token is not None and cancellation_token.cancelled
+
+        raw_result = deepcopy(source.raw_result)
+        raw_result.status = AgentStatus.FAILED
+        raw_result.final_answer = None
+        raw_result.wait_reason = None
+        raw_result.error = cancellation_token.reason or "Operation was cancelled"
+        raw_result.completion_reason = CompletionReason.CANCELLED
+        raw_result.completion_tool_name = None
+        cls._normalize_completion_observation(raw_result, cancellation_token=cancellation_token)
+
+        resumed_run_id = f"run_{uuid.uuid4().hex}"
+        terminal_event = cls._terminal_event(
+            result=raw_result,
+            final_output=raw_result.error,
+            run_id=resumed_run_id,
+            trace_id=source.trace_id,
+            agent_name=source.agent_name,
+            session_id=cls._resolve_event_session_id(effective_config),
+            cancellation_token=cancellation_token,
+        )
+        cls._emit_chain_event(terminal_event, run_config=effective_config, event_sink=None)
+        return RunResult(
+            input=source.input,
+            new_items=deepcopy(source.new_items),
+            final_output=raw_result.error,
+            status=raw_result.status,
+            raw_result=raw_result,
+            events=[*source.events, terminal_event],
+            token_usage=raw_result.token_usage,
+            trace_id=source.trace_id,
+            run_id=resumed_run_id,
+            metadata={**source.metadata, "resumed": True, "approved_interruption_id": approval.interruption_id},
+            agent_name=source.agent_name,
+            resolved_model=source.resolved_model,
+            _resume_context=resume_context,
         )
 
     @staticmethod
@@ -1147,7 +1210,7 @@ class Runner:
             try:
                 final_output = cls._coerce_output_type(agent=agent, final_output=final_output)
             except Exception as exc:
-                output_coercion_error = exc
+                output_coercion_error = ValueError(f"failed to validate final output: {exc}")
         return final_output, output_coercion_error
 
     @staticmethod

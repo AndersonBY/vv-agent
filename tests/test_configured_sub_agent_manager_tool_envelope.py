@@ -7,13 +7,14 @@ from typing import Any, cast
 
 import pytest
 
+from vv_agent import SubRunCompletedEvent
 from vv_agent.runtime import SubTaskManager
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import AgentStatus, CompletionReason, SubTaskOutcome, ToolResultStatus
 from vv_agent.workspace import MemoryWorkspaceBackend
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "manager_tool_envelope_v1.json"
-FIXTURE_SHA256 = "a4fce56b3051939b2c8e02568bac79746010daff0dd703cc8dced52ff602bd0f"
+FIXTURE_SHA256 = "2f1dfc343b9c1800b95de8b21e3afa9cdfab7514071c221b6465188441221f02"
 
 
 def _fixture() -> dict[str, Any]:
@@ -101,9 +102,13 @@ def test_sync_failed_outcome_normalizes_blank_error_code(tmp_path: Path) -> None
         error_code=contract["input_error_code"],
     )
 
-    result = build_default_registry().get("create_sub_task").handler(
-        context,
-        {"agent_id": "researcher", "task_description": "fail"},
+    result = (
+        build_default_registry()
+        .get("create_sub_task")
+        .handler(
+            context,
+            {"agent_id": "researcher", "task_description": "fail"},
+        )
     )
 
     payload = json.loads(result.content)
@@ -115,7 +120,7 @@ def test_sync_failed_outcome_normalizes_blank_error_code(tmp_path: Path) -> None
 def test_sync_wait_outcome_preserves_completion_observation(tmp_path: Path) -> None:
     contract = _fixture()["sync_wait_outcome"]
     context = _context(tmp_path)
-    context.sub_task_runner = lambda _request: SubTaskOutcome(
+    outcome = SubTaskOutcome(
         task_id="wait-child",
         agent_name="researcher",
         status=AgentStatus.WAIT_USER,
@@ -126,16 +131,51 @@ def test_sync_wait_outcome_preserves_completion_observation(tmp_path: Path) -> N
         partial_output="proposed change",
         cycles=1,
     )
+    assert outcome.error_code == contract["internal_error_code"]
+    assert contract["manager_status_error_code_field"] == "omitted"
+    assert "error_code" not in outcome.to_dict()
+    context.sub_task_runner = lambda _request: outcome
 
-    result = build_default_registry().get("create_sub_task").handler(
-        context,
-        {"agent_id": "researcher", "task_description": "wait"},
+    result = (
+        build_default_registry()
+        .get("create_sub_task")
+        .handler(
+            context,
+            {"agent_id": "researcher", "task_description": "wait"},
+        )
     )
 
     payload = json.loads(result.content)
     assert payload == contract["expected"]
-    assert result.error_code == "sub_task_wait_user"
+    assert result.error_code == contract["sync_single_tool_envelope_error_code"]
     _assert_error_metadata_matches_content(result)
+
+    manager = _manager()
+    manager.record_outcome("wait-child", outcome)
+    status_context = _context(tmp_path)
+    status_context.sub_task_manager = manager
+    status_result = (
+        build_default_registry()
+        .get("sub_task_status")
+        .handler(
+            status_context,
+            {"task_ids": ["wait-child"]},
+        )
+    )
+    status_entry = json.loads(status_result.content)["tasks"][0]
+    assert "error_code" not in status_entry
+
+    sub_run_event = SubRunCompletedEvent(
+        run_id="child-run",
+        trace_id="trace",
+        parent_tool_call_id="parent-tool",
+        status=AgentStatus.WAIT_USER.value,
+        wait_reason=outcome.wait_reason,
+        completion_reason=outcome.completion_reason,
+        metadata={"cycles": outcome.cycles},
+    ).to_dict()
+    assert contract["sub_run_event_error_code_field"] == "omitted"
+    assert "error_code" not in sub_run_event["metadata"]
 
 
 def test_manager_outcome_identity_blank_code_and_unicode_preview_match_contract() -> None:
@@ -164,15 +204,19 @@ def test_manager_outcome_identity_blank_code_and_unicode_preview_match_contract(
     entry = manager.get(contract["lookup_task_id"])
     assert entry is not None
     assert entry.task_id == contract["lookup_task_id"]
-    result = build_default_registry().get("sub_task_status").handler(
-        ToolContext(
-            workspace=Path.cwd(),
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=MemoryWorkspaceBackend(),
-            sub_task_manager=manager,
-        ),
-        {"task_ids": [contract["lookup_task_id"]]},
+    result = (
+        build_default_registry()
+        .get("sub_task_status")
+        .handler(
+            ToolContext(
+                workspace=Path.cwd(),
+                shared_state={},
+                cycle_index=1,
+                workspace_backend=MemoryWorkspaceBackend(),
+                sub_task_manager=manager,
+            ),
+            {"task_ids": [contract["lookup_task_id"]]},
+        )
     )
     assert json.loads(result.content)["tasks"][0] == contract["status_entry"]
 
@@ -222,9 +266,13 @@ def test_pending_interaction_previous_status_matches_contract(tmp_path: Path) ->
     context = _context(tmp_path)
     context.sub_task_manager = cast(Any, _PendingManager())
 
-    result = build_default_registry().get("sub_task_status").handler(
-        context,
-        {"task_ids": ["pending-task"], "message": "continue"},
+    result = (
+        build_default_registry()
+        .get("sub_task_status")
+        .handler(
+            context,
+            {"task_ids": ["pending-task"], "message": "continue"},
+        )
     )
 
     payload = json.loads(result.content)
@@ -388,9 +436,13 @@ def test_status_envelope_preserves_lineage_and_omits_unknown_activity(tmp_path: 
     context = _context(tmp_path)
     context.sub_task_manager = manager
 
-    result = build_default_registry().get("sub_task_status").handler(
-        context,
-        {"task_ids": ["status-task"], "detail_level": "snapshot"},
+    result = (
+        build_default_registry()
+        .get("sub_task_status")
+        .handler(
+            context,
+            {"task_ids": ["status-task"], "detail_level": "snapshot"},
+        )
     )
     payload = json.loads(result.content)
     entry = payload["tasks"][0]

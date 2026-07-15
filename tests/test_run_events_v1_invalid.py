@@ -7,16 +7,29 @@ from typing import Any
 
 import pytest
 
-from vv_agent import event_from_dict
+from vv_agent import CompletionReason, event_from_dict
 
 FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1_invalid.json"
-FIXTURE_SHA256 = "55e3be856d8c1cc1c522cefa8bb0d0aa05b4552e7eda34c0a6c5c04172394e06"
+FIXTURE_SHA256 = "c0ca610bb66aa6b4434c16801f3fffdfcabfbcd87728a6aac57c107b01e12bb6"
 
 
 def _contract() -> dict[str, Any]:
     fixture_bytes = FIXTURE.read_bytes()
     assert hashlib.sha256(fixture_bytes).hexdigest() == FIXTURE_SHA256
     return json.loads(fixture_bytes)
+
+
+def _run_completed_payload() -> dict[str, Any]:
+    return {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_completion_contract",
+        "run_id": "run_completion_contract",
+        "trace_id": "trace_completion_contract",
+        "created_at": 1.0,
+        "status": "completed",
+        "final_output": "done",
+    }
 
 
 def test_run_event_v1_compatibility_inputs_canonicalize_to_fixture() -> None:
@@ -33,3 +46,74 @@ def test_run_event_v1_invalid_inputs_are_rejected() -> None:
     for case in contract["reject"]:
         with pytest.raises(ValueError, match=r".+"):
             event_from_dict(case["input"])
+
+
+@pytest.mark.parametrize("reason", [reason.value for reason in CompletionReason])
+def test_run_event_completion_reason_accepts_declared_values(reason: str) -> None:
+    payload = _run_completed_payload()
+    payload["completion_reason"] = reason
+
+    event = event_from_dict(payload)
+
+    assert event.to_dict()["completion_reason"] == reason
+
+
+def test_run_event_completion_text_fields_accept_strings_and_null() -> None:
+    payload = _run_completed_payload()
+    payload.update(
+        completion_reason=None,
+        completion_tool_name="task_finish",
+        partial_output="last draft",
+    )
+
+    event = event_from_dict(payload)
+
+    encoded = event.to_dict()
+    assert encoded.get("completion_reason") is None
+    assert encoded["completion_tool_name"] == "task_finish"
+    assert encoded["partial_output"] == "last draft"
+
+    nullable_payload = _run_completed_payload()
+    nullable_payload.update(
+        completion_reason=None,
+        completion_tool_name=None,
+        partial_output=None,
+    )
+    nullable = event_from_dict(nullable_payload)
+    nullable_encoded = nullable.to_dict()
+    assert nullable_encoded.get("completion_reason") is None
+    assert nullable_encoded.get("completion_tool_name") is None
+    assert nullable_encoded.get("partial_output") is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("completion_reason", "future_reason"),
+        ("completion_reason", 7),
+        ("completion_tool_name", False),
+        ("completion_tool_name", ["task_finish"]),
+        ("partial_output", {"text": "last draft"}),
+        ("partial_output", 7),
+    ],
+)
+def test_run_event_completion_fields_reject_unknown_reason_and_wrong_types(
+    field_name: str,
+    value: Any,
+) -> None:
+    payload = _run_completed_payload()
+    payload[field_name] = value
+
+    with pytest.raises(ValueError, match=field_name):
+        event_from_dict(payload)
+
+
+def test_run_event_completion_validation_preserves_non_completion_compatibility() -> None:
+    payload = _run_completed_payload()
+    payload["future_field"] = {"ignored": True}
+    payload["metadata"] = {"future_metadata": {"preserved": True}}
+
+    encoded = event_from_dict(payload).to_dict()
+
+    assert "future_field" not in encoded
+    assert encoded["metadata"] == {"future_metadata": {"preserved": True}}

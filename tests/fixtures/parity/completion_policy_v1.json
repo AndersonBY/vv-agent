@@ -30,7 +30,12 @@
     "output_guardrail_failure_precedes_success_reason": true,
     "cancellation_precedes_generic_failure": true,
     "partial_output_only_for_non_completed_status": true,
-    "budget_exhausted_reserved_until_0_4": true
+    "budget_exhausted_reserved_until_0_4": true,
+    "approval_resume_uses_fresh_run_budget": true,
+    "approved_resume_rejects_input_before_claim": true,
+    "pre_cancelled_approval_resume_skips_side_effects": true,
+    "guardrail_allow_preserves_completion_observation": true,
+    "ordinary_llm_failure_is_typed_terminal": true
   },
   "cases": [
     {
@@ -348,5 +353,130 @@
       "expected_reason": "failed",
       "expected_partial_output": null
     }
-  ]
+  ],
+  "approval_resume": {
+    "rules": {
+      "run_identity": "fresh",
+      "trace_id_relation": "same_as_source",
+      "cycle_budget": "full_configured_max_cycles",
+      "prior_interrupted_cycles_reduce_resume_budget": false,
+      "new_input": "reject_before_claim",
+      "admission_precedence": [
+        "reject_new_input",
+        "observe_cancellation",
+        "claim_approval"
+      ],
+      "pre_cancelled_order": [
+        "observe_cancellation",
+        "emit_fresh_terminal"
+      ],
+      "pre_cancelled_forbidden_actions": [
+        "claim_approval",
+        "execute_tool",
+        "run_output_guardrail"
+      ],
+      "typed_output_validation": "after_terminal_persistence"
+    },
+    "cases": [
+      {
+        "name": "approved_continue_uses_full_fresh_cycle_budget",
+        "configured_max_cycles": 1,
+        "source_cycles": 1,
+        "approved_tool_directive": "continue",
+        "resumed_model_cycles": 1,
+        "expected": {
+          "fresh_run_id": true,
+          "trace_id_relation": "same_as_source",
+          "status": "completed",
+          "completion_reason": "tool_finish",
+          "cycles": 1
+        }
+      },
+      {
+        "name": "approved_resume_rejects_input_before_claim",
+        "resume_input": "replacement input",
+        "expected": {
+          "error": "input cannot be provided when resuming an approved tool call",
+          "approval_claim_consumed": false,
+          "tool_execution_count": 0
+        }
+      },
+      {
+        "name": "pre_cancelled_approved_resume_with_input_rejects_before_cancellation",
+        "resume_input": "replacement input",
+        "cancellation_reason": "cancel before approved tool",
+        "expected": {
+          "error": "input cannot be provided when resuming an approved tool call",
+          "approval_claim_consumed": false,
+          "tool_execution_count": 0,
+          "output_guardrail_count": 0,
+          "terminal_count": 0
+        }
+      },
+      {
+        "name": "pre_cancelled_approved_resume_has_no_side_effects",
+        "candidate_output": "assistant draft before approval",
+        "cancellation_reason": "cancel before approved tool",
+        "expected": {
+          "fresh_run_id": true,
+          "status": "failed",
+          "completion_reason": "cancelled",
+          "completion_tool_name": null,
+          "partial_output": "assistant draft before approval",
+          "final_output": "cancel before approved tool",
+          "approval_claim_consumed": false,
+          "tool_execution_count": 0,
+          "output_guardrail_count": 0,
+          "terminal_event": "run_cancelled",
+          "terminal_count": 1
+        }
+      },
+      {
+        "name": "approval_typed_output_error_follows_fresh_terminal",
+        "expected": {
+          "runner_outcome": "error",
+          "error_contains": "failed to validate final output",
+          "fresh_run_id": true,
+          "terminal_persisted_before_error": true,
+          "approval_claim_consumed": true
+        }
+      }
+    ]
+  },
+  "output_guardrail_allow": {
+    "output_rewrite_is_applied": true,
+    "preserved_fields": [
+      "status",
+      "completion_reason",
+      "completion_tool_name",
+      "partial_output"
+    ],
+    "case": {
+      "name": "allow_rewrites_wait_output_but_preserves_completion_observation",
+      "candidate_output": "Approved question",
+      "guardrail_rewrite_output": "Redacted question",
+      "candidate_observation": {
+        "status": "wait_user",
+        "completion_reason": "wait_user",
+        "completion_tool_name": "ask_user",
+        "partial_output": "assistant wait candidate"
+      },
+      "expected_output": "Redacted question",
+      "expected_observation": {
+        "status": "wait_user",
+        "completion_reason": "wait_user",
+        "completion_tool_name": "ask_user",
+        "partial_output": "assistant wait candidate"
+      }
+    }
+  },
+  "ordinary_llm_failure": {
+    "runner_outcome": "typed_result",
+    "status": "failed",
+    "completion_reason": "failed",
+    "completion_tool_name": null,
+    "partial_output": null,
+    "terminal_event": "run_failed",
+    "terminal_count": 1
+  }
 }
