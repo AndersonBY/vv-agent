@@ -81,6 +81,8 @@ class _FakeRedisPipeline:
 class _FakeRedisClient:
     def __init__(self) -> None:
         self._values: dict[str, str] = {}
+        self.eval_server_now_ms: int | None = None
+        self.eval_replacement: tuple[str, str] | None = None
 
     def set(self, key: str, value: str, *, nx: bool = False) -> bool:
         if nx and key in self._values:
@@ -96,6 +98,21 @@ class _FakeRedisClient:
 
     def pipeline(self) -> _FakeRedisPipeline:
         return _FakeRedisPipeline(self)
+
+    def eval(self, _script: str, numkeys: int, *args: str) -> int:
+        assert numkeys == 1
+        key, expected, updated, previous_expiry, requested_expiry, client_now = args
+        if self.eval_replacement is not None:
+            replacement_key, replacement_value = self.eval_replacement
+            self._values[replacement_key] = replacement_value
+        server_now = self.eval_server_now_ms if self.eval_server_now_ms is not None else int(client_now)
+        current_now = max(server_now, int(client_now))
+        if int(previous_expiry) <= current_now or int(requested_expiry) <= current_now:
+            return 2
+        if self._values.get(key) != expected:
+            return 0
+        self._values[key] = updated
+        return 1
 
     def scan_iter(self, pattern: str) -> list[str]:
         prefix = pattern.removesuffix("*")
@@ -141,6 +158,101 @@ def test_checkpoint_codec_matches_shared_valid_and_invalid_corpus() -> None:
     for case in fixture["invalid_cases"]:
         with pytest.raises((TypeError, ValueError), match="checkpoint"):
             checkpoint_from_dict(case["payload"])
+
+
+def test_redis_renewal_atomic_compare_and_set_does_not_overwrite_a_new_owner() -> None:
+    store = _redis_store()
+    checkpoint = _checkpoint("renewal-cas-mismatch")
+    checkpoint.revision = 1
+    checkpoint.claim_token = "owner"
+    checkpoint.claimed_cycle = 1
+    checkpoint.lease_expires_at_ms = 200
+    store.save_checkpoint(checkpoint)
+    replacement = _checkpoint(checkpoint.task_id)
+    replacement.revision = 2
+    replacement.claim_token = "contender"
+    replacement.claimed_cycle = 1
+    replacement.lease_expires_at_ms = 500
+    store._client.eval_replacement = (
+        f"vv_agent:checkpoint:{checkpoint.task_id}",
+        checkpoint_to_json(replacement),
+    )
+
+    assert not store.renew_checkpoint_claim(
+        checkpoint.task_id,
+        claim_token="owner",
+        expected_revision=1,
+        lease_expires_at_ms=300,
+        now_ms=150,
+    )
+    persisted = store.load_checkpoint(checkpoint.task_id)
+    assert persisted is not None
+    assert persisted.claim_token == "contender"
+    assert persisted.lease_expires_at_ms == 500
+
+
+def test_redis_renewal_checks_server_time_atomically_before_writing() -> None:
+    store = _redis_store()
+    checkpoint = _checkpoint("renewal-expired-at-write")
+    checkpoint.revision = 1
+    checkpoint.claim_token = "owner"
+    checkpoint.claimed_cycle = 1
+    checkpoint.lease_expires_at_ms = 110
+    store.save_checkpoint(checkpoint)
+    store._client.eval_server_now_ms = 110
+
+    with pytest.raises(CheckpointConflictError, match="claim lease expired"):
+        store.renew_checkpoint_claim(
+            checkpoint.task_id,
+            claim_token="owner",
+            expected_revision=1,
+            lease_expires_at_ms=1_000,
+            now_ms=100,
+        )
+    persisted = store.load_checkpoint(checkpoint.task_id)
+    assert persisted is not None
+    assert persisted.lease_expires_at_ms == 110
+
+    contender = store.claim_checkpoint(
+        checkpoint.task_id,
+        1,
+        claim_token="contender",
+        lease_expires_at_ms=1_000,
+        now_ms=110,
+    )
+    assert contender is not None
+    assert contender.claim_token == "contender"
+
+
+def test_redis_renewal_expiry_precedes_compare_and_set_mismatch() -> None:
+    store = _redis_store()
+    checkpoint = _checkpoint("renewal-expiry-before-cas")
+    checkpoint.revision = 1
+    checkpoint.claim_token = "owner"
+    checkpoint.claimed_cycle = 1
+    checkpoint.lease_expires_at_ms = 200
+    store.save_checkpoint(checkpoint)
+    replacement = _checkpoint(checkpoint.task_id)
+    replacement.revision = 2
+    replacement.claim_token = None
+    replacement.claimed_cycle = None
+    replacement.lease_expires_at_ms = None
+    replacement_raw = checkpoint_to_json(replacement)
+    store._client.eval_replacement = (
+        f"vv_agent:checkpoint:{checkpoint.task_id}",
+        replacement_raw,
+    )
+    store._client.eval_server_now_ms = 200
+
+    with pytest.raises(CheckpointConflictError, match="claim lease expired"):
+        store.renew_checkpoint_claim(
+            checkpoint.task_id,
+            claim_token="owner",
+            expected_revision=1,
+            lease_expires_at_ms=300,
+            now_ms=150,
+        )
+    assert store._client.get(f"vv_agent:checkpoint:{checkpoint.task_id}") == replacement_raw
 
 
 def test_state_stores_snapshot_values_and_reject_duplicate_or_skipped_claims(tmp_path: Path) -> None:
@@ -330,6 +442,101 @@ def test_sqlite_second_connection_waits_for_short_write_contention(tmp_path: Pat
     assert "error" not in outcome
     assert outcome["created"] is True
     assert store.load_checkpoint("contended-task") is not None
+
+
+def test_sqlite_renewal_refreshes_time_after_write_lock_wait(tmp_path: Path) -> None:
+    db_path = tmp_path / "renewal-contention.sqlite3"
+    store = SqliteStateStore(db_path)
+    checkpoint = _checkpoint("contended-renewal")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.task_id,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=150,
+        now_ms=100,
+    )
+    assert claimed is not None
+    locker = sqlite3.connect(db_path, check_same_thread=False)
+    locker.execute("PRAGMA busy_timeout=5000")
+    locker.execute("BEGIN IMMEDIATE")
+    outcome: dict[str, object] = {}
+
+    def renew_checkpoint() -> None:
+        try:
+            outcome["renewed"] = store.renew_checkpoint_claim(
+                checkpoint.task_id,
+                claim_token="owner",
+                expected_revision=claimed.revision,
+                lease_expires_at_ms=300,
+                now_ms=100,
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = Thread(target=renew_checkpoint)
+    worker.start()
+    time.sleep(0.08)
+    assert worker.is_alive(), "renewal should wait for the SQLite writer lock"
+    locker.commit()
+    worker.join(2)
+    locker.close()
+
+    assert not worker.is_alive()
+    assert "error" not in outcome
+    assert outcome["renewed"] is False
+    persisted = store.load_checkpoint(checkpoint.task_id)
+    assert persisted is not None
+    assert persisted.lease_expires_at_ms == 150
+
+
+def test_sqlite_renewal_rolls_back_when_commit_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SqliteStateStore(tmp_path / "renewal-commit-failure.sqlite3")
+    checkpoint = _checkpoint("renewal-commit-failure")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.task_id,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+    )
+    assert claimed is not None
+    connection = store._conn
+
+    class CommitFailingConnection:
+        def __init__(self) -> None:
+            self.rollback_calls = 0
+
+        def __getattr__(self, name: str):
+            return getattr(connection, name)
+
+        def commit(self) -> None:
+            raise sqlite3.OperationalError("commit failed")
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+            connection.rollback()
+
+    failing_connection = CommitFailingConnection()
+    monkeypatch.setattr(store, "_conn", failing_connection)
+
+    with pytest.raises(sqlite3.OperationalError, match="commit failed"):
+        store.renew_checkpoint_claim(
+            checkpoint.task_id,
+            claim_token="owner",
+            expected_revision=claimed.revision,
+            lease_expires_at_ms=300,
+            now_ms=150,
+        )
+
+    assert failing_connection.rollback_calls == 1
+    persisted = store.load_checkpoint(checkpoint.task_id)
+    assert persisted is not None
+    assert persisted.lease_expires_at_ms == 200
 
 
 def test_claimed_terminal_result_commits_before_scheduler_acknowledgement(tmp_path: Path) -> None:

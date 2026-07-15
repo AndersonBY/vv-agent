@@ -12,6 +12,7 @@ from vv_agent.runtime.state import (
     CheckpointConflictError,
     StateStoreSpec,
     _check_claim,
+    _LeaseOperationClock,
     _validate_claim,
     _validate_renew,
 )
@@ -166,17 +167,28 @@ class SqliteStateStore:
         now_ms: int,
     ) -> bool:
         _validate_renew(claim_token, expected_revision, lease_expires_at_ms, now_ms)
-        with self._lock, self._conn:
-            cursor = self._conn.execute(
-                """
-                UPDATE checkpoints
-                SET lease_expires_at_ms = ?
-                WHERE task_id = ? AND revision = ? AND claim_token = ?
-                  AND lease_expires_at_ms > ?
-                """,
-                (lease_expires_at_ms, task_id, expected_revision, claim_token, now_ms),
-            )
-            return cursor.rowcount == 1
+        clock = _LeaseOperationClock(now_ms)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                current_now_ms = clock.now_ms()
+                if lease_expires_at_ms <= current_now_ms:
+                    self._conn.rollback()
+                    return False
+                cursor = self._conn.execute(
+                    """
+                    UPDATE checkpoints
+                    SET lease_expires_at_ms = ?
+                    WHERE task_id = ? AND revision = ? AND claim_token = ?
+                      AND lease_expires_at_ms > ?
+                    """,
+                    (lease_expires_at_ms, task_id, expected_revision, claim_token, current_now_ms),
+                )
+                self._conn.commit()
+                return cursor.rowcount == 1
+            except BaseException:
+                self._conn.rollback()
+                raise
 
     def load_checkpoint(self, task_id: str) -> Checkpoint | None:
         with self._lock:

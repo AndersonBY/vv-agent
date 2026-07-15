@@ -139,6 +139,27 @@ revision/token lease with heartbeat renewal and CAS commit. The scheduler
 accepts a result only after reconciling it with the durable checkpoint;
 terminal checkpoints are immutable and replayable until acknowledged. SQLite
 uses WAL, a bounded busy timeout, and in-place legacy-column migration.
+Before entering the runtime cycle, a worker must complete one successful lease
+renewal; initial and renewed lease expiry never extends beyond the job deadline.
+Each periodic wait is derived from that renewal's actual deadline-clamped lease,
+not only from the configured duration. A renewal result must return before both
+the previously known expiry and the new expiry it requested. Response checks
+use the conservative maximum of current wall time and request-start wall time
+plus monotonic elapsed time, covering wall-clock jumps in either direction.
+SQLite refreshes effective time after acquiring its write lock. Redis renewal
+uses one atomic script: Redis `TIME` validates both expiries and the original
+JSON is the compare-and-set value, so an expired or replaced owner cannot write
+a new expiry. The script distinguishes CAS loss from authoritative expiry, so
+commit-race suppression can apply only to claim consumption and never to an
+expired lease; authoritative expiry takes precedence when both conditions are
+observed. Heartbeat renewal uses an independent store connection and remains
+active through an explicit commit phase. A durable commit suppresses only an
+active-claim rejection from a renewal that started in that commit phase and
+returned before its applicable lease expiry. Renewals that started before
+commit, expired leases, and other coordination failures remain visible even if
+the checkpoint commit later succeeds.
+Redis connection I/O and non-renewal optimistic-transaction retries are bounded
+so stopping or unwinding a worker cannot wait forever on the heartbeat thread.
 
 This is an at-least-once execution model. Celery revoke during cancellation is
 best effort, and an active worker claim may still complete after the scheduler

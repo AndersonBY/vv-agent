@@ -19,6 +19,7 @@ DEFAULT_TOOLSET_VERSION = "1"
 DEFAULT_TOOLSET_SCHEMA_DIGEST = "f85422117d41d28ffa3cdfcfd9a42892854de624808fadc2124f4ebe7a452b61"
 DEFAULT_CYCLE_NAME = "vv_agent.distributed.run_single_cycle"
 DEFAULT_LEASE_DURATION_MS = 5 * 60 * 1000
+_MAX_U64 = (1 << 64) - 1
 
 CapabilityKind = Literal[
     "llm_client",
@@ -173,9 +174,7 @@ class DistributedToolPolicy:
             disallowed_tools=tuple(disallowed),
             approval=approval,  # type: ignore[arg-type]
             predicate_ref=(
-                CapabilityRef.from_dict(predicate, field_name="tool_policy.predicate_ref")
-                if predicate is not None
-                else None
+                CapabilityRef.from_dict(predicate, field_name="tool_policy.predicate_ref") if predicate is not None else None
             ),
         )
 
@@ -215,9 +214,7 @@ class DistributedCapabilities:
 
     def __post_init__(self) -> None:
         if (self.approval_provider_ref is None) != (self.approval_broker_ref is None):
-            raise DistributedContractError(
-                "approval_provider_ref and approval_broker_ref must be declared together"
-            )
+            raise DistributedContractError("approval_provider_ref and approval_broker_ref must be declared together")
         if self.approval_timeout_seconds is not None and (
             isinstance(self.approval_timeout_seconds, bool)
             or not isinstance(self.approval_timeout_seconds, (int, float))
@@ -254,8 +251,7 @@ class DistributedCapabilities:
             if not isinstance(values, list):
                 raise DistributedContractError(f"capabilities.{key} must be an array")
             return tuple(
-                CapabilityRef.from_dict(value, field_name=f"capabilities.{key}[{index}]")
-                for index, value in enumerate(values)
+                CapabilityRef.from_dict(value, field_name=f"capabilities.{key}[{index}]") for index, value in enumerate(values)
             )
 
         return cls(
@@ -297,9 +293,7 @@ class RuntimeRecipe:
         if not math.isfinite(float(self.timeout_seconds)) or self.timeout_seconds <= 0:
             raise DistributedContractError("runtime_recipe.timeout_seconds must be a finite positive number")
         if self.log_preview_chars is not None and (
-            isinstance(self.log_preview_chars, bool)
-            or not isinstance(self.log_preview_chars, int)
-            or self.log_preview_chars < 0
+            isinstance(self.log_preview_chars, bool) or not isinstance(self.log_preview_chars, int) or self.log_preview_chars < 0
         ):
             raise DistributedContractError("runtime_recipe.log_preview_chars must be a non-negative integer or null")
 
@@ -328,11 +322,7 @@ class RuntimeRecipe:
             workspace=_required_string(payload, "workspace"),
             timeout_seconds=timeout,
             log_preview_chars=log_preview_chars,
-            state_store=(
-                StateStoreSpec.from_dict(payload["state_store"])
-                if payload.get("state_store") is not None
-                else None
-            ),
+            state_store=(StateStoreSpec.from_dict(payload["state_store"]) if payload.get("state_store") is not None else None),
             capabilities=DistributedCapabilities.from_dict(payload.get("capabilities")),
         )
 
@@ -363,12 +353,14 @@ class DistributedRunEnvelope:
             isinstance(self.deadline_unix_ms, bool)
             or not isinstance(self.deadline_unix_ms, int)
             or self.deadline_unix_ms < 0
+            or self.deadline_unix_ms > _MAX_U64
         ):
             raise DistributedContractError("distributed envelope deadline_unix_ms must be a non-negative integer or null")
         if (
             isinstance(self.lease_duration_ms, bool)
             or not isinstance(self.lease_duration_ms, int)
             or self.lease_duration_ms <= 0
+            or self.lease_duration_ms > _MAX_U64
         ):
             raise DistributedContractError("distributed envelope lease_duration_ms must be a positive integer")
 
@@ -481,17 +473,13 @@ class DistributedCapabilityRegistry:
     def resolve(self, kind: CapabilityKind, reference: CapabilityRef) -> Any:
         key = (kind, *reference.key)
         if key not in self._capabilities:
-            raise DistributedCapabilityError(
-                f"unknown distributed capability {kind} {reference.id}@{reference.version}"
-            )
+            raise DistributedCapabilityError(f"unknown distributed capability {kind} {reference.id}@{reference.version}")
         return self._capabilities[key]
 
     def resolve_toolset(self, reference: ToolsetRef) -> ToolRegistry:
         registry = self._toolsets.get(reference.key)
         if registry is None:
-            raise DistributedCapabilityError(
-                f"unknown distributed toolset {reference.id}@{reference.version}"
-            )
+            raise DistributedCapabilityError(f"unknown distributed toolset {reference.id}@{reference.version}")
         actual = toolset_schema_digest(registry)
         if actual != reference.schema_digest:
             raise DistributedCapabilityError(
