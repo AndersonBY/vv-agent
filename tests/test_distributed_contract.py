@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from vv_agent.budget import HostCost, RunBudgetLimits
-from vv_agent.events import RunEvent
+from vv_agent.budget import BudgetEnforcementBoundary, HostCost, RunBudgetLimits
+from vv_agent.events import BudgetExhaustedEvent, BudgetSnapshotEvent, RunEvent
 from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.runtime.backends.celery_tasks import (
@@ -321,11 +321,27 @@ def test_distributed_budget_usage_persists_and_blocks_the_next_worker_cycle(tmp_
     assert second["result"]["completion_reason"] == "budget_exhausted"
     assert second["result"]["budget_exhaustion"]["enforcement_boundary"] == "cycle_start"
     assert model_calls == 1
-    assert [event.type for event in events if event.type.startswith("budget_")] == [
-        "budget_snapshot",
-        "budget_snapshot",
-        "budget_exhausted",
-    ]
+    budget_events = [event for event in events if isinstance(event, (BudgetSnapshotEvent, BudgetExhaustedEvent))]
+    initial, *elapsed_updates, llm_update, exhausted = budget_events
+    assert isinstance(initial, BudgetSnapshotEvent)
+    assert initial.enforcement_boundary is BudgetEnforcementBoundary.RUN_START
+    assert initial.budget_usage.cycles == 0
+    assert initial.budget_usage.total_tokens == 0
+    assert len(elapsed_updates) <= 1
+    assert all(isinstance(event, BudgetSnapshotEvent) for event in elapsed_updates)
+    assert all(event.enforcement_boundary is BudgetEnforcementBoundary.CYCLE_START for event in elapsed_updates)
+    assert all(event.budget_usage.cycles == 0 for event in elapsed_updates)
+    assert all(event.budget_usage.total_tokens == 0 for event in elapsed_updates)
+    assert isinstance(llm_update, BudgetSnapshotEvent)
+    assert llm_update.enforcement_boundary is BudgetEnforcementBoundary.LLM_COMPLETE
+    assert llm_update.budget_usage.cycles == 1
+    assert llm_update.budget_usage.total_tokens == 10
+    assert isinstance(exhausted, BudgetExhaustedEvent)
+    assert exhausted.enforcement_boundary is BudgetEnforcementBoundary.CYCLE_START
+    assert exhausted.budget_usage.cycles == 1
+    assert exhausted.budget_usage.total_tokens == 10
+    elapsed_observations = [event.budget_usage.elapsed_ms for event in budget_events]
+    assert elapsed_observations == sorted(elapsed_observations)
 
 
 def test_distributed_worker_resolves_host_cost_meter_and_reports_overshoot(tmp_path: Path) -> None:
