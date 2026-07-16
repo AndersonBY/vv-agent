@@ -6,7 +6,15 @@ from typing import Any, cast
 
 import pytest
 
-from vv_agent import Agent, RunConfig
+from vv_agent import (
+    Agent,
+    BudgetDimension,
+    BudgetEnforcementBoundary,
+    BudgetExhaustion,
+    BudgetExhaustionReason,
+    BudgetUsageSnapshot,
+    RunConfig,
+)
 from vv_agent.app_server import (
     ApprovalDecision,
     AppServerErrorCode,
@@ -365,6 +373,75 @@ def test_cancelled_turn_projects_as_failed_with_error() -> None:
     assert stored_turn.status == expected["turnStatus"]
     assert stored_turn.result["completionReason"] == expected["completionReason"]
     assert ("error" in stored_turn.result) is (expected["errorField"] == "present")
+
+
+def test_budget_exhaustion_projects_typed_usage_to_turn_and_store() -> None:
+    expected = _status_projection("budget_exhaustion_is_failed_with_typed_observation")
+    processor, transport, store, state = _initialized_processor()
+    thread = store.create_thread(agent_key="default")
+    turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
+    state.subscribe(thread.thread_id, "conn_1")
+    adapter = RunAdapter(
+        host=_ContractHost(),
+        store=store,
+        state_manager=state,
+        router=processor._router,
+    )
+    usage = BudgetUsageSnapshot(cycles=1, total_tokens=12, uncached_input_tokens=12, elapsed_ms=7)
+    exhaustion = BudgetExhaustion(
+        dimension=BudgetDimension.TOTAL_TOKENS,
+        reason=BudgetExhaustionReason.LIMIT_EXCEEDED,
+        limit=10,
+        observed=12,
+        attempted_increment=None,
+        overshoot=2,
+        unit="tokens",
+        enforcement_boundary=BudgetEnforcementBoundary.LLM_COMPLETE,
+    )
+    raw_result = AgentResult(
+        status=AgentStatus.FAILED,
+        messages=[],
+        cycles=[],
+        error="Run budget exhausted.",
+        completion_reason=CompletionReason.BUDGET_EXHAUSTED,
+        partial_output="draft",
+        budget_usage=usage,
+        budget_exhaustion=exhaustion,
+    )
+    result = RunResult(
+        input="run",
+        new_items=[],
+        final_output="Run budget exhausted.",
+        status=AgentStatus.FAILED,
+        raw_result=raw_result,
+        run_id="run_budget",
+        trace_id="trace_budget",
+        agent_name="default",
+    )
+
+    adapter._complete_turn(
+        "conn_1",
+        StartedTurn(thread=thread, turn=turn, handle=cast(RunHandle, object())),
+        result=result,
+        error=None,
+    )
+
+    messages: list[dict[str, Any]] = []
+    while True:
+        message = transport.receive_outbound(timeout=1)
+        messages.append(message)
+        if message.get("method") == "turn/completed":
+            break
+    payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
+    stored_turn = store.read_thread(thread.thread_id).turns[0]
+
+    assert payload["status"] == expected["turnStatus"]
+    assert payload["completionReason"] == expected["completionReason"]
+    assert payload["budgetUsage"] == usage.to_dict()
+    assert payload["budgetExhaustion"] == exhaustion.to_dict()
+    assert ("error" in payload) is (expected["errorField"] == "present")
+    assert stored_turn.result["budgetUsage"] == usage.to_dict()
+    assert stored_turn.result["budgetExhaustion"] == exhaustion.to_dict()
 
 
 def test_shared_fixture_snapshot_nullability_and_restart_recovery(tmp_path: Path) -> None:

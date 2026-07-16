@@ -16,6 +16,7 @@ from threading import Event, Lock, Thread
 from typing import Any
 
 from vv_agent.agent import RunContext
+from vv_agent.budget import BudgetEvaluator, HostCostMeter
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.backends.distributed import (
@@ -25,7 +26,12 @@ from vv_agent.runtime.backends.distributed import (
     RuntimeRecipe,
 )
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.engine import AgentRuntime, register_sub_agent_session, unregister_sub_agent_session
+from vv_agent.runtime.engine import (
+    AgentRuntime,
+    _RunBudgetController,
+    register_sub_agent_session,
+    unregister_sub_agent_session,
+)
 from vv_agent.runtime.state import CheckpointConflictError, _LeaseOperationClock, build_state_store
 from vv_agent.runtime.sub_task_manager import SubTaskManager
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason
@@ -203,7 +209,7 @@ def _resolve_many(
 def _rebuild_runtime(
     recipe: RuntimeRecipe,
     capability_registry: DistributedCapabilityRegistry,
-) -> tuple[AgentRuntime, ExecutionContext, SubTaskManager, ToolPolicy]:
+) -> tuple[AgentRuntime, ExecutionContext, SubTaskManager, ToolPolicy, HostCostMeter | None]:
     """Reconstruct an AgentRuntime from a RuntimeRecipe on the worker."""
     capabilities = recipe.capabilities
     capability_registry.validate(capabilities)
@@ -228,6 +234,13 @@ def _rebuild_runtime(
         if capabilities.event_sink_ref is not None
         else None
     )
+    host_cost_meter = (
+        capability_registry.resolve("host_cost_meter", capabilities.host_cost_meter_ref)
+        if capabilities.host_cost_meter_ref is not None
+        else None
+    )
+    if host_cost_meter is not None and not callable(getattr(host_cost_meter, "read", None)):
+        raise TypeError("distributed host_cost_meter capability must provide read()")
 
     def log_handler(event: str, payload: dict[str, Any]) -> None:
         for observer in observers:
@@ -299,7 +312,7 @@ def _rebuild_runtime(
             unregister_session=unregister_sub_agent_session,
         )
     )
-    return runtime, context, sub_task_manager, tool_policy
+    return runtime, context, sub_task_manager, tool_policy, host_cost_meter
 
 
 def run_single_cycle(
@@ -344,7 +357,7 @@ def run_single_cycle(
         }
     envelope.ensure_not_expired()
     registry = capability_registry or DistributedCapabilityRegistry()
-    runtime, ctx, sub_task_manager, tool_policy = _rebuild_runtime(recipe, registry)
+    runtime, ctx, sub_task_manager, tool_policy, host_cost_meter = _rebuild_runtime(recipe, registry)
     heartbeat_store = _build_state_store(recipe)
     if tool_policy.allowed_tools is None:
         task.metadata.pop("_vv_agent_allowed_tools", None)
@@ -391,6 +404,19 @@ def run_single_cycle(
             ).to_dict(),
         }
 
+    budget_controller: _RunBudgetController | None = None
+    if envelope.budget_limits is not None and envelope.budget_limits.has_limits:
+        budget_controller = _RunBudgetController(
+            evaluator=BudgetEvaluator(
+                envelope.budget_limits,
+                host_cost_meter=host_cost_meter,
+                initial_usage=checkpoint.budget_usage,
+            ),
+            task=task,
+            ctx=ctx,
+            emit_log=runtime._emit_log,
+        )
+
     # Build the cycle executor closure on the worker side.
     workspace_path = Path(recipe.workspace).resolve()
     memory_manager = runtime._build_memory_manager(
@@ -405,6 +431,7 @@ def run_single_cycle(
         before_cycle_messages=None,
         interruption_messages=None,
         sub_task_manager=sub_task_manager,
+        budget_controller=budget_controller,
     )
 
     messages = checkpoint.messages
@@ -420,13 +447,61 @@ def run_single_cycle(
     )
     try:
         heartbeat.start()
-        result = cycle_executor(
-            cycle_index,
-            messages,
-            cycles,
-            shared_state,
-            ctx,
-        )
+        result: AgentResult | None = None
+        if budget_controller is not None and checkpoint.cycle_index == 0:
+            cancelled = bool(ctx.cancellation_token is not None and ctx.cancellation_token.cancelled)
+            if cancelled:
+                result = AgentResult(
+                    status=AgentStatus.FAILED,
+                    completion_reason=CompletionReason.CANCELLED,
+                    messages=messages,
+                    cycles=cycles,
+                    error=ctx.cancellation_token.reason or "Operation was cancelled",
+                    shared_state=shared_state,
+                    budget_usage=budget_controller.snapshot,
+                )
+            else:
+                exhaustion = budget_controller.run_start()
+                if exhaustion is not None:
+                    result = runtime._budget_failure_result(
+                        messages=messages,
+                        cycles=cycles,
+                        shared_state=shared_state,
+                        controller=budget_controller,
+                        exhaustion=exhaustion,
+                    )
+        if result is None:
+            result = cycle_executor(
+                cycle_index,
+                messages,
+                cycles,
+                shared_state,
+                ctx,
+            )
+        if budget_controller is not None and result is not None and budget_controller.exhaustion is None:
+            cancelled = bool(
+                result.status == AgentStatus.FAILED
+                and ctx.cancellation_token is not None
+                and ctx.cancellation_token.cancelled
+            )
+            operation_failed = bool(
+                result.status == AgentStatus.FAILED
+                and result.completion_reason not in {CompletionReason.BUDGET_EXHAUSTED, CompletionReason.CANCELLED}
+            )
+            exhaustion = budget_controller.terminal(
+                suppress_exhaustion=cancelled or operation_failed,
+            )
+            if exhaustion is not None and not cancelled and not operation_failed:
+                result = runtime._budget_failure_result(
+                    messages=messages,
+                    cycles=cycles,
+                    shared_state=shared_state,
+                    controller=budget_controller,
+                    exhaustion=exhaustion,
+                )
+        if budget_controller is not None and result is not None:
+            result.budget_usage = budget_controller.snapshot
+            result.budget_exhaustion = budget_controller.exhaustion
         if result is not None:
             checkpoint.cycle_index = cycle_index
             checkpoint.status = result.status
@@ -434,6 +509,7 @@ def run_single_cycle(
             checkpoint.cycles = result.cycles
             checkpoint.shared_state = result.shared_state
             checkpoint.terminal_result = result
+            checkpoint.budget_usage = result.budget_usage
             expected_revision = checkpoint.revision
             heartbeat.begin_commit()
             if not store.commit_checkpoint(
@@ -456,6 +532,7 @@ def run_single_cycle(
             checkpoint.messages = messages
             checkpoint.cycles = cycles
             checkpoint.shared_state = shared_state
+            checkpoint.budget_usage = budget_controller.snapshot if budget_controller is not None else None
             expected_revision = checkpoint.revision
             heartbeat.begin_commit()
             if not store.commit_checkpoint(

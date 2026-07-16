@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from vv_agent.approval import ApprovalBroker, ApprovalProvider
+from vv_agent.budget import HostCostMeter, RunBudgetLimits
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.context_providers import ContextProvider
 from vv_agent.event_store import RunEventStore
@@ -165,11 +166,19 @@ class RunConfig:
     runtime_log_handler: RuntimeLogHandler | None = None
     runtime_stream_callback: StreamHandler | None = None
     no_tool_policy: NoToolPolicy | None = None
+    budget_limits: RunBudgetLimits | None = None
+    host_cost_meter: HostCostMeter | None = None
 
     def __post_init__(self) -> None:
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
         _validate_bounded_int(self.max_handoffs, "max_handoffs", minimum=0)
         _validate_no_tool_policy(self.no_tool_policy, "RunConfig.no_tool_policy")
+        if self.budget_limits is not None and not isinstance(self.budget_limits, RunBudgetLimits):
+            if not isinstance(self.budget_limits, dict):
+                raise TypeError("RunConfig.budget_limits must be RunBudgetLimits, an object, or None")
+            self.budget_limits = RunBudgetLimits.from_dict(self.budget_limits)
+        if self.host_cost_meter is not None and not callable(getattr(self.host_cost_meter, "read", None)):
+            raise TypeError("RunConfig.host_cost_meter must provide read() or be None")
 
     def with_cancellation_token(self, cancellation_token: CancellationToken) -> RunConfig:
         return replace(self, cancellation_token=cancellation_token)

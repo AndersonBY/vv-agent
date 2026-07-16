@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from vv_agent import Agent, MemorySession, RunConfig, Runner, output_guardrail
+from vv_agent import Agent, MemorySession, RunBudgetLimits, RunConfig, Runner, output_guardrail
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.event_store import RunEventReplayQuery
 from vv_agent.events import RunEvent
@@ -18,7 +18,7 @@ from vv_agent.runtime import CancellationToken
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "runner_terminal_v1.json"
-FIXTURE_SHA256 = "927c76bcb770364314fd42966a942b552ec6f3ccc1afcdcc419c571358ffc3de"
+FIXTURE_SHA256 = "2c6f7e7477d95a817a5fa2df7cf0b11be65e43a67206ff5181b593aec5845593"
 TERMINAL_TYPES = {"run_completed", "run_failed", "run_cancelled"}
 
 
@@ -174,6 +174,48 @@ def test_cancellation_reason_precedes_output_guardrail_failure() -> None:
     assert guardrail_calls == 0
     assert result.events[-1].type == "run_cancelled"
     assert result.events[-1].to_dict()["completion_reason"] == CompletionReason.CANCELLED.value
+
+
+def test_budget_exhaustion_emits_observation_before_the_only_terminal() -> None:
+    expected = _contract()["budget_exhausted"]
+    result = Runner.run_sync(
+        Agent(
+            name="budget-terminal-agent",
+            instructions="Return the scripted draft.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content=expected["partial_output"],
+                        raw={
+                            "usage": {
+                                "prompt_tokens": 12,
+                                "completion_tokens": 0,
+                                "total_tokens": 12,
+                                "prompt_tokens_details": {"cached_tokens": 0},
+                            }
+                        },
+                    )
+                ]
+            ),
+            no_tool_policy="finish",
+        ),
+        "go",
+        run_config=RunConfig(budget_limits=RunBudgetLimits(max_total_tokens=10)),
+    )
+    terminals = [event for event in result.events if event.type in TERMINAL_TYPES]
+
+    assert [event.type for event in result.events[-2:]] == expected["events_tail"]
+    assert len(terminals) == expected["terminal_count"]
+    assert terminals[0].type == expected["terminal"]
+    assert result.status == AgentStatus(expected["status"])
+    assert result.completion_reason == CompletionReason(expected["completion_reason"])
+    assert result.completion_tool_name == expected["completion_tool_name"]
+    assert result.partial_output == expected["partial_output"]
+    assert result.raw_result.error == expected["error"]
+    assert result.budget_usage is not None
+    assert result.budget_exhaustion is not None
+    assert terminals[0].to_dict()["budget_usage"] == result.budget_usage.to_dict()
+    assert terminals[0].to_dict()["budget_exhaustion"] == result.budget_exhaustion.to_dict()
 
 
 def test_event_store_fail_closed_is_a_normal_runner_error() -> None:

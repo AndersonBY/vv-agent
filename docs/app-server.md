@@ -175,6 +175,11 @@ Important notification methods:
 | `thread/closed` | Mark a loaded thread closed after the last subscriber leaves. |
 | `turn/completed` | Mark the turn terminal and persist final output or error. |
 
+When a run budget is configured, `turn/completed` may also contain
+`budgetUsage` and `budgetExhaustion`. A budget stop projects as `status:
+"failed"` with `completionReason: "budget_exhausted"`; it is never reported as
+a successful task completion.
+
 Every item carries `itemId`, `threadId`, `turnId`, `type`, `status`, `payload`,
 `createdAt`, and `updatedAt`.
 

@@ -45,6 +45,7 @@ class SqliteStateStore:
                 ,claimed_cycle INTEGER
                 ,lease_expires_at_ms INTEGER
                 ,terminal_result TEXT
+                ,budget_usage TEXT
             )
             """
         )
@@ -55,6 +56,7 @@ class SqliteStateStore:
             ("claimed_cycle", "INTEGER"),
             ("lease_expires_at_ms", "INTEGER"),
             ("terminal_result", "TEXT"),
+            ("budget_usage", "TEXT"),
         ):
             if name not in columns:
                 self._conn.execute(f"ALTER TABLE checkpoints ADD COLUMN {name} {declaration}")
@@ -68,8 +70,9 @@ class SqliteStateStore:
                 """
                 INSERT OR REPLACE INTO checkpoints
                     (task_id, cycle_index, status, messages, cycles, shared_state,
-                     revision, claim_token, claimed_cycle, lease_expires_at_ms, terminal_result)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     revision, claim_token, claimed_cycle, lease_expires_at_ms, terminal_result,
+                     budget_usage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.task_id,
@@ -87,8 +90,9 @@ class SqliteStateStore:
                 """
                 INSERT OR IGNORE INTO checkpoints
                     (task_id, cycle_index, status, messages, cycles, shared_state,
-                     revision, claim_token, claimed_cycle, lease_expires_at_ms, terminal_result)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     revision, claim_token, claimed_cycle, lease_expires_at_ms, terminal_result,
+                     budget_usage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.task_id,
@@ -103,14 +107,14 @@ class SqliteStateStore:
         payload = checkpoint_from_json(
             checkpoint_to_json(replace(checkpoint, claim_token=None, claimed_cycle=None, lease_expires_at_ms=None))
         )
-        messages_json, cycles_json, shared_json, _, _, _, _, terminal_result = _checkpoint_columns(payload)
+        messages_json, cycles_json, shared_json, _, _, _, _, terminal_result, budget_usage = _checkpoint_columns(payload)
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 """
                 UPDATE checkpoints
                 SET cycle_index = ?, status = ?, messages = ?, cycles = ?, shared_state = ?,
                     revision = ?, claim_token = NULL, claimed_cycle = NULL, lease_expires_at_ms = NULL,
-                    terminal_result = ?
+                    terminal_result = ?, budget_usage = ?
                 WHERE task_id = ? AND revision = ? AND claim_token = ? AND claimed_cycle = ?
                 """,
                 (
@@ -121,6 +125,7 @@ class SqliteStateStore:
                     shared_json,
                     expected_revision + 1,
                     terminal_result,
+                    budget_usage,
                     payload.task_id,
                     expected_revision,
                     claim_token,
@@ -133,14 +138,14 @@ class SqliteStateStore:
         if checkpoint.terminal_result is None:
             raise ValueError("finalized checkpoint must include terminal_result")
         payload = checkpoint_from_json(checkpoint_to_json(checkpoint))
-        messages_json, cycles_json, shared_json, _, _, _, _, terminal_result = _checkpoint_columns(payload)
+        messages_json, cycles_json, shared_json, _, _, _, _, terminal_result, budget_usage = _checkpoint_columns(payload)
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 """
                 UPDATE checkpoints
                 SET cycle_index = ?, status = ?, messages = ?, cycles = ?, shared_state = ?,
                     revision = ?, claim_token = NULL, claimed_cycle = NULL, lease_expires_at_ms = NULL,
-                    terminal_result = ?
+                    terminal_result = ?, budget_usage = ?
                 WHERE task_id = ? AND revision = ? AND claim_token IS NULL AND terminal_result IS NULL
                 """,
                 (
@@ -151,6 +156,7 @@ class SqliteStateStore:
                     shared_json,
                     expected_revision + 1,
                     terminal_result,
+                    budget_usage,
                     payload.task_id,
                     expected_revision,
                 ),
@@ -263,7 +269,7 @@ class SqliteStateStore:
 
 _SELECT_CHECKPOINT = (
     "SELECT task_id, cycle_index, status, messages, cycles, shared_state, "
-    "revision, claim_token, claimed_cycle, lease_expires_at_ms, terminal_result FROM checkpoints"
+    "revision, claim_token, claimed_cycle, lease_expires_at_ms, terminal_result, budget_usage FROM checkpoints"
 )
 
 
@@ -279,6 +285,9 @@ def _checkpoint_columns(checkpoint: Checkpoint) -> tuple[object, ...]:
         full.get("lease_expires_at_ms"),
         json.dumps(full["terminal_result"], ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         if "terminal_result" in full
+        else None,
+        json.dumps(full["budget_usage"], ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        if "budget_usage" in full
         else None,
     )
 
@@ -297,5 +306,6 @@ def _checkpoint_from_row(row: tuple[object, ...]) -> Checkpoint:
             "claimed_cycle": row[8],
             "lease_expires_at_ms": row[9],
             "terminal_result": json.loads(str(row[10])) if row[10] is not None else None,
+            "budget_usage": json.loads(str(row[11])) if row[11] is not None else None,
         }
     )

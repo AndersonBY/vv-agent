@@ -220,8 +220,6 @@ class CycleRunner:
                     )
                 memory_compacted = True
 
-        if ctx is not None:
-            ctx.check_cancelled()
         llm_response = self.hook_manager.apply_after_llm(
             task=task,
             cycle_index=cycle_index,

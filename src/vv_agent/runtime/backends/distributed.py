@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from vv_agent.budget import RunBudgetLimits
 from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.state import StateStoreSpec
 from vv_agent.tools import ToolRegistry, build_default_registry
@@ -28,6 +29,7 @@ CapabilityKind = Literal[
     "approval_broker",
     "cancellation",
     "event_sink",
+    "host_cost_meter",
     "app_state",
     "memory_provider",
     "hook",
@@ -206,6 +208,7 @@ class DistributedCapabilities:
     approval_timeout_seconds: float | None = None
     cancellation_ref: CapabilityRef | None = None
     event_sink_ref: CapabilityRef | None = None
+    host_cost_meter_ref: CapabilityRef | None = None
     app_state_ref: CapabilityRef | None = None
     sub_task_manager_ref: CapabilityRef | None = None
     memory_provider_refs: tuple[CapabilityRef, ...] = ()
@@ -234,6 +237,7 @@ class DistributedCapabilities:
             "approval_timeout_seconds": self.approval_timeout_seconds,
             "cancellation_ref": self.cancellation_ref.to_dict() if self.cancellation_ref else None,
             "event_sink_ref": self.event_sink_ref.to_dict() if self.event_sink_ref else None,
+            "host_cost_meter_ref": self.host_cost_meter_ref.to_dict() if self.host_cost_meter_ref else None,
             "app_state_ref": self.app_state_ref.to_dict() if self.app_state_ref else None,
             "sub_task_manager_ref": self.sub_task_manager_ref.to_dict() if self.sub_task_manager_ref else None,
             "memory_provider_refs": [reference.to_dict() for reference in self.memory_provider_refs],
@@ -264,6 +268,7 @@ class DistributedCapabilities:
             approval_timeout_seconds=payload.get("approval_timeout_seconds"),
             cancellation_ref=_optional_ref(payload, "cancellation_ref"),
             event_sink_ref=_optional_ref(payload, "event_sink_ref"),
+            host_cost_meter_ref=_optional_ref(payload, "host_cost_meter_ref"),
             app_state_ref=_optional_ref(payload, "app_state_ref"),
             sub_task_manager_ref=_optional_ref(payload, "sub_task_manager_ref"),
             memory_provider_refs=refs("memory_provider_refs"),
@@ -337,6 +342,7 @@ class DistributedRunEnvelope:
     cycle_index: int
     idempotency_key: str
     deadline_unix_ms: int | None
+    budget_limits: RunBudgetLimits | None = None
     lease_duration_ms: int = DEFAULT_LEASE_DURATION_MS
     schema_version: str = DISTRIBUTED_RUN_SCHEMA_VERSION
 
@@ -363,6 +369,8 @@ class DistributedRunEnvelope:
             or self.lease_duration_ms > _MAX_U64
         ):
             raise DistributedContractError("distributed envelope lease_duration_ms must be a positive integer")
+        if self.budget_limits is not None and not isinstance(self.budget_limits, RunBudgetLimits):
+            raise DistributedContractError("distributed envelope budget_limits must be an object or null")
 
     @classmethod
     def for_cycle(
@@ -375,6 +383,7 @@ class DistributedRunEnvelope:
         run_id: str | None = None,
         deadline_unix_ms: int | None = None,
         lease_duration_ms: int = DEFAULT_LEASE_DURATION_MS,
+        budget_limits: RunBudgetLimits | None = None,
     ) -> DistributedRunEnvelope:
         effective_run_id = run_id or str(task.metadata.get("_vv_agent_run_id") or task.task_id)
         idempotency_key = f"{effective_run_id}:cycle:{cycle_index}"
@@ -382,6 +391,7 @@ class DistributedRunEnvelope:
             job_id=idempotency_key,
             run_id=effective_run_id,
             task=task,
+            budget_limits=budget_limits,
             recipe=recipe,
             cycle_name=cycle_name,
             cycle_index=cycle_index,
@@ -407,6 +417,7 @@ class DistributedRunEnvelope:
             "job_id": self.job_id,
             "run_id": self.run_id,
             "task": self.task.to_dict(),
+            "budget_limits": self.budget_limits.to_dict() if self.budget_limits is not None else None,
             "recipe": self.recipe.to_dict(),
             "cycle_name": self.cycle_name,
             "cycle_index": self.cycle_index,
@@ -425,11 +436,20 @@ class DistributedRunEnvelope:
         task_payload = payload.get("task")
         if not isinstance(task_payload, Mapping):
             raise DistributedContractError("distributed envelope task must be an object")
+        budget_limits = None
+        if payload.get("budget_limits") is not None:
+            try:
+                budget_limits = RunBudgetLimits.from_dict(payload["budget_limits"])
+            except (TypeError, ValueError) as exc:
+                raise DistributedContractError(
+                    f"distributed envelope budget limit must be between 0 and 9007199254740991: {exc}"
+                ) from exc
         return cls(
             schema_version=schema_version,
             job_id=_required_string(payload, "job_id"),
             run_id=_required_string(payload, "run_id"),
             task=AgentTask.from_dict(dict(task_payload)),
+            budget_limits=budget_limits,
             recipe=RuntimeRecipe.from_dict(payload.get("recipe")),
             cycle_name=_required_string(payload, "cycle_name"),
             cycle_index=payload.get("cycle_index"),
@@ -498,6 +518,7 @@ class DistributedCapabilityRegistry:
             ("approval_broker", capabilities.approval_broker_ref),
             ("cancellation", capabilities.cancellation_ref),
             ("event_sink", capabilities.event_sink_ref),
+            ("host_cost_meter", capabilities.host_cost_meter_ref),
             ("app_state", capabilities.app_state_ref),
             ("sub_task_manager", capabilities.sub_task_manager_ref),
         ):

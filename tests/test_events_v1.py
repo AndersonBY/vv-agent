@@ -34,7 +34,9 @@ from vv_agent import (
 )
 
 PARITY_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1.jsonl"
-PARITY_FIXTURE_SHA256 = "7d0d80a2587f242c2bdc04afc7452a632fab781845f2ea9a63742d2c62a0174e"
+PARITY_FIXTURE_SHA256 = "67751ad33c4705e87477bbe4bdfadd43ea5f674cbfa2ec9073d13600dfd05275"
+BUDGET_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "budget_events_v1.jsonl"
+BUDGET_FIXTURE_SHA256 = "3267292737ac6bf63ec4ee691fe0ef07f3e2cadd5a69098e3e267f4f6b692d2e"
 PARITY_EVENT_TYPES = [
     "run_started",
     "agent_started",
@@ -57,6 +59,8 @@ PARITY_EVENT_TYPES = [
     "run_completed",
     "run_failed",
     "run_cancelled",
+    "budget_snapshot",
+    "budget_exhausted",
 ]
 
 
@@ -289,11 +293,29 @@ def test_run_events_v1_parity_fixture_has_stable_bytes_and_round_trips_compact_w
 
     assert [event.type for event in events] == PARITY_EVENT_TYPES
     for line, event in zip(lines, events, strict=True):
-        assert event.event_id == "evt_parity"
-        assert event.run_id == "run_parity"
-        assert event.trace_id == "trace_parity"
-        assert event.created_at == 123.456789
+        if not event.type.startswith("budget_"):
+            assert event.event_id == "evt_parity"
+            assert event.run_id == "run_parity"
+            assert event.trace_id == "trace_parity"
+            assert event.created_at == 123.456789
         assert json.dumps(event.to_dict(), separators=(",", ":")) == line
+
+
+def test_budget_events_v1_fixture_has_stable_bytes_and_round_trips() -> None:
+    fixture_bytes = BUDGET_FIXTURE.read_bytes()
+    assert hashlib.sha256(fixture_bytes).hexdigest() == BUDGET_FIXTURE_SHA256
+
+    lines = fixture_bytes.decode("ascii").splitlines()
+    events = [event_from_dict(json.loads(line)) for line in lines]
+
+    assert [event.type for event in events] == [
+        "budget_snapshot",
+        "budget_exhausted",
+        "run_failed",
+        "run_completed",
+    ]
+    for line, event in zip(lines, events, strict=True):
+        assert event.to_dict() == json.loads(line)
 
 
 def test_run_event_v1_omits_none_and_empty_metadata() -> None:

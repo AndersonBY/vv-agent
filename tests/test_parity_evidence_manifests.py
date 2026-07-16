@@ -209,6 +209,21 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "python": "vv_agent.ContextProvider",
                 "rust": "vv_agent::ContextProvider",
             },
+            {
+                "id": "run_config.run_budget_limits",
+                "python": "vv_agent.RunBudgetLimits",
+                "rust": "vv_agent::RunBudgetLimits",
+            },
+            {
+                "id": "run_config.host_cost_meter",
+                "python": "vv_agent.HostCostMeter",
+                "rust": "vv_agent::HostCostMeter",
+            },
+            {
+                "id": "run_config.unavailable_metric_policy",
+                "python": "vv_agent.UnavailableMetricPolicy",
+                "rust": "vv_agent::UnavailableMetricPolicy",
+            },
         ],
     },
     {
@@ -256,6 +271,42 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "id": "result.task_token_usage",
                 "python": "vv_agent.TaskTokenUsage",
                 "rust": "vv_agent::TaskTokenUsage",
+            },
+            {"id": "result.host_cost", "python": "vv_agent.HostCost", "rust": "vv_agent::HostCost"},
+            {
+                "id": "result.budget_dimension",
+                "python": "vv_agent.BudgetDimension",
+                "rust": "vv_agent::BudgetDimension",
+            },
+            {
+                "id": "result.budget_enforcement_boundary",
+                "python": "vv_agent.BudgetEnforcementBoundary",
+                "rust": "vv_agent::BudgetEnforcementBoundary",
+            },
+            {
+                "id": "result.budget_exhaustion_reason",
+                "python": "vv_agent.BudgetExhaustionReason",
+                "rust": "vv_agent::BudgetExhaustionReason",
+            },
+            {
+                "id": "result.budget_unavailable_reason",
+                "python": "vv_agent.BudgetUnavailableReason",
+                "rust": "vv_agent::BudgetUnavailableReason",
+            },
+            {
+                "id": "result.budget_unavailable_dimension",
+                "python": "vv_agent.BudgetUnavailableDimension",
+                "rust": "vv_agent::BudgetUnavailableDimension",
+            },
+            {
+                "id": "result.budget_usage_snapshot",
+                "python": "vv_agent.BudgetUsageSnapshot",
+                "rust": "vv_agent::BudgetUsageSnapshot",
+            },
+            {
+                "id": "result.budget_exhaustion",
+                "python": "vv_agent.BudgetExhaustion",
+                "rust": "vv_agent::BudgetExhaustion",
             },
         ],
     },
@@ -909,6 +960,8 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 "model_provider",
                 adaptation="Python's legacy settings adapter carries timeout; Rust's provider/client owns transport timeout.",
             ),
+            _field("budget_limits", "budget_limits", "budget_limits"),
+            _field("host_cost_meter", "host_cost_meter", "host_cost_meter"),
         ],
     },
     {
@@ -938,6 +991,20 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 "partial_output",
                 "partial_output",
                 "partial_output",
+                python_kind="property",
+                rust_kind="method",
+            ),
+            _field(
+                "budget_usage",
+                "budget_usage",
+                "budget_usage",
+                python_kind="property",
+                rust_kind="method",
+            ),
+            _field(
+                "budget_exhaustion",
+                "budget_exhaustion",
+                "budget_exhaustion",
                 python_kind="property",
                 rust_kind="method",
             ),
@@ -1328,6 +1395,12 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
         ],
     },
     {
+        "id": "host_cost_meter",
+        "python_target": "vv_agent.HostCostMeter",
+        "rust_target": "vv_agent::HostCostMeter",
+        "members": [_operation("read", "read", "read")],
+    },
+    {
         "id": "model_provider",
         "python_target": "vv_agent.ModelProvider",
         "rust_target": "vv_agent::ModelProvider",
@@ -1715,7 +1788,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 117
+    assert len(capability_ids) == 128
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -1725,7 +1798,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 216
+        == 221
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

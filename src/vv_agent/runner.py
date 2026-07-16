@@ -12,6 +12,7 @@ from typing import Any, cast
 from vv_agent.agent import Agent, RunContext
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalRequest, bind_request_cancellation
 from vv_agent.background_task import BackgroundAgentTask
+from vv_agent.budget import BudgetEnforcementBoundary, BudgetEvaluator, BudgetUsageSnapshot
 from vv_agent.config import (
     EndpointConfig,
     EndpointOption,
@@ -22,6 +23,8 @@ from vv_agent.config import (
 from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
+    BudgetExhaustedEvent,
+    BudgetSnapshotEvent,
     HandoffCompletedEvent,
     HandoffEvent,
     HandoffStartedEvent,
@@ -78,9 +81,12 @@ _TOOL_POLICY_METADATA_KEYS = (
     "_vv_agent_tool_policy_can_use_tool",
 )
 _PLANNED_TOOL_NAMES_METADATA_KEY = "_vv_agent_planned_tool_names"
+_INITIAL_BUDGET_USAGE_METADATA_KEY = "_vv_agent_initial_budget_usage"
 _RUNTIME_TERMINAL_LOG_EVENTS = frozenset(
     {
         "cycle_failed",
+        "budget_exhausted",
+        "budget_snapshot",
         "run_cancelled",
         "run_completed",
         "run_failed",
@@ -290,6 +296,10 @@ class Runner:
             resume_context.run_config,
             initial_messages=deepcopy(source.raw_result.messages),
             shared_state=deepcopy(source.raw_result.shared_state),
+            metadata=cls._metadata_with_initial_budget_usage(
+                resume_context.run_config.metadata,
+                source.budget_usage,
+            ),
         )
         return resume_context.runner._run(
             resume_context.agent,
@@ -324,6 +334,14 @@ class Runner:
             )
         if not resume_context.claim_approval(approval.interruption_id):
             raise RuntimeError("approval_already_consumed")
+        resumed_run_id = f"run_{uuid.uuid4().hex}"
+        resume_budget_evaluator: BudgetEvaluator | None = None
+        if effective_config.budget_limits is not None and effective_config.budget_limits.has_limits:
+            resume_budget_evaluator = BudgetEvaluator(
+                effective_config.budget_limits,
+                host_cost_meter=effective_config.host_cost_meter,
+                initial_usage=source.budget_usage,
+            )
         call = pending.call
         context = replace(
             pending.context,
@@ -375,7 +393,43 @@ class Runner:
         if effective_config.session is not None:
             effective_config.session.add_items([tool_message])
 
-        if tool_result.directive == ToolDirective.CONTINUE:
+        resume_budget_events: list[RunEvent] = []
+        if resume_budget_evaluator is not None:
+            exhaustion = resume_budget_evaluator.tool_batch_complete()
+            raw_result.budget_usage = resume_budget_evaluator.snapshot()
+            raw_result.budget_exhaustion = exhaustion
+            if exhaustion is not None:
+                raw_result.status = AgentStatus.FAILED
+                raw_result.completion_reason = CompletionReason.BUDGET_EXHAUSTED
+                raw_result.completion_tool_name = None
+                raw_result.partial_output = _last_assistant_output(raw_result.cycles)
+                raw_result.final_answer = None
+                raw_result.wait_reason = None
+                raw_result.error = "Run budget exhausted."
+                budget_event: RunEvent = BudgetExhaustedEvent(
+                    run_id=resumed_run_id,
+                    trace_id=source.trace_id,
+                    agent_name=source.agent_name,
+                    session_id=cls._resolve_event_session_id(effective_config),
+                    cycle_index=approval.cycle_index,
+                    enforcement_boundary=BudgetEnforcementBoundary.TOOL_BATCH_COMPLETE,
+                    budget_usage=raw_result.budget_usage,
+                    budget_exhaustion=exhaustion,
+                )
+            else:
+                budget_event = BudgetSnapshotEvent(
+                    run_id=resumed_run_id,
+                    trace_id=source.trace_id,
+                    agent_name=source.agent_name,
+                    session_id=cls._resolve_event_session_id(effective_config),
+                    cycle_index=approval.cycle_index,
+                    enforcement_boundary=BudgetEnforcementBoundary.TOOL_BATCH_COMPLETE,
+                    budget_usage=raw_result.budget_usage,
+                )
+            resume_budget_events.append(budget_event)
+            cls._emit_chain_event(budget_event, run_config=effective_config, event_sink=None)
+
+        if raw_result.completion_reason != CompletionReason.BUDGET_EXHAUSTED and tool_result.directive == ToolDirective.CONTINUE:
             tracing = dict(resume_context.run_config.tracing) if isinstance(resume_context.run_config.tracing, dict) else {}
             tracing["trace_id"] = source.trace_id
             config = replace(
@@ -383,6 +437,10 @@ class Runner:
                 initial_messages=deepcopy(raw_result.messages),
                 shared_state=deepcopy(raw_result.shared_state),
                 tracing=tracing,
+                metadata=cls._metadata_with_initial_budget_usage(
+                    resume_context.run_config.metadata,
+                    raw_result.budget_usage,
+                ),
             )
             continued = resume_context.runner._run(
                 resume_context.agent,
@@ -395,11 +453,15 @@ class Runner:
                     "approved_interruption_id": approval.interruption_id,
                 }
             )
+            if resume_budget_events:
+                continued.events = [*source.events, *resume_budget_events, *continued.events]
             return continued
 
-        raw_result.completion_tool_name = call.name
-        raw_result.error = None
-        if tool_result.directive == ToolDirective.WAIT_USER:
+        if raw_result.completion_reason == CompletionReason.BUDGET_EXHAUSTED:
+            pass
+        elif tool_result.directive == ToolDirective.WAIT_USER:
+            raw_result.completion_tool_name = call.name
+            raw_result.error = None
             wait_reason = tool_result.metadata.get("question") if isinstance(tool_result.metadata, dict) else None
             if not wait_reason:
                 wait_reason = tool_result.content
@@ -409,6 +471,8 @@ class Runner:
             raw_result.final_answer = None
             raw_result.wait_reason = str(wait_reason)
         else:
+            raw_result.completion_tool_name = call.name
+            raw_result.error = None
             raw_result.status = AgentStatus.COMPLETED
             raw_result.completion_reason = behavior_reason or CompletionReason.TOOL_FINISH
             raw_result.partial_output = None
@@ -432,7 +496,6 @@ class Runner:
             final_output=raw_result.final_answer or raw_result.wait_reason,
             cancellation_token=effective_config.cancellation_token,
         )
-        resumed_run_id = f"run_{uuid.uuid4().hex}"
         terminal_event = cls._terminal_event(
             result=raw_result,
             final_output=final_output,
@@ -457,7 +520,7 @@ class Runner:
             final_output=final_output,
             status=raw_result.status,
             raw_result=raw_result,
-            events=[*source.events, terminal_event],
+            events=[*source.events, *resume_budget_events, terminal_event],
             token_usage=raw_result.token_usage,
             trace_id=source.trace_id,
             run_id=resumed_run_id,
@@ -657,6 +720,8 @@ class Runner:
             sub_task_manager=prefer_run("sub_task_manager"),
             runtime_log_handler=prefer_run("runtime_log_handler"),
             runtime_stream_callback=prefer_run("runtime_stream_callback"),
+            budget_limits=prefer_run("budget_limits"),
+            host_cost_meter=prefer_run("host_cost_meter"),
         )
 
     @classmethod
@@ -732,6 +797,15 @@ class Runner:
                     raise
 
             chain_events.extend(result.events)
+            if _INITIAL_BUDGET_USAGE_METADATA_KEY in base_config.metadata:
+                base_config = replace(
+                    base_config,
+                    metadata={
+                        key: value
+                        for key, value in base_config.metadata.items()
+                        if key != _INITIAL_BUDGET_USAGE_METADATA_KEY
+                    },
+                )
             request = cls._extract_handoff(result)
             if pending is not None:
                 completed = HandoffCompletedEvent(
@@ -890,6 +964,7 @@ class Runner:
         event_session_id = cls._resolve_event_session_id(run_config)
         collected_events: list[RunEvent] = []
         user_input = cls._normalize_input(input)
+        initial_budget_usage = cls._initial_budget_usage(run_config)
 
         def capture_event(event: RunEvent | None) -> None:
             if event is None:
@@ -1027,6 +1102,7 @@ class Runner:
                 run_id=run_id,
             )
         )
+        task.metadata.pop(_INITIAL_BUDGET_USAGE_METADATA_KEY, None)
         policy = run_config.tool_policy
         policy_metadata = _tool_policy_metadata(policy)
         for key in _TOOL_POLICY_METADATA_KEYS:
@@ -1044,6 +1120,7 @@ class Runner:
             else cls._session_initial_messages(run_config)
         )
         runtime_metadata = dict(run_config.metadata)
+        runtime_metadata.pop(_INITIAL_BUDGET_USAGE_METADATA_KEY, None)
         for key in _TOOL_POLICY_METADATA_KEYS:
             runtime_metadata.pop(key, None)
         runtime_metadata.update(policy_metadata)
@@ -1080,6 +1157,9 @@ class Runner:
             before_cycle_messages=run_config.before_cycle_messages,
             interruption_messages=run_config.interruption_messages,
             sub_task_manager=run_config.sub_task_manager,
+            budget_limits=run_config.budget_limits,
+            host_cost_meter=run_config.host_cost_meter,
+            initial_budget_usage=initial_budget_usage,
         )
         final_output = raw_result.final_answer or raw_result.wait_reason or raw_result.error
         final_output, output_coercion_error = cls._postprocess_output(
@@ -1184,7 +1264,7 @@ class Runner:
         cancellation_token: Any | None,
     ) -> tuple[Any, Exception | None]:
         cls._normalize_completion_observation(raw_result, cancellation_token=cancellation_token)
-        if raw_result.completion_reason == CompletionReason.CANCELLED:
+        if raw_result.completion_reason in {CompletionReason.CANCELLED, CompletionReason.BUDGET_EXHAUSTED}:
             return final_output, None
         output_result = cls._apply_output_guardrails(
             agent=agent,
@@ -1246,6 +1326,8 @@ class Runner:
                 reason=result.error or cancellation_token.reason or "run cancelled",
                 completion_reason=CompletionReason.CANCELLED,
                 partial_output=result.partial_output,
+                budget_usage=result.budget_usage,
+                budget_exhaustion=result.budget_exhaustion,
             )
         if result.status in {AgentStatus.FAILED, AgentStatus.MAX_CYCLES}:
             return RunFailedEvent(
@@ -1255,8 +1337,12 @@ class Runner:
                 session_id=session_id,
                 cycle_index=cycle_index,
                 error=result.error or result.status.value,
+                status=(result.status.value if result.budget_usage is not None else None),
                 completion_reason=result.completion_reason,
+                completion_tool_name=result.completion_tool_name,
                 partial_output=result.partial_output,
+                budget_usage=result.budget_usage,
+                budget_exhaustion=result.budget_exhaustion,
             )
         event_output = final_output
         if event_output is not None and not isinstance(event_output, str):
@@ -1277,6 +1363,8 @@ class Runner:
             completion_reason=result.completion_reason,
             completion_tool_name=result.completion_tool_name,
             partial_output=result.partial_output,
+            budget_usage=result.budget_usage,
+            budget_exhaustion=result.budget_exhaustion,
         )
 
     @staticmethod
@@ -1295,7 +1383,8 @@ class Runner:
             result.completion_reason = CompletionReason.MAX_CYCLES
             result.completion_tool_name = None
         elif result.status == AgentStatus.FAILED:
-            result.completion_reason = CompletionReason.FAILED
+            if result.completion_reason != CompletionReason.BUDGET_EXHAUSTED:
+                result.completion_reason = CompletionReason.FAILED
             result.completion_tool_name = None
 
         if result.status == AgentStatus.COMPLETED:
@@ -1968,6 +2057,12 @@ class Runner:
             runtime_log_handler=None,
             runtime_stream_callback=None,
             cancellation_token=cancellation_token,
+            host_cost_meter=None,
+            metadata={
+                key: value
+                for key, value in parent_config.metadata.items()
+                if key != _INITIAL_BUDGET_USAGE_METADATA_KEY
+            },
         )
 
     @staticmethod
@@ -2029,6 +2124,29 @@ class Runner:
     @staticmethod
     def _normalize_input(input: str) -> str:
         return str(input)
+
+    @staticmethod
+    def _initial_budget_usage(run_config: RunConfig) -> BudgetUsageSnapshot | None:
+        value = run_config.metadata.get(_INITIAL_BUDGET_USAGE_METADATA_KEY)
+        if value is None:
+            return None
+        if isinstance(value, BudgetUsageSnapshot):
+            return value
+        if isinstance(value, dict):
+            return BudgetUsageSnapshot.from_dict(value)
+        raise TypeError(f"RunConfig.metadata[{_INITIAL_BUDGET_USAGE_METADATA_KEY!r}] must be an object")
+
+    @staticmethod
+    def _metadata_with_initial_budget_usage(
+        metadata: dict[str, Any],
+        usage: BudgetUsageSnapshot | None,
+    ) -> dict[str, Any]:
+        merged = dict(metadata)
+        if usage is None:
+            merged.pop(_INITIAL_BUDGET_USAGE_METADATA_KEY, None)
+        else:
+            merged[_INITIAL_BUDGET_USAGE_METADATA_KEY] = usage.to_dict()
+        return merged
 
     @staticmethod
     def _resolve_workspace(workspace: Any | None) -> Path | None:
