@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
+from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
 from vv_agent.events import RunEvent
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason, Message, TaskTokenUsage, ToolCall
 
@@ -116,6 +117,14 @@ class RunResult:
         return self.raw_result.partial_output
 
     @property
+    def budget_usage(self) -> BudgetUsageSnapshot | None:
+        return self.raw_result.budget_usage
+
+    @property
+    def budget_exhaustion(self) -> BudgetExhaustion | None:
+        return self.raw_result.budget_exhaustion
+
+    @property
     def approvals(self) -> tuple[ApprovalSnapshot, ...]:
         return self.approval_snapshot()
 
@@ -134,6 +143,8 @@ class RunResult:
             "completion_reason": self.completion_reason.value if self.completion_reason is not None else None,
             "completion_tool_name": self.completion_tool_name,
             "partial_output": self.partial_output,
+            "budget_usage": self.budget_usage.to_dict() if self.budget_usage is not None else None,
+            "budget_exhaustion": self.budget_exhaustion.to_dict() if self.budget_exhaustion is not None else None,
             "events": [event.to_dict() for event in self.events],
             "token_usage": self.token_usage.to_dict(),
             "trace_id": self.trace_id,

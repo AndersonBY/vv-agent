@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from threading import RLock
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from vv_agent.budget import BudgetUsageSnapshot
 from vv_agent.types import AgentResult, AgentStatus, CycleRecord, Message
 
 
@@ -22,6 +23,7 @@ class Checkpoint:
     claimed_cycle: int | None = None
     lease_expires_at_ms: int | None = None
     terminal_result: AgentResult | None = None
+    budget_usage: BudgetUsageSnapshot | None = None
 
 
 class CheckpointConflictError(RuntimeError):

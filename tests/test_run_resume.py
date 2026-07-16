@@ -13,6 +13,7 @@ from vv_agent import (
     ApprovalRequestedEvent,
     GuardrailResult,
     MemorySession,
+    RunBudgetLimits,
     RunConfig,
     Runner,
     ToolContext,
@@ -105,6 +106,63 @@ def test_interrupted_result_snapshot_and_runner_resume_execute_approved_call_onc
     assert resumed.final_output == "deleted danger.txt"
     assert executions == ["danger.txt"]
     assert llm_calls == 1
+
+
+def test_approval_resume_preserves_budget_usage_without_reserving_the_tool_twice(tmp_path: Path) -> None:
+    executions: list[str] = []
+
+    @function_tool(needs_approval=True)
+    def delete_file(path: str) -> str:
+        executions.append(path)
+        return f"deleted {path}"
+
+    interrupted = Runner.run_sync(
+        Agent(
+            name="budgeted-approver",
+            instructions="Delete after approval.",
+            model=ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="delete",
+                        tool_calls=[ToolCall(id="delete-budget", name="delete_file", arguments={"path": "x.txt"})],
+                        raw={
+                            "usage": {
+                                "prompt_tokens": 6,
+                                "completion_tokens": 2,
+                                "total_tokens": 8,
+                                "prompt_tokens_details": {"cached_tokens": 0},
+                            }
+                        },
+                    )
+                ]
+            ),
+            tools=[delete_file],
+            tool_use_behavior="stop_on_first_tool",
+        ),
+        "delete x.txt",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            budget_limits=RunBudgetLimits(max_total_tokens=20, max_tool_calls=1),
+        ),
+    )
+    assert interrupted.status == AgentStatus.WAIT_USER
+    assert interrupted.budget_usage is not None
+    source_usage = interrupted.budget_usage
+    assert source_usage.cycles == 1
+    assert source_usage.total_tokens == 8
+    assert source_usage.tool_calls == 1
+
+    state = interrupted.into_state()
+    state.approve(state.pending_approval_ids()[0])
+    resumed = Runner.resume(state)
+
+    assert resumed.status == AgentStatus.COMPLETED
+    assert executions == ["x.txt"]
+    assert resumed.budget_usage is not None
+    assert resumed.budget_usage.cycles == 1
+    assert resumed.budget_usage.total_tokens == 8
+    assert resumed.budget_usage.tool_calls == 1
+    assert resumed.budget_usage.elapsed_ms >= source_usage.elapsed_ms
 
 
 def test_approved_continue_tool_returns_to_the_model_loop(tmp_path: Path) -> None:

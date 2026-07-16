@@ -149,6 +149,14 @@ class RunAdapter:
                 "tokenUsage": token_usage,
             }
             stored_result: dict[str, Any] = {"tokenUsage": token_usage}
+            if result.budget_usage is not None:
+                budget_usage = result.budget_usage.to_dict()
+                payload["budgetUsage"] = budget_usage
+                stored_result["budgetUsage"] = budget_usage
+            if result.budget_exhaustion is not None:
+                budget_exhaustion = result.budget_exhaustion.to_dict()
+                payload["budgetExhaustion"] = budget_exhaustion
+                stored_result["budgetExhaustion"] = budget_exhaustion
             if result.completion_reason is not None:
                 payload["completionReason"] = result.completion_reason.value
                 stored_result["completionReason"] = result.completion_reason.value

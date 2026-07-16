@@ -98,7 +98,9 @@
       "completionToolName",
       "partialOutput",
       "error",
-      "tokenUsage"
+      "tokenUsage",
+      "budgetUsage",
+      "budgetExhaustion"
     ],
     "completionReasonValues": [
       "tool_finish",
@@ -125,6 +127,15 @@
         "turnStatus": "failed",
         "completionReason": "cancelled",
         "errorField": "present"
+      },
+      {
+        "name": "budget_exhaustion_is_failed_with_typed_observation",
+        "agentStatus": "failed",
+        "turnStatus": "failed",
+        "completionReason": "budget_exhausted",
+        "errorField": "present",
+        "budgetUsageField": "present",
+        "budgetExhaustionField": "present"
       }
     ]
   },

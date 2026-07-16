@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, cast
 
+from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
 from vv_agent.model_settings import ModelSettings
 
 Role = Literal["system", "user", "assistant", "tool"]
@@ -855,6 +856,8 @@ class AgentResult:
     completion_reason: CompletionReason | None = None
     completion_tool_name: str | None = None
     partial_output: str | None = None
+    budget_usage: BudgetUsageSnapshot | None = None
+    budget_exhaustion: BudgetExhaustion | None = None
 
     @property
     def todo_list(self) -> list[dict[str, Any]]:
@@ -864,7 +867,7 @@ class AgentResult:
         return []
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "status": self.status.value,
             "completion_reason": self.completion_reason.value if self.completion_reason is not None else None,
             "completion_tool_name": self.completion_tool_name,
@@ -877,6 +880,11 @@ class AgentResult:
             "shared_state": self.shared_state,
             "token_usage": self.token_usage.to_dict(),
         }
+        if self.budget_usage is not None:
+            payload["budget_usage"] = self.budget_usage.to_dict()
+        if self.budget_exhaustion is not None:
+            payload["budget_exhaustion"] = self.budget_exhaustion.to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentResult:
@@ -893,6 +901,12 @@ class AgentResult:
         partial_output = data.get("partial_output")
         if partial_output is not None and not isinstance(partial_output, str):
             raise TypeError("AgentResult field 'partial_output' must be a string or None")
+        budget_usage_raw = data.get("budget_usage")
+        if budget_usage_raw is not None and not isinstance(budget_usage_raw, dict):
+            raise TypeError("AgentResult field 'budget_usage' must be an object or None")
+        budget_exhaustion_raw = data.get("budget_exhaustion")
+        if budget_exhaustion_raw is not None and not isinstance(budget_exhaustion_raw, dict):
+            raise TypeError("AgentResult field 'budget_exhaustion' must be an object or None")
         return cls(
             status=AgentStatus(data["status"]),
             completion_reason=(CompletionReason(completion_reason_raw) if completion_reason_raw is not None else None),
@@ -905,4 +919,8 @@ class AgentResult:
             error=data.get("error"),
             shared_state=data.get("shared_state", {}),
             token_usage=token_usage,
+            budget_usage=(BudgetUsageSnapshot.from_dict(budget_usage_raw) if budget_usage_raw is not None else None),
+            budget_exhaustion=(
+                BudgetExhaustion.from_dict(budget_exhaustion_raw) if budget_exhaustion_raw is not None else None
+            ),
         )

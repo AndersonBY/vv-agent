@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, Literal, cast
 
+from vv_agent.budget import (
+    BudgetDimension,
+    BudgetEnforcementBoundary,
+    BudgetExhaustion,
+    BudgetExhaustionReason,
+    BudgetUsageSnapshot,
+)
 from vv_agent.types import CompletionReason
 
 RUN_EVENT_VERSION = "v1"
@@ -30,6 +37,22 @@ def _completion_text(value: Any, field_name: str) -> str | None:
     if not isinstance(value, str):
         raise ValueError(f"Run event {field_name} must be a string or null")
     return value
+
+
+def _budget_usage(value: Any) -> BudgetUsageSnapshot | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("Run event budget_usage must be an object or null")
+    return BudgetUsageSnapshot.from_dict(value)
+
+
+def _budget_exhaustion(value: Any) -> BudgetExhaustion | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("Run event budget_exhaustion must be an object or null")
+    return BudgetExhaustion.from_dict(value)
 
 
 def new_event_id() -> str:
@@ -834,6 +857,8 @@ class SubRunCompletedEvent(RunEvent):
     completion_tool_name: str | None = None
     partial_output: str | None = None
     token_usage: dict[str, Any] | None = None
+    budget_usage: BudgetUsageSnapshot | None = None
+    budget_exhaustion: BudgetExhaustion | None = None
 
     def __init__(
         self,
@@ -852,6 +877,8 @@ class SubRunCompletedEvent(RunEvent):
         completion_tool_name: str | None = None,
         partial_output: str | None = None,
         token_usage: dict[str, Any] | None = None,
+        budget_usage: BudgetUsageSnapshot | None = None,
+        budget_exhaustion: BudgetExhaustion | None = None,
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
@@ -883,6 +910,8 @@ class SubRunCompletedEvent(RunEvent):
         object.__setattr__(self, "completion_tool_name", completion_tool_name)
         object.__setattr__(self, "partial_output", partial_output)
         object.__setattr__(self, "token_usage", dict(token_usage) if token_usage is not None else None)
+        object.__setattr__(self, "budget_usage", budget_usage)
+        object.__setattr__(self, "budget_exhaustion", budget_exhaustion)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -900,12 +929,16 @@ class SubRunCompletedEvent(RunEvent):
             payload["error"] = self.error
         if self.completion_reason is not None:
             payload["completion_reason"] = self.completion_reason.value
-        if self.completion_tool_name is not None:
+        if self.completion_tool_name is not None or self.budget_usage is not None:
             payload["completion_tool_name"] = self.completion_tool_name
-        if self.partial_output is not None:
+        if self.partial_output is not None or self.budget_usage is not None:
             payload["partial_output"] = self.partial_output
         if self.token_usage is not None:
             payload["token_usage"] = dict(self.token_usage)
+        if self.budget_usage is not None:
+            payload["budget_usage"] = self.budget_usage.to_dict()
+        if self.budget_exhaustion is not None:
+            payload["budget_exhaustion"] = self.budget_exhaustion.to_dict()
         return payload
 
 
@@ -1061,12 +1094,127 @@ class SessionPersistedEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class BudgetSnapshotEvent(RunEvent):
+    enforcement_boundary: BudgetEnforcementBoundary = BudgetEnforcementBoundary.RUN_START
+    budget_usage: BudgetUsageSnapshot = field(default_factory=BudgetUsageSnapshot)
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        enforcement_boundary: BudgetEnforcementBoundary,
+        budget_usage: BudgetUsageSnapshot,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="budget_snapshot",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "enforcement_boundary", BudgetEnforcementBoundary(enforcement_boundary))
+        if not isinstance(budget_usage, BudgetUsageSnapshot):
+            raise TypeError("BudgetSnapshotEvent.budget_usage must be a BudgetUsageSnapshot")
+        object.__setattr__(self, "budget_usage", budget_usage)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["enforcement_boundary"] = self.enforcement_boundary.value
+        payload["budget_usage"] = self.budget_usage.to_dict()
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetExhaustedEvent(RunEvent):
+    enforcement_boundary: BudgetEnforcementBoundary = BudgetEnforcementBoundary.RUN_START
+    budget_usage: BudgetUsageSnapshot = field(default_factory=BudgetUsageSnapshot)
+    budget_exhaustion: BudgetExhaustion = field(
+        default_factory=lambda: BudgetExhaustion(
+            dimension=BudgetDimension.WALL_TIME,
+            reason=BudgetExhaustionReason.LIMIT_REACHED,
+            limit=0,
+            observed=0,
+            attempted_increment=None,
+            overshoot=0,
+            unit="milliseconds",
+            enforcement_boundary=BudgetEnforcementBoundary.RUN_START,
+        )
+    )
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        enforcement_boundary: BudgetEnforcementBoundary,
+        budget_usage: BudgetUsageSnapshot,
+        budget_exhaustion: BudgetExhaustion,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="budget_exhausted",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "enforcement_boundary", BudgetEnforcementBoundary(enforcement_boundary))
+        if not isinstance(budget_usage, BudgetUsageSnapshot):
+            raise TypeError("BudgetExhaustedEvent.budget_usage must be a BudgetUsageSnapshot")
+        if not isinstance(budget_exhaustion, BudgetExhaustion):
+            raise TypeError("BudgetExhaustedEvent.budget_exhaustion must be a BudgetExhaustion")
+        if budget_exhaustion.enforcement_boundary is not self.enforcement_boundary:
+            raise ValueError("BudgetExhaustedEvent boundaries must match")
+        object.__setattr__(self, "budget_usage", budget_usage)
+        object.__setattr__(self, "budget_exhaustion", budget_exhaustion)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["enforcement_boundary"] = self.enforcement_boundary.value
+        payload["budget_usage"] = self.budget_usage.to_dict()
+        payload["budget_exhaustion"] = self.budget_exhaustion.to_dict()
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class RunCompletedEvent(RunEvent):
     final_output: str | None = None
     status: str = ""
     completion_reason: CompletionReason | None = None
     completion_tool_name: str | None = None
     partial_output: str | None = None
+    budget_usage: BudgetUsageSnapshot | None = None
+    budget_exhaustion: BudgetExhaustion | None = None
 
     def __init__(
         self,
@@ -1078,6 +1226,8 @@ class RunCompletedEvent(RunEvent):
         completion_reason: CompletionReason | None = None,
         completion_tool_name: str | None = None,
         partial_output: str | None = None,
+        budget_usage: BudgetUsageSnapshot | None = None,
+        budget_exhaustion: BudgetExhaustion | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1106,6 +1256,8 @@ class RunCompletedEvent(RunEvent):
         object.__setattr__(self, "completion_reason", completion_reason)
         object.__setattr__(self, "completion_tool_name", completion_tool_name)
         object.__setattr__(self, "partial_output", partial_output)
+        object.__setattr__(self, "budget_usage", budget_usage)
+        object.__setattr__(self, "budget_exhaustion", budget_exhaustion)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -1113,18 +1265,26 @@ class RunCompletedEvent(RunEvent):
         payload["status"] = self.status
         if self.completion_reason is not None:
             payload["completion_reason"] = self.completion_reason.value
-        if self.completion_tool_name is not None:
+        if self.completion_tool_name is not None or self.budget_usage is not None:
             payload["completion_tool_name"] = self.completion_tool_name
-        if self.partial_output is not None:
+        if self.partial_output is not None or self.budget_usage is not None:
             payload["partial_output"] = self.partial_output
+        if self.budget_usage is not None:
+            payload["budget_usage"] = self.budget_usage.to_dict()
+        if self.budget_exhaustion is not None:
+            payload["budget_exhaustion"] = self.budget_exhaustion.to_dict()
         return payload
 
 
 @dataclass(frozen=True, slots=True)
 class RunFailedEvent(RunEvent):
     error: str = ""
+    status: str | None = None
     completion_reason: CompletionReason | None = None
+    completion_tool_name: str | None = None
     partial_output: str | None = None
+    budget_usage: BudgetUsageSnapshot | None = None
+    budget_exhaustion: BudgetExhaustion | None = None
 
     def __init__(
         self,
@@ -1132,8 +1292,12 @@ class RunFailedEvent(RunEvent):
         run_id: str,
         trace_id: str,
         error: str,
+        status: str | None = None,
         completion_reason: CompletionReason | None = None,
+        completion_tool_name: str | None = None,
         partial_output: str | None = None,
+        budget_usage: BudgetUsageSnapshot | None = None,
+        budget_exhaustion: BudgetExhaustion | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1158,16 +1322,28 @@ class RunFailedEvent(RunEvent):
             metadata=metadata,
         )
         object.__setattr__(self, "error", error)
+        object.__setattr__(self, "status", status)
         object.__setattr__(self, "completion_reason", completion_reason)
+        object.__setattr__(self, "completion_tool_name", completion_tool_name)
         object.__setattr__(self, "partial_output", partial_output)
+        object.__setattr__(self, "budget_usage", budget_usage)
+        object.__setattr__(self, "budget_exhaustion", budget_exhaustion)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["error"] = self.error
+        if self.status is not None:
+            payload["status"] = self.status
         if self.completion_reason is not None:
             payload["completion_reason"] = self.completion_reason.value
-        if self.partial_output is not None:
+        if self.completion_tool_name is not None or self.budget_usage is not None:
+            payload["completion_tool_name"] = self.completion_tool_name
+        if self.partial_output is not None or self.budget_usage is not None:
             payload["partial_output"] = self.partial_output
+        if self.budget_usage is not None:
+            payload["budget_usage"] = self.budget_usage.to_dict()
+        if self.budget_exhaustion is not None:
+            payload["budget_exhaustion"] = self.budget_exhaustion.to_dict()
         return payload
 
 
@@ -1176,6 +1352,8 @@ class RunCancelledEvent(RunEvent):
     reason: str = ""
     completion_reason: CompletionReason | None = None
     partial_output: str | None = None
+    budget_usage: BudgetUsageSnapshot | None = None
+    budget_exhaustion: BudgetExhaustion | None = None
 
     def __init__(
         self,
@@ -1185,6 +1363,8 @@ class RunCancelledEvent(RunEvent):
         reason: str,
         completion_reason: CompletionReason | None = None,
         partial_output: str | None = None,
+        budget_usage: BudgetUsageSnapshot | None = None,
+        budget_exhaustion: BudgetExhaustion | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1211,6 +1391,8 @@ class RunCancelledEvent(RunEvent):
         object.__setattr__(self, "reason", reason)
         object.__setattr__(self, "completion_reason", completion_reason)
         object.__setattr__(self, "partial_output", partial_output)
+        object.__setattr__(self, "budget_usage", budget_usage)
+        object.__setattr__(self, "budget_exhaustion", budget_exhaustion)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -1219,6 +1401,10 @@ class RunCancelledEvent(RunEvent):
             payload["completion_reason"] = self.completion_reason.value
         if self.partial_output is not None:
             payload["partial_output"] = self.partial_output
+        if self.budget_usage is not None:
+            payload["budget_usage"] = self.budget_usage.to_dict()
+        if self.budget_exhaustion is not None:
+            payload["budget_exhaustion"] = self.budget_exhaustion.to_dict()
         return payload
 
 
@@ -1286,6 +1472,21 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
     _completion_reason(payload.get("completion_reason"))
     _completion_text(payload.get("completion_tool_name"), "completion_tool_name")
     _completion_text(payload.get("partial_output"), "partial_output")
+    budget_usage = _budget_usage(payload.get("budget_usage"))
+    budget_exhaustion = _budget_exhaustion(payload.get("budget_exhaustion"))
+    if payload["type"] in {"budget_snapshot", "budget_exhausted"}:
+        boundary_raw = payload.get("enforcement_boundary")
+        try:
+            boundary = BudgetEnforcementBoundary(boundary_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Unsupported budget enforcement boundary: {boundary_raw!r}") from exc
+        if budget_usage is None:
+            raise ValueError(f"Run event {payload['type']} requires budget_usage")
+        if payload["type"] == "budget_exhausted":
+            if budget_exhaustion is None:
+                raise ValueError("Run event budget_exhausted requires budget_exhaustion")
+            if budget_exhaustion.enforcement_boundary is not boundary:
+                raise ValueError("Run event budget exhaustion boundaries must match")
 
 
 def event_from_dict(payload: dict[str, Any]) -> RunEvent:
@@ -1403,6 +1604,8 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             token_usage=token_usage if isinstance(token_usage, dict) else None,
+            budget_usage=_budget_usage(payload.get("budget_usage")),
+            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             **common,
         )
     if event_type == "handoff_started":
@@ -1442,6 +1645,19 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "session_persisted":
         return SessionPersistedEvent(**_with_cycle_and_agent(payload, common))
+    if event_type == "budget_snapshot":
+        return BudgetSnapshotEvent(
+            enforcement_boundary=BudgetEnforcementBoundary(payload.get("enforcement_boundary")),
+            budget_usage=cast(BudgetUsageSnapshot, _budget_usage(payload.get("budget_usage"))),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "budget_exhausted":
+        return BudgetExhaustedEvent(
+            enforcement_boundary=BudgetEnforcementBoundary(payload.get("enforcement_boundary")),
+            budget_usage=cast(BudgetUsageSnapshot, _budget_usage(payload.get("budget_usage"))),
+            budget_exhaustion=cast(BudgetExhaustion, _budget_exhaustion(payload.get("budget_exhaustion"))),
+            **_with_cycle_and_agent(payload, common),
+        )
     if event_type == "run_completed":
         final_output = payload.get("final_output")
         return RunCompletedEvent(
@@ -1450,13 +1666,19 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             completion_reason=_completion_reason(payload.get("completion_reason")),
             completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
+            budget_usage=_budget_usage(payload.get("budget_usage")),
+            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "run_failed":
         return RunFailedEvent(
             error=str(payload.get("error") or ""),
+            status=(str(payload["status"]) if payload.get("status") is not None else None),
             completion_reason=_completion_reason(payload.get("completion_reason")),
+            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
+            budget_usage=_budget_usage(payload.get("budget_usage")),
+            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "run_cancelled":
@@ -1464,6 +1686,8 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             reason=str(payload.get("reason") or ""),
             completion_reason=_completion_reason(payload.get("completion_reason")),
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
+            budget_usage=_budget_usage(payload.get("budget_usage")),
+            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             **_with_cycle_and_agent(payload, common),
         )
 
@@ -1691,6 +1915,34 @@ def event_from_runtime_log(
             cycle_index=cycle_index,
             metadata=dict(payload),
         )
+    if event == "budget_snapshot":
+        usage = _budget_usage(payload.get("budget_usage"))
+        if usage is None:
+            raise ValueError("budget_snapshot runtime log requires budget_usage")
+        return BudgetSnapshotEvent(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            cycle_index=cycle_index,
+            enforcement_boundary=BudgetEnforcementBoundary(payload.get("enforcement_boundary")),
+            budget_usage=usage,
+        )
+    if event == "budget_exhausted":
+        usage = _budget_usage(payload.get("budget_usage"))
+        exhaustion = _budget_exhaustion(payload.get("budget_exhaustion"))
+        if usage is None or exhaustion is None:
+            raise ValueError("budget_exhausted runtime log requires budget usage and exhaustion")
+        return BudgetExhaustedEvent(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            cycle_index=cycle_index,
+            enforcement_boundary=BudgetEnforcementBoundary(payload.get("enforcement_boundary")),
+            budget_usage=usage,
+            budget_exhaustion=exhaustion,
+        )
     if event == "run_completed":
         return RunCompletedEvent(
             run_id=run_id,
@@ -1703,6 +1955,8 @@ def event_from_runtime_log(
             completion_reason=_completion_reason(payload.get("completion_reason")),
             completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
+            budget_usage=_budget_usage(payload.get("budget_usage")),
+            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             metadata=dict(payload),
         )
     if event == "run_wait_user":
@@ -1717,6 +1971,8 @@ def event_from_runtime_log(
             completion_reason=_completion_reason(payload.get("completion_reason")) or CompletionReason.WAIT_USER,
             completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
+            budget_usage=_budget_usage(payload.get("budget_usage")),
+            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             metadata=dict(payload),
         )
     if event in {"run_failed", "run_max_cycles"}:
@@ -1727,11 +1983,15 @@ def event_from_runtime_log(
             session_id=session_id,
             cycle_index=cycle_index,
             error=str(payload.get("error") or event),
+            status=(str(payload["status"]) if payload.get("status") is not None else None),
             completion_reason=(
                 _completion_reason(payload.get("completion_reason"))
                 or (CompletionReason.MAX_CYCLES if event == "run_max_cycles" else CompletionReason.FAILED)
             ),
+            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
+            budget_usage=_budget_usage(payload.get("budget_usage")),
+            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             metadata=dict(payload),
         )
     if event == "run_cancelled":
@@ -1744,6 +2004,8 @@ def event_from_runtime_log(
             reason=str(payload.get("reason") or payload.get("error") or "run cancelled"),
             completion_reason=_completion_reason(payload.get("completion_reason")) or CompletionReason.CANCELLED,
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
+            budget_usage=_budget_usage(payload.get("budget_usage")),
+            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
             metadata=dict(payload),
         )
     return None

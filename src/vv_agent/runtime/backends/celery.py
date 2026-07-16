@@ -20,6 +20,7 @@ from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
+from vv_agent.budget import BudgetUsageSnapshot, RunBudgetLimits
 from vv_agent.runtime.backends.base import CycleExecutor
 from vv_agent.runtime.backends.distributed import (
     DEFAULT_CYCLE_NAME,
@@ -85,6 +86,10 @@ class CeleryBackend:
             raise ValueError("lease_duration_ms must be a positive integer")
         self.dispatch_timeout_seconds = float(dispatch_timeout_seconds)
         self.lease_duration_ms = lease_duration_ms
+
+    @property
+    def manages_run_budget(self) -> bool:
+        return self.runtime_recipe is not None
 
     def execute(
         self,
@@ -182,6 +187,16 @@ class CeleryBackend:
     ) -> AgentResult:
         assert self.runtime_recipe is not None
 
+        budget_limits: RunBudgetLimits | None = None
+        initial_budget_usage: BudgetUsageSnapshot | None = None
+        if ctx is not None:
+            candidate_limits = ctx.metadata.get("_vv_agent_budget_limits")
+            if isinstance(candidate_limits, RunBudgetLimits):
+                budget_limits = candidate_limits
+            candidate_usage = ctx.metadata.get("_vv_agent_initial_budget_usage")
+            if isinstance(candidate_usage, BudgetUsageSnapshot):
+                initial_budget_usage = candidate_usage
+
         initial_checkpoint = Checkpoint(
             task_id=task.task_id,
             cycle_index=0,
@@ -189,6 +204,7 @@ class CeleryBackend:
             messages=initial_messages,
             cycles=[],
             shared_state=shared_state,
+            budget_usage=initial_budget_usage,
         )
         try:
             store_spec = self.state_store.state_store_spec()
@@ -252,6 +268,7 @@ class CeleryBackend:
             max_cycles=max_cycles,
             recipe=recipe,
             checkpoint=checkpoint,
+            budget_limits=budget_limits,
         )
 
     def _distributed_loop(
@@ -262,6 +279,7 @@ class CeleryBackend:
         max_cycles: int,
         recipe: RuntimeRecipe,
         checkpoint: Checkpoint,
+        budget_limits: RunBudgetLimits | None,
     ) -> AgentResult:
         for cycle_index in range(checkpoint.cycle_index + 1, max_cycles + 1):
             cancellation_reason = self._cancellation_reason(ctx)
@@ -282,6 +300,7 @@ class CeleryBackend:
                     cycle_name=DEFAULT_CYCLE_NAME,
                     deadline_unix_ms=now_ms + int(self.dispatch_timeout_seconds * 1000),
                     lease_duration_ms=self.lease_duration_ms,
+                    budget_limits=budget_limits,
                 )
                 async_result = self.celery_app.send_task(
                     self.cycle_task_name,
@@ -622,6 +641,7 @@ class CeleryBackend:
             cycles=result.cycles,
             shared_state=result.shared_state,
             terminal_result=result,
+            budget_usage=result.budget_usage,
         )
         expected_revision = checkpoint.revision
         try:
@@ -733,6 +753,7 @@ class CeleryBackend:
             and checkpoint.messages == result.messages
             and checkpoint.cycles == result.cycles
             and checkpoint.shared_state == result.shared_state
+            and checkpoint.budget_usage == result.budget_usage
         )
 
     @staticmethod
@@ -746,6 +767,7 @@ class CeleryBackend:
             error=error,
             shared_state=checkpoint.shared_state,
             token_usage=summarize_task_token_usage(checkpoint.cycles),
+            budget_usage=checkpoint.budget_usage,
         )
 
     @staticmethod
@@ -759,6 +781,7 @@ class CeleryBackend:
             error=error,
             shared_state=checkpoint.shared_state,
             token_usage=summarize_task_token_usage(checkpoint.cycles),
+            budget_usage=checkpoint.budget_usage,
         )
 
     @staticmethod
@@ -772,6 +795,7 @@ class CeleryBackend:
             final_answer="Reached max cycles without finish signal.",
             shared_state=checkpoint.shared_state,
             token_usage=summarize_task_token_usage(checkpoint.cycles),
+            budget_usage=checkpoint.budget_usage,
         )
 
     @staticmethod
@@ -785,6 +809,7 @@ class CeleryBackend:
             error=f"Distributed coordination failure: {detail}",
             shared_state=checkpoint.shared_state,
             token_usage=summarize_task_token_usage(checkpoint.cycles),
+            budget_usage=checkpoint.budget_usage,
         )
 
     def _claimed_checkpoint_failure(self, checkpoint: Checkpoint, *, context: str) -> AgentResult:

@@ -10,7 +10,7 @@ import pytest
 from vv_agent import CompletionReason, event_from_dict
 
 FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1_invalid.json"
-FIXTURE_SHA256 = "c0ca610bb66aa6b4434c16801f3fffdfcabfbcd87728a6aac57c107b01e12bb6"
+FIXTURE_SHA256 = "00048f1108c76082fd676edb3d8ea90b3e246fba8a605f843e983892388880a0"
 
 
 def _contract() -> dict[str, Any]:

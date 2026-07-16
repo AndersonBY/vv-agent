@@ -11,9 +11,23 @@ from threading import RLock
 from typing import Any, Protocol
 
 from vv_agent.approval import ApprovalError
+from vv_agent.budget import (
+    BudgetEnforcementBoundary,
+    BudgetEvaluator,
+    BudgetExhaustion,
+    BudgetUsageSnapshot,
+    HostCostMeter,
+    RunBudgetLimits,
+)
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
-from vv_agent.events import RunEvent, SubRunCompletedEvent, SubRunStartedEvent
+from vv_agent.events import (
+    BudgetExhaustedEvent,
+    BudgetSnapshotEvent,
+    RunEvent,
+    SubRunCompletedEvent,
+    SubRunStartedEvent,
+)
 from vv_agent.llm.base import LLMClient
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.token_utils import resolve_model_token_limits
@@ -174,6 +188,141 @@ class _SubTaskContractError(ValueError):
         self.code = code
 
 
+class _RunBudgetController:
+    def __init__(
+        self,
+        *,
+        evaluator: BudgetEvaluator,
+        task: AgentTask,
+        ctx: ExecutionContext | None,
+        emit_log: Callable[..., None],
+    ) -> None:
+        self.evaluator = evaluator
+        self.task = task
+        self.ctx = ctx
+        self.emit_log = emit_log
+        self.exhaustion: BudgetExhaustion | None = None
+        self._last_emitted_snapshot: BudgetUsageSnapshot | None = None
+
+    @property
+    def snapshot(self) -> BudgetUsageSnapshot:
+        return self.evaluator.snapshot()
+
+    def run_start(self) -> BudgetExhaustion | None:
+        return self._observe(
+            BudgetEnforcementBoundary.RUN_START,
+            self.evaluator.run_start,
+            force_snapshot=True,
+        )
+
+    def cycle_start(self, cycle_index: int) -> BudgetExhaustion | None:
+        return self._observe(
+            BudgetEnforcementBoundary.CYCLE_START,
+            self.evaluator.cycle_start,
+            cycle_index=cycle_index,
+        )
+
+    def llm_complete(
+        self,
+        cycle_index: int,
+        token_usage: Any,
+        *,
+        suppress_exhaustion: bool = False,
+    ) -> BudgetExhaustion | None:
+        return self._observe(
+            BudgetEnforcementBoundary.LLM_COMPLETE,
+            lambda: self.evaluator.llm_complete(token_usage),
+            cycle_index=cycle_index,
+            suppress_exhaustion=suppress_exhaustion,
+        )
+
+    def preflight_tools(self, cycle_index: int, tool_names: list[str]) -> BudgetExhaustion | None:
+        return self._observe(
+            BudgetEnforcementBoundary.TOOL_BATCH_PREFLIGHT,
+            lambda: self.evaluator.preflight_tools(tool_names),
+            cycle_index=cycle_index,
+        )
+
+    def tool_batch_complete(
+        self,
+        cycle_index: int,
+        *,
+        operation_failed: bool = False,
+        suppress_exhaustion: bool = False,
+    ) -> BudgetExhaustion | None:
+        return self._observe(
+            BudgetEnforcementBoundary.TOOL_BATCH_COMPLETE,
+            lambda: self.evaluator.tool_batch_complete(operation_failed=operation_failed),
+            cycle_index=cycle_index,
+            suppress_exhaustion=operation_failed or suppress_exhaustion,
+        )
+
+    def terminal(self, *, suppress_exhaustion: bool = False) -> BudgetExhaustion | None:
+        return self._observe(
+            BudgetEnforcementBoundary.TERMINAL,
+            self.evaluator.terminal,
+            suppress_exhaustion=suppress_exhaustion,
+        )
+
+    def _observe(
+        self,
+        boundary: BudgetEnforcementBoundary,
+        operation: Callable[[], BudgetExhaustion | None],
+        *,
+        cycle_index: int | None = None,
+        force_snapshot: bool = False,
+        suppress_exhaustion: bool = False,
+    ) -> BudgetExhaustion | None:
+        if self.exhaustion is not None:
+            return self.exhaustion
+        exhaustion = operation()
+        snapshot = self.evaluator.snapshot()
+        if exhaustion is not None and not suppress_exhaustion:
+            self.exhaustion = exhaustion
+            event = BudgetExhaustedEvent(
+                run_id=self._identity("_vv_agent_run_id", "run_id") or self.task.task_id,
+                trace_id=self._identity("_vv_agent_trace_id", "trace_id") or self.task.task_id,
+                agent_name=self._identity("_vv_agent_agent_name", "agent_name"),
+                session_id=self._identity("_vv_agent_session_id", "session_id"),
+                parent_run_id=self._identity("_vv_agent_parent_run_id", "parent_run_id"),
+                cycle_index=cycle_index,
+                enforcement_boundary=boundary,
+                budget_usage=snapshot,
+                budget_exhaustion=exhaustion,
+            )
+            self._emit_event(event)
+            self._last_emitted_snapshot = snapshot
+            return exhaustion
+        if force_snapshot or snapshot != self._last_emitted_snapshot:
+            event = BudgetSnapshotEvent(
+                run_id=self._identity("_vv_agent_run_id", "run_id") or self.task.task_id,
+                trace_id=self._identity("_vv_agent_trace_id", "trace_id") or self.task.task_id,
+                agent_name=self._identity("_vv_agent_agent_name", "agent_name"),
+                session_id=self._identity("_vv_agent_session_id", "session_id"),
+                parent_run_id=self._identity("_vv_agent_parent_run_id", "parent_run_id"),
+                cycle_index=cycle_index,
+                enforcement_boundary=boundary,
+                budget_usage=snapshot,
+            )
+            self._emit_event(event)
+            self._last_emitted_snapshot = snapshot
+        return None
+
+    def _identity(self, *keys: str) -> str | None:
+        if self.ctx is None:
+            return None
+        return AgentRuntime._metadata_str(self.ctx.metadata, *keys)
+
+    def _emit_event(self, event: RunEvent) -> None:
+        if self.ctx is not None:
+            emitter = self.ctx.metadata.get("_vv_agent_emit_event")
+            if callable(emitter):
+                emitter(event)
+        payload = event.to_dict()
+        payload.pop("type", None)
+        self.emit_log(event.type, **payload)
+
+
 def _parse_optional_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -321,6 +470,9 @@ class AgentRuntime:
         interruption_messages: InterruptionMessageProvider | None = None,
         ctx: ExecutionContext | None = None,
         sub_task_manager: SubTaskManager | None = None,
+        budget_limits: RunBudgetLimits | None = None,
+        host_cost_meter: HostCostMeter | None = None,
+        initial_budget_usage: BudgetUsageSnapshot | None = None,
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
         effective_shared_state = shared_state if shared_state is not None else task.initial_shared_state
@@ -338,6 +490,26 @@ class AgentRuntime:
             user_message=user_message,
         )
         freeze_dynamic_tool_schema_hints(task)
+        runtime_ctx = ctx if ctx is not None else ExecutionContext()
+        runtime_ctx.metadata.setdefault("execution_backend", self.execution_backend)
+        effective_budget_limits = budget_limits
+        if effective_budget_limits is None:
+            metadata_limits = runtime_ctx.metadata.get("_vv_agent_budget_limits")
+            if isinstance(metadata_limits, RunBudgetLimits):
+                effective_budget_limits = metadata_limits
+            elif isinstance(metadata_limits, dict):
+                effective_budget_limits = RunBudgetLimits.from_dict(metadata_limits)
+        if initial_budget_usage is None:
+            metadata_usage = runtime_ctx.metadata.get("_vv_agent_initial_budget_usage")
+            if isinstance(metadata_usage, BudgetUsageSnapshot):
+                initial_budget_usage = metadata_usage
+            elif isinstance(metadata_usage, dict):
+                initial_budget_usage = BudgetUsageSnapshot.from_dict(metadata_usage)
+        if host_cost_meter is None:
+            metadata_meter = runtime_ctx.metadata.get("_vv_agent_host_cost_meter")
+            if callable(getattr(metadata_meter, "read", None)):
+                host_cost_meter = metadata_meter
+
         self._emit_log(
             "run_started",
             task_id=task.task_id,
@@ -345,7 +517,55 @@ class AgentRuntime:
             workspace=str(workspace_path),
             max_cycles=task.max_cycles,
         )
-        self._emit_log("agent_started", model=task.model)
+
+        budget_controller: _RunBudgetController | None = None
+        backend_manages_budget = bool(getattr(self.execution_backend, "manages_run_budget", False))
+        if effective_budget_limits is not None and effective_budget_limits.has_limits:
+            runtime_ctx.metadata["_vv_agent_budget_limits"] = effective_budget_limits
+            runtime_ctx.metadata["_vv_agent_initial_budget_usage"] = initial_budget_usage
+            if host_cost_meter is not None:
+                runtime_ctx.metadata["_vv_agent_host_cost_meter"] = host_cost_meter
+            if not backend_manages_budget:
+                budget_controller = _RunBudgetController(
+                    evaluator=BudgetEvaluator(
+                        effective_budget_limits,
+                        host_cost_meter=host_cost_meter,
+                        initial_usage=initial_budget_usage,
+                    ),
+                    task=task,
+                    ctx=runtime_ctx,
+                    emit_log=self._emit_log,
+                )
+
+        result: AgentResult | None = None
+        if budget_controller is not None:
+            cancelled = bool(
+                runtime_ctx.cancellation_token is not None and runtime_ctx.cancellation_token.cancelled
+            )
+            if cancelled:
+                result = AgentResult(
+                    status=AgentStatus.FAILED,
+                    completion_reason=CompletionReason.CANCELLED,
+                    messages=messages,
+                    cycles=[],
+                    error=runtime_ctx.cancellation_token.reason or "Operation was cancelled",
+                    shared_state=shared,
+                    token_usage=summarize_task_token_usage([]),
+                    budget_usage=budget_controller.snapshot,
+                )
+            else:
+                exhaustion = budget_controller.run_start()
+                if exhaustion is not None:
+                    result = self._budget_failure_result(
+                        messages=messages,
+                        cycles=[],
+                        shared_state=shared,
+                        controller=budget_controller,
+                        exhaustion=exhaustion,
+                    )
+
+        if result is None:
+            self._emit_log("agent_started", model=task.model)
 
         memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
         allow_outside_workspace_paths = self._allow_outside_workspace_paths(task)
@@ -368,21 +588,43 @@ class AgentRuntime:
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
             sub_task_manager=effective_sub_task_manager,
+            budget_controller=budget_controller,
         )
+        if result is None:
+            result = self.execution_backend.execute(
+                task=task,
+                initial_messages=messages,
+                shared_state=shared,
+                cycle_executor=cycle_executor,
+                ctx=runtime_ctx,
+                max_cycles=task.max_cycles,
+            )
 
-        runtime_ctx = ctx
-        if runtime_ctx is None:
-            runtime_ctx = ExecutionContext()
-        runtime_ctx.metadata.setdefault("execution_backend", self.execution_backend)
+        if budget_controller is not None:
+            cancelled = bool(
+                result.status == AgentStatus.FAILED
+                and runtime_ctx.cancellation_token is not None
+                and runtime_ctx.cancellation_token.cancelled
+            )
+            operation_failed = bool(
+                result.status == AgentStatus.FAILED
+                and result.completion_reason not in {CompletionReason.BUDGET_EXHAUSTED, CompletionReason.CANCELLED}
+            )
+            if budget_controller.exhaustion is None:
+                exhaustion = budget_controller.terminal(
+                    suppress_exhaustion=cancelled or operation_failed,
+                )
+                if exhaustion is not None and not cancelled and not operation_failed:
+                    result = self._budget_failure_result(
+                        messages=result.messages,
+                        cycles=result.cycles,
+                        shared_state=result.shared_state,
+                        controller=budget_controller,
+                        exhaustion=exhaustion,
+                    )
+            result.budget_usage = budget_controller.snapshot
+            result.budget_exhaustion = budget_controller.exhaustion
 
-        result = self.execution_backend.execute(
-            task=task,
-            initial_messages=messages,
-            shared_state=shared,
-            cycle_executor=cycle_executor,
-            ctx=runtime_ctx,
-            max_cycles=task.max_cycles,
-        )
         cancelled = bool(runtime_ctx.cancellation_token is not None and runtime_ctx.cancellation_token.cancelled)
         if result.status == AgentStatus.FAILED and cancelled:
             result.completion_reason = CompletionReason.CANCELLED
@@ -422,6 +664,7 @@ class AgentRuntime:
         before_cycle_messages: BeforeCycleMessageProvider | None,
         interruption_messages: InterruptionMessageProvider | None,
         sub_task_manager: SubTaskManager,
+        budget_controller: _RunBudgetController | None = None,
     ) -> Callable[[int, list[Message], list[CycleRecord], dict[str, Any], ExecutionContext | None], AgentResult | None]:
         def executor(
             cycle_index: int,
@@ -430,6 +673,40 @@ class AgentRuntime:
             shared: dict[str, Any],
             ctx: ExecutionContext | None,
         ) -> AgentResult | None:
+            def is_cancelled() -> bool:
+                return bool(ctx is not None and ctx.cancellation_token is not None and ctx.cancellation_token.cancelled)
+
+            def cancellation_result(error: str | None = None) -> AgentResult:
+                reason = error
+                if reason is None and ctx is not None and ctx.cancellation_token is not None:
+                    reason = ctx.cancellation_token.reason
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    completion_reason=CompletionReason.CANCELLED,
+                    partial_output=_last_assistant_output(cycles),
+                    messages=messages,
+                    cycles=cycles,
+                    error=reason or "Operation was cancelled",
+                    shared_state=shared,
+                    token_usage=summarize_task_token_usage(cycles),
+                    budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
+                )
+
+            if budget_controller is not None:
+                if ctx is not None:
+                    try:
+                        ctx.check_cancelled()
+                    except Exception as exc:
+                        return cancellation_result(str(exc).strip())
+                exhaustion = budget_controller.cycle_start(cycle_index)
+                if exhaustion is not None:
+                    return self._budget_failure_result(
+                        messages=messages,
+                        cycles=cycles,
+                        shared_state=shared,
+                        controller=budget_controller,
+                        exhaustion=exhaustion,
+                    )
             if before_cycle_messages is not None:
                 injected = before_cycle_messages(cycle_index, messages, shared)
                 if injected:
@@ -508,6 +785,25 @@ class AgentRuntime:
                 memory_compacted=cycle_record.memory_compacted,
                 token_usage=cycle_record.token_usage.to_dict(),
             )
+            cancelled = is_cancelled()
+            if budget_controller is not None:
+                exhaustion = budget_controller.llm_complete(
+                    cycle_index,
+                    cycle_record.token_usage,
+                    suppress_exhaustion=cancelled,
+                )
+                if exhaustion is not None:
+                    cycles.append(cycle_record)
+                    return self._budget_failure_result(
+                        messages=messages,
+                        cycles=cycles,
+                        shared_state=shared,
+                        controller=budget_controller,
+                        exhaustion=exhaustion,
+                    )
+            if cancelled:
+                cycles.append(cycle_record)
+                return cancellation_result()
             if cycle_record.memory_compacted:
                 self._emit_log(
                     "memory_compacted",
@@ -517,6 +813,20 @@ class AgentRuntime:
                 )
 
             if cycle_record.tool_calls:
+                if budget_controller is not None:
+                    exhaustion = budget_controller.preflight_tools(
+                        cycle_index,
+                        [call.name for call in cycle_record.tool_calls],
+                    )
+                    if exhaustion is not None:
+                        cycles.append(cycle_record)
+                        return self._budget_failure_result(
+                            messages=messages,
+                            cycles=cycles,
+                            shared_state=shared,
+                            controller=budget_controller,
+                            exhaustion=exhaustion,
+                        )
                 tool_context_metadata = dict(task.metadata)
                 if self.log_handler is not None:
                     tool_context_metadata[_TURN_LOG_HANDLER_METADATA_KEY] = self.log_handler
@@ -580,6 +890,8 @@ class AgentRuntime:
                     )
                 except ApprovalError as exc:
                     cycles.append(cycle_record)
+                    if budget_controller is not None:
+                        budget_controller.tool_batch_complete(cycle_index, operation_failed=True)
                     self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
                     return AgentResult(
                         status=AgentStatus.FAILED,
@@ -590,21 +902,31 @@ class AgentRuntime:
                         error=str(exc),
                         shared_state=shared,
                         token_usage=summarize_task_token_usage(cycles),
+                        budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
                     )
                 except _ConfiguredSubTaskCancelledError as exc:
                     cycles.append(cycle_record)
-                    return AgentResult(
-                        status=AgentStatus.FAILED,
-                        completion_reason=CompletionReason.CANCELLED,
-                        partial_output=_last_assistant_output(cycles),
-                        messages=messages,
-                        cycles=cycles,
-                        error=str(exc),
-                        shared_state=shared,
-                        token_usage=summarize_task_token_usage(cycles),
-                    )
+                    if budget_controller is not None:
+                        budget_controller.tool_batch_complete(cycle_index, operation_failed=True)
+                    return cancellation_result(str(exc).strip())
                 tool_result = tool_outcome.directive_result
                 cycles.append(cycle_record)
+                cancelled = is_cancelled()
+                if budget_controller is not None:
+                    exhaustion = budget_controller.tool_batch_complete(
+                        cycle_index,
+                        suppress_exhaustion=cancelled,
+                    )
+                    if exhaustion is not None:
+                        return self._budget_failure_result(
+                            messages=messages,
+                            cycles=cycles,
+                            shared_state=shared,
+                            controller=budget_controller,
+                            exhaustion=exhaustion,
+                        )
+                if cancelled:
+                    return cancellation_result()
                 if tool_outcome.interruption_messages:
                     messages.extend(tool_outcome.interruption_messages)
                     self._emit_log(
@@ -723,6 +1045,31 @@ class AgentRuntime:
                 metadata=dict(result.metadata),
                 content_preview=self._preview_text(result.content),
             )
+
+    @staticmethod
+    def _budget_failure_result(
+        *,
+        messages: list[Message],
+        cycles: list[CycleRecord],
+        shared_state: dict[str, Any],
+        controller: _RunBudgetController,
+        exhaustion: BudgetExhaustion,
+    ) -> AgentResult:
+        return AgentResult(
+            status=AgentStatus.FAILED,
+            completion_reason=CompletionReason.BUDGET_EXHAUSTED,
+            completion_tool_name=None,
+            partial_output=_last_assistant_output(cycles),
+            messages=messages,
+            cycles=cycles,
+            final_answer=None,
+            wait_reason=None,
+            error="Run budget exhausted.",
+            shared_state=shared_state,
+            token_usage=summarize_task_token_usage(cycles),
+            budget_usage=controller.snapshot,
+            budget_exhaustion=exhaustion,
+        )
 
     def _emit_log(self, event: str, **payload: Any) -> None:
         if self.log_handler is None:
@@ -1233,6 +1580,8 @@ class AgentRuntime:
             outcome: SubTaskOutcome,
             *,
             token_usage: dict[str, Any] | None = None,
+            budget_usage: BudgetUsageSnapshot | None = None,
+            budget_exhaustion: BudgetExhaustion | None = None,
             emitter: RunEventHandler | None = event_emitter,
             current_trace_id: str = trace_id,
             current_parent_run_id: str = parent_run_id,
@@ -1264,6 +1613,8 @@ class AgentRuntime:
                     completion_tool_name=outcome.completion_tool_name,
                     partial_output=outcome.partial_output,
                     token_usage=token_usage,
+                    budget_usage=budget_usage,
+                    budget_exhaustion=budget_exhaustion,
                     metadata=metadata,
                 )
             )
@@ -1273,6 +1624,8 @@ class AgentRuntime:
             outcome: SubTaskOutcome,
             *,
             token_usage: dict[str, Any] | None = None,
+            budget_usage: BudgetUsageSnapshot | None = None,
+            budget_exhaustion: BudgetExhaustion | None = None,
             emitter: RunEventHandler | None = event_emitter,
             current_trace_id: str = trace_id,
             current_parent_run_id: str = parent_run_id,
@@ -1287,6 +1640,8 @@ class AgentRuntime:
                     run_id,
                     outcome,
                     token_usage=token_usage,
+                    budget_usage=budget_usage,
+                    budget_exhaustion=budget_exhaustion,
                     emitter=emitter,
                     current_trace_id=current_trace_id,
                     current_parent_run_id=current_parent_run_id,
@@ -1610,6 +1965,8 @@ class AgentRuntime:
                             current_child_run_id,
                             continuation_outcome,
                             token_usage=self._sub_run_token_usage(sub_result),
+                            budget_usage=sub_result.budget_usage,
+                            budget_exhaustion=sub_result.budget_exhaustion,
                             emitter=current_event_emitter,
                             current_trace_id=current_trace_id,
                             current_parent_run_id=current_parent_run_id,
@@ -1631,6 +1988,8 @@ class AgentRuntime:
                                 resolved=resolved_payload,
                             ),
                             token_usage=self._sub_run_token_usage(sub_result),
+                            budget_usage=sub_result.budget_usage,
+                            budget_exhaustion=sub_result.budget_exhaustion,
                             emitter=current_event_emitter,
                             current_trace_id=current_trace_id,
                             current_parent_run_id=current_parent_run_id,
@@ -1728,6 +2087,8 @@ class AgentRuntime:
             child_run_id,
             outcome,
             token_usage=self._sub_run_token_usage(sub_run.result),
+            budget_usage=sub_run.result.budget_usage,
+            budget_exhaustion=sub_run.result.budget_exhaustion,
         )
         if sub_task_manager is not None:
             sub_task_manager.record_outcome(
@@ -2189,6 +2550,7 @@ class AgentRuntime:
             "_vv_agent_approval_provider",
             "_vv_agent_approval_broker",
             "_vv_agent_approval_timeout_seconds",
+            "_vv_agent_budget_limits",
             "_vv_agent_emit_event",
             "_vv_agent_memory_providers",
             "_vv_agent_model_provider",

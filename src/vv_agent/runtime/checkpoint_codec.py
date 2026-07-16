@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from vv_agent.budget import BudgetUsageSnapshot
 from vv_agent.types import AgentResult, AgentStatus, CycleRecord, Message
 
 from .state import Checkpoint
@@ -45,6 +46,10 @@ def checkpoint_to_dict(checkpoint: Checkpoint) -> dict[str, Any]:
         if not isinstance(checkpoint.terminal_result, AgentResult):
             raise TypeError("checkpoint terminal_result must be an AgentResult or None")
         payload["terminal_result"] = checkpoint.terminal_result.to_dict()
+    if checkpoint.budget_usage is not None:
+        if not isinstance(checkpoint.budget_usage, BudgetUsageSnapshot):
+            raise TypeError("checkpoint budget_usage must be a BudgetUsageSnapshot or None")
+        payload["budget_usage"] = checkpoint.budget_usage.to_dict()
     _validate_control_fields(payload)
     return _json_object(payload, "checkpoint")
 
@@ -78,6 +83,15 @@ def checkpoint_from_dict(payload: Any) -> Checkpoint:
         raise ValueError("checkpoint shared_state must be an object")
 
     control = _decode_control_fields(payload, cycle_index=cycle_index, status=status)
+    budget_usage_raw = payload.get("budget_usage")
+    if budget_usage_raw is not None and not isinstance(budget_usage_raw, dict):
+        raise ValueError("checkpoint budget_usage must be an object or null")
+    budget_usage = None
+    if budget_usage_raw is not None:
+        try:
+            budget_usage = BudgetUsageSnapshot.from_dict(budget_usage_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"checkpoint budget_usage is invalid: {exc}") from exc
     return Checkpoint(
         task_id=task_id,
         cycle_index=cycle_index,
@@ -85,6 +99,7 @@ def checkpoint_from_dict(payload: Any) -> Checkpoint:
         messages=messages,
         cycles=cycles,
         shared_state=_json_object(shared_state, "checkpoint shared_state"),
+        budget_usage=budget_usage,
         **control,
     )
 

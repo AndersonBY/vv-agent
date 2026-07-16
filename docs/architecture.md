@@ -133,6 +133,13 @@ Checkpoint stores live under `runtime/stores/` and support SQLite and Redis.
 Backends must preserve the same `AgentResult` and checkpoint payload shape as
 inline execution.
 
+Optional run budgets are evaluated at stable runtime boundaries shared by all
+backends. Inline and thread runs keep one evaluator for the active run.
+Distributed limits travel in each envelope, while cumulative usage is stored
+in the checkpoint so each worker adds only its active monotonic segment. Host
+cost remains a worker-local capability and is never reconstructed from an SDK
+price table. See `run-budgets.md` for public API and terminal precedence.
+
 Distributed mode sends a versioned `DistributedRunEnvelope` for each cycle.
 Workers resolve all referenced capabilities before claiming state, then use a
 revision/token lease with heartbeat renewal and CAS commit. The scheduler

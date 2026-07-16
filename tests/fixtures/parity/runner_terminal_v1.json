@@ -26,6 +26,20 @@
     "completion_reason": "max_cycles",
     "partial_output": "unfinished draft"
   },
+  "budget_exhausted": {
+    "events_tail": [
+      "budget_exhausted",
+      "run_failed"
+    ],
+    "terminal": "run_failed",
+    "terminal_count": 1,
+    "status": "failed",
+    "completion_reason": "budget_exhausted",
+    "completion_tool_name": null,
+    "partial_output": "draft over budget",
+    "error": "Run budget exhausted.",
+    "budget_fixture": "run_budget_v1.json"
+  },
   "event_store_fail_closed": {
     "error": "run event store append failed: store down",
     "panics": false

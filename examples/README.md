@@ -23,6 +23,8 @@ typed events plus cancellation or approval control through `RunHandle`.
 | `V_AGENT_EXAMPLE_BACKEND` | `moonshot` | LLM backend |
 | `V_AGENT_EXAMPLE_MODEL` | `kimi-k2.6` | Model name |
 | `V_AGENT_EXAMPLE_PROMPT` | example-specific | Prompt override |
+| `V_AGENT_EXAMPLE_TOKEN_BUDGET` | `4000` | Total token limit for example 07 |
+| `V_AGENT_EXAMPLE_TOOL_BUDGET` | `12` | Total tool-call limit for example 07 |
 
 ## Public SDK
 
@@ -34,7 +36,7 @@ typed events plus cancellation or approval control through `RunHandle`.
 | 04 | `04_session_api.py` | `MemorySession` across multiple runs |
 | 05 | `05_ask_user_resume.py` | Tool approval and `WAIT_USER` events |
 | 06 | `06_runtime_hooks.py` | Low-level hooks passed through `RunConfig.hooks` |
-| 07 | `07_token_budget_guard.py` | Input guardrail for prompt budget checks |
+| 07 | `07_token_budget_guard.py` | Public token and tool-call run budgets |
 | 08 | `08_custom_tool.py` | `@function_tool` schema inference and structured output |
 | 09 | `09_resource_loader.py` | JSON-backed agent profile loading |
 | 10 | `10_read_image.py` | Image metadata through a typed tool |

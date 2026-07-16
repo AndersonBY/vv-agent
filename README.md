@@ -275,6 +275,12 @@ behavior. Inspect `result.completion_reason`, `result.completion_tool_name`,
 and `result.partial_output` to distinguish natural completion, tool-driven
 completion, waits, cancellation, failure, and max-cycle exhaustion.
 
+`RunConfig.budget_limits` can independently limit total tokens, uncached input
+tokens, total or exact-name tool calls, active wall time, and host-metered
+cost. Limits are optional and task-neutral. Inspect `result.budget_usage` and
+`result.budget_exhaustion`; a budget stop is a typed failed result, not a
+successful answer. See [Run Budgets](docs/run-budgets.md).
+
 Tools can request approval with `@function_tool(needs_approval=True)`. By
 default the run enters `WAIT_USER` before the tool body is called and emits a
 `ToolApprovalRequestedEvent`. `ToolPolicy(approval="never")` disables that

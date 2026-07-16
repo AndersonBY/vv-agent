@@ -12,6 +12,9 @@ from typing import Any
 
 import pytest
 
+from vv_agent.budget import HostCost, RunBudgetLimits
+from vv_agent.events import RunEvent
+from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.runtime.backends.celery_tasks import (
     _lease_expiry_at,
@@ -130,7 +133,7 @@ def test_python_and_rust_distributed_fixture_copies_are_byte_identical() -> None
     rust_root = Path(os.environ.get("VV_AGENT_RS_REPO", Path(__file__).resolve().parents[2] / "vv-agent-rs"))
     rust_copy = rust_root / "crates" / "vv-agent" / "tests" / "fixtures" / "parity" / FIXTURE_PATH.name
     fixture_bytes = FIXTURE_PATH.read_bytes()
-    assert hashlib.sha256(fixture_bytes).hexdigest() == ("a8d34e27893cc8d694612e9eed17a87746cf3ffba4a47cd5def2c6bc8a272320")
+    assert hashlib.sha256(fixture_bytes).hexdigest() == ("c1eb11591c93e8ac880fd4688cf06e0fe60a8b4522f7707ea13e1cccf40208e0")
     assert rust_copy.read_bytes() == fixture_bytes
 
 
@@ -226,6 +229,195 @@ def test_distributed_worker_reconstructs_custom_tool_policy_and_app_state(tmp_pa
     terminal = store.load_checkpoint(task.task_id)
     assert terminal is not None and terminal.terminal_result is not None
     assert dispatch["checkpoint_revision"] == terminal.revision
+
+
+def test_distributed_budget_usage_persists_and_blocks_the_next_worker_cycle(tmp_path: Path) -> None:
+    store = SqliteStateStore(tmp_path / "budget-checkpoints.sqlite3")
+    task = AgentTask(
+        task_id="worker-budget",
+        model="model-x",
+        system_prompt="system",
+        user_prompt="prompt",
+        no_tool_policy="continue",
+    )
+    assert store.create_checkpoint(
+        Checkpoint(
+            task_id=task.task_id,
+            cycle_index=0,
+            status=AgentStatus.RUNNING,
+            messages=[Message(role="system", content="system"), Message(role="user", content="prompt")],
+            cycles=[],
+        )
+    )
+
+    model_calls = 0
+
+    def first_cycle(_request: LlmRequest) -> LLMResponse:
+        nonlocal model_calls
+        model_calls += 1
+        return LLMResponse(
+            content="need another cycle",
+            raw={
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 0,
+                    "total_tokens": 10,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                }
+            },
+        )
+
+    llm_ref = CapabilityRef("llm.budget", "1")
+    event_ref = CapabilityRef("events.budget", "1")
+    events: list[RunEvent] = []
+    registry = DistributedCapabilityRegistry()
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[first_cycle]))
+    registry.register("event_sink", event_ref, events.append)
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="backend-x",
+        model="model-x",
+        workspace=str(tmp_path / "workspace"),
+        state_store=store.state_store_spec(),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            event_sink_ref=event_ref,
+        ),
+    )
+    limits = RunBudgetLimits(max_total_tokens=10)
+
+    first = run_single_cycle(
+        envelope_dict=DistributedRunEnvelope.for_cycle(
+            task=task,
+            recipe=recipe,
+            cycle_index=1,
+            run_id="run-worker-budget",
+            deadline_unix_ms=2_000_000_000_000,
+            budget_limits=limits,
+        ).to_dict(),
+        capability_registry=registry,
+    )
+
+    assert first == {"finished": False}
+    checkpoint = store.load_checkpoint(task.task_id)
+    assert checkpoint is not None and checkpoint.budget_usage is not None
+    assert checkpoint.budget_usage.cycles == 1
+    assert checkpoint.budget_usage.total_tokens == 10
+
+    second = run_single_cycle(
+        envelope_dict=DistributedRunEnvelope.for_cycle(
+            task=task,
+            recipe=recipe,
+            cycle_index=2,
+            run_id="run-worker-budget",
+            deadline_unix_ms=2_000_000_000_000,
+            budget_limits=limits,
+        ).to_dict(),
+        capability_registry=registry,
+    )
+
+    assert second["finished"] is True
+    assert second["result"]["status"] == "failed"
+    assert second["result"]["completion_reason"] == "budget_exhausted"
+    assert second["result"]["budget_exhaustion"]["enforcement_boundary"] == "cycle_start"
+    assert model_calls == 1
+    assert [event.type for event in events if event.type.startswith("budget_")] == [
+        "budget_snapshot",
+        "budget_snapshot",
+        "budget_exhausted",
+    ]
+
+
+def test_distributed_worker_resolves_host_cost_meter_and_reports_overshoot(tmp_path: Path) -> None:
+    store = SqliteStateStore(tmp_path / "host-cost-checkpoints.sqlite3")
+    task = AgentTask(
+        task_id="worker-host-cost",
+        model="model-x",
+        system_prompt="system",
+        user_prompt="prompt",
+        no_tool_policy="finish",
+    )
+    assert store.create_checkpoint(
+        Checkpoint(
+            task_id=task.task_id,
+            cycle_index=0,
+            status=AgentStatus.RUNNING,
+            messages=[Message(role="system", content="system"), Message(role="user", content="prompt")],
+            cycles=[],
+        )
+    )
+
+    class Meter:
+        def __init__(self) -> None:
+            self.readings = iter(
+                [
+                    HostCost(unit="credits", amount_microunits=0),
+                    HostCost(unit="credits", amount_microunits=0),
+                    HostCost(unit="credits", amount_microunits=120),
+                ]
+            )
+            self.last = HostCost(unit="credits", amount_microunits=120)
+
+        def read(self) -> HostCost:
+            self.last = next(self.readings, self.last)
+            return self.last
+
+    llm_ref = CapabilityRef("llm.host-cost", "1")
+    meter_ref = CapabilityRef("cost.run", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register(
+        "llm_client",
+        llm_ref,
+        ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="costly response",
+                    raw={
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2,
+                            "prompt_tokens_details": {"cached_tokens": 0},
+                        }
+                    },
+                )
+            ]
+        ),
+    )
+    registry.register("host_cost_meter", meter_ref, Meter())
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="backend-x",
+        model="model-x",
+        workspace=str(tmp_path / "workspace"),
+        state_store=store.state_store_spec(),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            host_cost_meter_ref=meter_ref,
+        ),
+    )
+
+    dispatch = run_single_cycle(
+        envelope_dict=DistributedRunEnvelope.for_cycle(
+            task=task,
+            recipe=recipe,
+            cycle_index=1,
+            run_id="run-worker-host-cost",
+            deadline_unix_ms=2_000_000_000_000,
+            budget_limits=RunBudgetLimits(
+                max_host_cost=HostCost(unit="credits", amount_microunits=100),
+            ),
+        ).to_dict(),
+        capability_registry=registry,
+    )
+
+    assert dispatch["finished"] is True
+    assert dispatch["result"]["completion_reason"] == "budget_exhausted"
+    exhaustion = dispatch["result"]["budget_exhaustion"]
+    assert exhaustion["dimension"] == "host_cost"
+    assert exhaustion["observed"] == 120
+    assert exhaustion["overshoot"] == 20
+    assert exhaustion["enforcement_boundary"] == "llm_complete"
 
 
 def test_distributed_worker_resolves_every_capability_before_claiming_checkpoint(tmp_path: Path) -> None:

@@ -21,7 +21,7 @@ from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "checkpoint_codec_v1.json"
 RUST_REPO = Path(os.environ.get("VV_AGENT_RS_REPO", Path(__file__).parents[2] / "vv-agent-rs"))
 RUST_FIXTURE_PATH = RUST_REPO / "crates" / "vv-agent" / "tests" / "fixtures" / "parity" / FIXTURE_PATH.name
-FIXTURE_SHA256 = "7a4b8ae2472eca3e643b37a6fa7f4f10202a31c53fe5e1aeeafe34d524b6069f"
+FIXTURE_SHA256 = "e7be2cfafca7f741d32b4537cb003f0179f69162171432c17cd746a0ff2119cf"
 
 
 class _FakeWatchError(Exception):
