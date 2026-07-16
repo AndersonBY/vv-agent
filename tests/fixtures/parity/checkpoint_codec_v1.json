@@ -51,7 +51,17 @@
         }
       }
     ],
-    "shared_state": {"counter": 42, "todo_list": []}
+    "shared_state": {"counter": 42, "todo_list": []},
+    "budget_usage": {
+      "cycles": 1,
+      "total_tokens": 0,
+      "uncached_input_tokens": 0,
+      "tool_calls": 1,
+      "tool_calls_by_name": {"test": 1},
+      "elapsed_ms": 25,
+      "host_cost": null,
+      "unavailable_dimensions": []
+    }
   },
   "valid_cases": [
     {
@@ -89,6 +99,40 @@
         "claim_token": "claim-7",
         "claimed_cycle": 3,
         "lease_expires_at_ms": 1000
+      }
+    },
+    {
+      "name": "running_with_budget_state",
+      "payload": {
+        "task_id": "budget-running",
+        "cycle_index": 1,
+        "status": "running",
+        "messages": [],
+        "cycles": [],
+        "shared_state": {},
+        "budget_usage": {
+          "cycles": 1,
+          "total_tokens": 12,
+          "uncached_input_tokens": null,
+          "tool_calls": 2,
+          "tool_calls_by_name": {"search": 2},
+          "elapsed_ms": 50,
+          "host_cost": {
+            "unit": "credits",
+            "currency": null,
+            "amount_microunits": 80
+          },
+          "unavailable_dimensions": [
+            {
+              "dimension": "uncached_input_tokens",
+              "reason": "usage_missing",
+              "expected_unit": "tokens",
+              "observed_unit": null,
+              "expected_currency": null,
+              "observed_currency": null
+            }
+          ]
+        }
       }
     },
     {
@@ -158,7 +202,9 @@
     {"name": "skipped_claimed_cycle", "payload": {"task_id": "x", "cycle_index": 0, "status": "running", "messages": [], "cycles": [], "shared_state": {}, "revision": 1, "claim_token": "claim", "claimed_cycle": 2, "lease_expires_at_ms": 10}},
     {"name": "terminal_with_claim", "payload": {"task_id": "x", "cycle_index": 0, "status": "completed", "messages": [], "cycles": [], "shared_state": {}, "revision": 1, "claim_token": "claim", "claimed_cycle": 1, "lease_expires_at_ms": 10, "terminal_result": {"status": "completed", "messages": [], "cycles": [], "final_answer": "done", "wait_reason": null, "error": null, "shared_state": {}, "token_usage": {}}}},
     {"name": "terminal_status_mismatch", "payload": {"task_id": "x", "cycle_index": 0, "status": "failed", "messages": [], "cycles": [], "shared_state": {}, "revision": 1, "terminal_result": {"status": "completed", "messages": [], "cycles": [], "final_answer": "done", "wait_reason": null, "error": null, "shared_state": {}, "token_usage": {}}}},
-    {"name": "terminal_result_not_object", "payload": {"task_id": "x", "cycle_index": 0, "status": "completed", "messages": [], "cycles": [], "shared_state": {}, "terminal_result": "done"}}
+    {"name": "terminal_result_not_object", "payload": {"task_id": "x", "cycle_index": 0, "status": "completed", "messages": [], "cycles": [], "shared_state": {}, "terminal_result": "done"}},
+    {"name": "budget_usage_not_object", "payload": {"task_id": "x", "cycle_index": 0, "status": "running", "messages": [], "cycles": [], "shared_state": {}, "budget_usage": []}},
+    {"name": "budget_usage_unsafe_integer", "payload": {"task_id": "x", "cycle_index": 0, "status": "running", "messages": [], "cycles": [], "shared_state": {}, "budget_usage": {"cycles": 0, "total_tokens": 9007199254740992, "uncached_input_tokens": 0, "tool_calls": 0, "tool_calls_by_name": {}, "elapsed_ms": 0, "host_cost": null, "unavailable_dimensions": []}}}
   ],
   "claim_contract": {
     "initial_cycle": 0,

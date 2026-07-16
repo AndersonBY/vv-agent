@@ -132,7 +132,9 @@
           }
         }
       ]
-    }
+    },
+    "budget_usage": null,
+    "budget_exhaustion": null
   },
   "expected_approvals": [
     {
@@ -149,6 +151,8 @@
   ],
   "projection_keys": [
     "agent_name",
+    "budget_exhaustion",
+    "budget_usage",
     "completion_reason",
     "completion_tool_name",
     "events",

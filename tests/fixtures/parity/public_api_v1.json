@@ -94,6 +94,21 @@
           "id": "run_config.context_provider",
           "python": "vv_agent.ContextProvider",
           "rust": "vv_agent::ContextProvider"
+        },
+        {
+          "id": "run_config.run_budget_limits",
+          "python": "vv_agent.RunBudgetLimits",
+          "rust": "vv_agent::RunBudgetLimits"
+        },
+        {
+          "id": "run_config.host_cost_meter",
+          "python": "vv_agent.HostCostMeter",
+          "rust": "vv_agent::HostCostMeter"
+        },
+        {
+          "id": "run_config.unavailable_metric_policy",
+          "python": "vv_agent.UnavailableMetricPolicy",
+          "rust": "vv_agent::UnavailableMetricPolicy"
         }
       ],
       "id": "run_config"
@@ -154,6 +169,46 @@
           "id": "result.task_token_usage",
           "python": "vv_agent.TaskTokenUsage",
           "rust": "vv_agent::TaskTokenUsage"
+        },
+        {
+          "id": "result.host_cost",
+          "python": "vv_agent.HostCost",
+          "rust": "vv_agent::HostCost"
+        },
+        {
+          "id": "result.budget_dimension",
+          "python": "vv_agent.BudgetDimension",
+          "rust": "vv_agent::BudgetDimension"
+        },
+        {
+          "id": "result.budget_enforcement_boundary",
+          "python": "vv_agent.BudgetEnforcementBoundary",
+          "rust": "vv_agent::BudgetEnforcementBoundary"
+        },
+        {
+          "id": "result.budget_exhaustion_reason",
+          "python": "vv_agent.BudgetExhaustionReason",
+          "rust": "vv_agent::BudgetExhaustionReason"
+        },
+        {
+          "id": "result.budget_unavailable_reason",
+          "python": "vv_agent.BudgetUnavailableReason",
+          "rust": "vv_agent::BudgetUnavailableReason"
+        },
+        {
+          "id": "result.budget_unavailable_dimension",
+          "python": "vv_agent.BudgetUnavailableDimension",
+          "rust": "vv_agent::BudgetUnavailableDimension"
+        },
+        {
+          "id": "result.budget_usage_snapshot",
+          "python": "vv_agent.BudgetUsageSnapshot",
+          "rust": "vv_agent::BudgetUsageSnapshot"
+        },
+        {
+          "id": "result.budget_exhaustion",
+          "python": "vv_agent.BudgetExhaustion",
+          "rust": "vv_agent::BudgetExhaustion"
         }
       ],
       "id": "result"
@@ -1698,6 +1753,32 @@
             "kind": "field",
             "name": "model_provider"
           }
+        },
+        {
+          "id": "budget_limits",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "budget_limits"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "budget_limits"
+          }
+        },
+        {
+          "id": "host_cost_meter",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "host_cost_meter"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "host_cost_meter"
+          }
         }
       ],
       "python_target": "vv_agent.RunConfig",
@@ -1825,6 +1906,52 @@
           "rust": {
             "kind": "method",
             "name": "partial_output"
+          }
+        },
+        {
+          "id": "budget_usage",
+          "kind": "field",
+          "python": {
+            "declaration": "property",
+            "kind": "property",
+            "name": "budget_usage",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "budget_usage"
+          }
+        },
+        {
+          "id": "budget_exhaustion",
+          "kind": "field",
+          "python": {
+            "declaration": "property",
+            "kind": "property",
+            "name": "budget_exhaustion",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "budget_exhaustion"
           }
         },
         {
@@ -5310,6 +5437,35 @@
       ],
       "python_target": "vv_agent.llm.LLMClient",
       "rust_target": "vv_agent::LlmClient"
+    },
+    {
+      "id": "host_cost_meter",
+      "members": [
+        {
+          "id": "read",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "read",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "read"
+          }
+        }
+      ],
+      "python_target": "vv_agent.HostCostMeter",
+      "rust_target": "vv_agent::HostCostMeter"
     },
     {
       "id": "model_provider",

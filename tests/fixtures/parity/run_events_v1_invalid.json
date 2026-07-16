@@ -28,6 +28,19 @@
       "partial_output": {
         "type": "string_or_null"
       }
+    },
+    "budget_fields": {
+      "budget_usage": "object_or_null",
+      "budget_exhaustion": "object_or_null",
+      "enforcement_boundary_values": [
+        "run_start",
+        "cycle_start",
+        "llm_complete",
+        "tool_batch_preflight",
+        "tool_batch_complete",
+        "terminal"
+      ],
+      "wire_integer_maximum": 9007199254740991
     }
   },
   "canonicalize": [
@@ -360,6 +373,54 @@
         "final_output": "done",
         "partial_output": {
           "text": "draft"
+        }
+      }
+    },
+    {
+      "id": "budget_usage_is_not_an_object_or_null",
+      "input": {
+        "version": "v1",
+        "type": "run_failed",
+        "event_id": "evt_invalid_budget_usage",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "error": "failed",
+        "budget_usage": []
+      }
+    },
+    {
+      "id": "budget_exhaustion_unknown_dimension",
+      "input": {
+        "version": "v1",
+        "type": "budget_exhausted",
+        "event_id": "evt_invalid_budget_dimension",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "enforcement_boundary": "llm_complete",
+        "budget_usage": {
+          "cycles": 1,
+          "total_tokens": 12,
+          "uncached_input_tokens": 12,
+          "tool_calls": 0,
+          "tool_calls_by_name": {},
+          "elapsed_ms": 1,
+          "host_cost": null,
+          "unavailable_dimensions": []
+        },
+        "budget_exhaustion": {
+          "dimension": "future_dimension",
+          "tool_name": null,
+          "reason": "limit_exceeded",
+          "limit": 10,
+          "observed": 12,
+          "attempted_increment": null,
+          "overshoot": 2,
+          "unit": "tokens",
+          "currency": null,
+          "enforcement_boundary": "llm_complete",
+          "unavailable_reason": null
         }
       }
     }
