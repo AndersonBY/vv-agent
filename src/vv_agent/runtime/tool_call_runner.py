@@ -6,13 +6,18 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from vv_agent.checkpoint import ToolIdempotency
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.result import _PendingToolApproval
 from vv_agent.runtime.cancellation import CancelledError
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.runtime.tool_planner import plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
-from vv_agent.tools.orchestrator import ToolOrchestrator
+from vv_agent.tools.orchestrator import (
+    _TOOL_DISPATCH_CALLBACK_METADATA_KEY,
+    ToolOrchestrator,
+)
 from vv_agent.types import (
     AgentTask,
     CompletionReason,
@@ -76,19 +81,62 @@ class ToolCallRunner:
                 call=call,
                 context=context,
             )
+            checkpoint_controller = (
+                ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
+            )
+            checkpoint_plan = None
+            if isinstance(checkpoint_controller, CheckpointResumeController):
+                try:
+                    idempotency = self.tool_registry.tool_idempotency(patched_call.name)
+                except Exception:
+                    idempotency = ToolIdempotency.UNKNOWN
+                if not isinstance(idempotency, ToolIdempotency):
+                    idempotency = ToolIdempotency(idempotency)
+                checkpoint_plan = checkpoint_controller.plan_tool(
+                    cycle_index=context.cycle_index,
+                    call=patched_call,
+                    idempotency_support=idempotency,
+                )
             if short_circuit_result is not None:
                 result = short_circuit_result
                 if not result.tool_call_id:
                     result.tool_call_id = call.id
+            elif checkpoint_plan is not None and checkpoint_plan.replay_result is not None:
+                result = checkpoint_plan.replay_result
             else:
+                bound_checkpoint_controller = (
+                    checkpoint_controller
+                    if isinstance(checkpoint_controller, CheckpointResumeController)
+                    else None
+                )
+
+                def mark_started(
+                    started_call: ToolCall,
+                    _checkpoint_controller: CheckpointResumeController | None = bound_checkpoint_controller,
+                    _cycle_index: int = context.cycle_index,
+                    _on_tool_start: Callable[[ToolCall], None] | None = on_tool_start,
+                ) -> None:
+                    if _checkpoint_controller is not None:
+                        _checkpoint_controller.tool_started(
+                            cycle_index=_cycle_index,
+                            call=started_call,
+                        )
+                    if _on_tool_start is not None:
+                        _on_tool_start(started_call)
+
                 call_context = replace(
                     context,
                     tool_call_id=patched_call.id,
                     tool_name=patched_call.name,
                     arguments=dict(patched_call.arguments),
+                    idempotency_key=(
+                        checkpoint_plan.idempotency_key if checkpoint_plan is not None else None
+                    ),
+                    metadata={
+                        **context.metadata,
+                        _TOOL_DISPATCH_CALLBACK_METADATA_KEY: mark_started,
+                    },
                 )
-                if on_tool_start is not None:
-                    on_tool_start(patched_call)
                 result = self.tool_orchestrator.run_one(
                     patched_call,
                     context=call_context,
@@ -110,6 +158,31 @@ class ToolCallRunner:
                             orchestrator=self.tool_orchestrator,
                             task=task,
                             hook_manager=self.hook_manager,
+                            source_checkpoint_key=(
+                                checkpoint_controller.checkpoint_key
+                                if isinstance(checkpoint_controller, CheckpointResumeController)
+                                else None
+                            ),
+                            source_operation_id=(
+                                checkpoint_plan.operation_id
+                                if checkpoint_plan is not None
+                                else None
+                            ),
+                            source_request_digest=(
+                                checkpoint_plan.request_digest
+                                if checkpoint_plan is not None
+                                else None
+                            ),
+                            source_idempotency_key=(
+                                checkpoint_plan.idempotency_key
+                                if checkpoint_plan is not None
+                                else None
+                            ),
+                            source_idempotency_support=(
+                                checkpoint_plan.idempotency_support.value
+                                if checkpoint_plan is not None
+                                else None
+                            ),
                         )
                 if ctx is not None and not self._defer_cancellation_check(task=task, call=patched_call):
                     ctx.check_cancelled()
@@ -128,6 +201,12 @@ class ToolCallRunner:
             if self._needs_tool_call_id(result.tool_call_id):
                 result.tool_call_id = patched_call.id
             behavior_reason = self._apply_tool_use_behavior(task=task, call=patched_call, result=result)
+            if isinstance(checkpoint_controller, CheckpointResumeController):
+                checkpoint_controller.finish_tool(
+                    cycle_index=context.cycle_index,
+                    call=patched_call,
+                    result=result,
+                )
 
             cycle_record.tool_results.append(result)
             messages.append(result.to_tool_message())

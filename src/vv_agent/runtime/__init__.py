@@ -21,6 +21,7 @@ from vv_agent.runtime.hooks import (
     RuntimeHookManager,
 )
 from vv_agent.runtime.state import Checkpoint, InMemoryStateStore, StateStore
+from vv_agent.runtime.state_v2 import CheckpointStoreV2, CheckpointV2, OperationJournalEntry
 from vv_agent.runtime.sub_task_manager import ManagedSubTask, SubTaskManager
 from vv_agent.runtime.tool_call_runner import ToolCallRunner
 
@@ -37,12 +38,15 @@ __all__ = [
     "CancellationToken",
     "CancelledError",
     "Checkpoint",
+    "CheckpointStoreV2",
+    "CheckpointV2",
     "CycleRunner",
     "ExecutionBackend",
     "ExecutionContext",
     "InMemoryStateStore",
     "InlineBackend",
     "ManagedSubTask",
+    "OperationJournalEntry",
     "RuntimeHook",
     "RuntimeHookManager",
     "RuntimeLogHandler",

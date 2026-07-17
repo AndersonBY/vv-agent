@@ -12,6 +12,7 @@ from vv_agent.memory import CompactionExhaustedError, MemoryManager
 from vv_agent.memory.provider import MemoryCompactCompleted, MemoryCompactStarted, MemoryProvider, MemoryProviderResult
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.model_settings import ModelSettings
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.runtime.token_usage import normalize_token_usage
 from vv_agent.runtime.tool_planner import plan_tool_schemas
@@ -152,12 +153,15 @@ class CycleRunner:
 
             try:
                 llm_response = self._complete_llm(
+                    cycle_index=cycle_index,
+                    operation_slot=f"main:{ptl_retries + 1}",
                     model=task.model,
                     messages=request_messages,
                     tools=request_tool_schemas,
                     metadata=dict(task.metadata),
                     stream_callback=stream_callback,
                     model_settings=self._effective_model_settings(task, ctx),
+                    ctx=ctx,
                 )
                 break
             except Exception as exc:
@@ -293,24 +297,42 @@ class CycleRunner:
     def _complete_llm(
         self,
         *,
+        cycle_index: int,
+        operation_slot: str,
         model: str,
         messages: list[Message],
         tools: list[dict[str, object]],
         metadata: dict[str, Any],
         stream_callback: Any,
         model_settings: ModelSettings | None,
+        ctx: ExecutionContext | None,
     ) -> LLMResponse:
-        return complete_llm_request(
-            self.llm_client,
-            LlmRequest(
-                model=model,
-                messages=messages,
-                tools=tools,
-                metadata=metadata,
-                model_settings=model_settings,
-            ),
-            stream_callback=stream_callback,
+        request = LlmRequest(
+            model=model,
+            messages=messages,
+            tools=tools,
+            metadata=metadata,
+            model_settings=model_settings,
         )
+        checkpoint_controller = (
+            ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
+        )
+
+        def invoke() -> LLMResponse:
+            return complete_llm_request(
+                self.llm_client,
+                request,
+                stream_callback=stream_callback,
+            )
+
+        if isinstance(checkpoint_controller, CheckpointResumeController):
+            return checkpoint_controller.complete_model(
+                cycle_index=cycle_index,
+                operation_slot=operation_slot,
+                request=request,
+                invoke=invoke,
+            )
+        return invoke()
 
     @staticmethod
     def _effective_model_settings(task: AgentTask, ctx: ExecutionContext | None) -> ModelSettings | None:

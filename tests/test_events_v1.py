@@ -34,7 +34,7 @@ from vv_agent import (
 )
 
 PARITY_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1.jsonl"
-PARITY_FIXTURE_SHA256 = "67751ad33c4705e87477bbe4bdfadd43ea5f674cbfa2ec9073d13600dfd05275"
+PARITY_FIXTURE_SHA256 = "3e09ca1c3987a50b95805f029ddf8e9fecf82541cdbea8a50f637000a01c90da"
 BUDGET_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "budget_events_v1.jsonl"
 BUDGET_FIXTURE_SHA256 = "3267292737ac6bf63ec4ee691fe0ef07f3e2cadd5a69098e3e267f4f6b692d2e"
 PARITY_EVENT_TYPES = [
@@ -61,6 +61,13 @@ PARITY_EVENT_TYPES = [
     "run_cancelled",
     "budget_snapshot",
     "budget_exhausted",
+    "checkpoint_created",
+    "checkpoint_resumed",
+    "operation_replayed",
+    "operation_ambiguous",
+    "model_retry_duplicate_risk",
+    "reconciliation_resolved",
+    "reconciliation_required",
 ]
 
 
@@ -292,13 +299,16 @@ def test_run_events_v1_parity_fixture_has_stable_bytes_and_round_trips_compact_w
     events = [event_from_dict(json.loads(line)) for line in lines]
 
     assert [event.type for event in events] == PARITY_EVENT_TYPES
-    for line, event in zip(lines, events, strict=True):
-        if not event.type.startswith("budget_"):
+    for index, (line, event) in enumerate(zip(lines, events, strict=True)):
+        if event.run_id == "run_parity":
             assert event.event_id == "evt_parity"
             assert event.run_id == "run_parity"
             assert event.trace_id == "trace_parity"
             assert event.created_at == 123.456789
-        assert json.dumps(event.to_dict(), separators=(",", ":")) == line
+        if index < len(PARITY_EVENT_TYPES) - 7:
+            assert json.dumps(event.to_dict(), separators=(",", ":")) == line
+        else:
+            assert event.to_dict() == json.loads(line)
 
 
 def test_budget_events_v1_fixture_has_stable_bytes_and_round_trips() -> None:

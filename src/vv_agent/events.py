@@ -13,6 +13,13 @@ from vv_agent.budget import (
     BudgetExhaustionReason,
     BudgetUsageSnapshot,
 )
+from vv_agent.checkpoint import (
+    OperationKind,
+    OperationState,
+    ReconciliationDecisionKind,
+    ResumeObservation,
+    ToolIdempotency,
+)
 from vv_agent.types import CompletionReason
 
 RUN_EVENT_VERSION = "v1"
@@ -1408,6 +1415,375 @@ class RunCancelledEvent(RunEvent):
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class CheckpointCreatedEvent(RunEvent):
+    checkpoint_key: str = ""
+    resume_attempt: int = 1
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        checkpoint_key: str,
+        resume_attempt: int,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="checkpoint_created",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
+        object.__setattr__(self, "resume_attempt", _positive_event_integer(resume_attempt, "resume_attempt"))
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["checkpoint_key"] = self.checkpoint_key
+        payload["resume_attempt"] = self.resume_attempt
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointResumedEvent(CheckpointCreatedEvent):
+    def __init__(self, **kwargs: Any) -> None:
+        CheckpointCreatedEvent.__init__(self, **kwargs)
+        object.__setattr__(self, "type", "checkpoint_resumed")
+
+
+@dataclass(frozen=True, slots=True)
+class OperationReplayedEvent(RunEvent):
+    checkpoint_key: str = ""
+    operation_id: str = ""
+    operation_kind: OperationKind = OperationKind.MODEL
+    receipt_state: OperationState = OperationState.SUCCEEDED
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        checkpoint_key: str,
+        operation_id: str,
+        operation_kind: OperationKind | str,
+        receipt_state: OperationState | str,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="operation_replayed",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        state = OperationState(receipt_state)
+        if state not in {OperationState.SUCCEEDED, OperationState.FAILED}:
+            raise ValueError("operation replay receipt_state must be succeeded or failed")
+        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
+        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
+        object.__setattr__(self, "operation_kind", OperationKind(operation_kind))
+        object.__setattr__(self, "receipt_state", state)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload.update(
+            checkpoint_key=self.checkpoint_key,
+            operation_id=self.operation_id,
+            operation_kind=self.operation_kind.value,
+            receipt_state=self.receipt_state.value,
+        )
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class OperationAmbiguousEvent(RunEvent):
+    checkpoint_key: str = ""
+    operation_id: str = ""
+    operation_kind: OperationKind = OperationKind.MODEL
+    risk: str = ""
+    idempotency_support: ToolIdempotency | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        checkpoint_key: str,
+        operation_id: str,
+        operation_kind: OperationKind | str,
+        risk: str,
+        idempotency_support: ToolIdempotency | str | None,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="operation_ambiguous",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        kind = OperationKind(operation_kind)
+        support = ToolIdempotency(idempotency_support) if idempotency_support is not None else None
+        if kind is OperationKind.TOOL and support is None:
+            raise ValueError("ambiguous tool event requires idempotency_support")
+        if kind is OperationKind.MODEL and support is not None:
+            raise ValueError("ambiguous model event idempotency_support must be null")
+        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
+        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
+        object.__setattr__(self, "operation_kind", kind)
+        object.__setattr__(self, "risk", _required_event_text(risk, "risk"))
+        object.__setattr__(self, "idempotency_support", support)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload.update(
+            checkpoint_key=self.checkpoint_key,
+            operation_id=self.operation_id,
+            operation_kind=self.operation_kind.value,
+            risk=self.risk,
+            idempotency_support=(self.idempotency_support.value if self.idempotency_support is not None else None),
+        )
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationRequiredEvent(RunEvent):
+    checkpoint_key: str = ""
+    operation_id: str = ""
+    operation_kind: OperationKind = OperationKind.MODEL
+    interruption_reason: str = "resume_requires_reconciliation"
+    resume_observation: ResumeObservation | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        checkpoint_key: str,
+        operation_id: str,
+        operation_kind: OperationKind | str,
+        interruption_reason: str,
+        resume_observation: ResumeObservation,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="reconciliation_required",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        kind = OperationKind(operation_kind)
+        if not isinstance(resume_observation, ResumeObservation):
+            raise TypeError("reconciliation event resume_observation must be ResumeObservation")
+        if resume_observation.operation_id != operation_id or resume_observation.operation_kind is not kind:
+            raise ValueError("reconciliation event operation must match resume_observation")
+        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
+        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
+        object.__setattr__(self, "operation_kind", kind)
+        object.__setattr__(
+            self,
+            "interruption_reason",
+            _required_event_text(interruption_reason, "interruption_reason"),
+        )
+        object.__setattr__(self, "resume_observation", resume_observation)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        assert self.resume_observation is not None
+        payload.update(
+            checkpoint_key=self.checkpoint_key,
+            operation_id=self.operation_id,
+            operation_kind=self.operation_kind.value,
+            interruption_reason=self.interruption_reason,
+            resume_observation=self.resume_observation.to_dict(),
+        )
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRetryDuplicateRiskEvent(RunEvent):
+    checkpoint_key: str = ""
+    operation_id: str = ""
+    operation_kind: OperationKind = OperationKind.MODEL
+    risk: str = ""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        checkpoint_key: str,
+        operation_id: str,
+        operation_kind: OperationKind | str,
+        risk: str,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="model_retry_duplicate_risk",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        kind = OperationKind(operation_kind)
+        if kind is not OperationKind.MODEL:
+            raise ValueError("model retry duplicate risk event requires model operation_kind")
+        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
+        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
+        object.__setattr__(self, "operation_kind", kind)
+        object.__setattr__(self, "risk", _required_event_text(risk, "risk"))
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload.update(
+            checkpoint_key=self.checkpoint_key,
+            operation_id=self.operation_id,
+            operation_kind=self.operation_kind.value,
+            risk=self.risk,
+        )
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationResolvedEvent(RunEvent):
+    checkpoint_key: str = ""
+    operation_id: str = ""
+    operation_kind: OperationKind = OperationKind.MODEL
+    decision: ReconciliationDecisionKind = ReconciliationDecisionKind.DEFER
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        checkpoint_key: str,
+        operation_id: str,
+        operation_kind: OperationKind | str,
+        decision: ReconciliationDecisionKind | str,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="reconciliation_resolved",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
+        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
+        object.__setattr__(self, "operation_kind", OperationKind(operation_kind))
+        object.__setattr__(self, "decision", ReconciliationDecisionKind(decision))
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload.update(
+            checkpoint_key=self.checkpoint_key,
+            operation_id=self.operation_id,
+            operation_kind=self.operation_kind.value,
+            decision=self.decision.value,
+        )
+        return payload
+
+
+def _required_event_text(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Run event {field_name} must be a non-empty string")
+    return value
+
+
+def _positive_event_integer(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"Run event {field_name} must be a positive integer")
+    return value
+
+
 def new_trace_id() -> str:
     return f"trace_{uuid.uuid4().hex}"
 
@@ -1487,6 +1863,50 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
                 raise ValueError("Run event budget_exhausted requires budget_exhaustion")
             if budget_exhaustion.enforcement_boundary is not boundary:
                 raise ValueError("Run event budget exhaustion boundaries must match")
+
+    checkpoint_event_types = {
+        "checkpoint_created",
+        "checkpoint_resumed",
+        "operation_replayed",
+        "operation_ambiguous",
+        "reconciliation_required",
+        "model_retry_duplicate_risk",
+        "reconciliation_resolved",
+    }
+    if payload["type"] in checkpoint_event_types:
+        _required_event_text(payload.get("checkpoint_key"), "checkpoint_key")
+        if not isinstance(payload.get("cycle_index"), int):
+            raise ValueError("Run event cycle_index is required for checkpoint lifecycle events")
+    if payload["type"] in {"checkpoint_created", "checkpoint_resumed"}:
+        _positive_event_integer(payload.get("resume_attempt"), "resume_attempt")
+    if payload["type"] in checkpoint_event_types - {"checkpoint_created", "checkpoint_resumed"}:
+        _required_event_text(payload.get("operation_id"), "operation_id")
+        OperationKind(payload.get("operation_kind"))
+    if payload["type"] == "operation_replayed":
+        receipt_state = OperationState(payload.get("receipt_state"))
+        if receipt_state not in {OperationState.SUCCEEDED, OperationState.FAILED}:
+            raise ValueError("operation replay receipt_state must be succeeded or failed")
+    if payload["type"] in {"operation_ambiguous", "model_retry_duplicate_risk"}:
+        _required_event_text(payload.get("risk"), "risk")
+    if payload["type"] == "operation_ambiguous":
+        operation_kind = OperationKind(payload.get("operation_kind"))
+        support = payload.get("idempotency_support")
+        if operation_kind is OperationKind.TOOL:
+            if support is None:
+                raise ValueError("ambiguous tool event requires idempotency_support")
+            ToolIdempotency(support)
+        elif support is not None:
+            raise ValueError("ambiguous model event idempotency_support must be null")
+    if payload["type"] == "reconciliation_required":
+        _required_event_text(payload.get("interruption_reason"), "interruption_reason")
+        observation = payload.get("resume_observation")
+        if not isinstance(observation, dict):
+            raise ValueError("Run event resume_observation must be an object")
+        ResumeObservation.from_dict(observation)
+    if payload["type"] == "model_retry_duplicate_risk" and payload.get("operation_kind") != "model":
+        raise ValueError("model retry duplicate risk event requires model operation_kind")
+    if payload["type"] == "reconciliation_resolved":
+        ReconciliationDecisionKind(payload.get("decision"))
 
 
 def event_from_dict(payload: dict[str, Any]) -> RunEvent:
@@ -1688,6 +2108,60 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
             budget_usage=_budget_usage(payload.get("budget_usage")),
             budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "checkpoint_created":
+        return CheckpointCreatedEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            resume_attempt=payload["resume_attempt"],
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "checkpoint_resumed":
+        return CheckpointResumedEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            resume_attempt=payload["resume_attempt"],
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "operation_replayed":
+        return OperationReplayedEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            operation_id=payload["operation_id"],
+            operation_kind=payload["operation_kind"],
+            receipt_state=payload["receipt_state"],
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "operation_ambiguous":
+        return OperationAmbiguousEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            operation_id=payload["operation_id"],
+            operation_kind=payload["operation_kind"],
+            risk=payload["risk"],
+            idempotency_support=payload.get("idempotency_support"),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "reconciliation_required":
+        return ReconciliationRequiredEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            operation_id=payload["operation_id"],
+            operation_kind=payload["operation_kind"],
+            interruption_reason=payload["interruption_reason"],
+            resume_observation=ResumeObservation.from_dict(payload["resume_observation"]),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "model_retry_duplicate_risk":
+        return ModelRetryDuplicateRiskEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            operation_id=payload["operation_id"],
+            operation_kind=payload["operation_kind"],
+            risk=payload["risk"],
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "reconciliation_resolved":
+        return ReconciliationResolvedEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            operation_id=payload["operation_id"],
+            operation_kind=payload["operation_kind"],
+            decision=payload["decision"],
             **_with_cycle_and_agent(payload, common),
         )
 

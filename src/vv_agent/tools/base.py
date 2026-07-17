@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from vv_agent.checkpoint import ToolIdempotency
 from vv_agent.types import SubTaskOutcome, SubTaskRequest, ToolExecutionResult
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ class ToolContext:
     tool_call_id: str = ""
     tool_name: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
+    idempotency_key: str | None = None
     session: Any | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -121,6 +123,11 @@ def is_tool_call_preapproved(context: ToolContext, *, tool_call_id: str, tool_na
 class ToolSpec:
     name: str
     handler: ToolHandler
+    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.idempotency, ToolIdempotency):
+            self.idempotency = ToolIdempotency(self.idempotency)
 
 
 ToolCallContext = ToolContext

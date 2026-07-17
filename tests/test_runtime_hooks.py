@@ -90,17 +90,23 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
             ),
         ]
     )
+    runtime_events: list[tuple[str, dict[str, object]]] = []
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
         hooks=[BlockTodoHook()],
+        log_handler=lambda event, payload: runtime_events.append((event, payload)),
     )
     task = AgentTask(task_id="hook_tool_short_circuit", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.cycles[0].tool_results[0].error_code == "blocked_by_hook"
+    assert not any(
+        event == "tool_started" and payload.get("tool_call_id") == "c1"
+        for event, payload in runtime_events
+    )
 
 
 def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> None:

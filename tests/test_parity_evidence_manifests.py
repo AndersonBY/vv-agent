@@ -53,6 +53,7 @@ EXPECTED_APP_SERVER_PROTOCOL_OPERATIONS = (
     "thread/unsubscribe",
     "turn/start",
     "turn/interrupt",
+    "turn/resume",
     "turn/steer",
     "turn/followUp",
     "approval/resolve",
@@ -224,6 +225,31 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "python": "vv_agent.UnavailableMetricPolicy",
                 "rust": "vv_agent::UnavailableMetricPolicy",
             },
+            {
+                "id": "run_config.checkpoint_config",
+                "python": "vv_agent.CheckpointConfig",
+                "rust": "vv_agent::CheckpointConfig",
+            },
+            {
+                "id": "checkpoint_config.capability_refs",
+                "python": "vv_agent.CheckpointConfig.capability_refs",
+                "rust": "vv_agent::CheckpointConfig::capability_refs",
+            },
+            {
+                "id": "checkpoint_config.credential_slots",
+                "python": "vv_agent.CheckpointConfig.credential_slots",
+                "rust": "vv_agent::CheckpointConfig::credential_slots",
+            },
+            {
+                "id": "run_config.checkpoint_extension",
+                "python": "vv_agent.CheckpointExtension",
+                "rust": "vv_agent::CheckpointExtension",
+            },
+            {
+                "id": "run_config.reconciliation_provider",
+                "python": "vv_agent.ReconciliationProvider",
+                "rust": "vv_agent::ReconciliationProvider",
+            },
         ],
     },
     {
@@ -307,6 +333,11 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "id": "result.budget_exhaustion",
                 "python": "vv_agent.BudgetExhaustion",
                 "rust": "vv_agent::BudgetExhaustion",
+            },
+            {
+                "id": "result.resume_observation",
+                "python": "vv_agent.ResumeObservation",
+                "rust": "vv_agent::ResumeObservation",
             },
         ],
     },
@@ -418,6 +449,16 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "python": "vv_agent.app_server.JsonRpcMessage",
                 "rust": "vv_agent::app_server::protocol::JsonRpcMessage",
             },
+            {
+                "id": "app_server.turn_resume_params",
+                "python": "vv_agent.app_server.TurnResumeParams",
+                "rust": "vv_agent::app_server::protocol::TurnResumeParams",
+            },
+            {
+                "id": "app_server.turn_resume_response",
+                "python": "vv_agent.app_server.TurnResumeResponse",
+                "rust": "vv_agent::app_server::protocol::TurnResumeResponse",
+            },
         ],
     },
     {
@@ -475,6 +516,11 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "id": "tools.not_found_error",
                 "python": "vv_agent.tools.ToolNotFoundError",
                 "rust": "vv_agent::ToolNotFoundError",
+            },
+            {
+                "id": "tools.idempotency",
+                "python": "vv_agent.ToolIdempotency",
+                "rust": "vv_agent::ToolIdempotency",
             },
         ],
     },
@@ -761,6 +807,26 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "python": "vv_agent.runtime.ToolCallRunner",
                 "rust": "vv_agent::ToolCallRunner",
             },
+            {
+                "id": "runtime_backend.checkpoint_v2",
+                "python": "vv_agent.runtime.CheckpointV2",
+                "rust": "vv_agent::CheckpointV2",
+            },
+            {
+                "id": "runtime_backend.checkpoint_store_v2",
+                "python": "vv_agent.runtime.CheckpointStoreV2",
+                "rust": "vv_agent::CheckpointStoreV2",
+            },
+            {
+                "id": "runtime_backend.idempotent_event_store",
+                "python": "vv_agent.IdempotentRunEventStore",
+                "rust": "vv_agent::IdempotentRunEventStore",
+            },
+            {
+                "id": "runtime_backend.operation_journal",
+                "python": "vv_agent.runtime.OperationJournalEntry",
+                "rust": "vv_agent::OperationJournalEntry",
+            },
         ],
     },
 )
@@ -962,6 +1028,9 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             ),
             _field("budget_limits", "budget_limits", "budget_limits"),
             _field("host_cost_meter", "host_cost_meter", "host_cost_meter"),
+            _field("checkpoint_config", "checkpoint_config", "checkpoint_config"),
+            _field("checkpoint_extensions", "checkpoint_extensions", "checkpoint_extensions"),
+            _field("reconciliation_provider", "reconciliation_provider", "reconciliation_provider"),
         ],
     },
     {
@@ -1005,6 +1074,20 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 "budget_exhaustion",
                 "budget_exhaustion",
                 "budget_exhaustion",
+                python_kind="property",
+                rust_kind="method",
+            ),
+            _field(
+                "checkpoint_key",
+                "checkpoint_key",
+                "checkpoint_key",
+                python_kind="property",
+                rust_kind="method",
+            ),
+            _field(
+                "resume_observation",
+                "resume_observation",
+                "resume_observation",
                 python_kind="property",
                 rust_kind="method",
             ),
@@ -1143,6 +1226,7 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _operation("thread/unsubscribe", "unsubscribe_thread", "unsubscribe_thread"),
             _operation("turn/start", "start_turn", "start_turn"),
             _operation("turn/interrupt", "interrupt_turn", "interrupt_turn"),
+            _operation("turn/resume", "resume_turn", "resume_turn"),
             _operation("turn/steer", "steer_turn", "steer_turn"),
             _operation("turn/followUp", "follow_up_turn", "follow_up_turn"),
             _operation("approval/resolve", "resolve_approval_request", "resolve_approval_request"),
@@ -1211,6 +1295,7 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 rust_kind="method",
                 rust_target="vv_agent::ToolExecutor",
             ),
+            _field("idempotency", "idempotency", "idempotency", rust_kind="method"),
             _operation(
                 "to_spec",
                 "to_openai_schema",
@@ -1744,13 +1829,26 @@ def _load_fixture(name: str) -> Any:
 
 
 def _resolve_python_export(path: str) -> Any:
-    module_name, _, attribute = path.rpartition(".")
-    module = importlib.import_module(module_name)
-    value = getattr(module, attribute)
-    public_names = getattr(module, "__all__", None)
-    if public_names is not None:
-        assert attribute in public_names, f"{path} exists but is absent from {module_name}.__all__"
-    return value
+    parts = path.split(".")
+    for split_index in range(len(parts) - 1, 0, -1):
+        module_name = ".".join(parts[:split_index])
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name != module_name and not module_name.startswith(f"{exc.name}."):
+                raise
+            continue
+        attributes = parts[split_index:]
+        public_names = getattr(module, "__all__", None)
+        if public_names is not None:
+            assert attributes[0] in public_names, (
+                f"{path} exists but is absent from {module_name}.__all__"
+            )
+        value: Any = module
+        for attribute in attributes:
+            value = getattr(value, attribute)
+        return value
+    raise ModuleNotFoundError(f"No importable module prefix for {path}")
 
 
 def _verify_fixture_python_member(surface: dict[str, Any], member: dict[str, Any]) -> None:
@@ -1788,7 +1886,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 128
+    assert len(capability_ids) == 141
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -1798,7 +1896,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 221
+        == 228
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

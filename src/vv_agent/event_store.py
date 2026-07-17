@@ -4,8 +4,9 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
+from vv_agent.checkpoint import EventCursor
 from vv_agent.events import RunEvent, event_from_dict
 
 
@@ -44,6 +45,19 @@ class RunEventStore(Protocol):
         *,
         run_id: str | None = None,
     ) -> Iterator[RunEvent]:
+        raise NotImplementedError
+
+
+@runtime_checkable
+class IdempotentRunEventStore(RunEventStore, Protocol):
+    def append_once(
+        self,
+        event_id: str,
+        payload_digest: str,
+        event: RunEvent,
+    ) -> EventCursor:
+        """Append one stable event or return the original cursor for an identical duplicate."""
+
         raise NotImplementedError
 
 

@@ -27,6 +27,8 @@ _JSON_SCHEMA_NAMES = {
     "ThreadReadResponse",
     "ThreadResumeResponse",
     "ThreadStartResponse",
+    "TurnResumeParams",
+    "TurnResumeResponse",
     "TurnStartResponse",
 }
 _JSON_SCHEMA_FILES = {f"json/{name}.json" for name in _JSON_SCHEMA_NAMES} | {

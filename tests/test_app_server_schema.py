@@ -37,6 +37,7 @@ def test_generate_json_schema_writes_expected_files(tmp_path) -> None:
         "initialized",
         "thread/start",
         "turn/start",
+        "turn/resume",
         "turn/steer",
         "approval/resolve",
         "schema/export",
@@ -105,8 +106,8 @@ def test_schema_bundle_file_sets_and_sources_match_shared_fixture(tmp_path) -> N
 
     json_bundle = json_schema_bundle()
     typescript_bundle = typescript_schema_bundle()
-    assert len(json_bundle) == 17
-    assert len(typescript_bundle) == 16
+    assert len(json_bundle) == 19
+    assert len(typescript_bundle) == 18
     assert [f"{name}.json" for name in json_bundle] == expected_json_files
     assert list(typescript_bundle) == expected_typescript_files
 
@@ -165,8 +166,8 @@ def test_schema_export_request_returns_json_and_typescript_bundles() -> None:
     result = transport.receive_outbound(timeout=1)["result"]
     assert json.loads(result["jsonSchema"]["ClientRequest"])["title"] == "ClientRequest"
     assert "export type ClientRequest" in result["typescript"]["ClientRequest.ts"]
-    assert len(result["jsonSchema"]) == 17
-    assert len(result["typescript"]) == 16
+    assert len(result["jsonSchema"]) == 19
+    assert len(result["typescript"]) == 18
 
     processor.process_message(
         "conn_1",

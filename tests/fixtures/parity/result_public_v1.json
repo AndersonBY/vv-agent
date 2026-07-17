@@ -134,7 +134,9 @@
       ]
     },
     "budget_usage": null,
-    "budget_exhaustion": null
+    "budget_exhaustion": null,
+    "checkpoint_key": null,
+    "resume_observation": null
   },
   "expected_approvals": [
     {
@@ -153,6 +155,7 @@
     "agent_name",
     "budget_exhaustion",
     "budget_usage",
+    "checkpoint_key",
     "completion_reason",
     "completion_tool_name",
     "events",
@@ -162,6 +165,7 @@
     "new_items",
     "partial_output",
     "resolved_model",
+    "resume_observation",
     "run_id",
     "status",
     "token_usage",
@@ -173,5 +177,23 @@
     "selected_model": "selected",
     "model_id": "model-id",
     "endpoint": "endpoint-public"
+  },
+  "reconciliation_result": {
+    "status": "reconciliation_required",
+    "completion_reason": null,
+    "completion_tool_name": null,
+    "partial_output": "last committed assistant output",
+    "final_answer": null,
+    "wait_reason": null,
+    "error": null,
+    "checkpoint_key": "tenant-7/run-42",
+    "resume_observation": {
+      "operation_id": "op_tool_cycle_2_call_2",
+      "operation_kind": "tool",
+      "cycle_index": 2,
+      "state": "ambiguous",
+      "risk": "unknown_tool_side_effect",
+      "idempotency_support": "unknown"
+    }
   }
 }

@@ -67,7 +67,7 @@ threaded execution, checkpointing, Celery dispatch, and workspace backends.
 | 18 | `18_cancellation.py` | `CancellationToken` with a running task |
 | 19 | `19_streaming.py` | Raw runtime stream callback events |
 | 20 | `20_thread_backend.py` | `ThreadBackend` submit/future execution |
-| 21 | `21_state_checkpoint.py` | `SqliteStateStore` checkpoints |
+| 21 | `21_state_checkpoint.py` | Durable Runner resume/replay with checkpoint v2 and SQLite |
 | 22 | `22_sdk_advanced.py` | Public SDK with streaming and `ThreadBackend` |
 | 23 | `23_celery_backend.py` | `CeleryBackend` distributed cycles |
 | 24 | `24_workspace_backends.py` | Local, memory, S3, and custom workspace backends |

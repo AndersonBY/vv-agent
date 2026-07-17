@@ -14,7 +14,16 @@ from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.types import AgentStatus
 
 ApprovalInput = ApprovalDecision | str
-RunHandleStatus = Literal["pending", "running", "wait_user", "completed", "failed", "max_cycles", "cancelled"]
+RunHandleStatus = Literal[
+    "pending",
+    "running",
+    "reconciliation_required",
+    "wait_user",
+    "completed",
+    "failed",
+    "max_cycles",
+    "cancelled",
+]
 
 
 class RunHandleController(Protocol):
@@ -32,6 +41,7 @@ class RunHandleRunner(Protocol):
         run_config: RunConfig,
         event_sink: Callable[[RunEvent], None] | None = None,
         _compiled_invocation: Any | None = None,
+        _approval_invocation: Any | None = None,
     ) -> RunResult: ...
 
     def resume(self, state: RunState, *, input: str | None = None) -> RunResult: ...

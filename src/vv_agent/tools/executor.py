@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
+from vv_agent.checkpoint import ToolIdempotency
 from vv_agent.tools.base import ToolContext, ToolSpec
 from vv_agent.types import ToolCall, ToolExecutionResult
 
@@ -29,6 +30,7 @@ class ToolExecutor(Protocol):
     timeout_seconds: float | None
     failure_error_function: ToolErrorFormatter | None
     metadata: dict[str, Any]
+    idempotency: ToolIdempotency
 
     def spec(self, context: ToolContext | None = None) -> ToolSpec: ...
 
@@ -79,6 +81,10 @@ class FunctionToolExecutor:
     def metadata(self) -> dict[str, Any]:
         return dict(self.tool.metadata)
 
+    @property
+    def idempotency(self) -> ToolIdempotency:
+        return self.tool.idempotency
+
     def spec(self, context: ToolContext | None = None) -> ToolSpec:
         del context
 
@@ -86,7 +92,7 @@ class FunctionToolExecutor:
             call = ToolCall(id=tool_context.tool_call_id, name=self.name, arguments=dict(arguments))
             return self.execute(call, tool_context)
 
-        return ToolSpec(name=self.name, handler=handler)
+        return ToolSpec(name=self.name, handler=handler, idempotency=self.idempotency)
 
     def openai_schema(self, context: ToolContext | None = None) -> dict[str, Any]:
         del context
@@ -115,8 +121,11 @@ class RegistryToolExecutor:
     timeout_seconds: float | None = None
     failure_error_function: ToolErrorFormatter | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
 
     def __post_init__(self) -> None:
+        if not isinstance(self.idempotency, ToolIdempotency):
+            self.idempotency = ToolIdempotency(self.idempotency)
         self.sync_description_from_schema()
 
     def sync_description_from_schema(self) -> None:
@@ -142,7 +151,7 @@ class RegistryToolExecutor:
 
     def spec(self, context: ToolContext | None = None) -> ToolSpec:
         del context
-        return ToolSpec(name=self.name, handler=self.handler)
+        return ToolSpec(name=self.name, handler=self.handler, idempotency=self.idempotency)
 
     def openai_schema(self, context: ToolContext | None = None) -> dict[str, Any]:
         del context

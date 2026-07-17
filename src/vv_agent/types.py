@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import Any, Literal, cast
 
 from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
+from vv_agent.checkpoint import ResumeObservation
 from vv_agent.model_settings import ModelSettings
 
 Role = Literal["system", "user", "assistant", "tool"]
@@ -29,6 +30,7 @@ def _trim_portable_whitespace(value: str) -> str:
 class AgentStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
     WAIT_USER = "wait_user"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -858,6 +860,8 @@ class AgentResult:
     partial_output: str | None = None
     budget_usage: BudgetUsageSnapshot | None = None
     budget_exhaustion: BudgetExhaustion | None = None
+    checkpoint_key: str | None = None
+    resume_observation: ResumeObservation | None = None
 
     @property
     def todo_list(self) -> list[dict[str, Any]]:
@@ -879,6 +883,10 @@ class AgentResult:
             "error": self.error,
             "shared_state": self.shared_state,
             "token_usage": self.token_usage.to_dict(),
+            "checkpoint_key": self.checkpoint_key,
+            "resume_observation": (
+                self.resume_observation.to_dict() if self.resume_observation is not None else None
+            ),
         }
         if self.budget_usage is not None:
             payload["budget_usage"] = self.budget_usage.to_dict()
@@ -907,6 +915,12 @@ class AgentResult:
         budget_exhaustion_raw = data.get("budget_exhaustion")
         if budget_exhaustion_raw is not None and not isinstance(budget_exhaustion_raw, dict):
             raise TypeError("AgentResult field 'budget_exhaustion' must be an object or None")
+        checkpoint_key = data.get("checkpoint_key")
+        if checkpoint_key is not None and not isinstance(checkpoint_key, str):
+            raise TypeError("AgentResult field 'checkpoint_key' must be a string or None")
+        resume_observation_raw = data.get("resume_observation")
+        if resume_observation_raw is not None and not isinstance(resume_observation_raw, dict):
+            raise TypeError("AgentResult field 'resume_observation' must be an object or None")
         return cls(
             status=AgentStatus(data["status"]),
             completion_reason=(CompletionReason(completion_reason_raw) if completion_reason_raw is not None else None),
@@ -922,5 +936,11 @@ class AgentResult:
             budget_usage=(BudgetUsageSnapshot.from_dict(budget_usage_raw) if budget_usage_raw is not None else None),
             budget_exhaustion=(
                 BudgetExhaustion.from_dict(budget_exhaustion_raw) if budget_exhaustion_raw is not None else None
+            ),
+            checkpoint_key=checkpoint_key,
+            resume_observation=(
+                ResumeObservation.from_dict(resume_observation_raw)
+                if resume_observation_raw is not None
+                else None
             ),
         )

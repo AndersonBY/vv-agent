@@ -18,6 +18,7 @@ from vv_agent.app_server.protocol import (
     ThreadUnsubscribeParams,
     TurnFollowUpParams,
     TurnInterruptParams,
+    TurnResumeParams,
     TurnStartParams,
     TurnSteerParams,
 )
@@ -87,6 +88,9 @@ class AppServerClient:
 
     def start_turn(self, params: TurnStartParams) -> dict[str, Any]:
         return self._send_request("turn/start", params.to_dict())
+
+    def resume_turn(self, params: TurnResumeParams) -> dict[str, Any]:
+        return self._send_request("turn/resume", params.to_dict())
 
     def interrupt_turn(self, params: TurnInterruptParams) -> dict[str, Any]:
         return self._send_request("turn/interrupt", params.to_dict())

@@ -1,0 +1,512 @@
+{
+  "contract": "checkpoint_config_v1",
+  "version": 1,
+  "defaults": {
+    "checkpoint_config": null,
+    "resume_policy": "new",
+    "ambiguous_model_policy": "require_reconciliation",
+    "ambiguous_tool_policy": "require_reconciliation",
+    "required_extension_namespaces": [],
+    "max_extension_state_bytes": 262144,
+    "credential_slots": [],
+    "capability_refs": {}
+  },
+  "limits": {
+    "checkpoint_key_max_utf8_bytes": 512,
+    "extension_namespace_max_ascii_bytes": 128,
+    "extension_entry_max_utf8_bytes": 65536,
+    "extension_total_default_max_utf8_bytes": 262144,
+    "wire_integer_max": 9007199254740991
+  },
+  "store_selection": {
+    "local": "store",
+    "distributed": "store_ref",
+    "exactly_one_required_when_enabled": true,
+    "process_local_store_is_not_serialized": true
+  },
+  "behavior_capability_references": {
+    "local_source": "CheckpointConfig.capability_refs",
+    "distributed_source": "resolved distributed capability registry references",
+    "slot_pattern": "^[a-z][a-z0-9_.:-]*$",
+    "reference_shape": {
+      "id": "non_empty_string",
+      "version": "non_empty_string"
+    },
+    "required_for_every_configured_behavior_capability": true,
+    "missing_error": "checkpoint_definition_unstable"
+  },
+  "valid_cases": [
+    {
+      "name": "disabled",
+      "config": null
+    },
+    {
+      "name": "generated_new_key",
+      "config": {
+        "key": null,
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        }
+      }
+    },
+    {
+      "name": "named_new_key",
+      "config": {
+        "key": "invoice-agent/2026-07-16/0001",
+        "resume_policy": "new",
+        "ambiguous_model_policy": "require_reconciliation",
+        "ambiguous_tool_policy": "require_reconciliation",
+        "store": {
+          "kind": "in_memory"
+        },
+        "required_extension_namespaces": [
+          "com.example.audit",
+          "com.example.state"
+        ],
+        "max_extension_state_bytes": 131072,
+        "credential_slots": [
+          "/model/settings/extra_body/api_key",
+          "/model/settings/extra_headers/authorization"
+        ],
+        "capability_refs": {
+          "reconciliation_provider": {
+            "id": "reconcile.local",
+            "version": "1"
+          },
+          "runtime_hook:0": {
+            "id": "hook.audit",
+            "version": "1"
+          }
+        }
+      }
+    },
+    {
+      "name": "resume_if_present",
+      "config": {
+        "key": "research-run-42",
+        "resume_policy": "resume_if_present",
+        "ambiguous_model_policy": "retry_with_duplicate_risk",
+        "ambiguous_tool_policy": "retry_idempotent_only",
+        "store": {
+          "kind": "in_memory"
+        },
+        "required_extension_namespaces": [],
+        "max_extension_state_bytes": 0
+      }
+    },
+    {
+      "name": "require_existing_distributed",
+      "config": {
+        "key": "durable-run-42",
+        "resume_policy": "require_existing",
+        "ambiguous_model_policy": "require_reconciliation",
+        "ambiguous_tool_policy": "require_reconciliation",
+        "store_ref": {
+          "id": "checkpoint.tenant",
+          "version": "1"
+        },
+        "required_extension_namespaces": [
+          "ai.vectorvein.vv-agent.runtime"
+        ],
+        "max_extension_state_bytes": 262144
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "not_object",
+      "config": [],
+      "error_code": "checkpoint_config_invalid"
+    },
+    {
+      "name": "missing_store_or_reference",
+      "config": {
+        "key": "x",
+        "resume_policy": "new"
+      },
+      "error_code": "checkpoint_store_selection_invalid"
+    },
+    {
+      "name": "both_store_and_reference",
+      "config": {
+        "key": "x",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        },
+        "store_ref": {
+          "id": "checkpoint.tenant",
+          "version": "1"
+        }
+      },
+      "error_code": "checkpoint_store_selection_invalid"
+    },
+    {
+      "name": "blank_key",
+      "config": {
+        "key": " ",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "error_code": "checkpoint_key_invalid"
+    },
+    {
+      "name": "key_too_large",
+      "config": {
+        "key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "error_code": "checkpoint_key_invalid"
+    },
+    {
+      "name": "resume_if_present_without_key",
+      "config": {
+        "key": null,
+        "resume_policy": "resume_if_present",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "error_code": "checkpoint_key_required"
+    },
+    {
+      "name": "require_existing_without_key",
+      "config": {
+        "key": null,
+        "resume_policy": "require_existing",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "error_code": "checkpoint_key_required"
+    },
+    {
+      "name": "unknown_resume_policy",
+      "config": {
+        "key": "x",
+        "resume_policy": "overwrite",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "error_code": "checkpoint_policy_invalid"
+    },
+    {
+      "name": "unknown_model_policy",
+      "config": {
+        "key": "x",
+        "resume_policy": "new",
+        "ambiguous_model_policy": "retry_silently",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "error_code": "checkpoint_policy_invalid"
+    },
+    {
+      "name": "unknown_tool_policy",
+      "config": {
+        "key": "x",
+        "resume_policy": "new",
+        "ambiguous_tool_policy": "retry_all",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "error_code": "checkpoint_policy_invalid"
+    },
+    {
+      "name": "duplicate_extension_namespace",
+      "config": {
+        "key": "x",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        },
+        "required_extension_namespaces": [
+          "com.example.state",
+          "com.example.state"
+        ]
+      },
+      "error_code": "checkpoint_extension_namespace_duplicate"
+    },
+    {
+      "name": "unsafe_extension_size",
+      "config": {
+        "key": "x",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        },
+        "max_extension_state_bytes": 9007199254740992
+      },
+      "error_code": "checkpoint_extension_limit_invalid"
+    },
+    {
+      "name": "credential_slots_not_sorted_unique",
+      "config": {
+        "key": "x",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        },
+        "credential_slots": [
+          "/model/settings/extra_headers/authorization",
+          "/model/settings/extra_body/api_key",
+          "/model/settings/extra_body/api_key"
+        ]
+      },
+      "error_code": "checkpoint_credential_slots_invalid"
+    },
+    {
+      "name": "credential_slot_invalid_pointer",
+      "config": {
+        "key": "x",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        },
+        "credential_slots": [
+          "/model/settings/extra_body/a~2b"
+        ]
+      },
+      "error_code": "checkpoint_credential_slots_invalid"
+    },
+    {
+      "name": "invalid_capability_reference",
+      "config": {
+        "key": "x",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        },
+        "capability_refs": {
+          "reconciliation_provider": {
+            "id": "reconcile.local"
+          }
+        }
+      },
+      "error_code": "checkpoint_capability_ref_invalid"
+    }
+  ],
+  "precedence": {
+    "layers": [
+      "run_config",
+      "runner_default_run_config",
+      "framework_disabled"
+    ],
+    "merge": "whole_object_replace",
+    "agent_implicit_checkpoint": false
+  },
+  "run_scope": {
+    "checkpoint_key_belongs_to_one_root_run_definition": true,
+    "agent_as_tool_child_inherits_parent_checkpoint_config": false,
+    "background_agent_child_inherits_parent_checkpoint_config": false,
+    "child_may_use_an_explicit_distinct_checkpoint_key": true,
+    "handoff_with_checkpoint_v2": "fail_before_external_operations_until_the_complete_handoff_graph_and_active_agent_state_are_contractual",
+    "handoff_error_code": "checkpoint_handoff_unsupported",
+    "approval_resume_reenters_operation_journal": true,
+    "approval_resume_reuses_source_checkpoint_key": false,
+    "approval_resume_requires_distinct_key_when_checkpoint_v2_enabled": true
+  },
+  "resume_attempt_rules": {
+    "created_record": 1,
+    "resume_if_present_created_record": 1,
+    "successful_recovery_claim": "previous_plus_one",
+    "failed_claim": "unchanged",
+    "live_claim_rejection": "unchanged",
+    "definition_mismatch": "unchanged",
+    "terminal_replay": "unchanged"
+  },
+  "runner_cases": [
+    {
+      "name": "disabled_preserves_existing_trace",
+      "runner_default": null,
+      "run_config": null,
+      "existing": null,
+      "expected": {
+        "checkpoint_v2_enabled": false,
+        "model_calls": 1,
+        "tool_calls": 0,
+        "checkpoint_events": []
+      }
+    },
+    {
+      "name": "new_generated_key_is_observable",
+      "runner_default": null,
+      "run_config": {
+        "key": null,
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "existing": null,
+      "expected": {
+        "status": "completed",
+        "generated_key": true,
+        "model_calls": 1,
+        "checkpoint_created": true
+      }
+    },
+    {
+      "name": "named_new_collision_fails_before_operations",
+      "runner_default": null,
+      "run_config": {
+        "key": "collision",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "existing": {
+        "checkpoint_key": "collision",
+        "run_definition_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "running"
+      },
+      "expected": {
+        "status": "failed",
+        "failure_code": "checkpoint_already_exists",
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "require_existing_missing_fails_before_operations",
+      "runner_default": null,
+      "run_config": {
+        "key": "missing",
+        "resume_policy": "require_existing",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "existing": null,
+      "expected": {
+        "status": "failed",
+        "failure_code": "checkpoint_not_found",
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "definition_mismatch_fails_before_operations",
+      "runner_default": null,
+      "run_config": {
+        "key": "stale-definition",
+        "resume_policy": "resume_if_present",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "existing": {
+        "checkpoint_key": "stale-definition",
+        "run_definition_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "resume_attempt": 2,
+        "status": "running"
+      },
+      "expected": {
+        "status": "failed",
+        "failure_code": "checkpoint_definition_mismatch",
+        "resume_attempt": 2,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "per_run_object_replaces_runner_default",
+      "runner_default": {
+        "key": "default-key",
+        "resume_policy": "resume_if_present",
+        "ambiguous_model_policy": "retry_with_duplicate_risk",
+        "ambiguous_tool_policy": "retry_idempotent_only",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "run_config": {
+        "key": "run-key",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "existing": null,
+      "expected": {
+        "effective_key": "run-key",
+        "effective_resume_policy": "new",
+        "effective_ambiguous_model_policy": "require_reconciliation",
+        "effective_ambiguous_tool_policy": "require_reconciliation"
+      }
+    },
+    {
+      "name": "child_agent_does_not_inherit_parent_checkpoint_key",
+      "runner_default": null,
+      "run_config": {
+        "key": "parent-run",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "child_invocation": {
+        "kind": "agent_as_tool",
+        "explicit_checkpoint_config": null
+      },
+      "expected": {
+        "parent_checkpoint_key": "parent-run",
+        "child_checkpoint_v2_enabled": false,
+        "child_checkpoint_key": null
+      }
+    },
+    {
+      "name": "local_reconciliation_provider_requires_explicit_stable_ref",
+      "runner_default": null,
+      "run_config": {
+        "key": "unstable-provider",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        },
+        "capability_refs": {}
+      },
+      "configured_capabilities": [
+        "reconciliation_provider"
+      ],
+      "expected": {
+        "status": "failed",
+        "failure_code": "checkpoint_definition_unstable",
+        "checkpoint_create_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "handoff_is_rejected_before_checkpoint_side_effects",
+      "runner_default": null,
+      "run_config": {
+        "key": "handoff-run",
+        "resume_policy": "new",
+        "store": {
+          "kind": "in_memory"
+        }
+      },
+      "agent": {
+        "handoff_count": 1
+      },
+      "expected": {
+        "status": "failed",
+        "failure_code": "checkpoint_handoff_unsupported",
+        "checkpoint_create_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    }
+  ]
+}

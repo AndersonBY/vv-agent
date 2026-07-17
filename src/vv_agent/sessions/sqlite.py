@@ -4,7 +4,12 @@ import sqlite3
 from pathlib import Path
 from threading import RLock
 
-from vv_agent.sessions.base import _deserialize_message, _serialize_message
+from vv_agent.sessions.base import (
+    SessionCommitError,
+    _deserialize_message,
+    _serialize_message,
+    validate_session_commit,
+)
 from vv_agent.types import Message
 
 _SESSION_SCHEMA_VERSION = 1
@@ -20,6 +25,14 @@ CREATE TABLE IF NOT EXISTS session_items (
 _CREATE_SESSION_ITEMS_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_session_items_session_id_item_index
     ON session_items (session_id, item_index)
+"""
+_CREATE_SESSION_COMMITS_TABLE = """
+CREATE TABLE IF NOT EXISTS session_commits (
+    session_id TEXT NOT NULL,
+    commit_id TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    PRIMARY KEY (session_id, commit_id)
+)
 """
 
 
@@ -55,6 +68,7 @@ def _initialize_session_schema(connection: sqlite3.Connection, lock: RLock) -> N
                     raise RuntimeError(f"unsupported session_items schema columns: {columns!r}")
 
             connection.execute(_CREATE_SESSION_ITEMS_INDEX)
+            connection.execute(_CREATE_SESSION_COMMITS_TABLE)
             connection.execute(f"PRAGMA user_version = {_SESSION_SCHEMA_VERSION}")
             connection.commit()
         except BaseException:
@@ -142,6 +156,47 @@ class SQLiteSession:
                 payloads,
             )
 
+    def add_items_once(
+        self,
+        commit_id: str,
+        payload_digest: str,
+        items: list[Message],
+    ) -> str:
+        normalized = validate_session_commit(commit_id, payload_digest, items)
+        payloads = [(self.session_id, _serialize_message(item)) for item in normalized]
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                existing = self._conn.execute(
+                    "SELECT payload_digest FROM session_commits "
+                    "WHERE session_id = ? AND commit_id = ?",
+                    (self.session_id, commit_id),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing[0]) != payload_digest:
+                        raise SessionCommitError(
+                            "session commit id already has a different payload",
+                            code="session_commit_identity_conflict",
+                        )
+                    self._conn.commit()
+                    return "replayed"
+                if payloads:
+                    self._conn.executemany(
+                        "INSERT INTO session_items (session_id, payload) VALUES (?, ?)",
+                        payloads,
+                    )
+                self._conn.execute(
+                    "INSERT INTO session_commits (session_id, commit_id, payload_digest) "
+                    "VALUES (?, ?, ?)",
+                    (self.session_id, commit_id, payload_digest),
+                )
+                self._conn.commit()
+                return "committed"
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+                raise
+
     def pop_item(self) -> Message | None:
         with self._lock:
             try:
@@ -166,6 +221,7 @@ class SQLiteSession:
     def clear(self) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM session_items WHERE session_id = ?", (self.session_id,))
+            self._conn.execute("DELETE FROM session_commits WHERE session_id = ?", (self.session_id,))
 
     def clear_session(self) -> None:
         self.clear()

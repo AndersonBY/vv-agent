@@ -14,6 +14,7 @@ history.
 | `model-settings.md` | `LLM_SETTINGS`, local key files, model defaults, and exact model resolution rules. |
 | `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and v1 event producers. |
 | `run-budgets.md` | Token, tool, wall-time, and host-cost limits; observations, resume, and distributed behavior. |
+| `checkpoint-resume.md` | Opt-in checkpoint v2, immutable run definitions, operation journals, ambiguity, and durable terminal ordering. |
 | `app-server.md` | JSONL protocol, lifecycle, approval, schema generation, CLI startup, and host boundary. |
 
 ## Existing Entry Points

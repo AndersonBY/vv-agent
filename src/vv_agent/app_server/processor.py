@@ -26,10 +26,11 @@ from vv_agent.app_server.request_serialization import (
     RequestScope,
     RequestSerializationQueues,
 )
-from vv_agent.app_server.run_adapter import RunAdapter
+from vv_agent.app_server.run_adapter import RunAdapter, TurnResumeError
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore
 from vv_agent.app_server.transport import ChannelTransport
+from vv_agent.checkpoint import CheckpointError
 
 CLIENT_METHODS: tuple[str, ...] = (
     "initialize",
@@ -42,6 +43,7 @@ CLIENT_METHODS: tuple[str, ...] = (
     "thread/archive",
     "thread/unsubscribe",
     "turn/start",
+    "turn/resume",
     "turn/steer",
     "turn/followUp",
     "turn/interrupt",
@@ -173,6 +175,9 @@ class MessageProcessor:
             return
         if request.method == "turn/start":
             self._serialize_or_run(connection_id, request, lambda: self._handle_turn_start(connection_id, request))
+            return
+        if request.method == "turn/resume":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_resume(connection_id, request))
             return
         if request.method == "turn/steer":
             self._serialize_or_run(connection_id, request, lambda: self._handle_turn_steer(connection_id, request))
@@ -512,7 +517,7 @@ class MessageProcessor:
         if snapshot.thread.archived_at is not None:
             self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
             return
-        if self._state_manager.active_turn(thread_id) is not None:
+        if self._state_manager.active_turn(thread_id) is not None or snapshot.thread.active_turn_id is not None:
             self._router.send_error(
                 connection_id,
                 request.id,
@@ -526,6 +531,57 @@ class MessageProcessor:
             metadata=dict(metadata),
             request_id=request.id,
         )
+
+    def _handle_turn_resume(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = self._params_object(connection_id, request)
+        if params is None:
+            return
+        expected_fields = {"threadId", "turnId", "checkpointKey"}
+        if set(params) != expected_fields:
+            self._router.send_error(
+                connection_id,
+                request.id,
+                AppServerError.invalid_params(
+                    "turn/resume requires exactly threadId, turnId, and checkpointKey"
+                ),
+            )
+            return
+        thread_id = self._required_string_param(connection_id, request, params, "threadId")
+        if not thread_id:
+            return
+        turn_id = self._required_string_param(connection_id, request, params, "turnId")
+        if not turn_id:
+            return
+        checkpoint_key = self._required_string_param(connection_id, request, params, "checkpointKey")
+        if not checkpoint_key:
+            return
+        try:
+            snapshot = self._store.read_thread(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        if snapshot.thread.archived_at is not None:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
+            return
+        try:
+            self._run_adapter.resume_turn(
+                connection_id=connection_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                checkpoint_key=checkpoint_key,
+                request_id=request.id,
+            )
+        except TurnResumeError as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+        except CheckpointError as exc:
+            self._router.send_error(
+                connection_id,
+                request.id,
+                AppServerError.invalid_params(
+                    "Checkpoint resume rejected",
+                    data={"checkpointErrorCode": exc.code},
+                ),
+            )
 
     def _handle_turn_steer(self, connection_id: str, request: JsonRpcRequest) -> None:
         control = self._validated_active_turn(connection_id, request)

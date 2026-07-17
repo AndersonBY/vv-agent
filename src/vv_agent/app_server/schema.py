@@ -35,6 +35,8 @@ JSON_SCHEMA_NAMES = (
     "ThreadReadResponse",
     "ThreadResumeResponse",
     "ThreadStartResponse",
+    "TurnResumeParams",
+    "TurnResumeResponse",
     "TurnStartResponse",
 )
 TYPESCRIPT_SCHEMA_NAMES = tuple(name for name in JSON_SCHEMA_NAMES if name != "JsonRpcMessage")
@@ -88,6 +90,40 @@ def _definitions() -> dict[str, dict[str, Any]]:
             "metadata": JSON_OBJECT,
         },
         required=["threadId", "agentKey", "cwd", "createdAt", "updatedAt", "archivedAt", "status", "metadata"],
+    )
+    checkpoint_summary = _object(
+        {
+            "key": {"type": "string"},
+            "resumeAttempt": {"type": "integer", "minimum": 1},
+            "cycleIndex": {"type": "integer", "minimum": 0},
+            "status": {
+                "type": "string",
+                "enum": [
+                    "running",
+                    "reconciliation_required",
+                    "wait_user",
+                    "completed",
+                    "failed",
+                    "max_cycles",
+                ],
+            },
+            "terminalAcknowledged": {"type": "boolean"},
+        },
+        required=["key", "resumeAttempt", "cycleIndex", "status", "terminalAcknowledged"],
+    )
+    interruption_summary = _object(
+        {
+            "reason": {"const": "resume_requires_reconciliation"},
+            "operationId": {"type": "string"},
+            "operationKind": {"type": "string", "enum": ["model", "tool"]},
+            "cycleIndex": {"type": "integer", "minimum": 1},
+            "risk": {"type": "string"},
+            "idempotencySupport": {
+                "type": ["string", "null"],
+                "enum": ["supported", "unsupported", "unknown", None],
+            },
+        },
+        required=["reason", "operationId", "operationKind", "cycleIndex", "risk", "idempotencySupport"],
     )
     turn_record = _object(
         {
@@ -187,6 +223,14 @@ def _definitions() -> dict[str, dict[str, Any]]:
             },
             required=["threadId"],
         ),
+        "TurnResumeParams": _object(
+            {
+                "threadId": {"type": "string"},
+                "turnId": {"type": "string"},
+                "checkpointKey": {"type": "string"},
+            },
+            required=["threadId", "turnId", "checkpointKey"],
+        ),
         "TurnSteerParams": _object(
             {
                 "threadId": {"type": "string"},
@@ -217,6 +261,8 @@ def _definitions() -> dict[str, dict[str, Any]]:
         "AppItem": thread_item,
         "AppThread": thread_record,
         "AppTurn": turn_record,
+        "CheckpointSummary": checkpoint_summary,
+        "InterruptionSummary": interruption_summary,
         "ThreadStartedParams": _object(
             {
                 "threadId": {"type": "string"},
@@ -236,7 +282,12 @@ def _definitions() -> dict[str, dict[str, Any]]:
         ),
         "ThreadClosedParams": _object({"threadId": {"type": "string"}}, required=["threadId"]),
         "TurnStartedParams": _object(
-            {"threadId": {"type": "string"}, "turnId": {"type": "string"}},
+            {
+                "threadId": {"type": "string"},
+                "turnId": {"type": "string"},
+                "runId": {"type": "string"},
+                "status": {"type": "string"},
+            },
             required=["threadId", "turnId"],
         ),
         "AgentMessageDeltaParams": {
@@ -269,6 +320,8 @@ def _definitions() -> dict[str, dict[str, Any]]:
                 "tokenUsage": JSON_OBJECT,
                 "budgetUsage": JSON_OBJECT,
                 "budgetExhaustion": JSON_OBJECT,
+                "checkpoint": {"$ref": "#/$defs/CheckpointSummary"},
+                "interruption": {"$ref": "#/$defs/InterruptionSummary"},
                 "error": {"type": "string"},
             },
             required=["threadId", "turnId", "status"],
@@ -342,6 +395,22 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
             },
             required=["threadId", "turnId", "status"],
         ),
+        "TurnResumeResponse": _object(
+            {
+                "threadId": {"type": "string"},
+                "turnId": {"type": "string"},
+                "runId": {"type": "string"},
+                "status": {"type": "string"},
+                "finalOutput": {},
+                "completionReason": {"type": "string"},
+                "completionToolName": {"type": "string"},
+                "partialOutput": {"type": "string"},
+                "checkpoint": {"$ref": "#/$defs/CheckpointSummary"},
+                "interruption": {"$ref": "#/$defs/InterruptionSummary"},
+                "error": {"type": "string"},
+            },
+            required=["threadId", "turnId", "runId", "status"],
+        ),
         "TurnQueueResponse": _object(
             {
                 "threadId": {"type": "string"},
@@ -376,6 +445,7 @@ CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "thread/archive": ("ThreadIdParams", True, True),
     "thread/unsubscribe": ("ThreadIdParams", True, True),
     "turn/start": ("TurnStartParams", True, True),
+    "turn/resume": ("TurnResumeParams", True, True),
     "turn/steer": ("TurnSteerParams", True, True),
     "turn/followUp": ("TurnFollowUpParams", True, True),
     "turn/interrupt": ("TurnInterruptParams", True, True),
@@ -503,6 +573,8 @@ def _schema_bundle() -> dict[str, Any]:
         "ThreadReadResponse": definitions["ThreadSnapshotResponse"],
         "ThreadResumeResponse": definitions["ThreadSnapshotResponse"],
         "ThreadStartResponse": definitions["ThreadStartResponse"],
+        "TurnResumeParams": definitions["TurnResumeParams"],
+        "TurnResumeResponse": definitions["TurnResumeResponse"],
         "TurnStartResponse": definitions["TurnStartResponse"],
     }
     bundle: dict[str, Any] = {
@@ -575,6 +647,7 @@ export type JsonObject = { [key: string]: JsonValue };
 export type ApprovalDecision = "allow" | "allow_session" | "deny" | "timeout";
 export type ThreadStatus = "idle" | "running" | "archived" | "closed";
 export type TurnStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
+export type CheckpointStatus = "running" | "reconciliation_required" | "wait_user" | "completed" | "failed" | "max_cycles";
 export type AppItemStatus = "started" | "inProgress" | "completed" | "failed";
 
 export interface ClientInfo { name: string; title?: string; version?: string; }
@@ -594,6 +667,7 @@ export interface ThreadListParams {
 }
 export type InputItem = JsonObject;
 export interface TurnStartParams { threadId: string; input?: InputItem[]; metadata?: JsonObject; }
+export interface TurnResumeParams { threadId: string; turnId: string; checkpointKey: string; }
 export interface TurnSteerParams { threadId: string; expectedTurnId?: string; input?: InputItem[]; }
 export interface TurnFollowUpParams { threadId: string; expectedTurnId?: string; input?: InputItem[]; }
 export interface TurnInterruptParams { threadId: string; expectedTurnId?: string; reason?: string; }
@@ -633,15 +707,29 @@ export interface ThreadListResponse { threads: AppThread[]; }
 export interface ThreadArchiveResponse { threadId: string; archived: boolean; }
 export interface ThreadUnsubscribeResponse { threadId: string; subscribed: boolean; closed: boolean; }
 export interface TurnStartResponse { threadId: string; turnId: string; status: TurnStatus; }
+export interface CheckpointSummary {
+  key: string; resumeAttempt: number; cycleIndex: number; status: CheckpointStatus;
+  terminalAcknowledged: boolean;
+}
+export interface InterruptionSummary {
+  reason: "resume_requires_reconciliation"; operationId: string; operationKind: "model" | "tool";
+  cycleIndex: number; risk: string; idempotencySupport: "supported" | "unsupported" | "unknown" | null;
+}
+export interface TurnResumeResponse {
+  threadId: string; turnId: string; runId: string; status: TurnStatus; finalOutput?: JsonValue;
+  completionReason?: string; completionToolName?: string; partialOutput?: string;
+  checkpoint?: CheckpointSummary; interruption?: InterruptionSummary; error?: string;
+}
 export interface TurnQueueResponse { threadId: string; turnId: string; queued: boolean; }
 export interface TurnInterruptResponse { threadId: string; turnId: string; cancelled: boolean; }
 export interface ThreadStatusChangedParams { threadId: string; status: ThreadStatus; }
 export interface ThreadClosedParams { threadId: string; }
-export interface TurnStartedParams { threadId: string; turnId: string; }
+export interface TurnStartedParams { threadId: string; turnId: string; runId?: string; status?: TurnStatus; }
 export interface TurnCompletedParams {
   threadId: string; turnId: string; runId?: string; status: TurnStatus; finalOutput?: JsonValue;
   completionReason?: string; completionToolName?: string; partialOutput?: string;
-  tokenUsage?: JsonObject; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject; error?: string;
+  tokenUsage?: JsonObject; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;
+  checkpoint?: CheckpointSummary; interruption?: InterruptionSummary; error?: string;
 }
 export type ApprovalResolveResponse = Record<string, never>;
 export interface SchemaExportResponse { jsonSchema: Record<string, string>; typescript: Record<string, string>; }
@@ -656,6 +744,7 @@ export type ClientRequest =
   | { jsonrpc: "2.0"; id: RequestId; method: "thread/archive" | "thread/unsubscribe"; params: ThreadIdParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "thread/list"; params?: ThreadListParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "turn/start"; params: TurnStartParams }
+  | { jsonrpc: "2.0"; id: RequestId; method: "turn/resume"; params: TurnResumeParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "turn/steer"; params: TurnSteerParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "turn/followUp"; params: TurnFollowUpParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "turn/interrupt"; params: TurnInterruptParams }
@@ -682,7 +771,7 @@ export type ServerRequest = {
 export type ClientResult =
   | InitializeResponse | ModelListResponse | ThreadStartResponse | ThreadReadResponse
   | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | ThreadUnsubscribeResponse
-  | TurnStartResponse | TurnQueueResponse | TurnInterruptResponse | ApprovalResolveResponse
+  | TurnStartResponse | TurnResumeResponse | TurnQueueResponse | TurnInterruptResponse | ApprovalResolveResponse
   | SchemaExportResponse;
 export type JsonRpcSuccess = { jsonrpc: "2.0"; id: RequestId; result: ClientResult | JsonValue };
 export type JsonRpcError = {

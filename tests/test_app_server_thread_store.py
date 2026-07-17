@@ -156,6 +156,63 @@ def test_duplicate_item_id_fails_without_reordering_replay() -> None:
     assert snapshot.items[0].payload == {"text": "original"}
 
 
+def test_duplicate_run_event_replays_identical_item_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "thread-store.sqlite"
+    first_store = ThreadStore(db_path)
+    thread = first_store.create_thread(agent_key="default")
+    turn = first_store.create_turn(thread_id=thread.thread_id, input=[])
+    item = ThreadItem(
+        item_id="item_evt_1",
+        thread_id=thread.thread_id,
+        turn_id=turn.turn_id,
+        item_type="agentMessage",
+        status="completed",
+        payload={"text": "durable"},
+        created_at=1,
+        updated_at=1,
+    )
+
+    assert first_store.append_item(item, run_event_id="evt_1") is True
+    assert ThreadStore(db_path).append_item(item, run_event_id="evt_1") is False
+
+    snapshot = first_store.read_thread(thread.thread_id)
+    assert snapshot.items == [item]
+
+
+def test_duplicate_run_event_rejects_conflicting_projection() -> None:
+    store = ThreadStore()
+    thread = store.create_thread(agent_key="default")
+    turn = store.create_turn(thread_id=thread.thread_id, input=[])
+    original = ThreadItem(
+        item_id="item_evt_1",
+        thread_id=thread.thread_id,
+        turn_id=turn.turn_id,
+        item_type="agentMessage",
+        status="completed",
+        payload={"text": "original"},
+        created_at=1,
+        updated_at=1,
+    )
+    store.append_item(original, run_event_id="evt_1")
+
+    with pytest.raises(sqlite3.IntegrityError, match="conflicting App Server item projection"):
+        store.append_item(
+            ThreadItem(
+                item_id=original.item_id,
+                thread_id=original.thread_id,
+                turn_id=original.turn_id,
+                item_type=original.item_type,
+                status=original.status,
+                payload={"text": "replacement"},
+                created_at=original.created_at,
+                updated_at=original.updated_at,
+            ),
+            run_event_id="evt_1",
+        )
+
+    assert store.read_thread(thread.thread_id).items == [original]
+
+
 def test_opening_legacy_database_adds_thread_lifecycle_columns(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy.sqlite"
     connection = sqlite3.connect(db_path)

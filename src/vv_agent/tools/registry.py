@@ -30,6 +30,7 @@ class ToolRegistry:
                 name=spec.name,
                 handler=spec.handler,
                 schema=deepcopy(schema) if schema else None,
+                idempotency=spec.idempotency,
             )
 
     def register_many(self, specs: list[ToolSpec]) -> None:
@@ -70,6 +71,10 @@ class ToolRegistry:
         if executor is None:
             raise ToolNotFoundError(name)
         return executor
+
+    def tool_idempotency(self, name: str) -> Any:
+        executor = self.get_executor(name)
+        return getattr(executor, "idempotency", self.get(name).idempotency)
 
     def mark_policy_managed_by_handler(self, name: str) -> None:
         executor = self.get_executor(name)

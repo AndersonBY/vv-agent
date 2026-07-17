@@ -28,7 +28,7 @@ from vv_agent.events import (
     SubRunCompletedEvent,
     SubRunStartedEvent,
 )
-from vv_agent.llm.base import LLMClient
+from vv_agent.llm.base import LLMClient, LlmRequest, complete_llm_request
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.token_utils import resolve_model_token_limits
 from vv_agent.model_settings import ModelSettings
@@ -36,6 +36,10 @@ from vv_agent.prompt import build_raw_system_prompt_sections, build_system_promp
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
+from vv_agent.runtime.checkpoint_resume import (
+    CheckpointReconciliationRequired,
+    CheckpointResumeController,
+)
 from vv_agent.runtime.context import ExecutionContext, StreamCallback
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
@@ -465,6 +469,7 @@ class AgentRuntime:
         workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
         initial_messages: list[Message] | None = None,
+        prepared_initial_messages: list[Message] | None = None,
         user_message: str | None = None,
         before_cycle_messages: BeforeCycleMessageProvider | None = None,
         interruption_messages: InterruptionMessageProvider | None = None,
@@ -473,6 +478,7 @@ class AgentRuntime:
         budget_limits: RunBudgetLimits | None = None,
         host_cost_meter: HostCostMeter | None = None,
         initial_budget_usage: BudgetUsageSnapshot | None = None,
+        checkpoint_controller: CheckpointResumeController | None = None,
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
         effective_shared_state = shared_state if shared_state is not None else task.initial_shared_state
@@ -484,10 +490,18 @@ class AgentRuntime:
             if "active_skills" not in shared and task.metadata.get("active_skills") is not None:
                 shared["active_skills"] = list(task.metadata.get("active_skills") or [])
 
-        messages = self._build_initial_messages(
-            task=task,
-            initial_messages=(initial_messages if initial_messages is not None else (list(task.initial_messages) or None)),
-            user_message=user_message,
+        messages = (
+            [self._copy_message(message) for message in prepared_initial_messages]
+            if prepared_initial_messages is not None
+            else self._build_initial_messages(
+                task=task,
+                initial_messages=(
+                    initial_messages
+                    if initial_messages is not None
+                    else (list(task.initial_messages) or None)
+                ),
+                user_message=user_message,
+            )
         )
         freeze_dynamic_tool_schema_hints(task)
         runtime_ctx = ctx if ctx is not None else ExecutionContext()
@@ -567,7 +581,17 @@ class AgentRuntime:
         if result is None:
             self._emit_log("agent_started", model=task.model)
 
-        memory_manager = self._build_memory_manager(task=task, workspace_path=workspace_path)
+        if checkpoint_controller is not None:
+            runtime_ctx.metadata["_vv_agent_checkpoint_controller"] = checkpoint_controller
+            runtime_ctx.metadata["_vv_agent_checkpoint_budget_snapshot"] = (
+                (lambda: budget_controller.snapshot) if budget_controller is not None else (lambda: None)
+            )
+
+        memory_manager = self._build_memory_manager(
+            task=task,
+            workspace_path=workspace_path,
+            ctx=runtime_ctx,
+        )
         allow_outside_workspace_paths = self._allow_outside_workspace_paths(task)
         effective_sub_task_manager = sub_task_manager
         if effective_sub_task_manager is None:
@@ -591,14 +615,17 @@ class AgentRuntime:
             budget_controller=budget_controller,
         )
         if result is None:
-            result = self.execution_backend.execute(
-                task=task,
-                initial_messages=messages,
-                shared_state=shared,
-                cycle_executor=cycle_executor,
-                ctx=runtime_ctx,
-                max_cycles=task.max_cycles,
-            )
+            try:
+                result = self.execution_backend.execute(
+                    task=task,
+                    initial_messages=messages,
+                    shared_state=shared,
+                    cycle_executor=cycle_executor,
+                    ctx=runtime_ctx,
+                    max_cycles=task.max_cycles,
+                )
+            except CheckpointReconciliationRequired as interruption:
+                result = interruption.result
 
         if budget_controller is not None:
             cancelled = bool(
@@ -610,7 +637,10 @@ class AgentRuntime:
                 result.status == AgentStatus.FAILED
                 and result.completion_reason not in {CompletionReason.BUDGET_EXHAUSTED, CompletionReason.CANCELLED}
             )
-            if budget_controller.exhaustion is None:
+            if (
+                budget_controller.exhaustion is None
+                and result.status is not AgentStatus.RECONCILIATION_REQUIRED
+            ):
                 exhaustion = budget_controller.terminal(
                     suppress_exhaustion=cancelled or operation_failed,
                 )
@@ -675,6 +705,9 @@ class AgentRuntime:
         ) -> AgentResult | None:
             def is_cancelled() -> bool:
                 return bool(ctx is not None and ctx.cancellation_token is not None and ctx.cancellation_token.cancelled)
+
+            if ctx is not None:
+                ctx.metadata["_vv_agent_active_cycle_index"] = cycle_index
 
             def cancellation_result(error: str | None = None) -> AgentResult:
                 reason = error
@@ -754,6 +787,8 @@ class AgentRuntime:
                     shared_state=shared,
                     ctx=ctx,
                 )
+            except CheckpointReconciliationRequired:
+                raise
             except Exception as exc:
                 cancelled = isinstance(exc, CancelledError) or bool(
                     ctx is not None and ctx.cancellation_token is not None and ctx.cancellation_token.cancelled
@@ -1135,8 +1170,22 @@ class AgentRuntime:
             Message(role="user", content=first_user_message),
         ]
 
-    def _build_memory_manager(self, *, task: AgentTask, workspace_path: Path) -> MemoryManager:
+    def _build_memory_manager(
+        self,
+        *,
+        task: AgentTask,
+        workspace_path: Path,
+        ctx: ExecutionContext | None = None,
+    ) -> MemoryManager:
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
+
+        def summarize(prompt: str, backend: str | None, model: str | None) -> str | None:
+            return self._summarize_memory_prompt(
+                prompt,
+                backend,
+                model,
+                ctx=ctx,
+            )
 
         def read_optional_int(key: str, *, minimum: int = 0) -> int | None:
             if key not in metadata:
@@ -1212,7 +1261,7 @@ class AgentRuntime:
                     max_tokens=read_int("session_memory_max_tokens", 40_000, minimum=1),
                     min_text_messages=read_int("session_memory_min_text_messages", 5, minimum=1),
                     storage_dir=str(metadata.get("session_memory_storage_dir", ".memory/session")),
-                    extraction_callback=self._summarize_memory_prompt,
+                    extraction_callback=summarize,
                     extraction_backend=session_memory_extraction_backend,
                     extraction_model=session_memory_extraction_model,
                     token_model=task.model or "",
@@ -1246,7 +1295,7 @@ class AgentRuntime:
             summary_event_limit=read_int("summary_event_limit", 40, minimum=1),
             summary_backend=summary_backend,
             summary_model=summary_model,
-            summary_callback=self._summarize_memory_prompt,
+            summary_callback=summarize,
             base_system_prompt=task.system_prompt,
             session_memory=session_memory,
         )
@@ -1335,7 +1384,14 @@ class AgentRuntime:
                     return value
         return None
 
-    def _summarize_memory_prompt(self, prompt: str, backend: str | None, model: str | None) -> str | None:
+    def _summarize_memory_prompt(
+        self,
+        prompt: str,
+        backend: str | None,
+        model: str | None,
+        *,
+        ctx: ExecutionContext | None = None,
+    ) -> str | None:
         backend_name = (backend or self.default_backend or "").strip()
         model_name = (model or "").strip()
         if not backend_name or not model_name:
@@ -1354,11 +1410,44 @@ class AgentRuntime:
             )
             self._memory_summary_clients[cache_key] = client
 
-        response = client.complete(
+        request = LlmRequest(
             model=model_name,
             messages=[Message(role="user", content=prompt)],
             tools=[],
+            metadata={
+                "_vv_agent_checkpoint_model": {
+                    "backend": backend_name,
+                    "model_id": model_name,
+                }
+            },
         )
+        checkpoint_controller = (
+            ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
+        )
+        cycle_index = (
+            ctx.metadata.get("_vv_agent_active_cycle_index") if ctx is not None else None
+        )
+
+        def invoke() -> Any:
+            return complete_llm_request(client, request)
+
+        if isinstance(checkpoint_controller, CheckpointResumeController) and isinstance(
+            cycle_index,
+            int,
+        ):
+            assert ctx is not None
+            summary_index = int(
+                ctx.metadata.get("_vv_agent_checkpoint_memory_summary_index", 0)
+            ) + 1
+            ctx.metadata["_vv_agent_checkpoint_memory_summary_index"] = summary_index
+            response = checkpoint_controller.complete_model(
+                cycle_index=cycle_index,
+                operation_slot=f"memory_summary:{summary_index}",
+                request=request,
+                invoke=invoke,
+            )
+        else:
+            response = invoke()
         content = (response.content or "").strip()
         return content or None
 

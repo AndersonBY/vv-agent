@@ -703,6 +703,7 @@ def test_active_turn_and_missing_required_params_are_rejected() -> None:
             "thread/archive",
             "thread/unsubscribe",
             "turn/start",
+            "turn/resume",
             "turn/steer",
             "turn/followUp",
             "turn/interrupt",
@@ -715,6 +716,7 @@ def test_active_turn_and_missing_required_params_are_rejected() -> None:
 
 
 def test_schema_matches_optional_and_required_runtime_params() -> None:
+    durable_resume = _observable_contract()["durableResume"]
     bundle = _schema_bundle()
     client_request = bundle["ClientRequest"]
     definitions = client_request["$defs"]
@@ -733,15 +735,27 @@ def test_schema_matches_optional_and_required_runtime_params() -> None:
         "limit",
     }
     assert definitions["TurnStartParams"]["required"] == ["threadId"]
+    assert definitions["TurnResumeParams"]["required"] == durable_resume["requestFields"]
+    assert set(definitions["TurnResumeParams"]["properties"]) == set(durable_resume["requestFields"])
+    assert set(definitions["TurnResumeResponse"]["properties"]) == set(durable_resume["responseFields"])
+    assert set(definitions["CheckpointSummary"]["properties"]) == set(
+        durable_resume["checkpointSummary"]["fields"]
+    )
+    assert set(definitions["InterruptionSummary"]["properties"]) == set(
+        durable_resume["interruptionSummary"]["fields"]
+    )
     assert definitions["ModelSummary"]["required"] == ["id", "supportsTools"]
     assert "params" not in variants["model/list"]["required"]
     assert "params" not in variants["thread/start"]["required"]
     assert "params" not in variants["thread/list"]["required"]
     assert "params" not in variants["schema/export"]["required"]
     assert "params" in variants["thread/read"]["required"]
+    assert "params" in variants["turn/resume"]["required"]
 
     typescript = typescript_schema_bundle()["ClientRequest.ts"]
     assert "provider?: string" in typescript
     assert "afterItemId?: string" in typescript
     assert "supportsTools: boolean" in typescript
+    assert "export interface TurnResumeParams" in typescript
+    assert "export interface TurnResumeResponse" in typescript
     assert "import " not in typescript
