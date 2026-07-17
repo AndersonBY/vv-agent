@@ -45,7 +45,10 @@ def checkpoint_to_dict(checkpoint: Checkpoint) -> dict[str, Any]:
     if checkpoint.terminal_result is not None:
         if not isinstance(checkpoint.terminal_result, AgentResult):
             raise TypeError("checkpoint terminal_result must be an AgentResult or None")
-        payload["terminal_result"] = checkpoint.terminal_result.to_dict()
+        terminal_result = checkpoint.terminal_result.to_dict()
+        terminal_result.pop("checkpoint_key", None)
+        terminal_result.pop("resume_observation", None)
+        payload["terminal_result"] = terminal_result
     if checkpoint.budget_usage is not None:
         if not isinstance(checkpoint.budget_usage, BudgetUsageSnapshot):
             raise TypeError("checkpoint budget_usage must be a BudgetUsageSnapshot or None")

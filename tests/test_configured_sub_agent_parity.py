@@ -2493,11 +2493,22 @@ def test_child_runtime_inherits_settings_file_and_default_backend(
     observed_runtime_config: list[tuple[Path | None, str | None, bool]] = []
     original_build_memory_manager = AgentRuntime._build_memory_manager
 
-    def capture_runtime_config(self: AgentRuntime, *, task: AgentTask, workspace_path: Path) -> Any:
+    def capture_runtime_config(
+        self: AgentRuntime,
+        *,
+        task: AgentTask,
+        workspace_path: Path,
+        ctx: Any = None,
+    ) -> Any:
         observed_runtime_config.append(
             (self.settings_file, self.default_backend, bool(task.metadata.get("is_sub_task")))
         )
-        return original_build_memory_manager(self, task=task, workspace_path=workspace_path)
+        return original_build_memory_manager(
+            self,
+            task=task,
+            workspace_path=workspace_path,
+            ctx=ctx,
+        )
 
     monkeypatch.setattr(AgentRuntime, "_build_memory_manager", capture_runtime_config)
     llm = ScriptedLLM(

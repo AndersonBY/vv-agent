@@ -6,6 +6,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
+from vv_agent.checkpoint import ResumeObservation
 from vv_agent.events import RunEvent
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason, Message, TaskTokenUsage, ToolCall
 
@@ -47,6 +48,11 @@ class _PendingToolApproval:
     orchestrator: Any
     task: AgentTask
     hook_manager: Any
+    source_checkpoint_key: str | None = None
+    source_operation_id: str | None = None
+    source_request_digest: str | None = None
+    source_idempotency_key: str | None = None
+    source_idempotency_support: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,20 +65,36 @@ class _RunResumeContext:
     pending_tool_approval: _PendingToolApproval | None = None
     approval_consumption: _ApprovalConsumption = field(default_factory=lambda: _ApprovalConsumption(), compare=False)
 
-    def claim_approval(self, interruption_id: str) -> bool:
-        return self.approval_consumption.claim(interruption_id)
+    def claim_approval(
+        self,
+        interruption_id: str,
+        *,
+        checkpoint_key: str | None = None,
+    ) -> bool:
+        return self.approval_consumption.claim(
+            interruption_id,
+            checkpoint_key=checkpoint_key,
+        )
 
 
 class _ApprovalConsumption:
     def __init__(self) -> None:
         self._lock = Lock()
-        self._consumed: set[str] = set()
+        self._consumed: dict[str, str | None] = {}
 
-    def claim(self, interruption_id: str) -> bool:
+    def claim(
+        self,
+        interruption_id: str,
+        *,
+        checkpoint_key: str | None = None,
+    ) -> bool:
         with self._lock:
             if interruption_id in self._consumed:
-                return False
-            self._consumed.add(interruption_id)
+                return bool(
+                    checkpoint_key is not None
+                    and self._consumed[interruption_id] == checkpoint_key
+                )
+            self._consumed[interruption_id] = checkpoint_key
             return True
 
 
@@ -125,6 +147,14 @@ class RunResult:
         return self.raw_result.budget_exhaustion
 
     @property
+    def checkpoint_key(self) -> str | None:
+        return self.raw_result.checkpoint_key
+
+    @property
+    def resume_observation(self) -> ResumeObservation | None:
+        return self.raw_result.resume_observation
+
+    @property
     def approvals(self) -> tuple[ApprovalSnapshot, ...]:
         return self.approval_snapshot()
 
@@ -145,6 +175,10 @@ class RunResult:
             "partial_output": self.partial_output,
             "budget_usage": self.budget_usage.to_dict() if self.budget_usage is not None else None,
             "budget_exhaustion": self.budget_exhaustion.to_dict() if self.budget_exhaustion is not None else None,
+            "checkpoint_key": self.checkpoint_key,
+            "resume_observation": (
+                self.resume_observation.to_dict() if self.resume_observation is not None else None
+            ),
             "events": [event.to_dict() for event in self.events],
             "token_usage": self.token_usage.to_dict(),
             "trace_id": self.trace_id,

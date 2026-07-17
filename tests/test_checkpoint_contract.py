@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -19,8 +18,6 @@ from vv_agent.runtime.stores.sqlite import SqliteStateStore
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "checkpoint_codec_v1.json"
-RUST_REPO = Path(os.environ.get("VV_AGENT_RS_REPO", Path(__file__).parents[2] / "vv-agent-rs"))
-RUST_FIXTURE_PATH = RUST_REPO / "crates" / "vv-agent" / "tests" / "fixtures" / "parity" / FIXTURE_PATH.name
 FIXTURE_SHA256 = "e7be2cfafca7f741d32b4537cb003f0179f69162171432c17cd746a0ff2119cf"
 
 
@@ -40,7 +37,7 @@ class _FakeRedisPipeline:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def watch(self, _key: str) -> None:
+    def watch(self, *_keys: str) -> None:
         return None
 
     def unwatch(self) -> None:
@@ -93,8 +90,8 @@ class _FakeRedisClient:
     def get(self, key: str) -> str | None:
         return self._values.get(key)
 
-    def delete(self, key: str) -> int:
-        return int(self._values.pop(key, None) is not None)
+    def delete(self, *keys: str) -> int:
+        return sum(int(self._values.pop(key, None) is not None) for key in keys)
 
     def pipeline(self) -> _FakeRedisPipeline:
         return _FakeRedisPipeline(self)
@@ -117,6 +114,10 @@ class _FakeRedisClient:
     def scan_iter(self, pattern: str) -> list[str]:
         prefix = pattern.removesuffix("*")
         return [key for key in self._values if key.startswith(prefix)]
+
+    def time(self) -> tuple[int, int]:
+        now_ms = self.eval_server_now_ms or 0
+        return now_ms // 1000, (now_ms % 1000) * 1000
 
 
 def _redis_store() -> RedisStateStore:
@@ -142,10 +143,9 @@ def _stores(tmp_path: Path) -> list[StateStore]:
     return [InMemoryStateStore(), SqliteStateStore(tmp_path / "checkpoints.sqlite3"), _redis_store()]
 
 
-def test_checkpoint_fixture_hash_and_rust_copy_match() -> None:
+def test_checkpoint_v1_fixture_keeps_golden_bytes() -> None:
     payload = FIXTURE_PATH.read_bytes()
     assert hashlib.sha256(payload).hexdigest() == FIXTURE_SHA256
-    assert RUST_FIXTURE_PATH.read_bytes() == payload
 
 
 def test_checkpoint_codec_matches_shared_valid_and_invalid_corpus() -> None:

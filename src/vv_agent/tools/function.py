@@ -10,6 +10,7 @@ from pathlib import Path
 from types import NoneType
 from typing import TYPE_CHECKING, Any, Protocol, Union, get_args, get_origin, get_type_hints, overload
 
+from vv_agent.checkpoint import ToolIdempotency
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.outputs import ToolOutput, ToolOutputError, ToolOutputFile, ToolOutputImage, ToolOutputJson, ToolOutputText
@@ -29,6 +30,7 @@ class Tool(Protocol):
     strict_json_schema: bool
     is_enabled: bool | Callable[[Any, Any], bool]
     needs_approval: bool | ApprovalPredicate
+    idempotency: ToolIdempotency
 
     def invoke(self, context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput: ...
 
@@ -45,11 +47,14 @@ class FunctionTool:
     timeout_seconds: float | None = None
     exposure: ToolExposure = ToolExposure.DIRECT
     failure_error_function: ToolErrorFormatter | None = None
+    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
+        if not isinstance(self.idempotency, ToolIdempotency):
+            self.idempotency = ToolIdempotency(self.idempotency)
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -169,6 +174,7 @@ def function_tool(
     timeout_seconds: float | None = None,
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
+    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
 ) -> FunctionTool: ...
 
 
@@ -185,6 +191,7 @@ def function_tool(
     timeout_seconds: float | None = None,
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
+    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 
 
@@ -200,6 +207,7 @@ def function_tool(
     timeout_seconds: float | None = None,
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
+    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     current_frame = inspect.currentframe()
     decorator_frame = current_frame.f_back if current_frame is not None else None
@@ -235,6 +243,7 @@ def function_tool(
             timeout_seconds=timeout_seconds,
             exposure=exposure,
             failure_error_function=failure_error_function,
+            idempotency=idempotency,
         )
 
     if func is not None:
@@ -290,6 +299,7 @@ def adapt_tool(tool: Tool) -> FunctionTool:
         timeout_seconds=getattr(tool, "timeout_seconds", None),
         exposure=exposure,
         failure_error_function=getattr(tool, "failure_error_function", None),
+        idempotency=getattr(tool, "idempotency", ToolIdempotency.UNKNOWN),
         metadata=dict(metadata),
     )
 

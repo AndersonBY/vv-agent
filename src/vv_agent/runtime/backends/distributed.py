@@ -3,18 +3,33 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from vv_agent.budget import RunBudgetLimits
+from vv_agent.checkpoint import (
+    MAX_CHECKPOINT_KEY_BYTES,
+    MAX_WIRE_INTEGER,
+    RUN_DEFINITION_V1_SCHEMA,
+    AmbiguousModelPolicy,
+    AmbiguousToolPolicy,
+    CheckpointConfig,
+    ResumePolicy,
+    utf16_sort_key,
+    validate_extension_namespace,
+)
 from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.state import StateStoreSpec
 from vv_agent.tools import ToolRegistry, build_default_registry
 from vv_agent.types import AgentTask
 
-DISTRIBUTED_RUN_SCHEMA_VERSION = "vv-agent.distributed-run.v1"
+DISTRIBUTED_RUN_SCHEMA_VERSION_V1 = "vv-agent.distributed-run.v1"
+DISTRIBUTED_RUN_SCHEMA_VERSION_V2 = "vv-agent.distributed-run.v2"
+# Keep the historical public constant and default pinned to v1.
+DISTRIBUTED_RUN_SCHEMA_VERSION = DISTRIBUTED_RUN_SCHEMA_VERSION_V1
 DEFAULT_TOOLSET_ID = "vv-agent.builtin-tools"
 DEFAULT_TOOLSET_VERSION = "1"
 DEFAULT_TOOLSET_SCHEMA_DIGEST = "f85422117d41d28ffa3cdfcfd9a42892854de624808fadc2124f4ebe7a452b61"
@@ -36,7 +51,15 @@ CapabilityKind = Literal[
     "observer",
     "sub_task_manager",
     "tool_predicate",
+    "checkpoint_store",
+    "checkpoint_event_store",
+    "checkpoint_extension",
+    "reconciliation_provider",
 ]
+ClaimMode = Literal["continue", "recovery"]
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_JSON_POINTER_ESCAPE_RE = re.compile(r"~(?:0|1)")
 
 
 class DistributedContractError(ValueError):
@@ -59,6 +82,20 @@ def _optional_ref(payload: Mapping[str, Any], key: str) -> CapabilityRef | None:
     if value is None:
         return None
     return CapabilityRef.from_dict(value, field_name=key)
+
+
+def _validate_json_pointer(pointer: str) -> None:
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        raise DistributedContractError("credential slot must be a non-empty RFC 6901 JSON pointer")
+    for token in pointer[1:].split("/"):
+        if "~" in _JSON_POINTER_ESCAPE_RE.sub("", token):
+            raise DistributedContractError("credential slot contains an invalid RFC 6901 escape")
+
+
+def _validate_sha256(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise DistributedContractError(f"{field_name} must be a lowercase SHA-256 hex digest")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +129,169 @@ class CapabilityRef:
         return cls(
             id=identifier,
             version=version,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointExtensionRef:
+    namespace: str
+    reference: CapabilityRef
+    required: bool
+
+    def __post_init__(self) -> None:
+        try:
+            validate_extension_namespace(self.namespace)
+        except (TypeError, ValueError) as exc:
+            raise DistributedContractError(str(exc)) from exc
+        if not isinstance(self.required, bool):
+            raise DistributedContractError("checkpoint extension required must be a boolean")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "namespace": self.namespace,
+            "reference": self.reference.to_dict(),
+            "required": self.required,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Any, *, index: int) -> CheckpointExtensionRef:
+        field_name = f"checkpoint_extension_refs[{index}]"
+        if not isinstance(payload, Mapping):
+            raise DistributedContractError(f"{field_name} must be an object")
+        namespace = payload.get("namespace")
+        if not isinstance(namespace, str):
+            raise DistributedContractError(f"{field_name}.namespace must be a string")
+        required = payload.get("required")
+        if not isinstance(required, bool):
+            raise DistributedContractError(f"{field_name}.required must be a boolean")
+        return cls(
+            namespace=namespace,
+            reference=CapabilityRef.from_dict(
+                payload.get("reference"),
+                field_name=f"{field_name}.reference",
+            ),
+            required=required,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DistributedCheckpointConfig:
+    key: str
+    resume_policy: ResumePolicy
+    ambiguous_model_policy: AmbiguousModelPolicy
+    ambiguous_tool_policy: AmbiguousToolPolicy
+    required_extension_namespaces: tuple[str, ...] = ()
+    max_extension_state_bytes: int = 262_144
+    credential_slots: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, str) or not self.key.strip():
+            raise DistributedContractError("checkpoint_config.key must be a non-empty string")
+        if len(self.key.encode("utf-8")) > MAX_CHECKPOINT_KEY_BYTES:
+            raise DistributedContractError(f"checkpoint_config.key must be at most {MAX_CHECKPOINT_KEY_BYTES} UTF-8 bytes")
+        try:
+            object.__setattr__(self, "resume_policy", ResumePolicy(self.resume_policy))
+            object.__setattr__(
+                self,
+                "ambiguous_model_policy",
+                AmbiguousModelPolicy(self.ambiguous_model_policy),
+            )
+            object.__setattr__(
+                self,
+                "ambiguous_tool_policy",
+                AmbiguousToolPolicy(self.ambiguous_tool_policy),
+            )
+        except (TypeError, ValueError) as exc:
+            raise DistributedContractError("checkpoint_config contains an unsupported policy") from exc
+        if (
+            isinstance(self.max_extension_state_bytes, bool)
+            or not isinstance(self.max_extension_state_bytes, int)
+            or not 0 <= self.max_extension_state_bytes <= MAX_WIRE_INTEGER
+        ):
+            raise DistributedContractError(f"max_extension_state_bytes must be between 0 and {MAX_WIRE_INTEGER}")
+        namespaces = tuple(self.required_extension_namespaces)
+        if namespaces != tuple(sorted(set(namespaces), key=utf16_sort_key)):
+            raise DistributedContractError("checkpoint_config.required_extension_namespaces must be sorted and unique")
+        for namespace in namespaces:
+            try:
+                validate_extension_namespace(namespace)
+            except (TypeError, ValueError) as exc:
+                raise DistributedContractError(str(exc)) from exc
+        slots = tuple(self.credential_slots)
+        if slots != tuple(sorted(set(slots), key=utf16_sort_key)):
+            raise DistributedContractError("checkpoint_config.credential_slots must be sorted and unique")
+        for pointer in slots:
+            _validate_json_pointer(pointer)
+        object.__setattr__(self, "required_extension_namespaces", namespaces)
+        object.__setattr__(self, "credential_slots", slots)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "resume_policy": self.resume_policy.value,
+            "ambiguous_model_policy": self.ambiguous_model_policy.value,
+            "ambiguous_tool_policy": self.ambiguous_tool_policy.value,
+            "required_extension_namespaces": list(self.required_extension_namespaces),
+            "max_extension_state_bytes": self.max_extension_state_bytes,
+            "credential_slots": list(self.credential_slots),
+        }
+
+    def to_runtime_config(
+        self,
+        *,
+        store: Any,
+        capability_refs: Mapping[str, Mapping[str, str]] | None = None,
+    ) -> CheckpointConfig:
+        return CheckpointConfig(
+            store=store,
+            key=self.key,
+            resume_policy=self.resume_policy,
+            ambiguous_model_policy=self.ambiguous_model_policy,
+            ambiguous_tool_policy=self.ambiguous_tool_policy,
+            required_extension_namespaces=list(self.required_extension_namespaces),
+            max_extension_state_bytes=self.max_extension_state_bytes,
+            credential_slots=list(self.credential_slots),
+            capability_refs={key: dict(value) for key, value in (capability_refs or {}).items()},
+        )
+
+    @classmethod
+    def from_checkpoint_config(
+        cls,
+        config: CheckpointConfig,
+        *,
+        require_existing: bool = True,
+    ) -> DistributedCheckpointConfig:
+        if config.key is None:
+            raise DistributedContractError("distributed v2 requires an explicit checkpoint key")
+        return cls(
+            key=config.key,
+            resume_policy=(ResumePolicy.REQUIRE_EXISTING if require_existing else config.resume_policy),
+            ambiguous_model_policy=config.ambiguous_model_policy,
+            ambiguous_tool_policy=config.ambiguous_tool_policy,
+            required_extension_namespaces=tuple(config.required_extension_namespaces),
+            max_extension_state_bytes=config.max_extension_state_bytes,
+            credential_slots=tuple(config.credential_slots),
+        )
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> DistributedCheckpointConfig:
+        if not isinstance(payload, Mapping):
+            raise DistributedContractError("distributed v2 requires checkpoint_config")
+
+        namespaces = payload.get("required_extension_namespaces", [])
+        credential_slots = payload.get("credential_slots", [])
+        if not isinstance(namespaces, list):
+            raise DistributedContractError("checkpoint_config.required_extension_namespaces must be an array")
+        if not isinstance(credential_slots, list):
+            raise DistributedContractError("checkpoint_config.credential_slots must be an array")
+        return cls(
+            key=_required_string(payload, "key"),
+            resume_policy=payload.get("resume_policy"),
+            ambiguous_model_policy=payload.get("ambiguous_model_policy"),
+            ambiguous_tool_policy=payload.get("ambiguous_tool_policy"),
+            required_extension_namespaces=tuple(namespaces),
+            max_extension_state_bytes=payload.get("max_extension_state_bytes", 262_144),
+            credential_slots=tuple(credential_slots),
         )
 
 
@@ -214,6 +414,10 @@ class DistributedCapabilities:
     memory_provider_refs: tuple[CapabilityRef, ...] = ()
     hook_refs: tuple[CapabilityRef, ...] = ()
     observer_refs: tuple[CapabilityRef, ...] = ()
+    checkpoint_store_ref: CapabilityRef | None = None
+    checkpoint_event_store_ref: CapabilityRef | None = None
+    checkpoint_extension_refs: tuple[CheckpointExtensionRef, ...] = ()
+    reconciliation_provider_ref: CapabilityRef | None = None
 
     def __post_init__(self) -> None:
         if (self.approval_provider_ref is None) != (self.approval_broker_ref is None):
@@ -225,9 +429,12 @@ class DistributedCapabilities:
             or self.approval_timeout_seconds <= 0
         ):
             raise DistributedContractError("approval_timeout_seconds must be a finite positive number or null")
+        namespaces = tuple(reference.namespace for reference in self.checkpoint_extension_refs)
+        if namespaces != tuple(sorted(set(namespaces), key=utf16_sort_key)):
+            raise DistributedContractError("checkpoint_extension_refs must be sorted by unique namespace")
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, *, include_checkpoint: bool | None = None) -> dict[str, Any]:
+        payload = {
             "toolset_ref": self.toolset_ref.to_dict(),
             "tool_policy": self.tool_policy.to_dict(),
             "llm_client_ref": self.llm_client_ref.to_dict() if self.llm_client_ref else None,
@@ -244,6 +451,29 @@ class DistributedCapabilities:
             "hook_refs": [reference.to_dict() for reference in self.hook_refs],
             "observer_refs": [reference.to_dict() for reference in self.observer_refs],
         }
+        if include_checkpoint is None:
+            include_checkpoint = bool(
+                self.checkpoint_store_ref is not None
+                or self.checkpoint_event_store_ref is not None
+                or self.checkpoint_extension_refs
+                or self.reconciliation_provider_ref is not None
+            )
+        if include_checkpoint:
+            payload.update(
+                {
+                    "checkpoint_store_ref": (
+                        self.checkpoint_store_ref.to_dict() if self.checkpoint_store_ref is not None else None
+                    ),
+                    "checkpoint_event_store_ref": (
+                        self.checkpoint_event_store_ref.to_dict() if self.checkpoint_event_store_ref is not None else None
+                    ),
+                    "checkpoint_extension_refs": [reference.to_dict() for reference in self.checkpoint_extension_refs],
+                    "reconciliation_provider_ref": (
+                        self.reconciliation_provider_ref.to_dict() if self.reconciliation_provider_ref is not None else None
+                    ),
+                }
+            )
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Any) -> DistributedCapabilities:
@@ -257,6 +487,10 @@ class DistributedCapabilities:
             return tuple(
                 CapabilityRef.from_dict(value, field_name=f"capabilities.{key}[{index}]") for index, value in enumerate(values)
             )
+
+        checkpoint_extension_values = payload.get("checkpoint_extension_refs", [])
+        if not isinstance(checkpoint_extension_values, list):
+            raise DistributedContractError("capabilities.checkpoint_extension_refs must be an array")
 
         return cls(
             toolset_ref=ToolsetRef.from_dict(payload.get("toolset_ref")),
@@ -274,6 +508,12 @@ class DistributedCapabilities:
             memory_provider_refs=refs("memory_provider_refs"),
             hook_refs=refs("hook_refs"),
             observer_refs=refs("observer_refs"),
+            checkpoint_store_ref=_optional_ref(payload, "checkpoint_store_ref"),
+            checkpoint_event_store_ref=_optional_ref(payload, "checkpoint_event_store_ref"),
+            checkpoint_extension_refs=tuple(
+                CheckpointExtensionRef.from_dict(value, index=index) for index, value in enumerate(checkpoint_extension_values)
+            ),
+            reconciliation_provider_ref=_optional_ref(payload, "reconciliation_provider_ref"),
         )
 
 
@@ -302,7 +542,7 @@ class RuntimeRecipe:
         ):
             raise DistributedContractError("runtime_recipe.log_preview_chars must be a non-negative integer or null")
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_checkpoint_capabilities: bool | None = None) -> dict[str, Any]:
         return {
             "settings_file": self.settings_file,
             "backend": self.backend,
@@ -311,7 +551,7 @@ class RuntimeRecipe:
             "timeout_seconds": float(self.timeout_seconds),
             "log_preview_chars": self.log_preview_chars,
             "state_store": self.state_store.to_dict() if self.state_store is not None else None,
-            "capabilities": self.capabilities.to_dict(),
+            "capabilities": self.capabilities.to_dict(include_checkpoint=include_checkpoint_capabilities),
         }
 
     @classmethod
@@ -345,9 +585,19 @@ class DistributedRunEnvelope:
     budget_limits: RunBudgetLimits | None = None
     lease_duration_ms: int = DEFAULT_LEASE_DURATION_MS
     schema_version: str = DISTRIBUTED_RUN_SCHEMA_VERSION
+    root_run_id: str | None = None
+    trace_id: str | None = None
+    run_definition_schema: str | None = None
+    run_definition_digest: str | None = None
+    claim_mode: ClaimMode | None = None
+    resume_attempt: int | None = None
+    checkpoint_config: DistributedCheckpointConfig | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != DISTRIBUTED_RUN_SCHEMA_VERSION:
+        if self.schema_version not in {
+            DISTRIBUTED_RUN_SCHEMA_VERSION_V1,
+            DISTRIBUTED_RUN_SCHEMA_VERSION_V2,
+        }:
             raise DistributedContractError(f"unsupported distributed schema_version: {self.schema_version}")
         for field_name in ("job_id", "run_id", "cycle_name", "idempotency_key"):
             value = getattr(self, field_name)
@@ -371,6 +621,55 @@ class DistributedRunEnvelope:
             raise DistributedContractError("distributed envelope lease_duration_ms must be a positive integer")
         if self.budget_limits is not None and not isinstance(self.budget_limits, RunBudgetLimits):
             raise DistributedContractError("distributed envelope budget_limits must be an object or null")
+        if self.schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION_V1:
+            capabilities = self.recipe.capabilities
+            if (
+                capabilities.checkpoint_store_ref is not None
+                or capabilities.checkpoint_event_store_ref is not None
+                or capabilities.checkpoint_extension_refs
+                or capabilities.reconciliation_provider_ref is not None
+            ):
+                raise DistributedContractError("distributed v1 envelope cannot contain checkpoint v2 capability refs")
+            if any(
+                value is not None
+                for value in (
+                    self.root_run_id,
+                    self.trace_id,
+                    self.run_definition_schema,
+                    self.run_definition_digest,
+                    self.claim_mode,
+                    self.resume_attempt,
+                    self.checkpoint_config,
+                )
+            ):
+                raise DistributedContractError("distributed v1 envelope cannot contain checkpoint v2 fields")
+            return
+
+        if self.run_definition_schema != RUN_DEFINITION_V1_SCHEMA:
+            raise DistributedContractError("checkpoint_definition_schema_unsupported")
+        for field_name in ("root_run_id", "trace_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise DistributedContractError(f"distributed v2 {field_name} must be a non-empty string")
+        _validate_sha256(self.run_definition_digest, "run_definition_digest")
+        if self.claim_mode not in {"continue", "recovery"}:
+            raise DistributedContractError("checkpoint_claim_mode_invalid")
+        if (
+            isinstance(self.resume_attempt, bool)
+            or not isinstance(self.resume_attempt, int)
+            or not 1 <= self.resume_attempt <= MAX_WIRE_INTEGER
+        ):
+            raise DistributedContractError(f"resume_attempt must be between 1 and {MAX_WIRE_INTEGER}")
+        if not isinstance(self.checkpoint_config, DistributedCheckpointConfig):
+            raise DistributedContractError("distributed v2 requires checkpoint_config")
+        capabilities = self.recipe.capabilities
+        if capabilities.checkpoint_store_ref is None:
+            raise DistributedContractError("distributed v2 requires checkpoint_store_ref")
+        extensions_by_namespace = {reference.namespace: reference for reference in capabilities.checkpoint_extension_refs}
+        for namespace in self.checkpoint_config.required_extension_namespaces:
+            reference = extensions_by_namespace.get(namespace)
+            if reference is None or not reference.required:
+                raise DistributedContractError(f"required checkpoint extension {namespace} is unavailable")
 
     @classmethod
     def for_cycle(
@@ -400,6 +699,52 @@ class DistributedRunEnvelope:
             lease_duration_ms=lease_duration_ms,
         )
 
+    @classmethod
+    def for_checkpoint_cycle(
+        cls,
+        *,
+        task: AgentTask,
+        recipe: RuntimeRecipe,
+        cycle_index: int,
+        root_run_id: str,
+        trace_id: str,
+        run_definition_digest: str,
+        claim_mode: ClaimMode,
+        resume_attempt: int,
+        checkpoint_config: DistributedCheckpointConfig,
+        cycle_name: str = DEFAULT_CYCLE_NAME,
+        run_id: str | None = None,
+        deadline_unix_ms: int | None = None,
+        lease_duration_ms: int = DEFAULT_LEASE_DURATION_MS,
+        budget_limits: RunBudgetLimits | None = None,
+    ) -> DistributedRunEnvelope:
+        effective_run_id = run_id or str(task.metadata.get("_vv_agent_run_id") or root_run_id)
+        idempotency_key = f"{effective_run_id}:cycle:{cycle_index}"
+        return cls(
+            schema_version=DISTRIBUTED_RUN_SCHEMA_VERSION_V2,
+            job_id=idempotency_key,
+            run_id=effective_run_id,
+            task=task,
+            budget_limits=budget_limits,
+            recipe=recipe,
+            cycle_name=cycle_name,
+            cycle_index=cycle_index,
+            idempotency_key=idempotency_key,
+            deadline_unix_ms=deadline_unix_ms,
+            lease_duration_ms=lease_duration_ms,
+            root_run_id=root_run_id,
+            trace_id=trace_id,
+            run_definition_schema=RUN_DEFINITION_V1_SCHEMA,
+            run_definition_digest=run_definition_digest,
+            claim_mode=claim_mode,
+            resume_attempt=resume_attempt,
+            checkpoint_config=checkpoint_config,
+        )
+
+    @property
+    def is_checkpoint_v2(self) -> bool:
+        return self.schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION_V2
+
     def remaining_seconds(self, *, now_ms: int | None = None) -> float | None:
         if self.deadline_unix_ms is None:
             return None
@@ -412,19 +757,33 @@ class DistributedRunEnvelope:
             raise DistributedContractError(f"distributed job {self.job_id} deadline has expired")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "job_id": self.job_id,
             "run_id": self.run_id,
             "task": self.task.to_dict(),
             "budget_limits": self.budget_limits.to_dict() if self.budget_limits is not None else None,
-            "recipe": self.recipe.to_dict(),
+            "recipe": self.recipe.to_dict(include_checkpoint_capabilities=self.is_checkpoint_v2),
             "cycle_name": self.cycle_name,
             "cycle_index": self.cycle_index,
             "idempotency_key": self.idempotency_key,
             "deadline_unix_ms": self.deadline_unix_ms,
             "lease_duration_ms": self.lease_duration_ms,
         }
+        if self.is_checkpoint_v2:
+            assert self.checkpoint_config is not None
+            payload.update(
+                {
+                    "root_run_id": self.root_run_id,
+                    "trace_id": self.trace_id,
+                    "run_definition_schema": self.run_definition_schema,
+                    "run_definition_digest": self.run_definition_digest,
+                    "claim_mode": self.claim_mode,
+                    "resume_attempt": self.resume_attempt,
+                    "checkpoint_config": self.checkpoint_config.to_dict(),
+                }
+            )
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Any) -> DistributedRunEnvelope:
@@ -433,6 +792,11 @@ class DistributedRunEnvelope:
         schema_version = payload.get("schema_version")
         if not isinstance(schema_version, str):
             raise DistributedContractError("distributed envelope schema_version must be a string")
+        if schema_version not in {
+            DISTRIBUTED_RUN_SCHEMA_VERSION_V1,
+            DISTRIBUTED_RUN_SCHEMA_VERSION_V2,
+        }:
+            raise DistributedContractError(f"unsupported distributed schema_version: {schema_version}")
         task_payload = payload.get("task")
         if not isinstance(task_payload, Mapping):
             raise DistributedContractError("distributed envelope task must be an object")
@@ -456,7 +820,27 @@ class DistributedRunEnvelope:
             idempotency_key=_required_string(payload, "idempotency_key"),
             deadline_unix_ms=payload.get("deadline_unix_ms"),
             lease_duration_ms=payload.get("lease_duration_ms", DEFAULT_LEASE_DURATION_MS),
+            root_run_id=payload.get("root_run_id"),
+            trace_id=payload.get("trace_id"),
+            run_definition_schema=payload.get("run_definition_schema"),
+            run_definition_digest=payload.get("run_definition_digest"),
+            claim_mode=payload.get("claim_mode"),
+            resume_attempt=payload.get("resume_attempt"),
+            checkpoint_config=(
+                DistributedCheckpointConfig.from_dict(payload.get("checkpoint_config"))
+                if schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION_V2
+                else None
+            ),
         )
+
+    @classmethod
+    def from_v1_dict(cls, payload: Any) -> DistributedRunEnvelope:
+        """Decode only the immutable v1 wire surface."""
+        if not isinstance(payload, Mapping):
+            raise DistributedContractError("distributed envelope must be an object")
+        if payload.get("schema_version") != DISTRIBUTED_RUN_SCHEMA_VERSION_V1:
+            raise DistributedContractError(f"unsupported distributed schema_version: {payload.get('schema_version')}")
+        return cls.from_dict(payload)
 
 
 def toolset_schema_digest(registry: ToolRegistry) -> str:
@@ -508,7 +892,12 @@ class DistributedCapabilityRegistry:
             )
         return registry
 
-    def validate(self, capabilities: DistributedCapabilities) -> None:
+    def validate(
+        self,
+        capabilities: DistributedCapabilities,
+        *,
+        require_checkpoint_v2: bool = False,
+    ) -> None:
         self.resolve_toolset(capabilities.toolset_ref)
         capabilities.tool_policy.resolve(self)
         for kind, reference in (
@@ -521,6 +910,9 @@ class DistributedCapabilityRegistry:
             ("host_cost_meter", capabilities.host_cost_meter_ref),
             ("app_state", capabilities.app_state_ref),
             ("sub_task_manager", capabilities.sub_task_manager_ref),
+            ("checkpoint_store", capabilities.checkpoint_store_ref),
+            ("checkpoint_event_store", capabilities.checkpoint_event_store_ref),
+            ("reconciliation_provider", capabilities.reconciliation_provider_ref),
         ):
             if reference is not None:
                 self.resolve(kind, reference)  # type: ignore[arg-type]
@@ -531,3 +923,7 @@ class DistributedCapabilityRegistry:
         ):
             for reference in references:
                 self.resolve(kind, reference)  # type: ignore[arg-type]
+        for extension in capabilities.checkpoint_extension_refs:
+            self.resolve("checkpoint_extension", extension.reference)
+        if require_checkpoint_v2 and capabilities.checkpoint_store_ref is None:
+            raise DistributedCapabilityError("distributed v2 requires checkpoint_store_ref")

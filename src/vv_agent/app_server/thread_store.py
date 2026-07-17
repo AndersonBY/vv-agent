@@ -126,38 +126,47 @@ class ThreadStore:
             self._connection.commit()
             return record
 
-    def append_item(self, item: ThreadItem, *, run_event_id: str | None = None) -> None:
+    def append_item(self, item: ThreadItem, *, run_event_id: str | None = None) -> bool:
         with self._lock:
             self._require_thread(item.thread_id)
-            self._connection.execute(
-                """
-                INSERT INTO items (
-                    item_id,
-                    thread_id,
-                    turn_id,
-                    run_event_id,
-                    type,
-                    status,
-                    payload_json,
-                    created_at,
-                    updated_at
+            if run_event_id is not None and self._event_projection_matches(run_event_id, item):
+                return False
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO items (
+                        item_id,
+                        thread_id,
+                        turn_id,
+                        run_event_id,
+                        type,
+                        status,
+                        payload_json,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.item_id,
+                        item.thread_id,
+                        item.turn_id,
+                        run_event_id,
+                        item.item_type,
+                        item.status,
+                        json.dumps(item.payload, ensure_ascii=False, sort_keys=True),
+                        item.created_at,
+                        item.updated_at,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    item.item_id,
-                    item.thread_id,
-                    item.turn_id,
-                    run_event_id,
-                    item.item_type,
-                    item.status,
-                    json.dumps(item.payload, ensure_ascii=False, sort_keys=True),
-                    item.created_at,
-                    item.updated_at,
-                ),
-            )
+            except sqlite3.IntegrityError:
+                self._connection.rollback()
+                if run_event_id is not None and self._event_projection_matches(run_event_id, item):
+                    return False
+                raise
             self._touch_thread(item.thread_id, time.time())
             self._connection.commit()
+            return True
 
     def update_turn(
         self,
@@ -187,6 +196,22 @@ class ThreadStore:
                 ),
             )
             self._touch_thread(existing.thread_id, completed)
+            self._connection.commit()
+            return self._fetch_turn(turn_id)
+
+    def resume_turn(self, turn_id: str, *, run_id: str) -> TurnRecord:
+        with self._lock:
+            existing = self._fetch_turn(turn_id)
+            now = time.time()
+            self._connection.execute(
+                """
+                UPDATE turns
+                SET run_id = ?, status = 'running', completed_at = NULL, result_json = '{}'
+                WHERE turn_id = ?
+                """,
+                (run_id, turn_id),
+            )
+            self._touch_thread(existing.thread_id, now)
             self._connection.commit()
             return self._fetch_turn(turn_id)
 
@@ -274,16 +299,19 @@ class ThreadStore:
             )
             self._ensure_column("threads", "status", "TEXT NOT NULL DEFAULT 'idle'")
             self._ensure_column("threads", "active_turn_id", "TEXT")
+            self._ensure_column("items", "run_event_id", "TEXT")
             self._connection.execute(
-                "UPDATE threads SET status = 'idle', active_turn_id = NULL WHERE status = 'running'"
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS items_run_event_id_unique
+                ON items(run_event_id)
+                WHERE run_event_id IS NOT NULL
+                """
             )
+            self._connection.execute("UPDATE threads SET status = 'idle', active_turn_id = NULL WHERE status = 'running'")
             self._connection.commit()
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
-        columns = {
-            str(row["name"])
-            for row in self._connection.execute(f"PRAGMA table_info({table})")
-        }
+        columns = {str(row["name"]) for row in self._connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
@@ -297,6 +325,17 @@ class ThreadStore:
 
     def _require_thread(self, thread_id: str) -> None:
         self._fetch_thread(thread_id)
+
+    def _event_projection_matches(self, run_event_id: str, item: ThreadItem) -> bool:
+        row = self._connection.execute(
+            "SELECT * FROM items WHERE run_event_id = ?",
+            (run_event_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if self._item_from_row(row) != item:
+            raise sqlite3.IntegrityError(f"run event {run_event_id!r} has a conflicting App Server item projection")
+        return True
 
     def _fetch_thread(self, thread_id: str) -> ThreadRecord:
         row = self._connection.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()

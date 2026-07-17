@@ -1,0 +1,782 @@
+{
+  "contract": "operation_journal_v1",
+  "version": 1,
+  "enums": {
+    "kinds": [
+      "model",
+      "tool"
+    ],
+    "states": [
+      "planned",
+      "started",
+      "succeeded",
+      "failed",
+      "ambiguous"
+    ],
+    "idempotency_support": [
+      "supported",
+      "unsupported",
+      "unknown"
+    ],
+    "reconciliation_decisions": [
+      "defer",
+      "retry",
+      "replay_success",
+      "record_failure",
+      "abort"
+    ]
+  },
+  "request_digest": {
+    "schema_version": "vv-agent.operation-request.v1",
+    "canonicalization": "RFC 8785 JSON Canonicalization Scheme over UTF-8 followed by lowercase SHA-256",
+    "model_projection": "complete effective provider request after credential redaction, including model, messages, settings, tools, output schema, and provider idempotency key",
+    "tool_projection": "tool call id, exact tool name, arguments, and framework idempotency key",
+    "excluded_fields": [
+      "operation_id",
+      "cycle_index",
+      "attempt",
+      "credential_values"
+    ],
+    "retry_rule": "the same logical request keeps its digest while attempt increments; a changed effective request requires a new journal entry",
+    "golden_cases": [
+      {
+        "name": "model_basic",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "model",
+          "request": {
+            "model": {
+              "backend": "test",
+              "model_id": "test-model"
+            },
+            "messages": [
+              {
+                "role": "user",
+                "content": "Check record 42."
+              }
+            ],
+            "settings": {
+              "temperature": 0,
+              "top_p": 1
+            },
+            "tools": [],
+            "output_schema": null,
+            "idempotency_key": null
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoibW9kZWwiLCJyZXF1ZXN0Ijp7ImlkZW1wb3RlbmN5X2tleSI6bnVsbCwibWVzc2FnZXMiOlt7ImNvbnRlbnQiOiJDaGVjayByZWNvcmQgNDIuIiwicm9sZSI6InVzZXIifV0sIm1vZGVsIjp7ImJhY2tlbmQiOiJ0ZXN0IiwibW9kZWxfaWQiOiJ0ZXN0LW1vZGVsIn0sIm91dHB1dF9zY2hlbWEiOm51bGwsInNldHRpbmdzIjp7InRlbXBlcmF0dXJlIjowLCJ0b3BfcCI6MX0sInRvb2xzIjpbXX0sInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQub3BlcmF0aW9uLXJlcXVlc3QudjEifQ==",
+        "canonical_json_utf8_bytes": 280,
+        "sha256": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c"
+      },
+      {
+        "name": "tool_write_record",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call_1",
+            "tool_name": "write_record",
+            "arguments": {
+              "record_id": "42",
+              "value": "approved"
+            },
+            "idempotency_key": "idem_7f5ca6d5"
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJhcHByb3ZlZCJ9LCJpZGVtcG90ZW5jeV9rZXkiOiJpZGVtXzdmNWNhNmQ1IiwidG9vbF9jYWxsX2lkIjoiY2FsbF8xIiwidG9vbF9uYW1lIjoid3JpdGVfcmVjb3JkIn0sInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQub3BlcmF0aW9uLXJlcXVlc3QudjEifQ==",
+        "canonical_json_utf8_bytes": 211,
+        "sha256": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf"
+      },
+      {
+        "name": "tool_write_record_call_2",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call_2",
+            "tool_name": "write_record",
+            "arguments": {
+              "record_id": "42",
+              "value": "approved"
+            },
+            "idempotency_key": "idem_5a40b4f1"
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJhcHByb3ZlZCJ9LCJpZGVtcG90ZW5jeV9rZXkiOiJpZGVtXzVhNDBiNGYxIiwidG9vbF9jYWxsX2lkIjoiY2FsbF8yIiwidG9vbF9uYW1lIjoid3JpdGVfcmVjb3JkIn0sInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQub3BlcmF0aW9uLXJlcXVlc3QudjEifQ==",
+        "canonical_json_utf8_bytes": 211,
+        "sha256": "6b05beb10de1bae7a2989e39294d4a1f02f4f4b357437bc198f47b6b7be85b49"
+      }
+    ]
+  },
+  "transition_rules": {
+    "allowed": [
+      [
+        "planned",
+        "failed"
+      ],
+      [
+        "planned",
+        "started"
+      ],
+      [
+        "started",
+        "succeeded"
+      ],
+      [
+        "started",
+        "failed"
+      ],
+      [
+        "started",
+        "ambiguous"
+      ],
+      [
+        "ambiguous",
+        "planned"
+      ],
+      [
+        "ambiguous",
+        "succeeded"
+      ],
+      [
+        "ambiguous",
+        "failed"
+      ]
+    ],
+    "terminal_receipts": [
+      "succeeded",
+      "failed"
+    ],
+    "cycle_commit_clears_committed_journals": true,
+    "progress_write_preserves_active_claim": true,
+    "request_digest_mismatch": "checkpoint_journal_integrity_mismatch_before_claim_without_state_transition",
+    "retry_attempt": "previous_plus_one",
+    "same_logical_retry_reuses_operation_id_and_idempotency_key": true
+  },
+  "outcome_classification": {
+    "failed_requires_definitive_external_outcome": true,
+    "pre_dispatch_local_failure": "planned_to_failed",
+    "explicit_provider_or_tool_rejection": "started_to_failed",
+    "timeout_after_started": "ambiguous_unless_the_adapter_proves_a_definitive_outcome",
+    "cancellation_after_started": "ambiguous_unless_the_adapter_proves_a_definitive_outcome",
+    "connection_loss_after_started": "ambiguous",
+    "non_cooperative_blocking_tool_timeout": "ambiguous_even_if_the_waiting_runtime_returns",
+    "framework_must_not_assume_a_timed_out_thread_or_process_stopped_side_effects": true
+  },
+  "pre_start_rules": {
+    "approval_pending_may_remain_planned": true,
+    "approval_grant_must_be_durable_before_started": true,
+    "approval_denial_or_timeout_writes_started": false,
+    "tool_policy_denial_writes_started": false,
+    "before_tool_hook_short_circuit_writes_started": false,
+    "approval_resume_uses_source_tool_call_id_request_digest_and_idempotency_key": true,
+    "approval_resume_operation_id_is_stable_within_the_distinct_resume_run": true,
+    "memory_compaction_and_ptl_model_requests_are_journaled_model_operations": true
+  },
+  "valid_entries": [
+    {
+      "name": "model_planned",
+      "request_golden_case": "model_basic",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
+        "idempotency_key": null,
+        "state": "planned",
+        "response": null,
+        "error": null
+      }
+    },
+    {
+      "name": "model_started",
+      "request_golden_case": "model_basic",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
+        "idempotency_key": null,
+        "state": "started",
+        "response": null,
+        "error": null
+      }
+    },
+    {
+      "name": "model_succeeded",
+      "request_golden_case": "model_basic",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
+        "idempotency_key": null,
+        "state": "succeeded",
+        "response": {
+          "content": "I will update the record.",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "name": "write_record",
+              "arguments": {
+                "record_id": "42",
+                "value": "approved"
+              }
+            }
+          ],
+          "raw": {
+            "usage": {
+              "prompt_tokens": 12,
+              "completion_tokens": 8,
+              "total_tokens": 20
+            }
+          },
+          "token_usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "total_tokens": 20,
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_tokens": 0,
+            "usage_source": "provider_reported",
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_tokens": null,
+              "write_tokens": null,
+              "uncached_input_tokens": null,
+              "source": null
+            }
+          }
+        },
+        "error": null
+      }
+    },
+    {
+      "name": "model_failed",
+      "request_golden_case": "model_basic",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
+        "idempotency_key": null,
+        "state": "failed",
+        "response": null,
+        "error": {
+          "code": "provider_rejected",
+          "message": "provider rejected the request before inference",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "name": "model_ambiguous",
+      "request_golden_case": "model_basic",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
+        "idempotency_key": null,
+        "state": "ambiguous",
+        "response": null,
+        "error": null
+      }
+    },
+    {
+      "name": "tool_planned",
+      "request_golden_case": "tool_write_record",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "tool_call_id": "call_1",
+        "tool_name": "write_record",
+        "arguments": {
+          "record_id": "42",
+          "value": "approved"
+        },
+        "idempotency_key": "idem_7f5ca6d5",
+        "idempotency_support": "supported",
+        "state": "planned",
+        "result": null,
+        "error": null
+      }
+    },
+    {
+      "name": "tool_started",
+      "request_golden_case": "tool_write_record",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "tool_call_id": "call_1",
+        "tool_name": "write_record",
+        "arguments": {
+          "record_id": "42",
+          "value": "approved"
+        },
+        "idempotency_key": "idem_7f5ca6d5",
+        "idempotency_support": "supported",
+        "state": "started",
+        "result": null,
+        "error": null
+      }
+    },
+    {
+      "name": "tool_succeeded",
+      "request_golden_case": "tool_write_record",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "tool_call_id": "call_1",
+        "tool_name": "write_record",
+        "arguments": {
+          "record_id": "42",
+          "value": "approved"
+        },
+        "idempotency_key": "idem_7f5ca6d5",
+        "idempotency_support": "supported",
+        "state": "succeeded",
+        "result": {
+          "tool_call_id": "call_1",
+          "content": "updated",
+          "status": "success",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "error_code": null,
+          "metadata": {
+            "receipt_id": "receipt-42"
+          },
+          "image_url": null,
+          "image_path": null
+        },
+        "error": null
+      }
+    },
+    {
+      "name": "tool_failed",
+      "request_golden_case": "tool_write_record",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "tool_call_id": "call_1",
+        "tool_name": "write_record",
+        "arguments": {
+          "record_id": "42",
+          "value": "approved"
+        },
+        "idempotency_key": "idem_7f5ca6d5",
+        "idempotency_support": "supported",
+        "state": "failed",
+        "result": null,
+        "error": {
+          "code": "tool_execution_failed",
+          "message": "write failed",
+          "retryable": false
+        }
+      }
+    },
+    {
+      "name": "tool_unknown_idempotency",
+      "request_golden_case": "tool_write_record_call_2",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_1_call_2",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "6b05beb10de1bae7a2989e39294d4a1f02f4f4b357437bc198f47b6b7be85b49",
+        "tool_call_id": "call_2",
+        "tool_name": "write_record",
+        "arguments": {
+          "record_id": "42",
+          "value": "approved"
+        },
+        "idempotency_key": "idem_5a40b4f1",
+        "idempotency_support": "unknown",
+        "state": "started",
+        "result": null,
+        "error": null
+      }
+    }
+  ],
+  "recovery_cases": [
+    {
+      "name": "durable_model_response_is_replayed",
+      "entry": "model_succeeded",
+      "policy": "require_reconciliation",
+      "expected": {
+        "decision": "replay",
+        "model_calls": 0,
+        "event": "operation_replayed"
+      }
+    },
+    {
+      "name": "durable_tool_result_is_replayed",
+      "entry": "tool_succeeded",
+      "policy": "require_reconciliation",
+      "expected": {
+        "decision": "replay",
+        "tool_calls": 0,
+        "event": "operation_replayed"
+      }
+    },
+    {
+      "name": "started_model_requires_reconciliation_by_default",
+      "entry": "model_started",
+      "policy": "require_reconciliation",
+      "expected": {
+        "persisted_state": "ambiguous",
+        "status": "reconciliation_required",
+        "interruption_reason": "resume_requires_reconciliation",
+        "model_calls": 0,
+        "duplicate_cost_risk": true
+      }
+    },
+    {
+      "name": "started_model_explicit_duplicate_risk_retry",
+      "entry": "model_started",
+      "policy": "retry_with_duplicate_risk",
+      "expected": {
+        "persisted_state": "planned",
+        "model_calls": 1,
+        "same_operation_id": true,
+        "same_request_digest": true,
+        "attempt": 2,
+        "event": "model_retry_duplicate_risk"
+      }
+    },
+    {
+      "name": "model_transport_timeout_after_started_is_ambiguous",
+      "entry": "model_started",
+      "observed_runtime_outcome": "transport_timeout",
+      "adapter_proves_definitive_failure": false,
+      "expected": {
+        "persisted_state": "ambiguous",
+        "status": "reconciliation_required",
+        "failed_receipt_written": false,
+        "duplicate_cost_risk": true
+      }
+    },
+    {
+      "name": "started_supported_tool_retries_same_key",
+      "entry": "tool_started",
+      "policy": "retry_idempotent_only",
+      "expected": {
+        "persisted_state": "planned",
+        "tool_calls": 1,
+        "same_operation_id": true,
+        "same_idempotency_key": true,
+        "same_request_digest": true,
+        "attempt": 2
+      }
+    },
+    {
+      "name": "blocking_tool_timeout_after_started_is_ambiguous",
+      "entry": "tool_started",
+      "observed_runtime_outcome": "waiting_runtime_timeout_while_blocking_work_may_continue",
+      "expected": {
+        "persisted_state": "ambiguous",
+        "failed_receipt_written": false,
+        "tool_process_assumed_stopped": false
+      }
+    },
+    {
+      "name": "started_unknown_tool_is_not_retried",
+      "entry": "tool_unknown_idempotency",
+      "policy": "retry_idempotent_only",
+      "expected": {
+        "persisted_state": "ambiguous",
+        "status": "reconciliation_required",
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "request_digest_mismatch_never_replays",
+      "entry": "tool_succeeded",
+      "reconstructed_request_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "expected": {
+        "decision": "reject_before_claim",
+        "failure_code": "checkpoint_journal_integrity_mismatch",
+        "checkpoint_mutated": false,
+        "claim_count": 0,
+        "tool_calls": 0,
+        "replay_count": 0
+      }
+    }
+  ],
+  "reconciliation_cases": [
+    {
+      "name": "defer_keeps_ambiguity",
+      "decision": {
+        "kind": "defer"
+      },
+      "expected": {
+        "state": "ambiguous",
+        "status": "reconciliation_required"
+      }
+    },
+    {
+      "name": "retry_returns_to_planned",
+      "decision": {
+        "kind": "retry"
+      },
+      "expected": {
+        "state": "planned",
+        "reuse_operation_id": true,
+        "reuse_idempotency_key": true,
+        "reuse_request_digest": true,
+        "attempt": "previous_plus_one"
+      }
+    },
+    {
+      "name": "replay_success_records_model_receipt",
+      "operation_kind": "model",
+      "decision": {
+        "kind": "replay_success",
+        "response": {
+          "content": "I will update the record.",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "name": "write_record",
+              "arguments": {
+                "record_id": "42",
+                "value": "approved"
+              }
+            }
+          ],
+          "raw": {
+            "usage": {
+              "prompt_tokens": 12,
+              "completion_tokens": 8,
+              "total_tokens": 20
+            }
+          },
+          "token_usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "total_tokens": 20,
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_tokens": 0,
+            "usage_source": "provider_reported",
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_tokens": null,
+              "write_tokens": null,
+              "uncached_input_tokens": null,
+              "source": null
+            }
+          }
+        }
+      },
+      "expected": {
+        "state": "succeeded"
+      }
+    },
+    {
+      "name": "replay_success_records_tool_receipt",
+      "operation_kind": "tool",
+      "decision": {
+        "kind": "replay_success",
+        "result": {
+          "tool_call_id": "call_1",
+          "content": "updated",
+          "status": "success",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "error_code": null,
+          "metadata": {
+            "receipt_id": "receipt-42"
+          },
+          "image_url": null,
+          "image_path": null
+        }
+      },
+      "expected": {
+        "state": "succeeded"
+      }
+    },
+    {
+      "name": "record_failure_records_typed_error",
+      "decision": {
+        "kind": "record_failure",
+        "error": {
+          "code": "externally_rejected",
+          "message": "not committed",
+          "retryable": false
+        }
+      },
+      "expected": {
+        "state": "failed"
+      }
+    },
+    {
+      "name": "abort_is_explicit_terminal_failure",
+      "decision": {
+        "kind": "abort",
+        "error": {
+          "code": "operator_abort",
+          "message": "aborted after review",
+          "retryable": false
+        }
+      },
+      "expected": {
+        "state": "ambiguous",
+        "ambiguity_preserved": true,
+        "operator_accepts_unknown_external_outcome": true,
+        "agent_status": "failed",
+        "completion_reason": "failed",
+        "terminal_error_code": "operator_abort_with_unknown_outcome"
+      }
+    }
+  ],
+  "tool_context": {
+    "idempotency_key_field": "idempotency_key",
+    "model_visible_argument": false,
+    "stable_across_retry": true,
+    "function_tool_declaration_field": "idempotency"
+  },
+  "invalid_entries": [
+    {
+      "name": "zero_cycle",
+      "error_code": "operation_cycle_invalid",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 0,
+        "attempt": 1,
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "idempotency_key": null,
+        "state": "planned",
+        "response": null,
+        "error": null
+      }
+    },
+    {
+      "name": "zero_attempt",
+      "error_code": "operation_attempt_invalid",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 0,
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "idempotency_key": null,
+        "state": "planned",
+        "response": null,
+        "error": null
+      }
+    },
+    {
+      "name": "uppercase_digest",
+      "error_code": "operation_request_digest_invalid",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "idempotency_key": null,
+        "state": "planned",
+        "response": null,
+        "error": null
+      }
+    },
+    {
+      "name": "succeeded_without_receipt",
+      "error_code": "operation_receipt_required",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tool_call_id": "call_1",
+        "tool_name": "write_record",
+        "arguments": {
+          "record_id": "42",
+          "value": "approved"
+        },
+        "idempotency_key": "idem_7f5ca6d5",
+        "idempotency_support": "supported",
+        "state": "succeeded",
+        "result": null,
+        "error": null
+      }
+    },
+    {
+      "name": "failed_without_error",
+      "error_code": "operation_error_required",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "idempotency_key": null,
+        "state": "failed",
+        "response": null,
+        "error": null
+      }
+    },
+    {
+      "name": "tool_without_idempotency_key",
+      "error_code": "tool_idempotency_key_required",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tool_call_id": "call_1",
+        "tool_name": "write_record",
+        "arguments": {
+          "record_id": "42",
+          "value": "approved"
+        },
+        "idempotency_key": null,
+        "idempotency_support": "supported",
+        "state": "planned",
+        "result": null,
+        "error": null
+      }
+    },
+    {
+      "name": "model_with_tool_fields",
+      "error_code": "operation_kind_fields_invalid",
+      "entry": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_1_attempt_1",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "idempotency_key": null,
+        "state": "planned",
+        "tool_call_id": "call_x",
+        "response": null,
+        "error": null
+      }
+    }
+  ]
+}

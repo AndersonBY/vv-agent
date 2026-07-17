@@ -23,6 +23,7 @@ RUNNER_SESSION_FIXTURE_PATH = FIXTURE_DIR / "runner_session_messages_v1.jsonl"
 class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, list[str]] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
 
     def lrange(self, key: str, start: int, end: int) -> list[str]:
         values = self.values.get(key, [])
@@ -38,8 +39,21 @@ class FakeRedis:
             return None
         return values.pop()
 
-    def delete(self, key: str) -> None:
-        self.values.pop(key, None)
+    def delete(self, *keys: str) -> None:
+        for key in keys:
+            self.values.pop(key, None)
+            self.hashes.pop(key, None)
+
+    def eval(self, _script: str, key_count: int, *args: str) -> int:
+        assert key_count == 2
+        list_key, commit_key, commit_id, payload_digest, *payloads = args
+        commits = self.hashes.setdefault(commit_key, {})
+        existing = commits.get(commit_id)
+        if existing is not None:
+            return 0 if existing == payload_digest else -1
+        self.values.setdefault(list_key, []).extend(payloads)
+        commits[commit_id] = payload_digest
+        return 1
 
 
 def test_memory_session_stores_pops_and_clears_items() -> None:

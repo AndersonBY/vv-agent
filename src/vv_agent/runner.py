@@ -13,6 +13,7 @@ from vv_agent.agent import Agent, RunContext
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalRequest, bind_request_cancellation
 from vv_agent.background_task import BackgroundAgentTask
 from vv_agent.budget import BudgetEnforcementBoundary, BudgetEvaluator, BudgetUsageSnapshot
+from vv_agent.checkpoint import CheckpointError, ResumePolicy, ToolIdempotency
 from vv_agent.config import (
     EndpointConfig,
     EndpointOption,
@@ -54,12 +55,22 @@ from vv_agent.run_config import (
 )
 from vv_agent.run_handle import RunHandle, RunHandleRunner
 from vv_agent.runtime import AgentRuntime, ToolCallRunner
+from vv_agent.runtime.checkpoint_resume import (
+    CheckpointReconciliationRequired,
+    CheckpointResumeController,
+)
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.engine import _CanonicalSubAgentStreamPayload
+from vv_agent.runtime.run_definition import build_run_definition
+from vv_agent.sessions.base import checkpoint_session_commit_id, session_commit_payload_digest
 from vv_agent.tools import ToolContext, ToolExposure, ToolSpec, build_default_registry
-from vv_agent.tools.executor import ToolExecutor, is_tool_executor
+from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, is_tool_executor
 from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
+from vv_agent.tools.orchestrator import (
+    _TOOL_DISPATCH_CALLBACK_METADATA_KEY,
+    mark_external_tool_execution_started,
+)
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.tracing import Span, TraceProcessor
 from vv_agent.types import (
@@ -68,6 +79,7 @@ from vv_agent.types import (
     AgentTask,
     CompletionReason,
     Message,
+    ToolCall,
     ToolDirective,
     ToolExecutionResult,
     ToolResultStatus,
@@ -134,6 +146,14 @@ class _PendingHandoff:
 @dataclass(frozen=True, slots=True)
 class _CompiledTaskInvocation:
     task: AgentTask
+
+
+@dataclass(frozen=True, slots=True)
+class _ApprovalResumeInvocation:
+    source: RunResult
+    resume_context: _RunResumeContext
+    approval: ApprovalSnapshot
+    pending: _PendingToolApproval
 
 
 class _RunTrace:
@@ -280,6 +300,17 @@ class Runner:
 
     @classmethod
     def resume(cls, state: RunState, *, input: str | None = None) -> RunResult:
+        return cls._resume_state(state, input=input)
+
+    @classmethod
+    def _resume_state(
+        cls,
+        state: RunState,
+        *,
+        input: str | None,
+        resume_runner: RunHandleRunner | None = None,
+        runner_defaults: RunConfig | None = None,
+    ) -> RunResult:
         source, approved_ids = state._into_inner()
         resume_context = source._resume_context
         if resume_context is None:
@@ -290,7 +321,14 @@ class Runner:
             None,
         )
         if approved is not None:
-            return cls._resume_approved_tool_call(source, resume_context, approved, resume_input=input)
+            return cls._resume_approved_tool_call(
+                source,
+                resume_context,
+                approved,
+                resume_input=input,
+                resume_runner=resume_runner,
+                runner_defaults=runner_defaults,
+            )
 
         config = replace(
             resume_context.run_config,
@@ -315,6 +353,8 @@ class Runner:
         approval: ApprovalSnapshot,
         *,
         resume_input: str | None,
+        resume_runner: RunHandleRunner | None = None,
+        runner_defaults: RunConfig | None = None,
     ) -> RunResult:
         effective_config = resume_context.effective_run_config or resume_context.run_config
         pending = resume_context.pending_tool_approval
@@ -324,6 +364,22 @@ class Runner:
             raise ValueError("approved tool call does not match the captured interruption")
         if resume_input is not None:
             raise ValueError("input cannot be provided when resuming an approved tool call")
+        source_checkpoint_key = pending.source_checkpoint_key or source.checkpoint_key
+        approval_checkpoint_config = (
+            runner_defaults.checkpoint_config
+            if runner_defaults is not None
+            else None
+        )
+        if source_checkpoint_key is not None and (
+            approval_checkpoint_config is None
+            or approval_checkpoint_config.key is None
+            or approval_checkpoint_config.resume_policy is not ResumePolicy.RESUME_IF_PRESENT
+            or approval_checkpoint_config.key == source_checkpoint_key
+        ):
+            raise CheckpointError(
+                "checkpoint approval resume requires a distinct explicit resume_if_present key",
+                code="checkpoint_approval_resume_config_invalid",
+            )
         cancellation_token = effective_config.cancellation_token
         if cancellation_token is not None and cancellation_token.cancelled:
             return cls._cancelled_approval_resume_result(
@@ -332,8 +388,51 @@ class Runner:
                 approval,
                 effective_config=effective_config,
             )
-        if not resume_context.claim_approval(approval.interruption_id):
+        approval_checkpoint_key = (
+            approval_checkpoint_config.key
+            if approval_checkpoint_config is not None
+            else None
+        )
+        if not resume_context.claim_approval(
+            approval.interruption_id,
+            checkpoint_key=approval_checkpoint_key,
+        ):
             raise RuntimeError("approval_already_consumed")
+        if approval_checkpoint_config is not None:
+            configured_extensions = (
+                list(runner_defaults.checkpoint_extensions)
+                if runner_defaults is not None
+                else []
+            )
+            configured_reconciliation = (
+                runner_defaults.reconciliation_provider
+                if runner_defaults is not None
+                else None
+            )
+            checkpoint_run_config = replace(
+                effective_config,
+                checkpoint_config=approval_checkpoint_config,
+                checkpoint_extensions=configured_extensions,
+                reconciliation_provider=configured_reconciliation,
+                initial_messages=deepcopy(source.raw_result.messages),
+                shared_state=deepcopy(source.raw_result.shared_state),
+                metadata=cls._metadata_with_initial_budget_usage(
+                    effective_config.metadata,
+                    source.budget_usage,
+                ),
+            )
+            effective_runner = resume_runner or resume_context.runner
+            return effective_runner._run(
+                resume_context.agent,
+                resume_context.input,
+                run_config=checkpoint_run_config,
+                _approval_invocation=_ApprovalResumeInvocation(
+                    source=source,
+                    resume_context=resume_context,
+                    approval=approval,
+                    pending=pending,
+                ),
+            )
         resumed_run_id = f"run_{uuid.uuid4().hex}"
         resume_budget_evaluator: BudgetEvaluator | None = None
         if effective_config.budget_limits is not None and effective_config.budget_limits.has_limits:
@@ -629,6 +728,81 @@ class Runner:
         )
 
     @staticmethod
+    def _execute_checkpoint_approved_tool(
+        *,
+        pending: _PendingToolApproval,
+        task: AgentTask,
+        ctx: ExecutionContext,
+        run_context: RunContext[Any],
+        checkpoint_controller: CheckpointResumeController,
+        shared_state: dict[str, Any],
+        session: Any | None,
+    ) -> tuple[ToolExecutionResult, dict[str, Any]]:
+        call = pending.call
+        if pending.source_idempotency_support is not None:
+            idempotency = ToolIdempotency(pending.source_idempotency_support)
+        elif pending.orchestrator.registry is not None:
+            idempotency = pending.orchestrator.registry.tool_idempotency(call.name)
+        else:
+            idempotency = ToolIdempotency.UNKNOWN
+        plan = checkpoint_controller.plan_tool(
+            cycle_index=1,
+            call=call,
+            idempotency_support=idempotency,
+            source_request_digest=pending.source_request_digest,
+            source_idempotency_key=pending.source_idempotency_key,
+        )
+        context = replace(
+            pending.context,
+            shared_state=deepcopy(shared_state),
+            cycle_index=1,
+            task_id=task.task_id,
+            ctx=ctx,
+            task_metadata=deepcopy(task.metadata),
+            run_context=run_context,
+            tool_call_id=call.id,
+            tool_name=call.name,
+            arguments=deepcopy(call.arguments),
+            idempotency_key=plan.idempotency_key,
+            session=session,
+        )
+        if plan.replay_result is not None:
+            result = plan.replay_result
+        else:
+            def mark_started(started_call: ToolCall) -> None:
+                checkpoint_controller.tool_started(
+                    cycle_index=1,
+                    call=started_call,
+                )
+
+            context = replace(
+                context,
+                metadata={
+                    **context.metadata,
+                    _TOOL_DISPATCH_CALLBACK_METADATA_KEY: mark_started,
+                },
+            )
+            ctx._approved_tool_approval = pending
+            result = pending.orchestrator.run_one(
+                call,
+                context=context,
+                allowed_tool_names=pending.allowed_tool_names,
+            )
+            result = pending.hook_manager.apply_after_tool_call(
+                task=task,
+                cycle_index=1,
+                call=call,
+                context=context,
+                result=result,
+            )
+            checkpoint_controller.finish_tool(
+                cycle_index=1,
+                call=call,
+                result=result,
+            )
+        return result, deepcopy(context.shared_state)
+
+    @staticmethod
     def _effective_run_config(
         agent: Agent,
         run_config: RunConfig | None,
@@ -722,6 +896,12 @@ class Runner:
             runtime_stream_callback=prefer_run("runtime_stream_callback"),
             budget_limits=prefer_run("budget_limits"),
             host_cost_meter=prefer_run("host_cost_meter"),
+            checkpoint_config=prefer_run("checkpoint_config"),
+            checkpoint_extensions=[
+                *defaults.checkpoint_extensions,
+                *config.checkpoint_extensions,
+            ],
+            reconciliation_provider=prefer_run("reconciliation_provider"),
         )
 
     @classmethod
@@ -736,6 +916,7 @@ class Runner:
         runner_defaults: RunConfig | None = None,
         initial_result: RunResult | None = None,
         _compiled_invocation: _CompiledTaskInvocation | None = None,
+        _approval_invocation: _ApprovalResumeInvocation | None = None,
     ) -> RunResult:
         base_config = run_config
         defaults = runner_defaults or RunConfig()
@@ -745,6 +926,7 @@ class Runner:
         pending: _PendingHandoff | None = None
         next_result = initial_result
         next_compiled_invocation = _compiled_invocation
+        next_approval_invocation = _approval_invocation
         handoff_count = 0
         max_handoffs = cls._effective_run_config(
             agent,
@@ -772,8 +954,10 @@ class Runner:
                         resume_runner=resume_runner,
                         resume_config=base_config,
                         _compiled_invocation=next_compiled_invocation,
+                        _approval_invocation=next_approval_invocation,
                     )
                     next_compiled_invocation = None
+                    next_approval_invocation = None
                 except Exception as exc:
                     if pending is not None:
                         completed = HandoffCompletedEvent(
@@ -807,6 +991,11 @@ class Runner:
                     },
                 )
             request = cls._extract_handoff(result)
+            if request is not None and effective_config.checkpoint_config is not None:
+                raise CheckpointError(
+                    "checkpoint v2 does not yet support handoff state",
+                    code="checkpoint_handoff_unsupported",
+                )
             if pending is not None:
                 completed = HandoffCompletedEvent(
                     run_id=pending.source_run_id,
@@ -912,11 +1101,21 @@ class Runner:
         resume_runner: RunHandleRunner | None = None,
         resume_config: RunConfig | None = None,
         _compiled_invocation: _CompiledTaskInvocation | None = None,
+        _approval_invocation: _ApprovalResumeInvocation | None = None,
     ) -> RunResult:
+        preloaded_checkpoint = CheckpointResumeController.preload(run_config.checkpoint_config)
         if run_config.approval_provider is not None and run_config.approval_broker is None:
             run_config = replace(run_config, approval_broker=ApprovalBroker())
-        run_id = f"run_{uuid.uuid4().hex}"
-        trace_id = cls._resolve_trace_id(run_config)
+        if (
+            preloaded_checkpoint is not None
+            and run_config.checkpoint_config is not None
+            and run_config.checkpoint_config.resume_policy is not ResumePolicy.NEW
+        ):
+            run_id = preloaded_checkpoint.root_run_id
+            trace_id = preloaded_checkpoint.trace_id
+        else:
+            run_id = f"run_{uuid.uuid4().hex}"
+            trace_id = cls._resolve_trace_id(run_config)
         trace = _RunTrace(
             processors=cls._trace_processors(run_config),
             trace_id=trace_id,
@@ -936,6 +1135,8 @@ class Runner:
                 resume_runner=resume_runner,
                 resume_config=resume_config,
                 _compiled_invocation=_compiled_invocation,
+                _approval_invocation=_approval_invocation,
+                preloaded_checkpoint=preloaded_checkpoint,
             )
             return result
         except BaseException as exc:
@@ -960,18 +1161,49 @@ class Runner:
         resume_runner: RunHandleRunner | None = None,
         resume_config: RunConfig | None = None,
         _compiled_invocation: _CompiledTaskInvocation | None = None,
+        _approval_invocation: _ApprovalResumeInvocation | None = None,
+        preloaded_checkpoint: Any | None = None,
     ) -> tuple[RunResult, dict[str, Any]]:
+        if run_config.checkpoint_config is not None:
+            if agent.handoffs:
+                raise CheckpointError(
+                    "checkpoint v2 does not yet support handoff state",
+                    code="checkpoint_handoff_unsupported",
+                )
+            if run_config.session is not None and not callable(
+                getattr(run_config.session, "add_items_once", None)
+            ):
+                raise CheckpointError(
+                    "checkpoint v2 requires an append-once session",
+                    code="checkpoint_session_idempotency_unsupported",
+                )
         event_session_id = cls._resolve_event_session_id(run_config)
         collected_events: list[RunEvent] = []
         user_input = cls._normalize_input(input)
+        checkpoint_resume = bool(
+            preloaded_checkpoint is not None
+            and run_config.checkpoint_config is not None
+            and run_config.checkpoint_config.resume_policy is not ResumePolicy.NEW
+        )
+        frozen_definition = (
+            preloaded_checkpoint.run_definition if checkpoint_resume else None
+        )
+        if frozen_definition is not None:
+            frozen_input = str(frozen_definition["root_input"])
+            if user_input != frozen_input:
+                raise CheckpointError(
+                    "resume input does not match the checkpoint run definition",
+                    code="checkpoint_definition_mismatch",
+                )
+            user_input = frozen_input
         initial_budget_usage = cls._initial_budget_usage(run_config)
 
-        def capture_event(event: RunEvent | None) -> None:
+        def capture_event(event: RunEvent | None, *, persist: bool = True) -> None:
             if event is None:
                 return
             collected_events.append(event)
             trace.on_event(event)
-            if run_config.event_store is not None:
+            if persist and run_config.event_store is not None:
                 try:
                     run_config.event_store.append(event)
                 except Exception as exc:
@@ -981,6 +1213,9 @@ class Runner:
             if event_sink is not None:
                 event_sink(event)
             cls._notify_observer(run_config.stream, event, label="Run event stream observer")
+
+        def capture_checkpoint_event(event: RunEvent) -> None:
+            capture_event(event, persist=False)
 
         def log_handler(event: str, payload: dict[str, Any]) -> None:
             if event not in _RUNTIME_TERMINAL_LOG_EVENTS:
@@ -1022,15 +1257,28 @@ class Runner:
             context_model = context_model.model()
         elif context_model is not None:
             context_model = getattr(context_model, "model_id", context_model)
+        effective_run_metadata = (
+            dict(frozen_definition["run_metadata"])
+            if frozen_definition is not None
+            else dict(run_config.metadata)
+        )
         guardrail_context = RunContext(
             context=run_config.context,
             run_id=run_id,
             agent_name=agent.name,
             model=context_model,
             workspace=run_config.workspace,
-            metadata={**agent.metadata, **run_config.metadata},
+            metadata={**agent.metadata, **effective_run_metadata},
         )
-        input_result = cls._apply_input_guardrails(agent=agent, run_context=guardrail_context, user_input=user_input)
+        input_result = (
+            GuardrailResult.allow()
+            if checkpoint_resume or _approval_invocation is not None
+            else cls._apply_input_guardrails(
+                agent=agent,
+                run_context=guardrail_context,
+                user_input=user_input,
+            )
+        )
         if input_result.outcome in {"block", "require_approval"}:
             message = input_result.message or "Input blocked by guardrail."
             failed_event = RunFailedEvent(
@@ -1090,10 +1338,26 @@ class Runner:
             workspace_backend=run_config.workspace_backend,
             hooks=[*agent.hooks, *run_config.hooks],
         )
-        task = (
-            deepcopy(_compiled_invocation.task)
-            if _compiled_invocation is not None
-            else AgentCompiler().compile(
+        compiler = AgentCompiler()
+        if checkpoint_resume:
+            task = compiler.compile_frozen_checkpoint(
+                agent=agent,
+                run_config=run_config,
+                resolved=resolved,
+                checkpoint=preloaded_checkpoint,
+                trace_id=trace_id,
+            )
+        elif _approval_invocation is not None:
+            task = deepcopy(_approval_invocation.pending.task)
+            task.task_id = f"{agent.name}_{uuid.uuid4().hex[:8]}"
+            task.max_cycles = int(run_config.max_cycles or task.max_cycles)
+            task.user_prompt = user_input
+            task.initial_shared_state = deepcopy(run_config.shared_state or {})
+            task.metadata["trace_id"] = trace_id
+        elif _compiled_invocation is not None:
+            task = deepcopy(_compiled_invocation.task)
+        else:
+            task = compiler.compile(
                 agent=agent,
                 input=user_input,
                 run_config=run_config,
@@ -1101,7 +1365,6 @@ class Runner:
                 trace_id=trace_id,
                 run_id=run_id,
             )
-        )
         task.metadata.pop(_INITIAL_BUDGET_USAGE_METADATA_KEY, None)
         policy = run_config.tool_policy
         policy_metadata = _tool_policy_metadata(policy)
@@ -1114,11 +1377,78 @@ class Runner:
             *task.extra_tool_names,
             *[name for name in registry.list_planner_extra_tool_names() if name not in task.extra_tool_names],
         ]
-        initial_messages = (
-            list(run_config.initial_messages)
-            if run_config.initial_messages is not None
-            else cls._session_initial_messages(run_config)
-        )
+        if frozen_definition is not None:
+            assert preloaded_checkpoint is not None
+            initial_messages = [
+                Message.from_dict(item)
+                for item in frozen_definition["initial_messages"]
+            ]
+            prepared_initial_messages = deepcopy(preloaded_checkpoint.messages)
+        elif _approval_invocation is not None:
+            pending_call_id = _approval_invocation.pending.call.id
+            initial_messages = [
+                deepcopy(message)
+                for message in _approval_invocation.source.raw_result.messages
+                if not (
+                    message.role == "tool"
+                    and message.tool_call_id == pending_call_id
+                )
+            ]
+            prepared_initial_messages = deepcopy(initial_messages)
+        else:
+            initial_messages = (
+                list(run_config.initial_messages)
+                if run_config.initial_messages is not None
+                else (cls._session_initial_messages(run_config) or [])
+            )
+            prepared_initial_messages = runtime._build_initial_messages(
+                task=task,
+                initial_messages=initial_messages,
+                user_message=user_input,
+            )
+        checkpoint_controller: CheckpointResumeController | None = None
+        terminal_replayed = False
+        replayed_result: AgentResult | None = None
+        if run_config.checkpoint_config is not None:
+            definition_run_config = (
+                replace(
+                    run_config,
+                    initial_messages=deepcopy(initial_messages),
+                    shared_state=deepcopy(frozen_definition["initial_shared_state"]),
+                    metadata=deepcopy(frozen_definition["run_metadata"]),
+                )
+                if frozen_definition is not None
+                else run_config
+            )
+            run_definition, run_definition_digest = build_run_definition(
+                agent=agent,
+                root_input=user_input,
+                run_config=definition_run_config,
+                resolved=resolved,
+                model_settings=resolved_model_settings,
+                task=task,
+                registry=registry,
+                initial_messages=initial_messages,
+            )
+            checkpoint_controller = CheckpointResumeController(
+                config=run_config.checkpoint_config,
+                task_id=task.task_id,
+                run_id=run_id,
+                trace_id=trace_id,
+                run_definition=run_definition,
+                run_definition_digest=run_definition_digest,
+                initial_messages=prepared_initial_messages,
+                initial_shared_state=deepcopy(run_config.shared_state or {}),
+                initial_budget_usage=initial_budget_usage,
+                extensions=run_config.checkpoint_extensions,
+                reconciliation_provider=run_config.reconciliation_provider,
+                event_sink=capture_checkpoint_event,
+                event_store=run_config.event_store,
+                preloaded_checkpoint=preloaded_checkpoint,
+            )
+            replayed_result = checkpoint_controller.admit()
+            terminal_replayed = replayed_result is not None
+            initial_budget_usage = checkpoint_controller.budget_usage
         runtime_metadata = dict(run_config.metadata)
         runtime_metadata.pop(_INITIAL_BUDGET_USAGE_METADATA_KEY, None)
         for key in _TOOL_POLICY_METADATA_KEYS:
@@ -1144,54 +1474,250 @@ class Runner:
                 "_vv_agent_approval_provider": run_config.approval_provider,
                 "_vv_agent_approval_broker": run_config.approval_broker,
                 "_vv_agent_approval_timeout_seconds": run_config.approval_timeout_seconds,
+                "_vv_agent_checkpoint_controller": checkpoint_controller,
             },
         )
 
-        raw_result = runtime.run(
-            task,
-            workspace=cls._resolve_workspace(run_config.workspace),
-            shared_state=run_config.shared_state,
-            initial_messages=initial_messages,
-            user_message=user_input,
-            ctx=ctx,
-            before_cycle_messages=run_config.before_cycle_messages,
-            interruption_messages=run_config.interruption_messages,
-            sub_task_manager=run_config.sub_task_manager,
-            budget_limits=run_config.budget_limits,
-            host_cost_meter=run_config.host_cost_meter,
-            initial_budget_usage=initial_budget_usage,
-        )
-        final_output = raw_result.final_answer or raw_result.wait_reason or raw_result.error
-        final_output, output_coercion_error = cls._postprocess_output(
-            agent=agent,
-            run_context=guardrail_context,
-            raw_result=raw_result,
-            final_output=final_output,
-            cancellation_token=run_config.cancellation_token,
-        )
+        if replayed_result is not None:
+            raw_result = replayed_result
+        elif _approval_invocation is not None:
+            if checkpoint_controller is None:
+                raise CheckpointError(
+                    "checkpoint approval resume requires a checkpoint controller",
+                    code="checkpoint_approval_resume_config_invalid",
+                )
+            approval_budget: BudgetEvaluator | None = None
+            approval_exhaustion = None
+            if run_config.budget_limits is not None and run_config.budget_limits.has_limits:
+                approval_budget = BudgetEvaluator(
+                    run_config.budget_limits,
+                    host_cost_meter=run_config.host_cost_meter,
+                    initial_usage=initial_budget_usage,
+                )
+                approval_exhaustion = approval_budget.preflight_tools(
+                    [_approval_invocation.pending.call.name]
+                )
+            approval_shared_state = deepcopy(run_config.shared_state or {})
+            tool_result: ToolExecutionResult | None = None
+            if approval_exhaustion is None:
+                tool_result, approval_shared_state = cls._execute_checkpoint_approved_tool(
+                    pending=_approval_invocation.pending,
+                    task=task,
+                    ctx=ctx,
+                    run_context=guardrail_context,
+                    checkpoint_controller=checkpoint_controller,
+                    shared_state=approval_shared_state,
+                    session=run_config.session,
+                )
+                prepared_initial_messages.append(tool_result.to_tool_message())
+                if approval_budget is not None:
+                    approval_exhaustion = approval_budget.tool_batch_complete(
+                        operation_failed=tool_result.status_code is ToolResultStatus.ERROR,
+                    )
+            if approval_budget is not None:
+                initial_budget_usage = approval_budget.snapshot()
+                budget_event: RunEvent
+                if approval_exhaustion is not None:
+                    budget_event = BudgetExhaustedEvent(
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        agent_name=agent.name,
+                        session_id=event_session_id,
+                        cycle_index=1,
+                        enforcement_boundary=approval_exhaustion.enforcement_boundary,
+                        budget_usage=initial_budget_usage,
+                        budget_exhaustion=approval_exhaustion,
+                    )
+                else:
+                    budget_event = BudgetSnapshotEvent(
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        agent_name=agent.name,
+                        session_id=event_session_id,
+                        cycle_index=1,
+                        enforcement_boundary=BudgetEnforcementBoundary.TOOL_BATCH_COMPLETE,
+                        budget_usage=initial_budget_usage,
+                    )
+                capture_event(budget_event)
 
-        new_items = cls._new_session_items(initial_messages=initial_messages, result=raw_result)
-        if run_config.session is not None:
-            run_config.session.add_items(cls._session_items_for_persistence(new_items, raw_result))
-            capture_event(
-                SessionPersistedEvent(
+            if (
+                tool_result is not None
+                and approval_exhaustion is None
+                and tool_result.directive is ToolDirective.CONTINUE
+            ):
+                raw_result = runtime.run(
+                    task,
+                    workspace=cls._resolve_workspace(run_config.workspace),
+                    shared_state=approval_shared_state,
+                    initial_messages=initial_messages,
+                    prepared_initial_messages=prepared_initial_messages,
+                    user_message="",
+                    ctx=ctx,
+                    before_cycle_messages=run_config.before_cycle_messages,
+                    interruption_messages=run_config.interruption_messages,
+                    sub_task_manager=run_config.sub_task_manager,
+                    budget_limits=run_config.budget_limits,
+                    host_cost_meter=run_config.host_cost_meter,
+                    initial_budget_usage=initial_budget_usage,
+                    checkpoint_controller=checkpoint_controller,
+                )
+            else:
+                raw_result = deepcopy(_approval_invocation.source.raw_result)
+                raw_result.messages = deepcopy(prepared_initial_messages)
+                raw_result.shared_state = deepcopy(approval_shared_state)
+                raw_result.budget_usage = deepcopy(initial_budget_usage)
+                raw_result.budget_exhaustion = approval_exhaustion
+                if approval_exhaustion is not None:
+                    raw_result.status = AgentStatus.FAILED
+                    raw_result.completion_reason = CompletionReason.BUDGET_EXHAUSTED
+                    raw_result.completion_tool_name = None
+                    raw_result.partial_output = _last_assistant_output(raw_result.cycles)
+                    raw_result.final_answer = None
+                    raw_result.wait_reason = None
+                    raw_result.error = "Run budget exhausted."
+                else:
+                    assert tool_result is not None
+                    for cycle in raw_result.cycles:
+                        if cycle.index != _approval_invocation.approval.cycle_index:
+                            continue
+                        cycle.tool_results = [
+                            existing
+                            for existing in cycle.tool_results
+                            if existing.tool_call_id != _approval_invocation.pending.call.id
+                        ]
+                        cycle.tool_results.append(tool_result)
+                        break
+                    behavior_reason = ToolCallRunner._apply_tool_use_behavior(
+                        task=task,
+                        call=_approval_invocation.pending.call,
+                        result=tool_result,
+                    )
+                    if tool_result.directive is ToolDirective.WAIT_USER:
+                        raw_result.status = AgentStatus.WAIT_USER
+                        raw_result.completion_reason = CompletionReason.WAIT_USER
+                        raw_result.completion_tool_name = _approval_invocation.pending.call.name
+                        raw_result.final_answer = None
+                        raw_result.error = None
+                        raw_result.wait_reason = str(
+                            tool_result.metadata.get("question") or tool_result.content
+                        )
+                    else:
+                        raw_result.status = AgentStatus.COMPLETED
+                        raw_result.completion_reason = behavior_reason or CompletionReason.TOOL_FINISH
+                        raw_result.completion_tool_name = _approval_invocation.pending.call.name
+                        raw_result.partial_output = None
+                        raw_result.final_answer = AgentRuntime._extract_final_message(tool_result)
+                        raw_result.wait_reason = None
+                        raw_result.error = None
+        else:
+            try:
+                raw_result = runtime.run(
+                    task,
+                    workspace=cls._resolve_workspace(run_config.workspace),
+                    shared_state=run_config.shared_state,
+                    initial_messages=initial_messages,
+                    prepared_initial_messages=prepared_initial_messages,
+                    user_message=user_input,
+                    ctx=ctx,
+                    before_cycle_messages=run_config.before_cycle_messages,
+                    interruption_messages=run_config.interruption_messages,
+                    sub_task_manager=run_config.sub_task_manager,
+                    budget_limits=run_config.budget_limits,
+                    host_cost_meter=run_config.host_cost_meter,
+                    initial_budget_usage=initial_budget_usage,
+                    checkpoint_controller=checkpoint_controller,
+                )
+            except BaseException:
+                if checkpoint_controller is not None:
+                    checkpoint_controller.close()
+                raise
+        output_coercion_error: Exception | None = None
+        try:
+            if checkpoint_controller is not None and not terminal_replayed:
+                try:
+                    raw_result = checkpoint_controller.prepare_terminal(raw_result)
+                except CheckpointReconciliationRequired as interruption:
+                    raw_result = interruption.result
+
+            final_output = raw_result.final_answer or raw_result.wait_reason or raw_result.error
+            reconciliation_required = raw_result.status is AgentStatus.RECONCILIATION_REQUIRED
+            operator_abort = bool(
+                raw_result.status is AgentStatus.FAILED
+                and raw_result.error == "operator_abort_with_unknown_outcome"
+                and raw_result.resume_observation is not None
+            )
+            if terminal_replayed:
+                new_items = []
+                if raw_result.status is AgentStatus.COMPLETED:
+                    try:
+                        final_output = cls._coerce_output_type(
+                            agent=agent,
+                            final_output=final_output,
+                        )
+                    except Exception as exc:
+                        output_coercion_error = ValueError(
+                            f"failed to validate final output: {exc}"
+                        )
+            elif reconciliation_required or operator_abort:
+                new_items = []
+            else:
+                final_output, output_coercion_error = cls._postprocess_output(
+                    agent=agent,
+                    run_context=guardrail_context,
+                    raw_result=raw_result,
+                    final_output=final_output,
+                    cancellation_token=run_config.cancellation_token,
+                )
+                new_items = cls._new_session_items(
+                    initial_messages=initial_messages,
+                    result=raw_result,
+                )
+
+            if not terminal_replayed and not reconciliation_required:
+                if run_config.session is not None and not operator_abort:
+                    session_items = cls._session_items_for_persistence(new_items, raw_result)
+                    session_event = SessionPersistedEvent(
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        agent_name=agent.name,
+                        session_id=event_session_id or "",
+                    )
+                    if checkpoint_controller is not None:
+                        commit_id = checkpoint_session_commit_id(
+                            checkpoint_controller.checkpoint_key
+                        )
+                        payload_digest = session_commit_payload_digest(session_items)
+                        run_config.session.add_items_once(
+                            commit_id,
+                            payload_digest,
+                            session_items,
+                        )
+                        checkpoint_controller.persist_preterminal_event(
+                            session_event,
+                            identity=commit_id,
+                        )
+                    else:
+                        run_config.session.add_items(session_items)
+                        capture_event(session_event)
+                terminal_event = cls._terminal_event(
+                    result=raw_result,
+                    final_output=final_output,
                     run_id=run_id,
                     trace_id=trace_id,
                     agent_name=agent.name,
-                    session_id=event_session_id or "",
+                    session_id=event_session_id,
+                    cancellation_token=run_config.cancellation_token,
                 )
-            )
-        capture_event(
-            cls._terminal_event(
-                result=raw_result,
-                final_output=final_output,
-                run_id=run_id,
-                trace_id=trace_id,
-                agent_name=agent.name,
-                session_id=event_session_id,
-                cancellation_token=run_config.cancellation_token,
-            )
-        )
+                if checkpoint_controller is not None:
+                    raw_result = checkpoint_controller.finalize(
+                        raw_result,
+                        terminal_event=terminal_event,
+                    )
+                else:
+                    capture_event(terminal_event)
+        finally:
+            if checkpoint_controller is not None:
+                checkpoint_controller.close()
         trace_metadata = {
             "status": raw_result.status.value,
             "final_output": final_output,
@@ -1487,14 +2013,25 @@ class Runner:
                     planner_extra=is_model_visible,
                 )
                 continue
-            if tool.exposure != ToolExposure.HIDDEN:
-                registry.register_schema(tool.name, tool.to_openai_schema())
-
             def handler(context: ToolContext, arguments: dict[str, Any], *, _tool: FunctionTool = tool) -> ToolExecutionResult:
                 return cls._execute_function_tool(_tool, context=context, arguments=arguments, run_config=run_config)
 
-            registry.register(ToolSpec(name=tool.name, handler=handler))
-            registry.mark_policy_managed_by_handler(tool.name)
+            is_model_visible = tool.exposure != ToolExposure.HIDDEN
+            registry.register_executor(
+                RegistryToolExecutor(
+                    name=tool.name,
+                    handler=handler,
+                    schema=tool.to_openai_schema(),
+                    exposure=tool.exposure,
+                    needs_approval=tool.needs_approval,
+                    timeout_seconds=tool.timeout_seconds,
+                    failure_error_function=tool.failure_error_function,
+                    metadata={**tool.metadata, "policy_managed_by_handler": True},
+                    idempotency=tool.idempotency,
+                ),
+                expose_to_model=is_model_visible,
+                planner_extra=is_model_visible,
+            )
         for transfer in agent.handoffs:
             if not transfer.tool_name:
                 continue
@@ -1596,6 +2133,14 @@ class Runner:
         approval_result = cls._approval_result(tool, context=context, arguments=arguments, run_config=run_config)
         if approval_result is not None:
             return approval_result
+        mark_external_tool_execution_started(
+            ToolCall(
+                id=context.tool_call_id,
+                name=context.tool_name or tool.name,
+                arguments=dict(arguments),
+            ),
+            context=context,
+        )
         return cls._invoke_function_tool(tool, context=context, arguments=arguments, run_config=run_config)
 
     @classmethod
@@ -2058,6 +2603,9 @@ class Runner:
             runtime_stream_callback=None,
             cancellation_token=cancellation_token,
             host_cost_meter=None,
+            checkpoint_config=None,
+            checkpoint_extensions=[],
+            reconciliation_provider=None,
             metadata={
                 key: value
                 for key, value in parent_config.metadata.items()
@@ -2245,7 +2793,12 @@ class ConfiguredRunner:
         return RunHandle._start_worker(agent=agent, input=input, run_config=control_config, runner=self)
 
     def resume(self, state: RunState, *, input: str | None = None) -> RunResult:
-        return Runner.resume(state, input=input)
+        return Runner._resume_state(
+            state,
+            input=input,
+            resume_runner=cast(RunHandleRunner, self),
+            runner_defaults=self.default_run_config,
+        )
 
     def _run(
         self,
@@ -2256,6 +2809,7 @@ class ConfiguredRunner:
         event_sink: Callable[[RunEvent], None] | None = None,
         initial_result: RunResult | None = None,
         _compiled_invocation: _CompiledTaskInvocation | None = None,
+        _approval_invocation: _ApprovalResumeInvocation | None = None,
     ) -> RunResult:
         return Runner._run(
             agent,
@@ -2266,4 +2820,5 @@ class ConfiguredRunner:
             runner_defaults=self.default_run_config,
             initial_result=initial_result,
             _compiled_invocation=_compiled_invocation,
+            _approval_invocation=_approval_invocation,
         )

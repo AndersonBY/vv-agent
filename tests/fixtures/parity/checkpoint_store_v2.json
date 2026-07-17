@@ -1,0 +1,837 @@
+{
+  "contract": "checkpoint_store_v2",
+  "version": 2,
+  "run_definition_schema": "vv-agent.run-definition.v1",
+  "run_definition_storage": "credential_redacted_object_embedded_and_immutable_beside_matching_digest",
+  "namespaces": {
+    "sqlite_table": "checkpoints_v2",
+    "redis_key_prefix": "vv-agent:checkpoint:v2:",
+    "redis_key_suffix": "lowercase_sha256_of_checkpoint_key",
+    "v1_sqlite_table": "checkpoints",
+    "v1_redis_prefix": "vv_agent:checkpoint:",
+    "v1_bytes_unchanged": true
+  },
+  "redis_key_vectors": [
+    {
+      "checkpoint_key": "tenant-7/run-42",
+      "checkpoint_key_utf8_sha256": "900c4d195b6e2d16f4ac0725d2306d5b9685397249d4581e107769f38cb068c7",
+      "v1_data_key": "vv_agent:checkpoint:tenant-7/run-42",
+      "v2_data_key": "vv-agent:checkpoint:v2:900c4d195b6e2d16f4ac0725d2306d5b9685397249d4581e107769f38cb068c7",
+      "v2_lease_key": "vv-agent:checkpoint:v2:900c4d195b6e2d16f4ac0725d2306d5b9685397249d4581e107769f38cb068c7:lease"
+    },
+    {
+      "checkpoint_key": "研究/运行-42",
+      "checkpoint_key_utf8_sha256": "e6b1a2e6f36de6d5273e0ea9b2617ed36e49d0663668dd4cd30ea1091b0d974c",
+      "v1_data_key": "vv_agent:checkpoint:研究/运行-42",
+      "v2_data_key": "vv-agent:checkpoint:v2:e6b1a2e6f36de6d5273e0ea9b2617ed36e49d0663668dd4cd30ea1091b0d974c",
+      "v2_lease_key": "vv-agent:checkpoint:v2:e6b1a2e6f36de6d5273e0ea9b2617ed36e49d0663668dd4cd30ea1091b0d974c:lease"
+    }
+  ],
+  "operations": [
+    {
+      "name": "create_v2",
+      "atomic": "insert_if_absent"
+    },
+    {
+      "name": "load_v2",
+      "atomic": "read_one"
+    },
+    {
+      "name": "claim_v2",
+      "atomic": "compare_status_cycle_and_lease_then_claim_and_increment_resume_attempt_only_for_recovery_mode"
+    },
+    {
+      "name": "renew_v2",
+      "atomic": "compare_claim_token_and_live_lease_then_update_lease_only"
+    },
+    {
+      "name": "progress_v2",
+      "atomic": "compare_revision_and_claim_token_then_update_payload_and_revision_preserving_claim"
+    },
+    {
+      "name": "suspend_v2",
+      "atomic": "compare_revision_and_claim_token_then_persist_resumable_interruption_preserve_journals_and_clear_claim"
+    },
+    {
+      "name": "commit_cycle_v2",
+      "atomic": "compare_revision_and_claim_token_then_commit_cycle_clear_journals_and_claim"
+    },
+    {
+      "name": "finalize_claimed_v2",
+      "atomic": "compare_revision_and_claim_token_then_write_terminal_clear_claim_and_clear_ordinary_journals"
+    },
+    {
+      "name": "finalize_v2",
+      "atomic": "compare_revision_and_no_claim_then_write_terminal_preserving_explicit_operator_abort_ambiguity"
+    },
+    {
+      "name": "record_event_delivery_v2",
+      "atomic": "compare_revision_claim_and_pending_event_identity_then_record_cursor_preserving_claim_or_terminal"
+    },
+    {
+      "name": "acknowledge_terminal_v2",
+      "atomic": "compare_revision_and_terminal_then_mark_acknowledged_without_delete"
+    },
+    {
+      "name": "delete_v2",
+      "atomic": "explicit_host_retention_cleanup"
+    }
+  ],
+  "revision_rules": {
+    "create": 0,
+    "claim_increment": 1,
+    "progress_increment": 1,
+    "suspend_increment": 1,
+    "cycle_commit_increment": 1,
+    "claimed_finalize_increment": 1,
+    "finalize_increment": 1,
+    "event_delivery_increment": 1,
+    "renew_increment": 0,
+    "acknowledge_increment": 1,
+    "heartbeat_requires_revision": false,
+    "heartbeat_requires_claim_token": true,
+    "progress_preserves_claim": true,
+    "claim_modes": [
+      "continue",
+      "recovery"
+    ],
+    "continue_claim_preserves_resume_attempt": true,
+    "successful_recovery_claim_increments_resume_attempt": true,
+    "failed_recovery_claim_preserves_resume_attempt": true,
+    "claimable_statuses": [
+      "running",
+      "reconciliation_required"
+    ],
+    "successful_claim_sets_status_running": true,
+    "suspend_preserves_active_journals": true,
+    "suspend_clears_claim_without_advancing_cycle": true,
+    "claimed_finalize_clears_claim_atomically": true,
+    "event_delivery_preserves_claim_and_terminal": true,
+    "outbox_event_ids_unique": true,
+    "identical_event_enqueue_reuses_existing_entry": true,
+    "conflicting_event_enqueue_error": "event_identity_conflict",
+    "run_definition_and_digest_immutable_after_create": true,
+    "operator_abort_finalize_preserves_ambiguous_journal": true
+  },
+  "event_payload_digest": {
+    "canonicalization": "RFC 8785 JSON Canonicalization Scheme over the complete event object followed by lowercase SHA-256",
+    "golden_cases": [
+      {
+        "name": "checkpoint_created_minimal",
+        "event": {
+          "type": "checkpoint_created"
+        },
+        "canonical_json_base64": "eyJ0eXBlIjoiY2hlY2twb2ludF9jcmVhdGVkIn0=",
+        "canonical_json_utf8_bytes": 29,
+        "sha256": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c"
+      }
+    ]
+  },
+  "store_cases": [
+    {
+      "name": "create_absent",
+      "initial": null,
+      "operation": {
+        "kind": "create_v2",
+        "revision": 0
+      },
+      "expected": {
+        "created": true,
+        "revision": 0,
+        "resume_attempt": 1
+      }
+    },
+    {
+      "name": "create_collision",
+      "initial": {
+        "revision": 0,
+        "status": "running"
+      },
+      "operation": {
+        "kind": "create_v2",
+        "revision": 0
+      },
+      "expected": {
+        "created": false,
+        "error": "checkpoint_already_exists"
+      }
+    },
+    {
+      "name": "claim_next_cycle",
+      "initial": {
+        "revision": 0,
+        "resume_attempt": 1,
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": null
+      },
+      "operation": {
+        "kind": "claim_v2",
+        "claim_mode": "continue",
+        "cycle_index": 1,
+        "claim_token": "owner-a",
+        "now_ms": 100,
+        "lease_expires_at_ms": 200
+      },
+      "expected": {
+        "claimed": true,
+        "revision": 1,
+        "resume_attempt": 1,
+        "claim_token": "owner-a",
+        "claimed_cycle": 1
+      }
+    },
+    {
+      "name": "live_claim_cannot_be_stolen",
+      "initial": {
+        "revision": 1,
+        "resume_attempt": 1,
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": "owner-a",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 200
+      },
+      "operation": {
+        "kind": "claim_v2",
+        "claim_mode": "recovery",
+        "cycle_index": 1,
+        "claim_token": "owner-b",
+        "now_ms": 199,
+        "lease_expires_at_ms": 300
+      },
+      "expected": {
+        "claimed": false,
+        "error": "checkpoint_claim_active",
+        "revision": 1,
+        "resume_attempt": 1
+      }
+    },
+    {
+      "name": "expired_claim_can_be_reclaimed",
+      "initial": {
+        "revision": 1,
+        "resume_attempt": 1,
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": "owner-a",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 200
+      },
+      "operation": {
+        "kind": "claim_v2",
+        "claim_mode": "recovery",
+        "cycle_index": 1,
+        "claim_token": "owner-b",
+        "now_ms": 200,
+        "lease_expires_at_ms": 300
+      },
+      "expected": {
+        "claimed": true,
+        "revision": 2,
+        "resume_attempt": 2,
+        "claim_token": "owner-b"
+      }
+    },
+    {
+      "name": "unclaimed_public_resume_increments_atomically_with_claim",
+      "initial": {
+        "revision": 5,
+        "resume_attempt": 1,
+        "cycle_index": 1,
+        "status": "running",
+        "claim_token": null,
+        "claimed_cycle": null,
+        "lease_expires_at_ms": null
+      },
+      "operation": {
+        "kind": "claim_v2",
+        "claim_mode": "recovery",
+        "cycle_index": 2,
+        "claim_token": "owner-resume",
+        "now_ms": 300,
+        "lease_expires_at_ms": 400
+      },
+      "expected": {
+        "claimed": true,
+        "revision": 6,
+        "resume_attempt": 2,
+        "claim_token": "owner-resume",
+        "claimed_cycle": 2
+      }
+    },
+    {
+      "name": "terminal_replay_does_not_claim_or_increment_resume_attempt",
+      "initial": {
+        "revision": 7,
+        "resume_attempt": 2,
+        "cycle_index": 2,
+        "status": "completed",
+        "claim_token": null,
+        "terminal_result_present": true
+      },
+      "operation": {
+        "kind": "load_v2",
+        "requested_claim_mode": "recovery"
+      },
+      "expected": {
+        "claim_count": 0,
+        "revision": 7,
+        "resume_attempt": 2,
+        "terminal_replayed": true
+      }
+    },
+    {
+      "name": "progress_keeps_claim",
+      "initial": {
+        "revision": 2,
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": "owner-b",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 300
+      },
+      "operation": {
+        "kind": "progress_v2",
+        "expected_revision": 2,
+        "claim_token": "owner-b",
+        "journal_state": "started"
+      },
+      "expected": {
+        "updated": true,
+        "revision": 3,
+        "claim_token": "owner-b",
+        "claimed_cycle": 1,
+        "journal_state": "started"
+      }
+    },
+    {
+      "name": "stale_progress_loses_cas",
+      "initial": {
+        "revision": 3,
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": "owner-b",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 300
+      },
+      "operation": {
+        "kind": "progress_v2",
+        "expected_revision": 2,
+        "claim_token": "owner-b"
+      },
+      "expected": {
+        "updated": false,
+        "error": "checkpoint_revision_conflict"
+      }
+    },
+    {
+      "name": "heartbeat_after_progress_updates_lease_only",
+      "initial": {
+        "revision": 3,
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": "owner-b",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 300,
+        "journal_state": "started"
+      },
+      "operation": {
+        "kind": "renew_v2",
+        "claim_token": "owner-b",
+        "now_ms": 250,
+        "lease_expires_at_ms": 400
+      },
+      "expected": {
+        "renewed": true,
+        "revision": 3,
+        "lease_expires_at_ms": 400,
+        "journal_state": "started"
+      }
+    },
+    {
+      "name": "reconciliation_suspend_preserves_journal_and_releases_claim",
+      "initial": {
+        "revision": 4,
+        "resume_attempt": 2,
+        "cycle_index": 1,
+        "status": "running",
+        "claim_token": "owner-resume",
+        "claimed_cycle": 2,
+        "lease_expires_at_ms": 400,
+        "tool_journal_state": "ambiguous"
+      },
+      "operation": {
+        "kind": "suspend_v2",
+        "expected_revision": 4,
+        "claim_token": "owner-resume",
+        "status": "reconciliation_required"
+      },
+      "expected": {
+        "updated": true,
+        "revision": 5,
+        "resume_attempt": 2,
+        "cycle_index": 1,
+        "status": "reconciliation_required",
+        "claim_token": null,
+        "claimed_cycle": null,
+        "lease_expires_at_ms": null,
+        "tool_journal_state": "ambiguous"
+      }
+    },
+    {
+      "name": "claim_suspended_reconciliation_for_resolution",
+      "initial": {
+        "revision": 5,
+        "resume_attempt": 2,
+        "cycle_index": 1,
+        "status": "reconciliation_required",
+        "claim_token": null,
+        "tool_journal_state": "ambiguous"
+      },
+      "operation": {
+        "kind": "claim_v2",
+        "claim_mode": "recovery",
+        "cycle_index": 2,
+        "claim_token": "owner-reconcile",
+        "now_ms": 500,
+        "lease_expires_at_ms": 600
+      },
+      "expected": {
+        "claimed": true,
+        "revision": 6,
+        "resume_attempt": 3,
+        "status": "running",
+        "claim_token": "owner-reconcile",
+        "tool_journal_state": "ambiguous"
+      }
+    },
+    {
+      "name": "concurrent_progress_one_winner",
+      "initial": {
+        "revision": 3,
+        "claim_token": "owner-b"
+      },
+      "operations": [
+        {
+          "kind": "progress_v2",
+          "expected_revision": 3,
+          "claim_token": "owner-b",
+          "writer": "a"
+        },
+        {
+          "kind": "progress_v2",
+          "expected_revision": 3,
+          "claim_token": "owner-b",
+          "writer": "b"
+        }
+      ],
+      "expected": {
+        "success_count": 1,
+        "conflict_count": 1,
+        "revision": 4
+      }
+    },
+    {
+      "name": "concurrent_recovery_claims_increment_once",
+      "initial": {
+        "revision": 1,
+        "resume_attempt": 1,
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": "expired-owner",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 200
+      },
+      "operations": [
+        {
+          "kind": "claim_v2",
+          "claim_mode": "recovery",
+          "cycle_index": 1,
+          "claim_token": "owner-a",
+          "now_ms": 200,
+          "lease_expires_at_ms": 300
+        },
+        {
+          "kind": "claim_v2",
+          "claim_mode": "recovery",
+          "cycle_index": 1,
+          "claim_token": "owner-b",
+          "now_ms": 200,
+          "lease_expires_at_ms": 300
+        }
+      ],
+      "expected": {
+        "success_count": 1,
+        "rejected_count": 1,
+        "revision": 2,
+        "resume_attempt": 2
+      }
+    },
+    {
+      "name": "cycle_commit_clears_active_journals_and_claim",
+      "initial": {
+        "revision": 4,
+        "cycle_index": 0,
+        "claim_token": "owner-b",
+        "claimed_cycle": 1,
+        "model_journal_count": 1,
+        "tool_journal_count": 1
+      },
+      "operation": {
+        "kind": "commit_cycle_v2",
+        "expected_revision": 4,
+        "claim_token": "owner-b",
+        "cycle_index": 1
+      },
+      "expected": {
+        "updated": true,
+        "revision": 5,
+        "cycle_index": 1,
+        "claim_token": null,
+        "model_journal_count": 0,
+        "tool_journal_count": 0
+      }
+    },
+    {
+      "name": "terminal_finalize_without_claim",
+      "initial": {
+        "revision": 5,
+        "cycle_index": 1,
+        "status": "running",
+        "claim_token": null,
+        "terminal_result": null
+      },
+      "operation": {
+        "kind": "finalize_v2",
+        "expected_revision": 5,
+        "status": "completed"
+      },
+      "expected": {
+        "updated": true,
+        "revision": 6,
+        "status": "completed",
+        "terminal_result_present": true
+      }
+    },
+    {
+      "name": "definitive_failure_finalizes_active_claim",
+      "initial": {
+        "revision": 5,
+        "cycle_index": 1,
+        "status": "running",
+        "claim_token": "owner-failure",
+        "claimed_cycle": 2,
+        "model_journal_state": "failed",
+        "terminal_result": null
+      },
+      "operation": {
+        "kind": "finalize_claimed_v2",
+        "expected_revision": 5,
+        "claim_token": "owner-failure",
+        "status": "failed"
+      },
+      "expected": {
+        "updated": true,
+        "revision": 6,
+        "status": "failed",
+        "claim_token": null,
+        "claimed_cycle": null,
+        "lease_expires_at_ms": null,
+        "model_journal_count": 0,
+        "terminal_result_present": true
+      }
+    },
+    {
+      "name": "claimed_operator_abort_retains_unknown_outcome",
+      "initial": {
+        "revision": 6,
+        "cycle_index": 1,
+        "status": "running",
+        "claim_token": "owner-reconcile",
+        "claimed_cycle": 2,
+        "tool_journal_state": "ambiguous",
+        "terminal_result": null
+      },
+      "operation": {
+        "kind": "finalize_claimed_v2",
+        "expected_revision": 6,
+        "claim_token": "owner-reconcile",
+        "status": "failed",
+        "terminal_error_code": "operator_abort_with_unknown_outcome"
+      },
+      "expected": {
+        "updated": true,
+        "revision": 7,
+        "status": "failed",
+        "claim_token": null,
+        "tool_journal_state": "ambiguous",
+        "resume_observation_present": true,
+        "terminal_result_present": true
+      }
+    },
+    {
+      "name": "terminal_is_immutable",
+      "initial": {
+        "revision": 6,
+        "status": "completed",
+        "terminal_result_present": true
+      },
+      "operation": {
+        "kind": "finalize_v2",
+        "expected_revision": 6,
+        "status": "failed"
+      },
+      "expected": {
+        "updated": false,
+        "error": "checkpoint_terminal_immutable"
+      }
+    },
+    {
+      "name": "operator_abort_terminal_retains_unknown_outcome",
+      "initial": {
+        "revision": 6,
+        "cycle_index": 1,
+        "status": "reconciliation_required",
+        "claim_token": null,
+        "tool_journal_state": "ambiguous",
+        "terminal_result": null
+      },
+      "operation": {
+        "kind": "finalize_v2",
+        "expected_revision": 6,
+        "status": "failed",
+        "terminal_error_code": "operator_abort_with_unknown_outcome"
+      },
+      "expected": {
+        "updated": true,
+        "revision": 7,
+        "status": "failed",
+        "tool_journal_state": "ambiguous",
+        "resume_observation_present": true,
+        "terminal_result_present": true
+      }
+    },
+    {
+      "name": "terminal_ack_is_retained",
+      "initial": {
+        "revision": 6,
+        "status": "completed",
+        "terminal_result_present": true,
+        "terminal_acknowledged": false
+      },
+      "operation": {
+        "kind": "acknowledge_terminal_v2",
+        "expected_revision": 6
+      },
+      "expected": {
+        "updated": true,
+        "revision": 7,
+        "terminal_result_present": true,
+        "terminal_acknowledged": true,
+        "row_present": true
+      }
+    },
+    {
+      "name": "running_outbox_delivery_preserves_claim",
+      "initial": {
+        "revision": 6,
+        "status": "running",
+        "claim_token": "owner-events",
+        "claimed_cycle": 2,
+        "event_id": "evt-1",
+        "payload_digest": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c",
+        "outbox_state": "pending"
+      },
+      "operation": {
+        "kind": "record_event_delivery_v2",
+        "expected_revision": 6,
+        "claim_token": "owner-events",
+        "event_id": "evt-1",
+        "payload_digest": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c",
+        "cursor": {
+          "schema_version": "vv-agent.event-cursor.v1",
+          "store_ref": {
+            "id": "events.tenant",
+            "version": "1"
+          },
+          "value": {
+            "sequence": 1
+          },
+          "last_event_id": "evt-1"
+        }
+      },
+      "expected": {
+        "updated": true,
+        "revision": 7,
+        "claim_token": "owner-events",
+        "outbox_state": "delivered",
+        "event_cursor_last_event_id": "evt-1"
+      }
+    },
+    {
+      "name": "terminal_outbox_delivery_preserves_receipt",
+      "initial": {
+        "revision": 7,
+        "status": "completed",
+        "claim_token": null,
+        "terminal_result_present": true,
+        "event_id": "evt-terminal",
+        "payload_digest": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c",
+        "outbox_state": "pending"
+      },
+      "operation": {
+        "kind": "record_event_delivery_v2",
+        "expected_revision": 7,
+        "claim_token": null,
+        "event_id": "evt-terminal",
+        "payload_digest": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c",
+        "cursor": {
+          "schema_version": "vv-agent.event-cursor.v1",
+          "store_ref": {
+            "id": "events.tenant",
+            "version": "1"
+          },
+          "value": {
+            "sequence": 2
+          },
+          "last_event_id": "evt-terminal"
+        }
+      },
+      "expected": {
+        "updated": true,
+        "revision": 8,
+        "status": "completed",
+        "terminal_result_present": true,
+        "outbox_state": "delivered",
+        "event_cursor_last_event_id": "evt-terminal"
+      }
+    },
+    {
+      "name": "terminal_redelivery_replays_without_operations",
+      "initial": {
+        "revision": 7,
+        "status": "completed",
+        "terminal_result_present": true,
+        "terminal_acknowledged": true
+      },
+      "operation": {
+        "kind": "load_v2"
+      },
+      "expected": {
+        "model_calls": 0,
+        "tool_calls": 0,
+        "terminal_replayed": true
+      }
+    },
+    {
+      "name": "cleanup_is_explicit",
+      "initial": {
+        "revision": 7,
+        "status": "completed",
+        "terminal_result_present": true,
+        "terminal_acknowledged": true
+      },
+      "operation": {
+        "kind": "delete_v2"
+      },
+      "expected": {
+        "row_present": false
+      }
+    }
+  ],
+  "outbox_cases": [
+    {
+      "name": "append_once_first_delivery",
+      "existing": null,
+      "call": {
+        "event_id": "evt-1",
+        "payload_digest": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c",
+        "event": {
+          "type": "checkpoint_created"
+        }
+      },
+      "expected": {
+        "inserted": true,
+        "cursor": {
+          "sequence": 1
+        }
+      }
+    },
+    {
+      "name": "append_once_identical_duplicate",
+      "existing": {
+        "event_id": "evt-1",
+        "payload_digest": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c",
+        "cursor": {
+          "sequence": 1
+        }
+      },
+      "call": {
+        "event_id": "evt-1",
+        "payload_digest": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c",
+        "event": {
+          "type": "checkpoint_created"
+        }
+      },
+      "expected": {
+        "inserted": false,
+        "cursor": {
+          "sequence": 1
+        },
+        "consumer_deliveries": 1
+      }
+    },
+    {
+      "name": "append_once_digest_conflict",
+      "existing": {
+        "event_id": "evt-1",
+        "payload_digest": "98648e700ff272cf9c8cb0133ed09f7bd9af09bcd95a03da8a955dcdeb270f1c",
+        "cursor": {
+          "sequence": 1
+        }
+      },
+      "call": {
+        "event_id": "evt-1",
+        "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "event": {
+          "type": "checkpoint_created"
+        }
+      },
+      "expected": {
+        "inserted": false,
+        "error": "event_identity_conflict"
+      }
+    },
+    {
+      "name": "pending_outbox_redelivery_reuses_identity",
+      "checkpoint_outbox_state": "pending",
+      "expected": {
+        "same_event_id": true,
+        "same_payload_digest": true
+      }
+    },
+    {
+      "name": "raw_callback_remains_at_least_once",
+      "sink_kind": "callback",
+      "expected": {
+        "accepted_once_guarantee": false
+      }
+    }
+  ],
+  "redis_rules": {
+    "representation": "hash_or_payload_plus_control_fields",
+    "progress_atomicity": "lua_compare_revision_and_claim_then_replace_payload",
+    "suspend_atomicity": "lua_compare_revision_and_claim_then_replace_payload_and_delete_lease",
+    "claimed_finalize_atomicity": "lua_compare_revision_and_claim_then_replace_terminal_payload_and_delete_lease",
+    "event_delivery_atomicity": "lua_compare_revision_claim_and_pending_event_identity_then_record_cursor",
+    "heartbeat_atomicity": "lua_compare_claim_and_live_lease_then_update_lease_field_only",
+    "whole_json_heartbeat_forbidden": true
+  },
+  "fault_rules": {
+    "deterministic_injector": true,
+    "barrier_tests_for_concurrency": true,
+    "sigkill_canary": true,
+    "sleep_only_timing_assertions_forbidden": true
+  }
+}

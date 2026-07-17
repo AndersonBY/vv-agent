@@ -956,5 +956,15 @@
         "unavailable_dimensions": []
       }
     }
-  ]
+  ],
+  "resume_semantics": {
+    "snapshot_persisted_at_operation_progress": true,
+    "cumulative_elapsed_ms_continues": true,
+    "process_downtime_ms_counted": false,
+    "queue_time_ms_counted": false,
+    "approval_wait_ms_counted": false,
+    "reconciliation_wait_ms_counted": false,
+    "unknown_crash_gap_ms_guessed": false,
+    "fixture": "checkpoint_resume_v1.json"
+  }
 }

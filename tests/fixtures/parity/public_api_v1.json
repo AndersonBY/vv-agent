@@ -109,6 +109,31 @@
           "id": "run_config.unavailable_metric_policy",
           "python": "vv_agent.UnavailableMetricPolicy",
           "rust": "vv_agent::UnavailableMetricPolicy"
+        },
+        {
+          "id": "run_config.checkpoint_config",
+          "python": "vv_agent.CheckpointConfig",
+          "rust": "vv_agent::CheckpointConfig"
+        },
+        {
+          "id": "checkpoint_config.capability_refs",
+          "python": "vv_agent.CheckpointConfig.capability_refs",
+          "rust": "vv_agent::CheckpointConfig::capability_refs"
+        },
+        {
+          "id": "checkpoint_config.credential_slots",
+          "python": "vv_agent.CheckpointConfig.credential_slots",
+          "rust": "vv_agent::CheckpointConfig::credential_slots"
+        },
+        {
+          "id": "run_config.checkpoint_extension",
+          "python": "vv_agent.CheckpointExtension",
+          "rust": "vv_agent::CheckpointExtension"
+        },
+        {
+          "id": "run_config.reconciliation_provider",
+          "python": "vv_agent.ReconciliationProvider",
+          "rust": "vv_agent::ReconciliationProvider"
         }
       ],
       "id": "run_config"
@@ -209,6 +234,11 @@
           "id": "result.budget_exhaustion",
           "python": "vv_agent.BudgetExhaustion",
           "rust": "vv_agent::BudgetExhaustion"
+        },
+        {
+          "id": "result.resume_observation",
+          "python": "vv_agent.ResumeObservation",
+          "rust": "vv_agent::ResumeObservation"
         }
       ],
       "id": "result"
@@ -327,6 +357,16 @@
           "id": "app_server.jsonrpc_message",
           "python": "vv_agent.app_server.JsonRpcMessage",
           "rust": "vv_agent::app_server::protocol::JsonRpcMessage"
+        },
+        {
+          "id": "app_server.turn_resume_params",
+          "python": "vv_agent.app_server.TurnResumeParams",
+          "rust": "vv_agent::app_server::protocol::TurnResumeParams"
+        },
+        {
+          "id": "app_server.turn_resume_response",
+          "python": "vv_agent.app_server.TurnResumeResponse",
+          "rust": "vv_agent::app_server::protocol::TurnResumeResponse"
         }
       ],
       "id": "app_server"
@@ -393,6 +433,11 @@
           "id": "tools.not_found_error",
           "python": "vv_agent.tools.ToolNotFoundError",
           "rust": "vv_agent::ToolNotFoundError"
+        },
+        {
+          "id": "tools.idempotency",
+          "python": "vv_agent.ToolIdempotency",
+          "rust": "vv_agent::ToolIdempotency"
         }
       ],
       "id": "tools"
@@ -718,6 +763,26 @@
           "id": "runtime_backend.tool_call_runner",
           "python": "vv_agent.runtime.ToolCallRunner",
           "rust": "vv_agent::ToolCallRunner"
+        },
+        {
+          "id": "runtime_backend.checkpoint_v2",
+          "python": "vv_agent.runtime.CheckpointV2",
+          "rust": "vv_agent::CheckpointV2"
+        },
+        {
+          "id": "runtime_backend.checkpoint_store_v2",
+          "python": "vv_agent.runtime.CheckpointStoreV2",
+          "rust": "vv_agent::CheckpointStoreV2"
+        },
+        {
+          "id": "runtime_backend.idempotent_event_store",
+          "python": "vv_agent.IdempotentRunEventStore",
+          "rust": "vv_agent::IdempotentRunEventStore"
+        },
+        {
+          "id": "runtime_backend.operation_journal",
+          "python": "vv_agent.runtime.OperationJournalEntry",
+          "rust": "vv_agent::OperationJournalEntry"
         }
       ],
       "id": "runtime_backend"
@@ -1779,6 +1844,45 @@
             "kind": "field",
             "name": "host_cost_meter"
           }
+        },
+        {
+          "id": "checkpoint_config",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "checkpoint_config"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "checkpoint_config"
+          }
+        },
+        {
+          "id": "checkpoint_extensions",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "checkpoint_extensions"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "checkpoint_extensions"
+          }
+        },
+        {
+          "id": "reconciliation_provider",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "reconciliation_provider"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "reconciliation_provider"
+          }
         }
       ],
       "python_target": "vv_agent.RunConfig",
@@ -1952,6 +2056,52 @@
           "rust": {
             "kind": "method",
             "name": "budget_exhaustion"
+          }
+        },
+        {
+          "id": "checkpoint_key",
+          "kind": "field",
+          "python": {
+            "declaration": "property",
+            "kind": "property",
+            "name": "checkpoint_key",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "checkpoint_key"
+          }
+        },
+        {
+          "id": "resume_observation",
+          "kind": "field",
+          "python": {
+            "declaration": "property",
+            "kind": "property",
+            "name": "resume_observation",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "resume_observation"
           }
         },
         {
@@ -3339,6 +3489,33 @@
           }
         },
         {
+          "id": "turn/resume",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "resume_turn",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "params",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "resume_turn"
+          }
+        },
+        {
           "id": "turn/steer",
           "kind": "operation",
           "python": {
@@ -3734,6 +3911,19 @@
             "kind": "method",
             "name": "metadata",
             "target": "vv_agent::ToolExecutor"
+          }
+        },
+        {
+          "id": "idempotency",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "idempotency"
+          },
+          "rust": {
+            "kind": "method",
+            "name": "idempotency"
           }
         },
         {

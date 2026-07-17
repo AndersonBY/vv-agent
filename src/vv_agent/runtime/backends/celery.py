@@ -17,19 +17,27 @@ import importlib.util
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
 from vv_agent.budget import BudgetUsageSnapshot, RunBudgetLimits
+from vv_agent.checkpoint import CheckpointError
+from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime.backends.base import CycleExecutor
 from vv_agent.runtime.backends.distributed import (
     DEFAULT_CYCLE_NAME,
     DEFAULT_LEASE_DURATION_MS,
+    ClaimMode,
+    DistributedCapabilityError,
     DistributedCapabilityRegistry,
+    DistributedCheckpointConfig,
+    DistributedContractError,
     DistributedRunEnvelope,
     RuntimeRecipe,
 )
 from vv_agent.runtime.cancellation import CancelledError
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.state import Checkpoint, StateStore
 from vv_agent.runtime.token_usage import summarize_task_token_usage
@@ -102,6 +110,16 @@ class CeleryBackend:
         max_cycles: int,
     ) -> AgentResult:
         if self.runtime_recipe is not None:
+            checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
+            if isinstance(checkpoint_controller, CheckpointResumeController):
+                return self._execute_distributed_v2(
+                    task=task,
+                    initial_messages=initial_messages,
+                    shared_state=shared_state,
+                    ctx=ctx,
+                    max_cycles=max_cycles,
+                    checkpoint_controller=checkpoint_controller,
+                )
             return self._execute_distributed(
                 task=task,
                 initial_messages=initial_messages,
@@ -175,6 +193,348 @@ class CeleryBackend:
     # ------------------------------------------------------------------
     # Distributed mode: each cycle → independent Celery task
     # ------------------------------------------------------------------
+
+    def _execute_distributed_v2(
+        self,
+        *,
+        task: AgentTask,
+        initial_messages: list[Message],
+        shared_state: dict[str, Any],
+        ctx: ExecutionContext | None,
+        max_cycles: int,
+        checkpoint_controller: CheckpointResumeController,
+    ) -> AgentResult:
+        assert self.runtime_recipe is not None
+        assert ctx is not None
+        budget_limits = ctx.metadata.get("_vv_agent_budget_limits")
+        if not isinstance(budget_limits, RunBudgetLimits):
+            budget_limits = None
+        recipe = RuntimeRecipe.from_dict(self.runtime_recipe.to_dict())
+        distributed_task = deepcopy(task)
+        effective_model_settings = ctx.metadata.get("_vv_agent_model_settings")
+        if isinstance(effective_model_settings, ModelSettings):
+            distributed_task.model_settings = deepcopy(effective_model_settings)
+        messages = initial_messages
+        cycles: list[CycleRecord] = []
+        snapshot_provider = ctx.metadata.get("_vv_agent_checkpoint_budget_snapshot")
+        messages, cycles, shared_state, start_cycle = checkpoint_controller.bind_runtime_state(
+            messages=messages,
+            cycles=cycles,
+            shared_state=shared_state,
+            budget_snapshot_provider=(snapshot_provider if callable(snapshot_provider) else None),
+        )
+        first_claim_mode = checkpoint_controller.next_claim_mode
+
+        for cycle_index in range(start_cycle, max_cycles + 1):
+            cancellation_reason = self._cancellation_reason(ctx)
+            if cancellation_reason is not None:
+                current = checkpoint_controller.store.load_checkpoint_v2(checkpoint_controller.checkpoint_key)
+                if current is not None and current.claim_token is not None:
+                    raise CheckpointError(
+                        "distributed cancellation observed while a worker still owns the checkpoint",
+                        code="checkpoint_claim_active",
+                    )
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    completion_reason=CompletionReason.CANCELLED,
+                    partial_output=_last_assistant_output(cycles),
+                    messages=messages,
+                    cycles=cycles,
+                    error=cancellation_reason,
+                    shared_state=shared_state,
+                    token_usage=summarize_task_token_usage(cycles),
+                    budget_usage=(current.budget_usage if current is not None else None),
+                )
+
+            deadline_unix_ms = time.time_ns() // 1_000_000 + int(self.dispatch_timeout_seconds * 1000)
+            payload, cancellation_reason = self._dispatch_checkpoint_v2_cycle(
+                task=distributed_task,
+                recipe=recipe,
+                cycle_index=cycle_index,
+                deadline_unix_ms=deadline_unix_ms,
+                claim_mode=(first_claim_mode if cycle_index == start_cycle else "continue"),
+                budget_limits=budget_limits,
+                checkpoint_controller=checkpoint_controller,
+                ctx=ctx,
+            )
+            if cancellation_reason is not None:
+                current = checkpoint_controller.store.load_checkpoint_v2(checkpoint_controller.checkpoint_key)
+                if current is not None and current.claim_token is not None:
+                    raise CheckpointError(
+                        "distributed cancellation left an active worker claim",
+                        code="checkpoint_claim_active",
+                    )
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    completion_reason=CompletionReason.CANCELLED,
+                    partial_output=_last_assistant_output(cycles),
+                    messages=messages,
+                    cycles=cycles,
+                    error=cancellation_reason,
+                    shared_state=shared_state,
+                    token_usage=summarize_task_token_usage(cycles),
+                    budget_usage=(current.budget_usage if current is not None else None),
+                )
+            assert payload is not None
+            finished = payload.get("finished")
+            if not isinstance(finished, bool):
+                raise CheckpointError(
+                    "distributed v2 worker payload field 'finished' must be a boolean",
+                    code="checkpoint_store_conflict",
+                )
+            if finished:
+                return self._handle_checkpoint_v2_candidate(
+                    payload=payload,
+                    cycle_index=cycle_index,
+                    checkpoint_controller=checkpoint_controller,
+                )
+            if payload.get("result") is not None:
+                raise CheckpointError(
+                    "distributed v2 unfinished payload cannot include a result",
+                    code="checkpoint_store_conflict",
+                )
+            checkpoint = checkpoint_controller.store.load_checkpoint_v2(checkpoint_controller.checkpoint_key)
+            if checkpoint is None:
+                raise CheckpointError(
+                    "checkpoint disappeared after distributed cycle commit",
+                    code="checkpoint_not_found",
+                )
+            if (
+                checkpoint.terminal_result is not None
+                or checkpoint.claim_token is not None
+                or checkpoint.status is not AgentStatus.RUNNING
+                or checkpoint.cycle_index != cycle_index
+            ):
+                raise CheckpointError(
+                    "distributed worker unfinished payload does not match durable progress",
+                    code="checkpoint_store_conflict",
+                )
+            revision = payload.get("checkpoint_revision")
+            if revision is not None and revision != checkpoint.revision:
+                raise CheckpointError(
+                    "distributed worker revision does not match durable progress",
+                    code="checkpoint_store_conflict",
+                )
+            messages[:] = deepcopy(checkpoint.messages)
+            cycles[:] = deepcopy(checkpoint.cycles)
+            shared_state.clear()
+            shared_state.update(deepcopy(checkpoint.shared_state))
+            checkpoint_controller.checkpoint = checkpoint
+            checkpoint_controller.set_next_claim_mode("continue")
+
+        current = checkpoint_controller.store.load_checkpoint_v2(checkpoint_controller.checkpoint_key)
+        return AgentResult(
+            status=AgentStatus.MAX_CYCLES,
+            completion_reason=CompletionReason.MAX_CYCLES,
+            partial_output=_last_assistant_output(cycles),
+            messages=messages,
+            cycles=cycles,
+            final_answer="Reached max cycles without finish signal.",
+            shared_state=shared_state,
+            token_usage=summarize_task_token_usage(cycles),
+            budget_usage=(current.budget_usage if current is not None else None),
+        )
+
+    def _dispatch_checkpoint_v2_cycle(
+        self,
+        *,
+        task: AgentTask,
+        recipe: RuntimeRecipe,
+        cycle_index: int,
+        deadline_unix_ms: int,
+        claim_mode: ClaimMode,
+        budget_limits: RunBudgetLimits | None,
+        checkpoint_controller: CheckpointResumeController,
+        ctx: ExecutionContext,
+    ) -> tuple[Mapping[str, Any] | None, str | None]:
+        last_error: Exception | None = None
+        effective_claim_mode = claim_mode
+        while True:
+            now_ms = time.time_ns() // 1_000_000
+            if now_ms >= deadline_unix_ms:
+                detail = f": {last_error}" if last_error is not None else ""
+                raise CheckpointError(
+                    f"distributed cycle {cycle_index} exhausted its dispatch deadline{detail}",
+                    code="checkpoint_dispatch_failed",
+                )
+            checkpoint = checkpoint_controller.store.load_checkpoint_v2(checkpoint_controller.checkpoint_key)
+            if checkpoint is None:
+                raise CheckpointError(
+                    "checkpoint disappeared before distributed dispatch",
+                    code="checkpoint_not_found",
+                )
+            if checkpoint.terminal_result is not None:
+                return {
+                    "finished": True,
+                    "result": checkpoint.terminal_result.to_dict(),
+                    "checkpoint_revision": checkpoint.revision,
+                    "terminal_replay": True,
+                }, None
+            if checkpoint.cycle_index >= cycle_index:
+                if checkpoint.cycle_index != cycle_index or checkpoint.claim_token is not None:
+                    raise CheckpointError(
+                        "distributed checkpoint advanced beyond the dispatched cycle",
+                        code="checkpoint_cycle_conflict",
+                    )
+                return {
+                    "finished": False,
+                    "checkpoint_revision": checkpoint.revision,
+                    "committed_cycle": checkpoint.cycle_index,
+                }, None
+            if checkpoint.claim_token is not None:
+                if (checkpoint.lease_expires_at_ms or 0) > now_ms:
+                    cancellation_reason = self._cancellation_reason(ctx)
+                    if cancellation_reason is not None:
+                        return None, cancellation_reason
+                    time.sleep(
+                        min(
+                            _DISPATCH_POLL_SECONDS,
+                            max(0.001, ((checkpoint.lease_expires_at_ms or now_ms) - now_ms) / 1000),
+                        )
+                    )
+                    continue
+                effective_claim_mode = "recovery"
+            elif checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED or last_error is not None:
+                effective_claim_mode = "recovery"
+
+            config = DistributedCheckpointConfig.from_checkpoint_config(checkpoint_controller.config)
+            envelope = DistributedRunEnvelope.for_checkpoint_cycle(
+                task=task,
+                recipe=recipe,
+                cycle_index=cycle_index,
+                root_run_id=checkpoint.root_run_id,
+                trace_id=checkpoint.trace_id,
+                run_definition_digest=checkpoint.run_definition_digest,
+                claim_mode=effective_claim_mode,
+                resume_attempt=checkpoint.resume_attempt,
+                checkpoint_config=config,
+                cycle_name=DEFAULT_CYCLE_NAME,
+                run_id=checkpoint.root_run_id,
+                deadline_unix_ms=deadline_unix_ms,
+                lease_duration_ms=self.lease_duration_ms,
+                budget_limits=budget_limits,
+            )
+            try:
+                async_result = self.celery_app.send_task(
+                    self.cycle_task_name,
+                    kwargs={"envelope_dict": envelope.to_dict()},
+                    serializer="json",
+                    task_id=envelope.job_id,
+                )
+                remaining_seconds = envelope.remaining_seconds()
+                assert remaining_seconds is not None
+                result, cancellation_reason, dispatch_error = self._wait_for_dispatch(
+                    async_result,
+                    ctx=ctx,
+                    timeout=remaining_seconds,
+                )
+            except Exception as exc:
+                result = None
+                cancellation_reason = None
+                dispatch_error = exc
+            if cancellation_reason is not None:
+                return None, cancellation_reason
+            if dispatch_error is None:
+                if not isinstance(result, Mapping):
+                    raise CheckpointError(
+                        "distributed v2 dispatcher returned a non-object payload",
+                        code="checkpoint_store_conflict",
+                    )
+                return result, None
+            if not self._is_retryable_checkpoint_v2_dispatch_error(dispatch_error):
+                raise dispatch_error
+            last_error = dispatch_error
+
+    @staticmethod
+    def _is_retryable_checkpoint_v2_dispatch_error(error: Exception) -> bool:
+        if isinstance(error, CheckpointError):
+            return error.code in {
+                "checkpoint_claim_active",
+                "checkpoint_lease_lost",
+                "checkpoint_store_conflict",
+            }
+        return not isinstance(
+            error,
+            (DistributedCapabilityError, DistributedContractError, TypeError, ValueError),
+        )
+
+    def _handle_checkpoint_v2_candidate(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        cycle_index: int,
+        checkpoint_controller: CheckpointResumeController,
+    ) -> AgentResult:
+        checkpoint = checkpoint_controller.store.load_checkpoint_v2(checkpoint_controller.checkpoint_key)
+        if checkpoint is None:
+            raise CheckpointError(
+                "checkpoint disappeared before terminal candidate verification",
+                code="checkpoint_not_found",
+            )
+        if payload.get("terminal_replay") is True:
+            raise CheckpointError(
+                "a concurrent owner finalized the checkpoint; resume to replay its retained terminal",
+                code="checkpoint_terminal_replay_required",
+            )
+        if payload.get("terminal_candidate") is not True:
+            raise CheckpointError(
+                "distributed v2 worker returned a terminal without candidate semantics",
+                code="checkpoint_store_conflict",
+            )
+        raw_result = payload.get("result")
+        if not isinstance(raw_result, dict):
+            raise CheckpointError(
+                "distributed v2 terminal candidate is missing its result",
+                code="checkpoint_store_conflict",
+            )
+        try:
+            result = AgentResult.from_dict(raw_result)
+        except Exception as exc:
+            raise CheckpointError(
+                f"distributed v2 terminal candidate is invalid: {exc}",
+                code="checkpoint_store_conflict",
+            ) from exc
+        if result.status in {AgentStatus.PENDING, AgentStatus.RUNNING}:
+            raise CheckpointError(
+                "distributed v2 terminal candidate has a non-terminal status",
+                code="checkpoint_store_conflict",
+            )
+        revision = payload.get("checkpoint_revision")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision != checkpoint.revision:
+            raise CheckpointError(
+                "distributed v2 terminal candidate revision does not match the checkpoint",
+                code="checkpoint_store_conflict",
+            )
+        if result.status is AgentStatus.RECONCILIATION_REQUIRED:
+            if checkpoint.status is not AgentStatus.RECONCILIATION_REQUIRED or checkpoint.claim_token is not None:
+                raise CheckpointError(
+                    "distributed reconciliation candidate does not match durable state",
+                    code="checkpoint_store_conflict",
+                )
+            checkpoint_controller.checkpoint = checkpoint
+            return result
+        if checkpoint.terminal_result is not None:
+            raise CheckpointError(
+                "distributed terminal candidate cannot replace a durable terminal",
+                code="checkpoint_store_conflict",
+            )
+        if checkpoint.claim_token is not None and checkpoint.claimed_cycle != cycle_index:
+            raise CheckpointError(
+                "distributed terminal candidate belongs to a different claimed cycle",
+                code="checkpoint_store_conflict",
+            )
+        if result.cycles and result.cycles[-1].index != cycle_index:
+            raise CheckpointError(
+                "distributed terminal candidate does not contain the dispatched cycle",
+                code="checkpoint_cycle_conflict",
+            )
+        checkpoint_controller.checkpoint = checkpoint
+        if checkpoint.claim_token is not None:
+            checkpoint_controller.adopt_claim_for_terminal_finalize(
+                claim_token=checkpoint.claim_token,
+                lease_duration_ms=self.lease_duration_ms,
+            )
+        return result
 
     def _execute_distributed(
         self,
@@ -579,8 +939,7 @@ class CeleryBackend:
         if checkpoint.cycle_index != cycle_index:
             return None, self._coordination_failure(
                 checkpoint,
-                f"{context} without durable progress: expected cycle_index {cycle_index}, "
-                f"found {checkpoint.cycle_index}",
+                f"{context} without durable progress: expected cycle_index {cycle_index}, found {checkpoint.cycle_index}",
             )
         return checkpoint, None
 
@@ -723,8 +1082,7 @@ class CeleryBackend:
             return result
         return self._coordination_failure(
             current,
-            f"{context}; terminal acknowledgement returned false and checkpoint still exists "
-            f"at revision {current.revision}",
+            f"{context}; terminal acknowledgement returned false and checkpoint still exists at revision {current.revision}",
         )
 
     def _load_checkpoint(
@@ -870,7 +1228,18 @@ def register_cycle_task(
     """
     from vv_agent.runtime.backends.celery_tasks import run_single_cycle
 
-    def worker_task(*, envelope_dict: dict[str, Any]) -> dict[str, Any]:
-        return run_single_cycle(envelope_dict=envelope_dict, capability_registry=capability_registry)
+    def worker_task(task: Any, *, envelope_dict: dict[str, Any]) -> dict[str, Any]:
+        request = getattr(task, "request", None)
+        delivery_info = getattr(request, "delivery_info", None)
+        redelivered = bool(isinstance(delivery_info, Mapping) and delivery_info.get("redelivered") is True)
+        retries = getattr(request, "retries", 0)
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            retries = 0
+        return run_single_cycle(
+            envelope_dict=envelope_dict,
+            capability_registry=capability_registry,
+            transport_redelivered=redelivered,
+            transport_retry_count=retries,
+        )
 
-    return celery_app.task(name=task_name, bind=False)(worker_task)
+    return celery_app.task(name=task_name, bind=True)(worker_task)

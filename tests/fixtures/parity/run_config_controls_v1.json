@@ -5,7 +5,10 @@
     "max_handoffs": 10,
     "no_tool_policy": "continue",
     "budget_limits": null,
-    "host_cost_meter": null
+    "host_cost_meter": null,
+    "checkpoint_config": null,
+    "checkpoint_extensions": [],
+    "reconciliation_provider": null
   },
   "app_server_defaults": {
     "max_cycles": 80,
@@ -24,6 +27,14 @@
     "run_budget_wire_integer": {
       "minimum": 0,
       "maximum": 9007199254740991
+    },
+    "checkpoint_key_utf8_bytes": {
+      "minimum": 1,
+      "maximum": 512
+    },
+    "checkpoint_extension_entry_utf8_bytes": {
+      "minimum": 0,
+      "maximum": 65536
     }
   },
   "per_run_controls": [
@@ -69,6 +80,19 @@
       ],
       "merge": "whole_object_replace",
       "fixture": "run_budget_v1.json"
+    },
+    {
+      "capability": "durable_checkpoint_resume",
+      "python": "checkpoint_config plus checkpoint_extensions plus reconciliation_provider",
+      "rust": "checkpoint_config plus checkpoint_extensions plus reconciliation_provider",
+      "status": "equivalent",
+      "precedence": [
+        "run_config",
+        "runner_default_run_config",
+        "framework_disabled"
+      ],
+      "merge": "whole_object_replace",
+      "fixture": "checkpoint_config_v1.json"
     },
     {
       "capability": "no_tool_policy",

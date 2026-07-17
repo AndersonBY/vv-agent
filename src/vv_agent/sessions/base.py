@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
 from typing import Any, Protocol, cast
 
+from vv_agent.checkpoint import canonical_json_bytes
 from vv_agent.types import Message, Role
+
+SESSION_COMMIT_SCHEMA = "vv-agent.session-commit.v1"
+SESSION_COMMIT_ID_PREFIX = "vv-agent:checkpoint-v2:session:"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class SessionCommitError(RuntimeError):
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class Session(Protocol):
@@ -14,6 +27,14 @@ class Session(Protocol):
         ...
 
     def add_items(self, items: list[Message]) -> None:
+        ...
+
+    def add_items_once(
+        self,
+        commit_id: str,
+        payload_digest: str,
+        items: list[Message],
+    ) -> str:
         ...
 
     def pop_item(self) -> Message | None:
@@ -69,6 +90,28 @@ def session_store_conformance(store: SessionStore, *, session_id: str = "conform
     ]
     session.add_items(expected)
 
+    commit_items = [Message(role="assistant", content="checkpoint terminal")]
+    commit_id = checkpoint_session_commit_id(f"{session_id}/checkpoint")
+    payload_digest = session_commit_payload_digest(commit_items)
+    if session.add_items_once(commit_id, payload_digest, commit_items) != "committed":
+        raise AssertionError("session store did not report the first append-once commit")
+    if session.add_items_once(commit_id, payload_digest, commit_items) != "replayed":
+        raise AssertionError("session store did not replay an identical append-once commit")
+    if session.get_items()[-1:] != commit_items:
+        raise AssertionError("session store duplicated or lost append-once items")
+    try:
+        session.add_items_once(
+            commit_id,
+            session_commit_payload_digest([Message(role="assistant", content="different")]),
+            [Message(role="assistant", content="different")],
+        )
+    except SessionCommitError as exc:
+        if exc.code != "session_commit_identity_conflict":
+            raise AssertionError("session store returned the wrong commit conflict code") from exc
+    else:
+        raise AssertionError("session store accepted a conflicting append-once identity")
+    session.pop_item()
+
     restored = store.session(session_id)
     if restored.get_items() != expected:
         raise AssertionError("session store did not preserve appended messages")
@@ -100,6 +143,52 @@ def _serialize_message(message: Message) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def checkpoint_session_commit_id(checkpoint_key: str) -> str:
+    if not isinstance(checkpoint_key, str) or not checkpoint_key:
+        raise ValueError("checkpoint key must be a non-empty string")
+    digest = hashlib.sha256(checkpoint_key.encode("utf-8")).hexdigest()
+    return f"{SESSION_COMMIT_ID_PREFIX}{digest}"
+
+
+def session_commit_payload(items: list[Message]) -> dict[str, Any]:
+    normalized = [_normalize_message(item) for item in items]
+    return {
+        "schema_version": SESSION_COMMIT_SCHEMA,
+        "items": [item.to_dict() for item in normalized],
+    }
+
+
+def session_commit_payload_digest(items: list[Message]) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(session_commit_payload(items), "session commit payload")
+    ).hexdigest()
+
+
+def validate_session_commit(
+    commit_id: str,
+    payload_digest: str,
+    items: list[Message],
+) -> list[Message]:
+    if not isinstance(commit_id, str) or not commit_id:
+        raise SessionCommitError(
+            "session commit id must be a non-empty string",
+            code="session_commit_identity_invalid",
+        )
+    if not isinstance(payload_digest, str) or _SHA256_RE.fullmatch(payload_digest) is None:
+        raise SessionCommitError(
+            "session commit payload digest must be lowercase SHA-256",
+            code="session_commit_payload_digest_invalid",
+        )
+    normalized = [_normalize_message(item) for item in items]
+    actual_digest = session_commit_payload_digest(normalized)
+    if actual_digest != payload_digest:
+        raise SessionCommitError(
+            "session commit payload digest does not match items",
+            code="session_commit_payload_digest_mismatch",
+        )
+    return normalized
 
 
 def _deserialize_message(payload: str | bytes) -> Message:

@@ -65,7 +65,7 @@ Celery 分发和工作区后端。
 | 18 | `18_cancellation.py` | 通过 `CancellationToken` 取消运行中的任务 |
 | 19 | `19_streaming.py` | 原始 runtime stream callback 事件 |
 | 20 | `20_thread_backend.py` | `ThreadBackend` submit/future 执行 |
-| 21 | `21_state_checkpoint.py` | `SqliteStateStore` checkpoint |
+| 21 | `21_state_checkpoint.py` | 使用 checkpoint v2 与 SQLite 恢复/重放 Runner 任务 |
 | 22 | `22_sdk_advanced.py` | 公开 SDK + streaming + `ThreadBackend` |
 | 23 | `23_celery_backend.py` | `CeleryBackend` 分布式 cycle |
 | 24 | `24_workspace_backends.py` | Local、memory、S3 与自定义工作区后端 |

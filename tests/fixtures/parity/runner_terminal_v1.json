@@ -1,13 +1,19 @@
 {
   "version": "v1",
   "success_with_session": {
-    "tail": ["session_persisted", "run_completed"],
+    "tail": [
+      "session_persisted",
+      "run_completed"
+    ],
     "terminal": "run_completed",
     "status": "completed",
     "completion_reason": "tool_finish"
   },
   "output_guardrail_block": {
-    "tail": ["session_persisted", "run_failed"],
+    "tail": [
+      "session_persisted",
+      "run_failed"
+    ],
     "terminal": "run_failed",
     "status": "failed",
     "completion_reason": "failed",
@@ -43,5 +49,32 @@
   "event_store_fail_closed": {
     "error": "run event store append failed: store down",
     "panics": false
+  },
+  "reconciliation_required": {
+    "events_tail": [
+      "operation_ambiguous",
+      "reconciliation_required"
+    ],
+    "terminal": null,
+    "terminal_count": 0,
+    "status": "reconciliation_required",
+    "completion_reason": null,
+    "error": null,
+    "checkpoint_retained": true
+  },
+  "checkpoint_v2_terminal_order": {
+    "order": [
+      "runtime_candidate_result",
+      "output_guardrail",
+      "session_add_items_once",
+      "session_persisted_observation",
+      "terminal_event_outbox_pending",
+      "checkpoint_terminal_finalize",
+      "terminal_event_outbox_delivered",
+      "terminal_event_delivery_recorded",
+      "terminal_acknowledge_retained"
+    ],
+    "terminal_deleted_on_acknowledgement": false,
+    "explicit_retention_cleanup_required": true
   }
 }

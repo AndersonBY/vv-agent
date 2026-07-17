@@ -13,6 +13,8 @@ class ActiveTurn:
     thread_id: str
     turn_id: str
     handle: Any
+    checkpoint_key: str | None = None
+    run_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -109,11 +111,25 @@ class ThreadStateManager:
         with self._lock:
             self._reopen(self.load(thread_id))
 
-    def set_active_turn(self, *, thread_id: str, turn_id: str, handle: Any) -> None:
+    def set_active_turn(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        handle: Any,
+        checkpoint_key: str | None = None,
+        run_id: str | None = None,
+    ) -> None:
         with self._lock:
             if self._persist_active_turn is not None:
                 self._persist_active_turn(thread_id, turn_id, "running")
-            self.load(thread_id).active_turn = ActiveTurn(thread_id=thread_id, turn_id=turn_id, handle=handle)
+            self.load(thread_id).active_turn = ActiveTurn(
+                thread_id=thread_id,
+                turn_id=turn_id,
+                handle=handle,
+                checkpoint_key=checkpoint_key,
+                run_id=run_id,
+            )
 
     def clear_active_turn(self, thread_id: str, turn_id: str) -> None:
         with self._lock:

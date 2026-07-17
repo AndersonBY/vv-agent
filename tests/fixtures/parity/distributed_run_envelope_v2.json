@@ -1,0 +1,376 @@
+{
+  "schema_version": "vv-agent.distributed-run.v2",
+  "compatibility": {
+    "v1_fixture": "distributed_run_envelope_v1.json",
+    "v1_bytes_must_remain_unchanged": true,
+    "decoder": "discriminator_dispatch",
+    "enabled_v2_never_writes_v1_namespace": true
+  },
+  "run_definition_schema_rules": {
+    "writer_value": "vv-agent.run-definition.v1",
+    "complete_definition_source": "embedded_run_definition_in_checkpoint_v2",
+    "envelope_digest_must_match_checkpoint_digest": true,
+    "missing_or_unknown_error": "checkpoint_definition_schema_unsupported",
+    "failure_boundary": "before_capability_resolution_or_claim"
+  },
+  "resume_attempt_rules": {
+    "checkpoint_store_is_authoritative": true,
+    "envelope_value_is_an_observation_not_an_increment_command": true,
+    "continue_claim_preserves_value": true,
+    "successful_recovery_claim_atomically_increments_store_and_next_envelope": true,
+    "mismatch_error": "checkpoint_resume_attempt_mismatch"
+  },
+  "claim_mode_rules": {
+    "wire_values": [
+      "continue",
+      "recovery"
+    ],
+    "initial_and_next_cycle_dispatch": "continue",
+    "public_resume_and_explicit_redelivery": "recovery",
+    "transport_redelivery_metadata_promotes_continue_to_recovery": true,
+    "celery_source": "request.delivery_info.redelivered_or_retry_count",
+    "apalis_source": "task_attempt_or_redelivery_metadata",
+    "expired_claim_or_reconciliation_status_is_always_recovery": true,
+    "missing_or_unknown_error": "checkpoint_claim_mode_invalid"
+  },
+  "canonical_envelope": {
+    "schema_version": "vv-agent.distributed-run.v2",
+    "job_id": "run-123:cycle:2",
+    "run_id": "run-123",
+    "task": {
+      "task_id": "run-123",
+      "model": "model-x",
+      "system_prompt": "system",
+      "user_prompt": "prompt",
+      "max_cycles": 8,
+      "memory_compact_threshold": 128000,
+      "memory_threshold_percentage": 90,
+      "no_tool_policy": "continue",
+      "allow_interruption": true,
+      "use_workspace": true,
+      "has_sub_agents": false,
+      "agent_type": null,
+      "native_multimodal": false,
+      "sub_agents": {},
+      "extra_tool_names": [],
+      "exclude_tools": [],
+      "model_settings": null,
+      "initial_messages": [],
+      "initial_shared_state": {},
+      "metadata": {
+        "_vv_agent_run_id": "run-123",
+        "language": "en-US"
+      }
+    },
+    "budget_limits": {
+      "max_total_tokens": 5000,
+      "max_uncached_input_tokens": 4000,
+      "max_tool_calls": 20,
+      "max_tool_calls_by_name": {
+        "search": 8
+      },
+      "max_wall_time_ms": 60000,
+      "max_host_cost": {
+        "unit": "credits",
+        "currency": null,
+        "amount_microunits": 500000
+      },
+      "unavailable_metric_policy": "continue_and_mark"
+    },
+    "recipe": {
+      "settings_file": "/srv/settings.json",
+      "backend": "deepseek",
+      "model": "model-x",
+      "workspace": "/srv/workspace",
+      "timeout_seconds": 120,
+      "log_preview_chars": 256,
+      "state_store": {
+        "kind": "redis",
+        "location": "redis://state/0"
+      },
+      "capabilities": {
+        "toolset_ref": {
+          "id": "vv-agent.builtin-tools",
+          "version": "1",
+          "schema_digest": "f85422117d41d28ffa3cdfcfd9a42892854de624808fadc2124f4ebe7a452b61"
+        },
+        "tool_policy": {
+          "allowed_tools": [
+            "read_file",
+            "task_finish"
+          ],
+          "disallowed_tools": [
+            "bash"
+          ],
+          "approval": "on_request",
+          "predicate_ref": {
+            "id": "policy.project",
+            "version": "3"
+          }
+        },
+        "llm_client_ref": {
+          "id": "llm.primary",
+          "version": "2"
+        },
+        "workspace_backend_ref": {
+          "id": "workspace.shared",
+          "version": "1"
+        },
+        "approval_provider_ref": {
+          "id": "approval.remote",
+          "version": "4"
+        },
+        "approval_broker_ref": {
+          "id": "approval.channel",
+          "version": "4"
+        },
+        "approval_timeout_seconds": 45,
+        "cancellation_ref": {
+          "id": "cancel.redis",
+          "version": "1"
+        },
+        "event_sink_ref": {
+          "id": "events.outbox",
+          "version": "2"
+        },
+        "host_cost_meter_ref": {
+          "id": "cost.tenant-run",
+          "version": "1"
+        },
+        "app_state_ref": {
+          "id": "app.tenant",
+          "version": "7"
+        },
+        "sub_task_manager_ref": {
+          "id": "subtasks.shared",
+          "version": "1"
+        },
+        "memory_provider_refs": [
+          {
+            "id": "memory.team",
+            "version": "5"
+          }
+        ],
+        "hook_refs": [
+          {
+            "id": "hook.audit",
+            "version": "1"
+          }
+        ],
+        "observer_refs": [
+          {
+            "id": "observer.metrics",
+            "version": "2"
+          }
+        ],
+        "checkpoint_store_ref": {
+          "id": "checkpoint.tenant",
+          "version": "2"
+        },
+        "checkpoint_event_store_ref": {
+          "id": "events.outbox",
+          "version": "2"
+        },
+        "checkpoint_extension_refs": [
+          {
+            "namespace": "com.example.audit",
+            "reference": {
+              "id": "extension.audit",
+              "version": "1"
+            },
+            "required": true
+          }
+        ],
+        "reconciliation_provider_ref": {
+          "id": "reconcile.tenant",
+          "version": "1"
+        }
+      }
+    },
+    "cycle_name": "vv_agent.distributed.run_single_cycle",
+    "cycle_index": 2,
+    "idempotency_key": "run-123:cycle:2",
+    "deadline_unix_ms": 2000000000000,
+    "lease_duration_ms": 120000,
+    "root_run_id": "run-123",
+    "trace_id": "trace-run-123",
+    "run_definition_schema": "vv-agent.run-definition.v1",
+    "run_definition_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "claim_mode": "recovery",
+    "resume_attempt": 2,
+    "checkpoint_config": {
+      "key": "tenant-7/run-123",
+      "resume_policy": "require_existing",
+      "ambiguous_model_policy": "require_reconciliation",
+      "ambiguous_tool_policy": "retry_idempotent_only",
+      "required_extension_namespaces": [
+        "com.example.audit"
+      ],
+      "max_extension_state_bytes": 262144,
+      "credential_slots": [
+        "/model/settings/extra_headers/authorization"
+      ]
+    }
+  },
+  "invalid_cases": [
+    {
+      "name": "unsupported_schema_version",
+      "path": [
+        "schema_version"
+      ],
+      "value": "vv-agent.distributed-run.v3",
+      "error": "unsupported distributed schema_version"
+    },
+    {
+      "name": "missing_run_definition_schema",
+      "path": [
+        "run_definition_schema"
+      ],
+      "value": null,
+      "error": "checkpoint_definition_schema_unsupported"
+    },
+    {
+      "name": "unsupported_run_definition_schema",
+      "path": [
+        "run_definition_schema"
+      ],
+      "value": "vv-agent.run-definition.v2",
+      "error": "checkpoint_definition_schema_unsupported"
+    },
+    {
+      "name": "missing_checkpoint_config",
+      "path": [
+        "checkpoint_config"
+      ],
+      "value": null,
+      "error": "distributed v2 requires checkpoint_config"
+    },
+    {
+      "name": "missing_checkpoint_store_ref",
+      "path": [
+        "recipe",
+        "capabilities",
+        "checkpoint_store_ref"
+      ],
+      "value": null,
+      "error": "distributed v2 requires checkpoint_store_ref"
+    },
+    {
+      "name": "missing_required_extension_ref",
+      "path": [
+        "recipe",
+        "capabilities",
+        "checkpoint_extension_refs"
+      ],
+      "value": [],
+      "error": "required checkpoint extension com.example.audit is unavailable"
+    },
+    {
+      "name": "definition_digest_mismatch",
+      "path": [
+        "run_definition_digest"
+      ],
+      "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "stored_value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "error": "checkpoint_definition_mismatch"
+    },
+    {
+      "name": "resume_attempt_mismatch",
+      "path": [
+        "resume_attempt"
+      ],
+      "value": 3,
+      "stored_value": 2,
+      "error": "checkpoint_resume_attempt_mismatch"
+    },
+    {
+      "name": "missing_claim_mode",
+      "path": [
+        "claim_mode"
+      ],
+      "value": null,
+      "error": "checkpoint_claim_mode_invalid"
+    },
+    {
+      "name": "unknown_claim_mode",
+      "path": [
+        "claim_mode"
+      ],
+      "value": "retry",
+      "error": "checkpoint_claim_mode_invalid"
+    },
+    {
+      "name": "unsafe_extension_limit",
+      "path": [
+        "checkpoint_config",
+        "max_extension_state_bytes"
+      ],
+      "value": 9007199254740992,
+      "error": "max_extension_state_bytes must be between 0 and 9007199254740991"
+    }
+  ],
+  "worker_rules": {
+    "capability_resolution_before_claim": true,
+    "initial_claim_renewal_before_operations": true,
+    "operation_progress_cas_preserves_claim": true,
+    "heartbeat_updates_lease_only": true,
+    "heartbeat_cannot_overwrite_journal": true,
+    "reconciliation_provider_is_optional": true,
+    "missing_reconciliation_provider_defaults_to_defer": true,
+    "effective_claim_mode_uses_envelope_transport_metadata_and_stored_checkpoint": true,
+    "terminal_commit_order": [
+      "output_guardrail",
+      "session_add_items_once",
+      "session_persisted_observation",
+      "terminal_event_outbox_pending",
+      "checkpoint_terminal_finalize",
+      "terminal_event_delivery",
+      "terminal_event_delivery_recorded",
+      "terminal_acknowledge_retained",
+      "scheduler_acknowledgement"
+    ],
+    "terminal_acknowledgement_does_not_delete": true,
+    "apalis_blocking_runtime": "tokio_spawn_blocking"
+  },
+  "redelivery_cases": [
+    {
+      "name": "live_claim",
+      "expected": {
+        "status": "in_progress",
+        "resume_attempt_unchanged": true,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "expired_started_unknown_tool",
+      "expected": {
+        "status": "reconciliation_required",
+        "missing_reconciliation_provider_decision": "defer",
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "committed_receipt",
+      "expected": {
+        "operation_replayed": true,
+        "external_calls": 0
+      }
+    },
+    {
+      "name": "committed_cycle",
+      "expected": {
+        "dispatch_cycle": 3,
+        "next_envelope_claim_mode": "continue"
+      }
+    },
+    {
+      "name": "committed_terminal",
+      "expected": {
+        "terminal_replayed": true,
+        "external_calls": 0
+      }
+    }
+  ]
+}

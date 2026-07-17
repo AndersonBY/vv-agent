@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -59,7 +60,9 @@ def _result(*, status: AgentStatus, error: str | None = None) -> AgentResult:
 
 def test_cli_contract_fixture_is_reviewable_and_matches_rust_copy() -> None:
     contract = _contract()
-    rust_copy = Path(__file__).resolve().parents[2] / "vv-agent-rs" / "crates" / "vv-agent" / "tests" / "cli_contract_v1.json"
+    explicit_rust_root = os.environ.get("VV_AGENT_RS_REPO")
+    rust_root = Path(explicit_rust_root or Path(__file__).resolve().parents[2] / "vv-agent-rs")
+    rust_copy = rust_root / "crates" / "vv-agent" / "tests" / "cli_contract_v1.json"
 
     assert contract["contract"] == "vv-agent-cli-v1"
     assert CONTRACT_PATH.read_bytes() == rust_copy.read_bytes()

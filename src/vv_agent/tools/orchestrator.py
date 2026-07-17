@@ -16,6 +16,8 @@ from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolRes
 
 ToolEventSink = Callable[[RunEvent], None]
 _PLANNED_TOOL_NAMES_METADATA_KEY = "_vv_agent_planned_tool_names"
+_TOOL_DISPATCH_CALLBACK_METADATA_KEY = "_vv_agent_tool_dispatch_callback"
+_TOOL_DISPATCH_STARTED_METADATA_KEY = "_vv_agent_tool_dispatch_started"
 
 
 class ToolOrchestrator:
@@ -79,7 +81,6 @@ class ToolOrchestrator:
                 return policy_result
             return self._error_result(call.id, f"Unknown tool: {call.name}", error_code="tool_not_found")
 
-        self._emit_started(normalized_call, context=call_context, event_sink=event_sink)
         try:
             policy_result = self._policy_denial_result(
                 executor,
@@ -91,7 +92,16 @@ class ToolOrchestrator:
                 result = policy_result
             else:
                 approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
-                result = approval_result if approval_result is not None else executor.execute(normalized_call, call_context)
+                if approval_result is not None:
+                    result = approval_result
+                else:
+                    if not executor.metadata.get("policy_managed_by_handler"):
+                        mark_external_tool_execution_started(
+                            normalized_call,
+                            context=call_context,
+                            event_sink=event_sink,
+                        )
+                    result = executor.execute(normalized_call, call_context)
         except ApprovalError:
             raise
         except Exception as exc:
@@ -506,6 +516,23 @@ def _runtime_metadata(context: ToolContext) -> dict[str, Any]:
     if context.ctx is not None and isinstance(context.ctx.metadata, dict):
         metadata.update(context.ctx.metadata)
     return metadata
+
+
+def mark_external_tool_execution_started(
+    call: ToolCall,
+    *,
+    context: ToolContext,
+    event_sink: ToolEventSink | None = None,
+) -> None:
+    """Mark the single boundary immediately before an executor can cause effects."""
+
+    if context.metadata.get(_TOOL_DISPATCH_STARTED_METADATA_KEY) is True:
+        return
+    context.metadata[_TOOL_DISPATCH_STARTED_METADATA_KEY] = True
+    callback = context.metadata.get(_TOOL_DISPATCH_CALLBACK_METADATA_KEY)
+    if callable(callback):
+        callback(call)
+    ToolOrchestrator._emit_started(call, context=context, event_sink=event_sink)
 
 
 def _is_cancelled_error(exc: Exception) -> bool:

@@ -20,6 +20,9 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "no_tool_policy": "continue",
         "budget_limits": None,
         "host_cost_meter": None,
+        "checkpoint_config": None,
+        "checkpoint_extensions": [],
+        "reconciliation_provider": None,
     }
     assert contract["app_server_defaults"]["max_cycles"] == 80
     assert all(entry["status"] == "equivalent" for entry in controls.values())
@@ -30,6 +33,7 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "session_history",
         "cycle_and_handoff_limits",
         "run_budget",
+        "durable_checkpoint_resume",
         "no_tool_policy",
         "tool_policy",
         "per_run_tool_registry",
@@ -61,6 +65,9 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "no_tool_policy",
         "budget_limits",
         "host_cost_meter",
+        "checkpoint_config",
+        "checkpoint_extensions",
+        "reconciliation_provider",
         "tool_policy",
         "tool_registry_factory",
         "execution_backend",

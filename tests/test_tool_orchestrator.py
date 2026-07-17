@@ -36,14 +36,40 @@ def test_orchestrator_rejects_tool_not_allowed_for_batch(tmp_path) -> None:
     )
 
     orchestrator = ToolOrchestrator.from_tools([hidden])
+    events = []
     result = orchestrator.run_one(
         ToolCall(id="call_1", name="hidden", arguments={}),
         context=context,
         allowed_tool_names={"other"},
+        event_sink=events.append,
     )
 
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "tool_not_allowed"
+    assert [event.type for event in events] == ["tool_call_completed"]
+
+
+def test_orchestrator_approval_short_circuit_does_not_emit_started(tmp_path) -> None:
+    @function_tool(needs_approval=True)
+    def protected() -> str:
+        return "must not run"
+
+    context = ToolContext(
+        workspace=tmp_path,
+        shared_state={},
+        cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
+    )
+    events = []
+
+    result = ToolOrchestrator.from_tools([protected]).run_one(
+        ToolCall(id="call_approval", name="protected", arguments={}),
+        context=context,
+        event_sink=events.append,
+    )
+
+    assert result.error_code == "tool_approval_required"
+    assert [event.type for event in events] == ["tool_call_completed"]
 
 
 def test_orchestrator_unknown_tool_returns_error(tmp_path) -> None:

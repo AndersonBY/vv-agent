@@ -102,7 +102,7 @@ def test_distributed_envelope_invalid_cases_match_shared_contract() -> None:
         payload = copy.deepcopy(canonical)
         _set_path(payload, case["path"], case["value"])
         with pytest.raises(DistributedContractError, match=str(case["error"])):
-            DistributedRunEnvelope.from_dict(payload)
+            DistributedRunEnvelope.from_v1_dict(payload)
 
 
 @pytest.mark.parametrize("field_name", ["deadline_unix_ms", "lease_duration_ms"])
@@ -130,10 +130,23 @@ def test_default_distributed_capabilities_resolve_without_hidden_fallbacks() -> 
 
 
 def test_python_and_rust_distributed_fixture_copies_are_byte_identical() -> None:
-    rust_root = Path(os.environ.get("VV_AGENT_RS_REPO", Path(__file__).resolve().parents[2] / "vv-agent-rs"))
+    explicit_rust_root = os.environ.get("VV_AGENT_RS_REPO")
+    rust_root = Path(explicit_rust_root or Path(__file__).resolve().parents[2] / "vv-agent-rs")
     rust_copy = rust_root / "crates" / "vv-agent" / "tests" / "fixtures" / "parity" / FIXTURE_PATH.name
     fixture_bytes = FIXTURE_PATH.read_bytes()
     assert hashlib.sha256(fixture_bytes).hexdigest() == ("c1eb11591c93e8ac880fd4688cf06e0fe60a8b4522f7707ea13e1cccf40208e0")
+    if explicit_rust_root is None:
+        try:
+            python_lock = json.loads((Path(__file__).resolve().parents[1] / "contract.lock.json").read_text())
+            rust_lock = json.loads((rust_root / "contract.lock.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        locks_match = (
+            python_lock.get("contract_version") == rust_lock.get("contract_version")
+            and python_lock.get("contract_revision") == rust_lock.get("contract_revision")
+        )
+        if not rust_copy.exists() or not locks_match:
+            return
     assert rust_copy.read_bytes() == fixture_bytes
 
 

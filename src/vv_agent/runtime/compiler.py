@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import uuid
 from copy import deepcopy
+from typing import Any, cast
 
 from vv_agent.agent import Agent, RunContext
+from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.constants import WORKSPACE_TOOLS
 from vv_agent.context_providers import (
     ContextFragment,
     ContextRequest,
@@ -15,7 +18,7 @@ from vv_agent.prompt.templates import render_sub_agents
 from vv_agent.run_config import RunConfig, _validate_bounded_int
 from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.function import FunctionTool
-from vv_agent.types import AgentTask
+from vv_agent.types import AgentTask, Message, NoToolPolicy
 
 RuntimeTask = AgentTask
 
@@ -133,3 +136,123 @@ class AgentCompiler:
             initial_shared_state=dict(run_config.shared_state or {}),
             metadata=metadata,
         )
+
+    def compile_frozen_checkpoint(
+        self,
+        *,
+        agent: Agent,
+        run_config: RunConfig,
+        resolved: ResolvedModelConfig,
+        checkpoint: Any,
+        trace_id: str,
+    ) -> RuntimeTask:
+        definition = getattr(checkpoint, "run_definition", None)
+        if not isinstance(definition, dict):
+            raise CheckpointError(
+                "checkpoint is missing its embedded run definition",
+                code="checkpoint_definition_invalid",
+            )
+        controls = definition.get("runtime_controls")
+        model = definition.get("model")
+        agent_definition = definition.get("agent")
+        if not isinstance(controls, dict) or not isinstance(model, dict) or not isinstance(agent_definition, dict):
+            raise CheckpointError(
+                "checkpoint run definition has invalid runtime fields",
+                code="checkpoint_definition_invalid",
+            )
+        messages = getattr(checkpoint, "messages", None)
+        system_metadata: dict[str, object] = {}
+        if isinstance(messages, list) and messages and isinstance(messages[0], Message) and messages[0].role == "system":
+            system_metadata = deepcopy(messages[0].metadata)
+        self._validate_frozen_static_prompt(agent, definition, system_metadata)
+
+        metadata = dict(system_metadata)
+        metadata["trace_id"] = trace_id
+        if resolved.context_length is not None:
+            metadata.setdefault("model_context_window", resolved.context_length)
+        if resolved.max_output_tokens is not None:
+            metadata.setdefault("reserved_output_tokens", resolved.max_output_tokens)
+        metadata["_vv_agent_tool_use_behavior"] = controls["tool_use_behavior"]
+        if controls["stop_at_tool_names"]:
+            metadata["_vv_agent_stop_at_tool_names"] = list(controls["stop_at_tool_names"])
+        if run_config.tool_policy is not None:
+            if run_config.tool_policy.allowed_tools is not None:
+                metadata["_vv_agent_allowed_tools"] = list(run_config.tool_policy.allowed_tools)
+            if run_config.tool_policy.disallowed_tools:
+                metadata["_vv_agent_disallowed_tools"] = list(run_config.tool_policy.disallowed_tools)
+
+        initial_messages = [
+            Message.from_dict(item)
+            for item in definition["initial_messages"]
+        ]
+        stored_tool_names = {
+            str(function["name"])
+            for item in definition["tools"]
+            if isinstance(item, dict)
+            and isinstance(item.get("schema"), dict)
+            and isinstance((function := item["schema"].get("function")), dict)
+            and isinstance(function.get("name"), str)
+        }
+        handoff_tool_names = [transfer.tool_name for transfer in agent.handoffs if transfer.tool_name]
+        return RuntimeTask(
+            task_id=str(checkpoint.task_id),
+            model=str(model["model_id"]),
+            system_prompt=str(definition["compiled_prompt"]),
+            user_prompt=str(definition["root_input"]),
+            max_cycles=int(controls["max_cycles"]),
+            memory_compact_threshold=int(controls["memory_compact_threshold"]),
+            memory_threshold_percentage=int(controls["memory_threshold_percentage"]),
+            no_tool_policy=cast(NoToolPolicy, controls["no_tool_policy"]),
+            allow_interruption=bool(controls["allow_interruption"]),
+            use_workspace=bool(stored_tool_names.intersection(WORKSPACE_TOOLS)),
+            has_sub_agents=False,
+            sub_agents=deepcopy(agent.sub_agents),
+            agent_type=agent_definition.get("type"),
+            native_multimodal=bool(controls["native_multimodal"]),
+            extra_tool_names=[
+                *[
+                    tool.name
+                    for tool in agent.tools
+                    if isinstance(tool, FunctionTool) and tool.exposure != ToolExposure.HIDDEN
+                ],
+                *handoff_tool_names,
+            ],
+            model_settings=run_config.model_settings,
+            initial_messages=initial_messages,
+            initial_shared_state=deepcopy(definition["initial_shared_state"]),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _validate_frozen_static_prompt(
+        agent: Agent,
+        definition: dict[str, object],
+        system_metadata: dict[str, object],
+    ) -> None:
+        sections = system_metadata.get("system_prompt_sections")
+        section_items: list[Any] = sections if isinstance(sections, list) else []
+        section_map = {
+            str(item.get("id")): str(item.get("text") or "")
+            for item in section_items
+            if isinstance(item, dict)
+        }
+        if isinstance(agent.instructions, str):
+            expected = agent.instructions.strip()
+            observed = section_map.get("agent_instructions")
+            if observed is None:
+                observed = str(definition["compiled_prompt"]).strip()
+            if observed != expected and not str(definition["compiled_prompt"]).startswith(expected):
+                raise CheckpointError(
+                    "static agent instructions do not match the frozen checkpoint prompt",
+                    code="checkpoint_definition_mismatch",
+                )
+        if agent.sub_agents:
+            expected_sub_agents = render_sub_agents(
+                "en-US",
+                {name: config.description for name, config in agent.sub_agents.items()},
+            ).strip()
+            if section_map.get("configured_sub_agents", "").strip() != expected_sub_agents:
+                raise CheckpointError(
+                    "configured sub-agents do not match the frozen checkpoint prompt",
+                    code="checkpoint_definition_mismatch",
+                )

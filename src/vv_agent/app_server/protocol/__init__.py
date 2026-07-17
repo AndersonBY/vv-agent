@@ -20,7 +20,16 @@ from vv_agent.app_server.protocol.thread import (
     ThreadStartParams,
     ThreadUnsubscribeParams,
 )
-from vv_agent.app_server.protocol.turn import TurnFollowUpParams, TurnInterruptParams, TurnStartParams, TurnSteerParams
+from vv_agent.app_server.protocol.turn import (
+    CheckpointSummary,
+    InterruptionSummary,
+    TurnFollowUpParams,
+    TurnInterruptParams,
+    TurnResumeParams,
+    TurnResumeResponse,
+    TurnStartParams,
+    TurnSteerParams,
+)
 from vv_agent.app_server.protocol.warning import WarningParams
 
 __all__ = [
@@ -29,10 +38,12 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalRequestParams",
     "ApprovalResolveParams",
+    "CheckpointSummary",
     "ClientCapabilities",
     "ClientInfo",
     "InitializeParams",
     "InitializeResponse",
+    "InterruptionSummary",
     "JsonRpcError",
     "JsonRpcMessage",
     "JsonRpcNotification",
@@ -52,6 +63,8 @@ __all__ = [
     "ThreadUnsubscribeParams",
     "TurnFollowUpParams",
     "TurnInterruptParams",
+    "TurnResumeParams",
+    "TurnResumeResponse",
     "TurnStartParams",
     "TurnSteerParams",
     "WarningParams",

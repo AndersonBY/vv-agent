@@ -18,7 +18,7 @@ from vv_agent.runtime import CancellationToken
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "runner_terminal_v1.json"
-FIXTURE_SHA256 = "2c6f7e7477d95a817a5fa2df7cf0b11be65e43a67206ff5181b593aec5845593"
+FIXTURE_SHA256 = "e202e1156e2bf93995168316b83ccd811ee6b4bba17154b740d6d12768eebdd6"
 TERMINAL_TYPES = {"run_completed", "run_failed", "run_cancelled"}
 
 

@@ -7,6 +7,16 @@ from threading import RLock
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from vv_agent.budget import BudgetUsageSnapshot
+from vv_agent.checkpoint import EventCursor
+from vv_agent.runtime.state_v2 import (
+    CheckpointV2,
+    ClaimMode,
+    check_claim_v2,
+    checkpoint_definition_matches_v2,
+    claim_matches_v2,
+    prepare_claimed_terminal_v2,
+    prepare_event_delivery_v2,
+)
 from vv_agent.types import AgentResult, AgentStatus, CycleRecord, Message
 
 
@@ -105,6 +115,7 @@ class InMemoryStateStore:
 
     def __init__(self) -> None:
         self._store: dict[str, Checkpoint] = {}
+        self._store_v2: dict[str, CheckpointV2] = {}
         self._lock = RLock()
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
@@ -236,6 +247,283 @@ class InMemoryStateStore:
 
     def state_store_spec(self) -> StateStoreSpec | None:
         return None
+
+    def save_checkpoint_v2(self, checkpoint: CheckpointV2) -> None:
+        from vv_agent.runtime.checkpoint_codec_v2 import clone_checkpoint_v2
+
+        snapshot = clone_checkpoint_v2(checkpoint)
+        with self._lock:
+            self._store_v2[snapshot.checkpoint_key] = snapshot
+
+    def create_checkpoint_v2(self, checkpoint: CheckpointV2) -> bool:
+        from vv_agent.runtime.checkpoint_codec_v2 import clone_checkpoint_v2
+
+        snapshot = clone_checkpoint_v2(checkpoint)
+        if (
+            snapshot.revision != 0
+            or snapshot.resume_attempt != 1
+            or snapshot.claim_token is not None
+        ):
+            raise ValueError("new checkpoint v2 records must be unclaimed at revision zero")
+        with self._lock:
+            if snapshot.checkpoint_key in self._store_v2:
+                return False
+            self._store_v2[snapshot.checkpoint_key] = snapshot
+            return True
+
+    def load_checkpoint_v2(self, checkpoint_key: str) -> CheckpointV2 | None:
+        from vv_agent.runtime.checkpoint_codec_v2 import clone_checkpoint_v2
+
+        with self._lock:
+            checkpoint = self._store_v2.get(checkpoint_key)
+            return clone_checkpoint_v2(checkpoint) if checkpoint is not None else None
+
+    def claim_checkpoint_v2(
+        self,
+        checkpoint_key: str,
+        cycle_index: int,
+        *,
+        claim_token: str,
+        lease_expires_at_ms: int,
+        now_ms: int,
+        claim_mode: ClaimMode,
+    ) -> CheckpointV2 | None:
+        from vv_agent.runtime.checkpoint_codec_v2 import clone_checkpoint_v2
+
+        _validate_claim(cycle_index, claim_token, lease_expires_at_ms, now_ms)
+        with self._lock:
+            checkpoint = self._store_v2.get(checkpoint_key)
+            if checkpoint is None:
+                return None
+            try:
+                check_claim_v2(checkpoint, cycle_index, now_ms, claim_mode)
+            except ValueError as exc:
+                raise CheckpointConflictError(str(exc)) from exc
+            if checkpoint.claim_token is not None and claim_mode != "recovery":
+                raise CheckpointConflictError("expired checkpoint claims require recovery mode")
+            if checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED and claim_mode != "recovery":
+                raise CheckpointConflictError("reconciliation checkpoints require recovery mode")
+            checkpoint.revision += 1
+            if claim_mode == "recovery":
+                checkpoint.resume_attempt += 1
+            checkpoint.status = AgentStatus.RUNNING
+            checkpoint.claim_token = claim_token
+            checkpoint.claimed_cycle = cycle_index
+            checkpoint.lease_expires_at_ms = lease_expires_at_ms
+            return clone_checkpoint_v2(checkpoint)
+
+    def progress_checkpoint_v2(
+        self,
+        checkpoint: CheckpointV2,
+        *,
+        claim_token: str,
+        expected_revision: int,
+    ) -> bool:
+        from vv_agent.runtime.checkpoint_codec_v2 import clone_checkpoint_v2
+
+        with self._lock:
+            current = self._store_v2.get(checkpoint.checkpoint_key)
+            if not claim_matches_v2(current, checkpoint, claim_token, expected_revision):
+                return False
+            assert current is not None
+            if (
+                current.terminal_result is not None
+                or current.status is not AgentStatus.RUNNING
+                or checkpoint.status is not AgentStatus.RUNNING
+            ):
+                return False
+            snapshot = clone_checkpoint_v2(checkpoint)
+            snapshot.revision = expected_revision + 1
+            snapshot.claim_token = current.claim_token
+            snapshot.claimed_cycle = current.claimed_cycle
+            snapshot.lease_expires_at_ms = current.lease_expires_at_ms
+            self._store_v2[snapshot.checkpoint_key] = snapshot
+            return True
+
+    def suspend_checkpoint_v2(
+        self,
+        checkpoint: CheckpointV2,
+        *,
+        claim_token: str,
+        expected_revision: int,
+    ) -> bool:
+        from vv_agent.runtime.checkpoint_codec_v2 import clone_checkpoint_v2
+
+        with self._lock:
+            current = self._store_v2.get(checkpoint.checkpoint_key)
+            if not claim_matches_v2(current, checkpoint, claim_token, expected_revision):
+                return False
+            assert current is not None
+            if (
+                current.terminal_result is not None
+                or checkpoint.cycle_index != current.cycle_index
+                or checkpoint.status is not AgentStatus.RECONCILIATION_REQUIRED
+            ):
+                return False
+            snapshot = replace(
+                checkpoint,
+                revision=expected_revision + 1,
+                claim_token=None,
+                claimed_cycle=None,
+                lease_expires_at_ms=None,
+            )
+            snapshot = clone_checkpoint_v2(snapshot)
+            self._store_v2[snapshot.checkpoint_key] = snapshot
+            return True
+
+    def commit_checkpoint_v2(
+        self,
+        checkpoint: CheckpointV2,
+        *,
+        claim_token: str,
+        expected_revision: int,
+    ) -> bool:
+        from vv_agent.runtime.checkpoint_codec_v2 import clone_checkpoint_v2
+
+        with self._lock:
+            current = self._store_v2.get(checkpoint.checkpoint_key)
+            if not claim_matches_v2(current, checkpoint, claim_token, expected_revision):
+                return False
+            assert current is not None
+            if (
+                current.terminal_result is not None
+                or checkpoint.terminal_result is not None
+                or checkpoint.status is not AgentStatus.RUNNING
+                or checkpoint.cycle_index != current.claimed_cycle
+            ):
+                return False
+            snapshot = replace(
+                checkpoint,
+                revision=expected_revision + 1,
+                claim_token=None,
+                claimed_cycle=None,
+                lease_expires_at_ms=None,
+                model_call_journal=[],
+                tool_journal=[],
+            )
+            snapshot = clone_checkpoint_v2(snapshot)
+            self._store_v2[snapshot.checkpoint_key] = snapshot
+            return True
+
+    def finalize_checkpoint_v2(
+        self,
+        checkpoint: CheckpointV2,
+        *,
+        expected_revision: int,
+    ) -> bool:
+        from vv_agent.runtime.checkpoint_codec_v2 import clone_checkpoint_v2
+
+        snapshot = clone_checkpoint_v2(checkpoint)
+        if snapshot.terminal_result is None or snapshot.claim_token is not None:
+            raise ValueError("finalized checkpoint v2 must be terminal and unclaimed")
+        with self._lock:
+            current = self._store_v2.get(snapshot.checkpoint_key)
+            if (
+                current is None
+                or current.revision != expected_revision
+                or snapshot.revision != expected_revision
+                or current.claim_token is not None
+                or current.terminal_result is not None
+                or not checkpoint_definition_matches_v2(current, snapshot)
+            ):
+                return False
+            snapshot.revision = expected_revision + 1
+            self._store_v2[snapshot.checkpoint_key] = snapshot
+            return True
+
+    def finalize_claimed_checkpoint_v2(
+        self,
+        checkpoint: CheckpointV2,
+        *,
+        claim_token: str,
+        expected_revision: int,
+    ) -> bool:
+        with self._lock:
+            current = self._store_v2.get(checkpoint.checkpoint_key)
+            if current is None:
+                return False
+            terminal = prepare_claimed_terminal_v2(
+                current,
+                checkpoint,
+                claim_token=claim_token,
+                expected_revision=expected_revision,
+            )
+            if terminal is None:
+                return False
+            self._store_v2[terminal.checkpoint_key] = terminal
+            return True
+
+    def record_event_delivery_v2(
+        self,
+        checkpoint_key: str,
+        *,
+        event_id: str,
+        payload_digest: str,
+        cursor: EventCursor,
+        expected_revision: int,
+        claim_token: str | None,
+    ) -> bool:
+        with self._lock:
+            current = self._store_v2.get(checkpoint_key)
+            if current is None:
+                return False
+            delivered = prepare_event_delivery_v2(
+                current,
+                event_id=event_id,
+                payload_digest=payload_digest,
+                cursor=cursor,
+                expected_revision=expected_revision,
+                claim_token=claim_token,
+            )
+            if delivered is None:
+                return False
+            self._store_v2[checkpoint_key] = delivered
+            return True
+
+    def renew_checkpoint_claim_v2(
+        self,
+        checkpoint_key: str,
+        *,
+        claim_token: str,
+        lease_expires_at_ms: int,
+        now_ms: int,
+    ) -> bool:
+        _validate_renew(claim_token, 0, lease_expires_at_ms, now_ms)
+        clock = _LeaseOperationClock(now_ms)
+        with self._lock:
+            current_now_ms = clock.now_ms()
+            checkpoint = self._store_v2.get(checkpoint_key)
+            if (
+                checkpoint is None
+                or checkpoint.claim_token != claim_token
+                or (checkpoint.lease_expires_at_ms or 0) <= current_now_ms
+                or lease_expires_at_ms <= current_now_ms
+            ):
+                return False
+            checkpoint.lease_expires_at_ms = lease_expires_at_ms
+            return True
+
+    def acknowledge_terminal_v2(self, checkpoint_key: str, *, expected_revision: int) -> bool:
+        with self._lock:
+            checkpoint = self._store_v2.get(checkpoint_key)
+            if (
+                checkpoint is None
+                or checkpoint.revision != expected_revision
+                or checkpoint.terminal_result is None
+                or checkpoint.terminal_acknowledged
+            ):
+                return False
+            checkpoint.revision += 1
+            checkpoint.terminal_acknowledged = True
+            return True
+
+    def delete_checkpoint_v2(self, checkpoint_key: str) -> None:
+        with self._lock:
+            self._store_v2.pop(checkpoint_key, None)
+
+    def list_checkpoints_v2(self) -> list[str]:
+        with self._lock:
+            return sorted(self._store_v2)
 
 
 def _validate_claim(cycle_index: int, claim_token: str, lease_expires_at_ms: int, now_ms: int) -> None:
