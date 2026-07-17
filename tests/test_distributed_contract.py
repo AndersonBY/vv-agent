@@ -1064,7 +1064,9 @@ def test_renewal_started_before_commit_cannot_be_suppressed_after_commit(
 
     monkeypatch.setattr(
         "vv_agent.runtime.backends.celery_tasks.time.time_ns",
-        lambda: (initial_expiry - 1) * 1_000_000,
+        # Keep the blocked renewal comfortably inside the original lease so
+        # this case isolates post-commit claim consumption from lease expiry.
+        lambda: (initial_expiry - 10_000) * 1_000_000,
     )
     heartbeat = _LeaseHeartbeat(
         store=BlockingHeartbeatStore(),
