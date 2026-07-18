@@ -58,13 +58,20 @@ def _result(*, status: AgentStatus, error: str | None = None) -> AgentResult:
     )
 
 
-def test_cli_contract_fixture_is_reviewable_and_matches_rust_copy() -> None:
+def test_cli_contract_fixture_is_reviewable() -> None:
     contract = _contract()
+
+    assert contract["contract"] == "vv-agent-cli-v1"
+    assert contract["scope"] == "direct-task"
+
+
+def test_cli_contract_fixture_matches_rust_copy_when_available() -> None:
     explicit_rust_root = os.environ.get("VV_AGENT_RS_REPO")
     rust_root = Path(explicit_rust_root or Path(__file__).resolve().parents[2] / "vv-agent-rs")
     rust_copy = rust_root / "crates" / "vv-agent" / "tests" / "cli_contract_v1.json"
 
-    assert contract["contract"] == "vv-agent-cli-v1"
+    if explicit_rust_root is None and not rust_copy.exists():
+        return
     assert CONTRACT_PATH.read_bytes() == rust_copy.read_bytes()
 
 
