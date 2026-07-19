@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from vv_agent.runtime.engine import _register_sub_agent_session, _unregister_sub_agent_session
 from vv_agent.runtime.sub_task_manager import SubTaskManager
@@ -10,6 +12,15 @@ from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.sub_task_status import sub_task_status
 from vv_agent.types import AgentResult, AgentStatus, Message, SubTaskOutcome, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
+
+ASSISTANT_REASONING_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history_v1.json"
+)
+
+
+def _assistant_reasoning_case(name: str) -> dict[str, Any]:
+    contract = json.loads(ASSISTANT_REASONING_FIXTURE_PATH.read_text(encoding="utf-8"))
+    return next(case for case in contract["cases"] if case["name"] == name)
 
 
 class _DummySession:
@@ -253,10 +264,14 @@ def test_sub_task_status_can_continue_completed_task(tmp_path: Path) -> None:
 def test_sub_task_manager_sanitizes_session_messages_before_continue(tmp_path: Path) -> None:
     manager = _build_manager()
     session = _DummySession()
+    reasoning_case = _assistant_reasoning_case("reasoning_only_assistant_is_preserved")
+    empty_case = _assistant_reasoning_case("fully_empty_assistant_is_removed")
+    reasoning_message = Message.from_dict(reasoning_case["message"])
     session.replace_messages(
         [
             Message(role="system", content="sys"),
-            Message(role="assistant", content="", reasoning_content="thinking only"),
+            reasoning_message,
+            Message.from_dict(empty_case["message"]),
             Message(
                 role="assistant",
                 content="",
@@ -288,5 +303,9 @@ def test_sub_task_manager_sanitizes_session_messages_before_continue(tmp_path: P
     manager.continue_task(task_id="sub-sanitize", prompt="resume")
     manager.wait("sub-sanitize", timeout=5.0)
 
-    assert session.continue_messages_snapshot == [Message(role="system", content="sys")]
+    assert reasoning_case["expected"]["retain_in_resumable_history"] is True
+    assert empty_case["expected"]["retain_in_resumable_history"] is False
+    assert session.continue_messages_snapshot == [Message(role="system", content="sys"), reasoning_message]
+    assert session.continue_messages_snapshot[1].content == reasoning_case["expected"]["visible_content"]
+    assert session.continue_messages_snapshot[1].reasoning_content == reasoning_case["expected"]["reasoning_content"]
     assert session.messages == [Message(role="assistant", content="done")]

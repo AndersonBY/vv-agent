@@ -15,6 +15,15 @@ def _configured_sub_agent_contract() -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _assistant_reasoning_contract() -> dict[str, Any]:
+    path = Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history_v1.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _assistant_reasoning_case(name: str) -> dict[str, Any]:
+    return next(case for case in _assistant_reasoning_contract()["cases"] if case["name"] == name)
+
+
 def test_sanitize_for_resume_drops_blank_assistant_messages() -> None:
     messages = [
         Message(role="user", content="hello"),
@@ -26,15 +35,30 @@ def test_sanitize_for_resume_drops_blank_assistant_messages() -> None:
     assert sanitized == [Message(role="user", content="hello")]
 
 
-def test_sanitize_for_resume_drops_thinking_only_messages() -> None:
+def test_sanitize_for_resume_preserves_reasoning_only_messages() -> None:
+    case = _assistant_reasoning_case("reasoning_only_assistant_is_preserved")
+    assistant = Message.from_dict(case["message"])
     messages = [
-        Message(role="assistant", content="", reasoning_content="thinking"),
+        assistant,
         Message(role="user", content="continue"),
     ]
 
     sanitized = sanitize_for_resume(messages)
 
-    assert sanitized == [Message(role="user", content="continue")]
+    assert case["expected"]["retain_in_resumable_history"] is True
+    assert sanitized == messages
+    assert assistant.content == case["expected"]["visible_content"]
+    assert assistant.reasoning_content == case["expected"]["reasoning_content"]
+    assert assistant.to_openai_message() == case["expected"]["openai_compatible_projection"]
+
+
+def test_sanitize_for_resume_drops_fully_empty_assistant_from_contract() -> None:
+    case = _assistant_reasoning_case("fully_empty_assistant_is_removed")
+
+    sanitized = sanitize_for_resume([Message.from_dict(case["message"])])
+
+    assert case["expected"]["retain_in_resumable_history"] is False
+    assert sanitized == []
 
 
 def test_sanitize_for_resume_drops_orphan_tool_results() -> None:

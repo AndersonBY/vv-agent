@@ -69,6 +69,7 @@ Never repair a contract failure by editing a file under
 | Sessions and stores | `src/vv_agent/sessions/`, `src/vv_agent/runtime/stores/`, `tests/test_session_store_parity.py` |
 | Events and tracing | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `src/vv_agent/tracing.py` |
 | Token and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py` |
+| Assistant reasoning history | `src/vv_agent/types.py`, `src/vv_agent/memory/manager.py`, `src/vv_agent/memory/message_sanitizer.py`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_runner.py`, `tests/test_message_sanitizer.py`, `tests/test_sub_task_status.py` |
 | Run budgets | `src/vv_agent/budget.py`, `src/vv_agent/runtime/engine.py`, `tests/test_run_budget.py` |
 | Durable checkpoint/resume v2 | `src/vv_agent/checkpoint.py`, `src/vv_agent/runtime/checkpoint_codec_v2.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/run_definition.py`, `tests/test_checkpoint_runner_v2.py`, `tests/test_checkpoint_fault_matrix.py` |
 | Distributed runtime | `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/checkpoint_codec.py` |

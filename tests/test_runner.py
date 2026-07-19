@@ -22,7 +22,21 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import READ_IMAGE_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.tools import ToolExposure, function_tool
-from vv_agent.types import AgentStatus, LLMResponse, Message, ToolCall
+from vv_agent.types import AgentStatus, LLMResponse, Message, NoToolPolicy, ToolCall
+
+ASSISTANT_REASONING_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history_v1.json"
+)
+
+
+def _assistant_reasoning_contract() -> dict[str, object]:
+    return json.loads(ASSISTANT_REASONING_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def _assistant_reasoning_case(name: str) -> dict[str, object]:
+    contract = _assistant_reasoning_contract()
+    cases = cast(list[dict[str, object]], contract["cases"])
+    return next(case for case in cases if case["name"] == name)
 
 
 def _fake_resolved(
@@ -88,6 +102,113 @@ def test_runner_run_sync_executes_agent_with_model_provider(tmp_path: Path) -> N
     assert result.input == "Say ok."
     assert result.raw_result.final_answer == "ok"
     assert seen_settings == [ModelSettings(temperature=0.1, max_tokens=200)]
+
+
+def test_runner_preserves_reasoning_only_history_for_next_model_request(tmp_path: Path) -> None:
+    contract = _assistant_reasoning_contract()
+    runtime_case = cast(dict[str, object], contract["runtime_case"])
+    first_response = cast(dict[str, object], runtime_case["first_response"])
+    expected = cast(dict[str, object], runtime_case["expected"])
+    reasoning_case = _assistant_reasoning_case("reasoning_only_assistant_is_preserved")
+    reasoning_expected = cast(dict[str, object], reasoning_case["expected"])
+    reasoning = cast(str, first_response["reasoning_content"])
+    captured_requests: list[list[Message]] = []
+
+    def capture_second_request(request: LlmRequest) -> LLMResponse:
+        captured_requests.append(list(request.messages))
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id="finish-reasoning", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})
+            ],
+        )
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content=cast(str, first_response["content"]),
+                raw={
+                    "reasoning_content": reasoning,
+                    "usage": {
+                        "completion_tokens": 7,
+                        "total_tokens": 7,
+                        "completion_tokens_details": {"reasoning_tokens": 7},
+                    },
+                },
+            ),
+            capture_second_request,
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return llm, _fake_resolved()
+
+    result = Runner.run_sync(
+        Agent(name="assistant", instructions="Preserve private reasoning history.", model="m"),
+        "continue the task",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            max_cycles=2,
+            no_tool_policy=cast(NoToolPolicy, runtime_case["no_tool_policy"]),
+        ),
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert expected["next_model_request_contains_reasoning_turn"] is True
+    assert len(captured_requests) == 1
+    replayed = next(
+        message
+        for message in captured_requests[0]
+        if message.role == "assistant" and message.reasoning_content == reasoning
+    )
+    assert replayed.content == expected["next_model_request_visible_content"]
+    assert replayed.content == reasoning_expected["visible_content"]
+    assert replayed.reasoning_content == reasoning_expected["reasoning_content"]
+    assert replayed.to_openai_message() == reasoning_expected["openai_compatible_projection"]
+    assert result.raw_result.cycles[0].token_usage.reasoning_tokens == 7
+
+
+def test_runner_removes_fully_empty_assistant_before_next_model_request(tmp_path: Path) -> None:
+    empty_case = _assistant_reasoning_case("fully_empty_assistant_is_removed")
+    message = cast(dict[str, object], empty_case["message"])
+    expected = cast(dict[str, object], empty_case["expected"])
+    captured_requests: list[list[Message]] = []
+
+    def capture_second_request(request: LlmRequest) -> LLMResponse:
+        captured_requests.append(list(request.messages))
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="finish-empty", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+        )
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(content=cast(str, message["content"])),
+            capture_second_request,
+        ]
+    )
+
+    def model_provider(agent: Agent, run_config: RunConfig):
+        del agent, run_config
+        return llm, _fake_resolved()
+
+    result = Runner.run_sync(
+        Agent(name="assistant", instructions="Drop invalid empty history.", model="m"),
+        "continue the task",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=model_provider,
+            max_cycles=2,
+            no_tool_policy="continue",
+        ),
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert expected["retain_in_runtime_history"] is False
+    assert len(captured_requests) == 1
+    assert all(message.role != "assistant" for message in captured_requests[0])
 
 
 def test_runner_passes_resolved_model_settings_to_llm_complete(tmp_path: Path) -> None:

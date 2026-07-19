@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "rules": {
+    "non_empty_reasoning_is_resumable_history": true,
+    "reasoning_is_not_promoted_to_visible_content": true,
+    "reasoning_usage_and_stream_telemetry_are_preserved": true,
+    "fully_empty_assistant_turn_is_removed": true,
+    "openai_compatible_reasoning_only_content_is_explicit_empty_string": true,
+    "no_tool_policy_is_unchanged": true
+  },
+  "cases": [
+    {
+      "name": "reasoning_only_assistant_is_preserved",
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "private reasoning chain",
+        "tool_calls": []
+      },
+      "expected": {
+        "retain_in_runtime_history": true,
+        "retain_in_resumable_history": true,
+        "visible_content": "",
+        "reasoning_content": "private reasoning chain",
+        "openai_compatible_projection": {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "private reasoning chain"
+        }
+      }
+    },
+    {
+      "name": "fully_empty_assistant_is_removed",
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": null,
+        "tool_calls": []
+      },
+      "expected": {
+        "retain_in_runtime_history": false,
+        "retain_in_resumable_history": false
+      }
+    },
+    {
+      "name": "visible_content_and_reasoning_are_preserved",
+      "message": {
+        "role": "assistant",
+        "content": "visible answer",
+        "reasoning_content": "private reasoning chain",
+        "tool_calls": []
+      },
+      "expected": {
+        "retain_in_runtime_history": true,
+        "retain_in_resumable_history": true,
+        "visible_content": "visible answer",
+        "reasoning_content": "private reasoning chain"
+      }
+    },
+    {
+      "name": "tool_call_and_reasoning_are_preserved",
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "private reasoning chain",
+        "tool_calls": [
+          {
+            "id": "reasoning-tool-1",
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "retain_in_runtime_history": true,
+        "retain_in_resumable_history": true,
+        "visible_content": "",
+        "reasoning_content": "private reasoning chain"
+      }
+    }
+  ],
+  "runtime_case": {
+    "name": "reasoning_only_continue_reaches_next_model_cycle",
+    "no_tool_policy": "continue",
+    "first_response": {
+      "content": "",
+      "reasoning_content": "private reasoning chain",
+      "tool_calls": []
+    },
+    "expected": {
+      "continuation_hint_emitted": true,
+      "next_model_request_contains_reasoning_turn": true,
+      "next_model_request_visible_content": "",
+      "reasoning_usage_preserved": true,
+      "reasoning_stream_telemetry_preserved": true
+    }
+  }
+}

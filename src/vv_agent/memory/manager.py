@@ -501,11 +501,20 @@ class MemoryManager:
     def _is_empty_content(content: str) -> bool:
         return not content.strip()
 
+    @staticmethod
+    def _has_reasoning_content(message: Message) -> bool:
+        return bool(message.reasoning_content and message.reasoning_content.strip())
+
     def _sanitize_empty_assistant_messages(self, messages: list[Message]) -> tuple[list[Message], bool]:
         updated = False
         sanitized: list[Message] = []
         for message in messages:
-            if message.role == "assistant" and not message.tool_calls and self._is_empty_content(message.content):
+            if (
+                message.role == "assistant"
+                and not message.tool_calls
+                and self._is_empty_content(message.content)
+                and not self._has_reasoning_content(message)
+            ):
                 updated = True
                 continue
             sanitized.append(message)
@@ -595,7 +604,7 @@ class MemoryManager:
             if message.role == "assistant" and message.tool_calls and idx not in keep_indices:
                 updated = True
                 new_message = replace(message, tool_calls=None)
-                if self._is_empty_content(new_message.content):
+                if self._is_empty_content(new_message.content) and not self._has_reasoning_content(new_message):
                     continue
                 stripped.append(new_message)
                 continue

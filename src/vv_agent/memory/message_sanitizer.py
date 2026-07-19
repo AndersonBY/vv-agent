@@ -10,7 +10,6 @@ def sanitize_for_resume(messages: list[Message]) -> list[Message]:
     """Remove incomplete or invalid tail/history messages before resuming a session."""
     sanitized = list(messages)
     sanitized = filter_empty_assistant_messages(sanitized)
-    sanitized = filter_thinking_only_messages(sanitized)
     sanitized = filter_orphan_tool_results(sanitized)
     return filter_unresolved_tool_uses(sanitized)
 
@@ -110,7 +109,7 @@ def _filter_tool_turns(
 
 
 def filter_thinking_only_messages(messages: list[Message]) -> list[Message]:
-    """Drop assistant messages that only carry reasoning/thinking payloads."""
+    """Explicitly drop assistant messages that only carry reasoning payloads."""
     result: list[Message] = []
     for message in messages:
         if message.role != "assistant":
