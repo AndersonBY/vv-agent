@@ -53,6 +53,20 @@ using `kimi-k2.6` or an older `kimi-k2-thinking` key.
 
 This behavior is covered by `tests/test_config.py`.
 
+## Kimi K3 Request Profile
+
+`kimi-k3` always uses its provider-defined reasoning and sampling profile. The
+LLM bridge sends top-level `reasoning_effort="max"`, omits `temperature`,
+`top_p`, fixed penalty/count fields, and legacy K2.x `thinking` controls, and
+maps public `max_tokens` to the provider's `max_completion_tokens` field.
+These invariants are applied after public `ModelSettings` are merged so
+provider-specific `extra_body` values cannot override them. Unrelated
+`extra_body` fields continue to pass through.
+
+For multi-turn and tool-call requests, every assistant message retains its
+complete `reasoning_content`; streamed reasoning deltas are collected through
+the end of the provider stream before that message is stored.
+
 ## Current User-Facing Defaults
 
 | Surface | Default |

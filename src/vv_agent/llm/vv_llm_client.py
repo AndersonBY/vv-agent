@@ -59,6 +59,19 @@ _TOOL_CALL_INCREMENTAL_ENDPOINT_PREFIXES = (
     "zhipuai",
 )
 
+_KIMI_K3_OMITTED_EXTRA_BODY_FIELDS = (
+    "enable_thinking",
+    "frequency_penalty",
+    "max_tokens",
+    "n",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "temperature",
+    "thinking",
+    "top_p",
+)
+
 
 @dataclass(slots=True)
 class _RequestOptions:
@@ -66,6 +79,7 @@ class _RequestOptions:
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    max_completion_tokens: int | None = None
     tool_choice: str | dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
     response_format: dict[str, Any] | None = None
@@ -182,6 +196,7 @@ class VVLlmClient(LLMClient):
                 temperature=request_options.temperature,
                 top_p=request_options.top_p,
                 max_tokens=request_options.max_tokens,
+                max_completion_tokens=request_options.max_completion_tokens,
                 tool_choice=request_options.tool_choice,
                 parallel_tool_calls=request_options.parallel_tool_calls,
                 response_format=request_options.response_format,
@@ -529,6 +544,7 @@ class VVLlmClient(LLMClient):
         temperature: float | None = None
         top_p: float | None = None
         max_tokens: int | None = None
+        max_completion_tokens: int | None = None
         tool_choice: str | dict[str, Any] | None = None
         parallel_tool_calls: bool | None = None
         response_format: dict[str, Any] | None = None
@@ -636,11 +652,30 @@ class VVLlmClient(LLMClient):
                 max_attempts = max(1, int(model_settings.retry.max_attempts))
                 backoff_seconds = max(0.0, float(model_settings.retry.backoff_seconds))
 
+        if normalized_model == "kimi-k3":
+            # K3 always reasons at max effort and fixes its sampling profile.
+            # Apply this after public settings so callers cannot reintroduce
+            # unsupported K2.x thinking or sampling parameters.
+            temperature = None
+            top_p = None
+            thinking = None
+            reasoning_effort = "max"
+            max_completion_tokens = max_tokens
+            max_tokens = None
+            if extra_body is not None:
+                sanitized_extra_body = dict(extra_body)
+                for field_name in _KIMI_K3_OMITTED_EXTRA_BODY_FIELDS:
+                    sanitized_extra_body.pop(field_name, None)
+                if max_completion_tokens is not None:
+                    sanitized_extra_body.pop("max_completion_tokens", None)
+                extra_body = sanitized_extra_body or None
+
         return _RequestOptions(
             model=resolved_model,
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             response_format=response_format,
@@ -698,6 +733,8 @@ class VVLlmClient(LLMClient):
             payload["top_p"] = options.top_p
         if options.max_tokens is not None:
             payload["max_tokens"] = options.max_tokens
+        if options.max_completion_tokens is not None:
+            payload["max_completion_tokens"] = options.max_completion_tokens
         if options.tool_choice is not None:
             payload["tool_choice"] = options.tool_choice
         if options.parallel_tool_calls is not None:

@@ -779,6 +779,42 @@ def test_deepseek_provider_defaults_new_models_to_reasoning_options() -> None:
     assert options.reasoning_effort == "max"
 
 
+def test_kimi_k3_request_options_enforce_provider_profile_after_public_settings() -> None:
+    llm = VVLlmClient(endpoint_targets=[], backend="moonshot", selected_model="kimi-k3")
+
+    options = llm._resolve_request_options(
+        "kimi-k3",
+        stream=True,
+        endpoint_type="moonshot",
+        model_settings=ModelSettings(
+            temperature=0.3,
+            top_p=0.7,
+            max_tokens=4096,
+            reasoning={"effort": "low", "type": "enabled"},
+            extra_body={
+                "temperature": 0.4,
+                "top_p": 0.8,
+                "n": 2,
+                "presence_penalty": 1,
+                "frequency_penalty": 1,
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": "low",
+                "max_tokens": 1024,
+                "max_completion_tokens": 2048,
+                "provider_option": "kept",
+            },
+        ),
+    )
+
+    assert options.temperature is None
+    assert options.top_p is None
+    assert options.max_tokens is None
+    assert options.max_completion_tokens == 4096
+    assert options.thinking is None
+    assert options.reasoning_effort == "max"
+    assert options.extra_body == {"provider_option": "kept"}
+
+
 def test_minimax_provider_defaults_new_models_to_reasoning_chain() -> None:
     llm = VVLlmClient(endpoint_targets=[], backend="minimax", selected_model="minimax-m3")
 
@@ -909,6 +945,59 @@ def test_moonshot_provider_defaults_new_models_to_reasoning_chain(monkeypatch) -
         ],
         tools=[],
     )
+    assert response.content == "done"
+
+
+def test_kimi_k3_real_request_uses_fixed_profile_and_completion_limit(monkeypatch) -> None:
+    chunk = SimpleNamespace(
+        usage=_FakeUsage(),
+        content="done",
+        reasoning_content=None,
+        tool_calls=[],
+    )
+
+    def stream_call(kwargs: dict[str, Any]) -> Any:
+        assert "temperature" not in kwargs
+        assert "top_p" not in kwargs
+        assert "max_tokens" not in kwargs
+        assert "thinking" not in kwargs
+        assert kwargs["reasoning_effort"] == "max"
+        assert kwargs["max_completion_tokens"] == 4096
+        assert kwargs["extra_body"] == {"provider_option": "kept"}
+        return [chunk]
+
+    _FakeChatClient.behavior_by_endpoint = {"moonshot-k3-profile": stream_call}
+    _FakeChatClient.seen_calls = []
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="moonshot-k3-profile",
+                api_key="k",
+                api_base="https://moonshot.example/v1",
+            )
+        ],
+        backend="moonshot",
+        selected_model="kimi-k3",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+    response = llm.complete(
+        model="kimi-k3",
+        messages=[Message(role="user", content="hi")],
+        tools=[],
+        model_settings=ModelSettings(
+            temperature=0.3,
+            top_p=0.7,
+            max_tokens=4096,
+            reasoning={"effort": "low", "type": "enabled"},
+            extra_body={"thinking": {"type": "enabled"}, "provider_option": "kept"},
+        ),
+    )
+
     assert response.content == "done"
 
 
