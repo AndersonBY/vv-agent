@@ -18,9 +18,11 @@ The normative behavior and change workflow no longer live in this repository.
 offline and reproducible tests, but it is not an editable source of truth.
 
 The current lock selects contract `0.9.0` at revision
-`5d829037ae069606835d2868de79ffdba6ef0304`. The central support matrix is
-still `pending-adoption`; this document maps the Python producers but does not
-claim cross-repository verification.
+`5d829037ae069606835d2868de79ffdba6ef0304`. The central support matrix records
+contract `0.9.0` as `verified`, backed by cross-repository conformance run
+[`29769410376`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29769410376).
+This document maps the Python producers; the central matrix remains the
+authoritative verification record.
 
 ## Required Reading
 
