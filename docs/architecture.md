@@ -86,6 +86,14 @@ implementing providers instead of patching runtime internals:
 Raw runtime logs remain available for compatibility, but typed `RunEvent` is
 the primary state contract for host UIs.
 
+Raw model stream callbacks are synchronous at-least-once observers, not a
+durable event store. The Runner projects only assistant/reasoning deltas and
+model tool-call start/progress into typed events with framework-owned identity
+and cycle fields. Model tool generation uses `model_tool_call_*`; actual tool
+execution continues to use `tool_call_started` / `tool_call_completed`.
+Reasoning remains private telemetry and is not rendered as App Server answer
+text. Unknown or malformed raw stream payloads stay raw-only.
+
 Token accounting keeps provider truth separate from compatibility values.
 `TokenUsage.usage_source` identifies provider-reported, estimated, or missing
 totals. `CacheUsage` distinguishes an explicit zero cache read from missing

@@ -5,8 +5,9 @@ from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    ModelToolCallProgressEvent,
+    ReasoningDeltaEvent,
     RunCompletedEvent,
-    RunEvent,
     RunFailedEvent,
     RunStartedEvent,
     ToolCallCompletedEvent,
@@ -95,18 +96,15 @@ def test_tool_call_events_map_to_started_and_completed_items() -> None:
 
 
 def test_tool_call_progress_maps_to_tool_call_delta_notification() -> None:
-    event = RunEvent(
-        type="tool_call_progress",
+    event = ModelToolCallProgressEvent(
         run_id="run_1",
         trace_id="trace_1",
+        tool_call_id="call_1",
+        tool_call_index=0,
+        tool_name="bash",
+        arguments_chars=12,
         event_id="evt_delta",
         created_at=3,
-        metadata={
-            "tool_call_id": "call_1",
-            "tool_call_index": 0,
-            "function_name": "bash",
-            "arguments_chars": 12,
-        },
     )
 
     projection = map_run_event(event, thread_id="thread_1", turn_id="turn_1")
@@ -128,6 +126,22 @@ def test_tool_call_progress_maps_to_tool_call_delta_notification() -> None:
             "argumentsChars": 12,
         },
     }
+
+
+def test_reasoning_delta_is_not_projected_as_visible_assistant_output() -> None:
+    event = ReasoningDeltaEvent(
+        run_id="run_1",
+        trace_id="trace_1",
+        delta="private plan",
+        event_id="evt_reasoning",
+        created_at=3,
+    )
+
+    projection = map_run_event(event, thread_id="thread_1", turn_id="turn_1")
+
+    assert projection.item is None
+    assert projection.notification_method is None
+    assert projection.notification_params == {}
 
 
 def test_approval_events_map_to_approval_items() -> None:

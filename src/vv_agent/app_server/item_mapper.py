@@ -8,6 +8,7 @@ from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    ModelToolCallProgressEvent,
     RunCompletedEvent,
     RunEvent,
     RunFailedEvent,
@@ -51,13 +52,12 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
             payload={"delta": event.delta},
         )
         return _projection(item, "item/agentMessage/delta", {"delta": event.delta})
-    if event.type == "tool_call_progress":
-        metadata = event.metadata
+    if isinstance(event, ModelToolCallProgressEvent):
         delta = {
-            "toolCallId": str(metadata.get("tool_call_id") or ""),
-            "toolCallIndex": metadata.get("tool_call_index"),
-            "toolName": str(metadata.get("function_name") or ""),
-            "argumentsChars": metadata.get("arguments_chars"),
+            "toolCallId": event.tool_call_id,
+            "toolCallIndex": event.tool_call_index,
+            "toolName": event.tool_name,
+            "argumentsChars": event.arguments_chars,
         }
         item = _item(
             event,

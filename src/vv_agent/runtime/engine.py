@@ -197,6 +197,9 @@ def _canonicalize_sub_agent_stream_event(
             "trace_id": trace_id,
         }
     )
+    cycle_index = payload.get("cycle")
+    if isinstance(cycle_index, int) and not isinstance(cycle_index, bool) and cycle_index > 0:
+        canonical["cycle_index"] = cycle_index
     return canonical
 
 

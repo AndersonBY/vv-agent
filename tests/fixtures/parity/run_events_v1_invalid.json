@@ -41,6 +41,12 @@
         "terminal"
       ],
       "wire_integer_maximum": 9007199254740991
+    },
+    "stream_fields": {
+      "delta": "string",
+      "tool_call_id": "non_empty_string",
+      "tool_name": "non_empty_string",
+      "optional_counters": "non_negative_json_safe_integer"
     }
   },
   "canonicalize": [
@@ -491,6 +497,71 @@
           "risk": "unknown_tool_side_effect",
           "idempotency_support": "unknown"
         }
+      }
+    },
+    {
+      "id": "reasoning_delta_is_not_a_string",
+      "input": {
+        "version": "v1",
+        "type": "reasoning_delta",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "delta": 7
+      }
+    },
+    {
+      "id": "model_tool_call_id_is_empty",
+      "input": {
+        "version": "v1",
+        "type": "model_tool_call_started",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "",
+        "tool_name": "search"
+      }
+    },
+    {
+      "id": "model_tool_name_is_empty",
+      "input": {
+        "version": "v1",
+        "type": "model_tool_call_progress",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": ""
+      }
+    },
+    {
+      "id": "stream_counter_is_negative",
+      "input": {
+        "version": "v1",
+        "type": "model_tool_call_progress",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "arguments_chars": -1
+      }
+    },
+    {
+      "id": "stream_counter_exceeds_json_safe_maximum",
+      "input": {
+        "version": "v1",
+        "type": "assistant_delta",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "delta": "x",
+        "content_chars": 9007199254740992
       }
     }
   ]

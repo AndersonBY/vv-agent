@@ -276,6 +276,13 @@
         "tool_call_index"
       ]
     },
+    "typed_wire_types": {
+      "assistant_delta": "assistant_delta",
+      "reasoning_delta": "reasoning_delta",
+      "tool_call_started": "model_tool_call_started",
+      "tool_call_progress": "model_tool_call_progress"
+    },
+    "canonical_cycle_field": "cycle_index",
     "canonical_identity_fields": [
       "agent_name",
       "child_run_id",
@@ -322,6 +329,7 @@
       "sub_run_"
     ],
     "normal_events_preserved": true,
+    "same_typed_projection_as_top_level": true,
     "untrusted_terminal_cannot_suppress_real_terminal": true,
     "stream_observer_failure_isolated": true,
     "event_sink_failure_policy": "fail_closed"

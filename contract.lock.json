@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "contract_version": "0.6.0",
-  "contract_revision": "1353a4be12de81b86079f2a7c1e20931ac85d946",
+  "contract_version": "0.7.1",
+  "contract_revision": "443baa54087721c110dbe2755a7d5d80fcdb5ec9",
   "source_repository": "https://github.com/AndersonBY/vv-agent-contract",
-  "artifact_url": "https://github.com/AndersonBY/vv-agent-contract/releases/download/v0.6.0/vv-agent-contract-0.6.0.zip",
-  "artifact_sha256": "da3efdbad908360e5e01f70b4b1ccf141507423016e00e9f9f1725db52a40beb",
+  "artifact_url": "https://github.com/AndersonBY/vv-agent-contract/releases/download/v0.7.1/vv-agent-contract-0.7.1.zip",
+  "artifact_sha256": "5f4cea04bf913f01bf532b61821ee7a1d7266acc5dee46905f5294f371326652",
   "snapshot_path": "tests/fixtures/parity",
-  "fixture_manifest_sha256": "2c99e615824ef8ec74f3c48fc05d89594cba6a4ea99b11fa49a4926af82117ba"
+  "fixture_manifest_sha256": "9df621d44ca8f6fccc4681ad0f76d0c69799e3e61edee6a98cb7e3b960360756"
 }

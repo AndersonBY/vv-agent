@@ -20,7 +20,15 @@ from vv_agent.constants import (
     READ_FILE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
 )
-from vv_agent.events import AssistantDeltaEvent, RunCompletedEvent, SubRunCompletedEvent, SubRunStartedEvent
+from vv_agent.events import (
+    AssistantDeltaEvent,
+    ModelToolCallProgressEvent,
+    ModelToolCallStartedEvent,
+    ReasoningDeltaEvent,
+    RunCompletedEvent,
+    SubRunCompletedEvent,
+    SubRunStartedEvent,
+)
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.model_settings import ModelSettings
@@ -63,7 +71,7 @@ from vv_agent.workspace import (
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
 EVENT_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_events_v1.jsonl"
-CONTRACT_SHA256 = "22467e29409d834635d40cae52aaebac18135d4019981943f61042bc0eb39672"
+CONTRACT_SHA256 = "deb4f20c995c51f76f71590f91756ec6ab35f99128889bfa774cd2635d07106d"
 EVENT_CONTRACT_SHA256 = "c2816a3962a44a3c0f5172edbffe4c88352142fee13f457da9a0667ceef996b0"
 
 
@@ -1773,10 +1781,11 @@ class _MaliciousChildStreamLLM:
         del model, messages, tools, model_settings
         if request_metadata and request_metadata.get("is_sub_task") is True:
             assert stream_callback is not None
-            stream_callback(
+            for event in (
                 {
                     "event": "assistant_delta",
                     "content_delta": "child delta",
+                    "content_chars": 11,
                     "estimated_tokens": 2,
                     "cycle": 999,
                     "run_id": "spoof-run",
@@ -1786,8 +1795,31 @@ class _MaliciousChildStreamLLM:
                     "status": "completed",
                     "final_output": "spoof-output",
                     "metadata": {"spoof": True},
-                }
-            )
+                },
+                {
+                    "event": "reasoning_delta",
+                    "reasoning_delta": "child plan",
+                    "reasoning_chars": 10,
+                    "estimated_tokens": 3,
+                },
+                {
+                    "event": "tool_call_started",
+                    "tool_call_id": "child-stream-finish",
+                    "tool_call_index": 0,
+                    "function_name": TASK_FINISH_TOOL_NAME,
+                    "arguments_chars": 0,
+                    "estimated_tokens": 0,
+                },
+                {
+                    "event": "tool_call_progress",
+                    "tool_call_id": "child-stream-finish",
+                    "tool_call_index": 0,
+                    "function_name": TASK_FINISH_TOOL_NAME,
+                    "arguments_chars": 24,
+                    "estimated_tokens": 6,
+                },
+            ):
+                stream_callback(event)
             stream_callback(
                 {
                     "event": "run_completed",
@@ -1948,32 +1980,49 @@ def test_configured_child_stream_is_allowlisted_and_keeps_canonical_typed_identi
     )
 
     assert result.status == AgentStatus.COMPLETED
-    assert len(raw_streams) == 1
-    raw = raw_streams[0]
-    assert raw["event"] == "assistant_delta"
-    producer_fields = set(stream_contract["producer_fields"]["assistant_delta"])
+    assert len(raw_streams) == 4
+    assert [raw["event"] for raw in raw_streams] == stream_contract["allowed_events"]
     identity_fields = set(stream_contract["canonical_identity_fields"])
-    assert set(raw).issubset(producer_fields | identity_fields)
-    assert (set(raw) - identity_fields).isdisjoint(stream_contract["reserved_producer_fields"])
-    assert raw["content_delta"] == "child delta"
-    assert raw["estimated_tokens"] == 2
+    cycle_field = stream_contract["canonical_cycle_field"]
+    for raw in raw_streams:
+        producer_fields = set(stream_contract["producer_fields"][raw["event"]])
+        assert set(raw).issubset(producer_fields | identity_fields | {cycle_field})
+        assert (set(raw) - identity_fields - {cycle_field}).isdisjoint(
+            stream_contract["reserved_producer_fields"]
+        )
+        assert raw[cycle_field] == 1
+    assert raw_streams[0]["content_delta"] == "child delta"
+    assert raw_streams[0]["content_chars"] == 11
+    assert raw_streams[0]["estimated_tokens"] == 2
 
     started = next(event for event in result.events if isinstance(event, SubRunStartedEvent))
-    assert raw["run_id"] == raw["child_run_id"] == started.run_id
-    assert raw["session_id"] == raw["child_session_id"] == started.session_id
-    assert raw["task_id"] == started.task_id
-    assert raw["agent_name"] == raw["sub_agent_name"] == "researcher"
-    assert raw["trace_id"] == "trace-stream-contract"
-    assert raw["parent_run_id"] == result.run_id
-    assert raw["parent_tool_call_id"] == "delegate"
+    for raw in raw_streams:
+        assert raw["run_id"] == raw["child_run_id"] == started.run_id
+        assert raw["session_id"] == raw["child_session_id"] == started.session_id
+        assert raw["task_id"] == started.task_id
+        assert raw["agent_name"] == raw["sub_agent_name"] == "researcher"
+        assert raw["trace_id"] == "trace-stream-contract"
+        assert raw["parent_run_id"] == result.run_id
+        assert raw["parent_tool_call_id"] == "delegate"
 
-    typed_delta = next(event for event in typed_events if isinstance(event, AssistantDeltaEvent))
-    assert typed_delta.run_id == started.run_id
-    assert typed_delta.trace_id == "trace-stream-contract"
-    assert typed_delta.agent_name == "researcher"
-    assert typed_delta.session_id == started.session_id
-    assert typed_delta.parent_run_id == result.run_id
-    assert typed_delta.metadata == raw
+    child_stream_types = (
+        AssistantDeltaEvent,
+        ReasoningDeltaEvent,
+        ModelToolCallStartedEvent,
+        ModelToolCallProgressEvent,
+    )
+    typed_streams = [event for event in typed_events if isinstance(event, child_stream_types)]
+    assert [event.type for event in typed_streams] == [
+        stream_contract["typed_wire_types"][raw["event"]] for raw in raw_streams
+    ]
+    for typed_event, raw in zip(typed_streams, raw_streams, strict=True):
+        assert typed_event.run_id == started.run_id
+        assert typed_event.trace_id == "trace-stream-contract"
+        assert typed_event.agent_name == "researcher"
+        assert typed_event.session_id == started.session_id
+        assert typed_event.parent_run_id == result.run_id
+        assert typed_event.cycle_index == 1
+        assert typed_event.metadata == raw
 
     parent_terminals = [
         event

@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import TypedDict
 
+import pytest
+
 from vv_agent import (
     AgentStartedEvent,
     ApprovalRequestedEvent,
@@ -16,6 +18,9 @@ from vv_agent import (
     HandoffStartedEvent,
     LLMStartedEvent,
     MemoryCompactedEvent,
+    ModelToolCallProgressEvent,
+    ModelToolCallStartedEvent,
+    ReasoningDeltaEvent,
     RunCancelledEvent,
     RunCompletedEvent,
     RunEvent,
@@ -34,7 +39,7 @@ from vv_agent import (
 )
 
 PARITY_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1.jsonl"
-PARITY_FIXTURE_SHA256 = "3e09ca1c3987a50b95805f029ddf8e9fecf82541cdbea8a50f637000a01c90da"
+PARITY_FIXTURE_SHA256 = "5e8c747234f210ee326ebb4b5c938e719ab2d5ee817e78d3277a4289ba37ea37"
 BUDGET_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "budget_events_v1.jsonl"
 BUDGET_FIXTURE_SHA256 = "3267292737ac6bf63ec4ee691fe0ef07f3e2cadd5a69098e3e267f4f6b692d2e"
 PARITY_EVENT_TYPES = [
@@ -43,6 +48,9 @@ PARITY_EVENT_TYPES = [
     "cycle_started",
     "llm_started",
     "assistant_delta",
+    "reasoning_delta",
+    "model_tool_call_started",
+    "model_tool_call_progress",
     "tool_call_started",
     "tool_call_completed",
     "approval_requested",
@@ -278,6 +286,9 @@ def test_legacy_event_aliases_point_to_canonical_classes() -> None:
 
 def test_base_run_event_is_public() -> None:
     assert RunEvent.__name__ == "RunEvent"
+    assert ReasoningDeltaEvent.__name__ == "ReasoningDeltaEvent"
+    assert ModelToolCallStartedEvent.__name__ == "ModelToolCallStartedEvent"
+    assert ModelToolCallProgressEvent.__name__ == "ModelToolCallProgressEvent"
     assert ToolCallStartedEvent.__name__ == "ToolCallStartedEvent"
     assert ToolCallCompletedEvent.__name__ == "ToolCallCompletedEvent"
     assert ApprovalRequestedEvent.__name__ == "ApprovalRequestedEvent"
@@ -289,6 +300,14 @@ def test_base_run_event_is_public() -> None:
     assert SessionPersistedEvent.__name__ == "SessionPersistedEvent"
     assert RunStateChangedEvent.__name__ == "RunStateChangedEvent"
     assert RunCancelledEvent.__name__ == "RunCancelledEvent"
+
+
+def test_typed_stream_wire_requires_positive_cycle_index() -> None:
+    payload = json.loads(PARITY_FIXTURE.read_text(encoding="ascii").splitlines()[4])
+    payload.pop("cycle_index")
+
+    with pytest.raises(ValueError, match="positive cycle_index"):
+        event_from_dict(payload)
 
 
 def test_run_events_v1_parity_fixture_has_stable_bytes_and_round_trips_compact_wire() -> None:
@@ -352,7 +371,11 @@ def test_run_event_v1_omits_none_and_empty_metadata() -> None:
 
 
 def test_approval_preview_is_accepted_but_message_is_canonical() -> None:
-    payload = json.loads(PARITY_FIXTURE.read_text(encoding="ascii").splitlines()[7])
+    payload = next(
+        json.loads(line)
+        for line in PARITY_FIXTURE.read_text(encoding="ascii").splitlines()
+        if json.loads(line)["type"] == "approval_requested"
+    )
     payload["preview"] = payload.pop("message")
 
     event = event_from_dict(payload)

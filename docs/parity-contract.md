@@ -68,6 +68,7 @@ Never repair a contract failure by editing a file under
 | Delegation and background tasks | `src/vv_agent/background_task.py`, `src/vv_agent/handoffs.py`, `src/vv_agent/runtime/sub_task_manager.py` |
 | Sessions and stores | `src/vv_agent/sessions/`, `src/vv_agent/runtime/stores/`, `tests/test_session_store_parity.py` |
 | Events and tracing | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `src/vv_agent/tracing.py` |
+| Model stream projection | `src/vv_agent/events.py`, `src/vv_agent/runner.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/app_server/item_mapper.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_configured_sub_agent_parity.py` |
 | Token and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py` |
 | Assistant reasoning history | `src/vv_agent/types.py`, `src/vv_agent/memory/manager.py`, `src/vv_agent/memory/message_sanitizer.py`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_runner.py`, `tests/test_message_sanitizer.py`, `tests/test_sub_task_status.py` |
 | Run budgets | `src/vv_agent/budget.py`, `src/vv_agent/runtime/engine.py`, `tests/test_run_budget.py` |

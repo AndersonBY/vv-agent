@@ -8,12 +8,26 @@ from typing import Any
 
 import pytest
 
-from vv_agent import Agent, AssistantDeltaEvent, MemorySession, ModelSettings, RunConfig, Runner
+from vv_agent import (
+    Agent,
+    AssistantDeltaEvent,
+    MemorySession,
+    ModelSettings,
+    ModelToolCallProgressEvent,
+    ModelToolCallStartedEvent,
+    ReasoningDeltaEvent,
+    RunCompletedEvent,
+    RunConfig,
+    Runner,
+    ToolCallStartedEvent,
+)
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 RUNNER_EVENTS_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "runner_events_v1.jsonl"
 RUNNER_EVENTS_FIXTURE_SHA256 = "3000b4d1647b39a5b938465a2e9aad2bff49eeb75d4ba31a8a326bf456f80965"
+STREAM_PROJECTION_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "stream_projection_v1.json"
+STREAM_PROJECTION_FIXTURE_SHA256 = "95a3b7d527efad68492d810038ff7be0eecefcd278f8ddad690359c497d79b0a"
 
 
 class StreamingGoldenLLM:
@@ -53,6 +67,166 @@ class StreamingGoldenLLM:
                 )
             ],
         )
+
+
+class ContractStreamLLM:
+    model_id = "stream-model"
+
+    def __init__(self, raw_events: list[dict[str, Any]]) -> None:
+        self.raw_events = raw_events
+        self.calls = 0
+
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        tools: list[dict[str, object]],
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+        model_settings: ModelSettings | None = None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        del model, messages, tools, model_settings, request_metadata
+        self.calls += 1
+        if self.calls < 3:
+            return LLMResponse(content=f"draft {self.calls}")
+
+        assert stream_callback is not None
+        for event in self.raw_events:
+            stream_callback(dict(event))
+        return LLMResponse(
+            content="done",
+            tool_calls=[
+                ToolCall(
+                    id="call_stream",
+                    name=TASK_FINISH_TOOL_NAME,
+                    arguments={"message": "done"},
+                )
+            ],
+        )
+
+
+def test_real_runner_projects_contract_stream_fixture_without_trusting_source_identity(tmp_path: Path) -> None:
+    fixture_bytes = STREAM_PROJECTION_FIXTURE.read_bytes()
+    contract = json.loads(fixture_bytes)
+    synthetic = contract["synthetic_top_level"]
+    raw_events = list(synthetic["raw_events"])
+    llm = ContractStreamLLM(raw_events)
+    raw_observed: list[dict[str, Any]] = []
+    callback_order: list[tuple[str, str]] = []
+    typed_wire_types = {
+        mapping["wire_type"] for mapping in contract["typed_projection"]["mappings"].values()
+    }
+
+    def typed_observer(event: Any) -> None:
+        if event.type in typed_wire_types:
+            callback_order.append(("typed", event.type))
+
+    def raw_observer(payload: dict[str, Any]) -> None:
+        raw_observed.append(dict(payload))
+        callback_order.append(("raw", str(payload.get("event"))))
+
+    result = Runner.run_sync(
+        Agent(name="stream-agent", instructions="Finish on the third cycle.", model=llm),
+        "stream input",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            session=MemorySession("session_stream_parity"),
+            max_cycles=3,
+            no_tool_policy="continue",
+            tracing={"trace_id": "trace_stream_parity"},
+            stream=typed_observer,
+            runtime_stream_callback=raw_observer,
+        ),
+    )
+
+    typed_events = [event for event in result.events if event.type in typed_wire_types]
+    actual = [_normalize_event(event.to_dict()) for event in typed_events]
+
+    assert hashlib.sha256(fixture_bytes).hexdigest() == STREAM_PROJECTION_FIXTURE_SHA256
+    assert actual == synthetic["expected_wire_events"]
+    assert llm.calls == synthetic["context"]["cycle_index"] == 3
+    assert len(raw_observed) == synthetic["raw_observer_count"] == 5
+    assert len(typed_events) == synthetic["typed_event_count"] == 4
+    assert [type(event) for event in typed_events] == [
+        AssistantDeltaEvent,
+        ReasoningDeltaEvent,
+        ModelToolCallStartedEvent,
+        ModelToolCallProgressEvent,
+    ]
+    assert callback_order == [
+        ("typed", "assistant_delta"),
+        ("raw", "assistant_delta"),
+        ("typed", "reasoning_delta"),
+        ("raw", "reasoning_delta"),
+        ("typed", "model_tool_call_started"),
+        ("raw", "tool_call_started"),
+        ("typed", "model_tool_call_progress"),
+        ("raw", "tool_call_progress"),
+        ("raw", "run_completed"),
+    ]
+    assert raw_observed[0]["cycle"] == 3
+    assert raw_observed[0]["run_id"] == "run_spoofed"
+    assert all(event.run_id == result.run_id for event in typed_events)
+    assert all(event.cycle_index == 3 for event in typed_events)
+
+    execution_events = [event for event in result.events if isinstance(event, ToolCallStartedEvent)]
+    assert len(execution_events) == 1
+    assert execution_events[0].type == synthetic["execution_event_type"]
+    assert execution_events[0].tool_call_id == "call_stream"
+    assert result.events.index(execution_events[0]) > result.events.index(typed_events[-1])
+    terminals = [event for event in result.events if isinstance(event, RunCompletedEvent)]
+    assert len(terminals) == 1
+    assert terminals[0].final_output == "done"
+
+
+@pytest.mark.parametrize(
+    "malformed_event",
+    [
+        {"event": "assistant_delta", "content_delta": 7},
+        {"event": "reasoning_delta", "reasoning_delta": None},
+        {"event": "tool_call_started", "tool_call_id": "", "function_name": "task_finish"},
+        {
+            "event": "tool_call_progress",
+            "tool_call_id": "call_stream",
+            "function_name": "task_finish",
+            "arguments_chars": -1,
+        },
+    ],
+)
+def test_real_runner_keeps_malformed_known_stream_events_raw_only(
+    tmp_path: Path,
+    malformed_event: dict[str, Any],
+) -> None:
+    llm = ContractStreamLLM([malformed_event])
+    raw_observed: list[dict[str, Any]] = []
+
+    result = Runner.run_sync(
+        Agent(name="stream-agent", instructions="Finish on the third cycle.", model=llm),
+        "stream input",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            max_cycles=3,
+            no_tool_policy="continue",
+            runtime_stream_callback=raw_observed.append,
+        ),
+    )
+
+    assert result.status.value == "completed"
+    assert len(raw_observed) == 1
+    assert raw_observed[0]["cycle"] == 3
+    assert not any(
+        isinstance(
+            event,
+            (
+                AssistantDeltaEvent,
+                ReasoningDeltaEvent,
+                ModelToolCallStartedEvent,
+                ModelToolCallProgressEvent,
+            ),
+        )
+        for event in result.events
+    )
 
 
 def test_real_runner_events_match_cross_language_producer_fixture(tmp_path: Path) -> None:

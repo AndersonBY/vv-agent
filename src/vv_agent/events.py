@@ -4,7 +4,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from math import isfinite
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 
 from vv_agent.budget import (
     BudgetDimension,
@@ -25,6 +25,31 @@ from vv_agent.types import CompletionReason
 RUN_EVENT_VERSION = "v1"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
 _APPROVAL_ACTIONS = frozenset({"allow", "allow_session", "deny", "timeout"})
+_JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
+
+
+class _StreamEventCommon(TypedDict):
+    run_id: str
+    trace_id: str
+    agent_name: str | None
+    session_id: str | None
+    parent_run_id: str | None
+    cycle_index: int
+    metadata: dict[str, Any] | None
+
+
+def _stream_delta(value: Any, field_name: str = "delta") -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Run event {field_name} must be a string")
+    return value
+
+
+def _optional_stream_counter(value: Any, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _JSON_SAFE_INTEGER_MAX:
+        raise ValueError(f"Run event {field_name} must be a non-negative JSON-safe integer or null")
+    return value
 
 
 def _completion_reason(value: Any) -> CompletionReason | None:
@@ -485,6 +510,8 @@ class MemoryCompactCompleted(RunEvent):
 @dataclass(frozen=True, slots=True)
 class AssistantDeltaEvent(RunEvent):
     delta: str = ""
+    content_chars: int | None = None
+    estimated_tokens: int | None = None
 
     def __init__(
         self,
@@ -492,6 +519,8 @@ class AssistantDeltaEvent(RunEvent):
         run_id: str,
         trace_id: str,
         delta: str,
+        content_chars: int | None = None,
+        estimated_tokens: int | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -515,12 +544,225 @@ class AssistantDeltaEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "delta", delta)
+        object.__setattr__(self, "delta", _stream_delta(delta))
+        object.__setattr__(self, "content_chars", _optional_stream_counter(content_chars, "content_chars"))
+        object.__setattr__(self, "estimated_tokens", _optional_stream_counter(estimated_tokens, "estimated_tokens"))
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["delta"] = self.delta
+        if self.content_chars is not None:
+            payload["content_chars"] = self.content_chars
+        if self.estimated_tokens is not None:
+            payload["estimated_tokens"] = self.estimated_tokens
         return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningDeltaEvent(RunEvent):
+    delta: str = ""
+    reasoning_chars: int | None = None
+    estimated_tokens: int | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        delta: str,
+        reasoning_chars: int | None = None,
+        estimated_tokens: int | None = None,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="reasoning_delta",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "delta", _stream_delta(delta))
+        object.__setattr__(self, "reasoning_chars", _optional_stream_counter(reasoning_chars, "reasoning_chars"))
+        object.__setattr__(self, "estimated_tokens", _optional_stream_counter(estimated_tokens, "estimated_tokens"))
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["delta"] = self.delta
+        if self.reasoning_chars is not None:
+            payload["reasoning_chars"] = self.reasoning_chars
+        if self.estimated_tokens is not None:
+            payload["estimated_tokens"] = self.estimated_tokens
+        return payload
+
+
+def _set_model_tool_stream_fields(
+    event: RunEvent,
+    *,
+    type: str,
+    run_id: str,
+    trace_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    tool_call_index: int | None,
+    arguments_chars: int | None,
+    estimated_tokens: int | None,
+    cycle_index: int | None,
+    agent_name: str | None,
+    session_id: str | None,
+    parent_event_id: str | None,
+    parent_run_id: str | None,
+    event_id: str | None,
+    created_at: float | None,
+    metadata: dict[str, Any] | None,
+) -> None:
+    _set_run_event_fields(
+        event,
+        type=type,
+        run_id=run_id,
+        trace_id=trace_id,
+        cycle_index=cycle_index,
+        agent_name=agent_name,
+        session_id=session_id,
+        parent_event_id=parent_event_id,
+        parent_run_id=parent_run_id,
+        event_id=event_id,
+        created_at=created_at,
+        metadata=metadata,
+    )
+    object.__setattr__(event, "tool_call_id", _required_event_text(tool_call_id, "tool_call_id"))
+    object.__setattr__(event, "tool_name", _required_event_text(tool_name, "tool_name"))
+    object.__setattr__(event, "tool_call_index", _optional_stream_counter(tool_call_index, "tool_call_index"))
+    object.__setattr__(event, "arguments_chars", _optional_stream_counter(arguments_chars, "arguments_chars"))
+    object.__setattr__(event, "estimated_tokens", _optional_stream_counter(estimated_tokens, "estimated_tokens"))
+
+
+def _model_tool_stream_dict(event: ModelToolCallStartedEvent | ModelToolCallProgressEvent) -> dict[str, Any]:
+    payload = RunEvent.to_dict(event)
+    payload["tool_call_id"] = event.tool_call_id
+    if event.tool_call_index is not None:
+        payload["tool_call_index"] = event.tool_call_index
+    payload["tool_name"] = event.tool_name
+    for field_name in ("arguments_chars", "estimated_tokens"):
+        value = getattr(event, field_name)
+        if value is not None:
+            payload[field_name] = value
+    return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ModelToolCallStartedEvent(RunEvent):
+    tool_call_id: str = ""
+    tool_name: str = ""
+    tool_call_index: int | None = None
+    arguments_chars: int | None = None
+    estimated_tokens: int | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        tool_call_index: int | None = None,
+        arguments_chars: int | None = None,
+        estimated_tokens: int | None = None,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_model_tool_stream_fields(
+            self,
+            type="model_tool_call_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_call_index=tool_call_index,
+            arguments_chars=arguments_chars,
+            estimated_tokens=estimated_tokens,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _model_tool_stream_dict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelToolCallProgressEvent(RunEvent):
+    tool_call_id: str = ""
+    tool_name: str = ""
+    tool_call_index: int | None = None
+    arguments_chars: int | None = None
+    estimated_tokens: int | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        tool_call_index: int | None = None,
+        arguments_chars: int | None = None,
+        estimated_tokens: int | None = None,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_model_tool_stream_fields(
+            self,
+            type="model_tool_call_progress",
+            run_id=run_id,
+            trace_id=trace_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_call_index=tool_call_index,
+            arguments_chars=arguments_chars,
+            estimated_tokens=estimated_tokens,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _model_tool_stream_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1844,6 +2086,29 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         raise ValueError("Run event metadata must be an object")
     if payload["type"] == "tool_call_started" and "arguments" in payload and not isinstance(payload["arguments"], dict):
         raise ValueError("Run event tool arguments must be an object")
+    if payload["type"] in {"assistant_delta", "reasoning_delta"}:
+        _stream_delta(payload.get("delta"))
+    typed_stream_events = {
+        "assistant_delta",
+        "reasoning_delta",
+        "model_tool_call_started",
+        "model_tool_call_progress",
+    }
+    if payload["type"] in typed_stream_events and (
+        isinstance(cycle_index, bool) or not isinstance(cycle_index, int) or cycle_index < 1
+    ):
+        raise ValueError("Run event stream variants require a positive cycle_index")
+    stream_counter_fields = {
+        "assistant_delta": ("content_chars", "estimated_tokens"),
+        "reasoning_delta": ("reasoning_chars", "estimated_tokens"),
+        "model_tool_call_started": ("tool_call_index", "arguments_chars", "estimated_tokens"),
+        "model_tool_call_progress": ("tool_call_index", "arguments_chars", "estimated_tokens"),
+    }
+    for field_name in stream_counter_fields.get(payload["type"], ()):
+        _optional_stream_counter(payload.get(field_name), field_name)
+    if payload["type"] in {"model_tool_call_started", "model_tool_call_progress"}:
+        _required_event_text(payload.get("tool_call_id"), "tool_call_id")
+        _required_event_text(payload.get("tool_name"), "tool_name")
 
     _completion_reason(payload.get("completion_reason"))
     _completion_text(payload.get("completion_tool_name"), "completion_tool_name")
@@ -1952,7 +2217,29 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "assistant_delta":
-        return AssistantDeltaEvent(delta=str(payload.get("delta") or ""), **_with_cycle_and_agent(payload, common))
+        return AssistantDeltaEvent(
+            delta=payload["delta"],
+            content_chars=payload.get("content_chars"),
+            estimated_tokens=payload.get("estimated_tokens"),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "reasoning_delta":
+        return ReasoningDeltaEvent(
+            delta=payload["delta"],
+            reasoning_chars=payload.get("reasoning_chars"),
+            estimated_tokens=payload.get("estimated_tokens"),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type in {"model_tool_call_started", "model_tool_call_progress"}:
+        event_class = ModelToolCallStartedEvent if event_type == "model_tool_call_started" else ModelToolCallProgressEvent
+        return event_class(
+            tool_call_id=payload["tool_call_id"],
+            tool_name=payload["tool_name"],
+            tool_call_index=payload.get("tool_call_index"),
+            arguments_chars=payload.get("arguments_chars"),
+            estimated_tokens=payload.get("estimated_tokens"),
+            **_with_cycle_and_agent(payload, common),
+        )
     if event_type == "tool_call_started":
         arguments = payload.get("arguments")
         return ToolCallStartedEvent(
@@ -2178,32 +2465,64 @@ def event_from_stream_payload(
     parent_run_id: str | None = None,
     preserve_metadata: bool = False,
 ) -> RunEvent | None:
-    raw_type = payload.get("type") or payload.get("event")
-    cycle_index = payload.get("cycle")
-    if not isinstance(cycle_index, int):
-        cycle_index = None
-    if raw_type == "assistant_delta":
-        delta = payload.get("delta", payload.get("content_delta", ""))
-        return AssistantDeltaEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            parent_run_id=parent_run_id,
-            cycle_index=cycle_index,
-            delta=str(delta),
-            metadata=(dict(payload) if preserve_metadata else None),
-        )
-    return RunEvent(
-        type=str(raw_type or "stream_event"),
-        run_id=run_id,
-        trace_id=trace_id,
-        agent_name=agent_name,
-        session_id=session_id,
-        parent_run_id=parent_run_id,
-        cycle_index=cycle_index,
-        metadata=dict(payload),
-    )
+    raw_type = payload.get("event") or payload.get("type")
+    cycle_index = payload.get("cycle_index") if preserve_metadata else payload.get("cycle")
+    if isinstance(cycle_index, bool) or not isinstance(cycle_index, int) or cycle_index < 1:
+        return None
+    metadata = dict(payload) if preserve_metadata else None
+    common: _StreamEventCommon = {
+        "run_id": run_id,
+        "trace_id": trace_id,
+        "agent_name": agent_name,
+        "session_id": session_id,
+        "parent_run_id": parent_run_id,
+        "cycle_index": cycle_index,
+        "metadata": metadata,
+    }
+    try:
+        if raw_type == "assistant_delta":
+            delta = payload.get("content_delta")
+            if not isinstance(delta, str):
+                delta = payload.get("delta")
+            return AssistantDeltaEvent(
+                delta=_stream_delta(delta, "content_delta or delta"),
+                content_chars=_optional_stream_counter(payload.get("content_chars"), "content_chars"),
+                estimated_tokens=_optional_stream_counter(payload.get("estimated_tokens"), "estimated_tokens"),
+                **common,
+            )
+        if raw_type == "reasoning_delta":
+            return ReasoningDeltaEvent(
+                delta=_stream_delta(payload.get("reasoning_delta"), "reasoning_delta"),
+                reasoning_chars=_optional_stream_counter(payload.get("reasoning_chars"), "reasoning_chars"),
+                estimated_tokens=_optional_stream_counter(payload.get("estimated_tokens"), "estimated_tokens"),
+                **common,
+            )
+        if raw_type in {"tool_call_started", "tool_call_progress"}:
+            tool_call_id = _required_event_text(payload.get("tool_call_id"), "tool_call_id")
+            tool_name = _required_event_text(payload.get("function_name"), "function_name")
+            tool_call_index = _optional_stream_counter(payload.get("tool_call_index"), "tool_call_index")
+            arguments_chars = _optional_stream_counter(payload.get("arguments_chars"), "arguments_chars")
+            estimated_tokens = _optional_stream_counter(payload.get("estimated_tokens"), "estimated_tokens")
+            if raw_type == "tool_call_started":
+                return ModelToolCallStartedEvent(
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    tool_call_index=tool_call_index,
+                    arguments_chars=arguments_chars,
+                    estimated_tokens=estimated_tokens,
+                    **common,
+                )
+            return ModelToolCallProgressEvent(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                tool_call_index=tool_call_index,
+                arguments_chars=arguments_chars,
+                estimated_tokens=estimated_tokens,
+                **common,
+            )
+    except ValueError:
+        return None
+    return None
 
 
 def _runtime_session_id(payload: dict[str, Any], fallback: str | None) -> str | None:
