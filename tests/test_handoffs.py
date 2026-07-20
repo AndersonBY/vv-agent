@@ -19,7 +19,7 @@ from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "handoff_contract_v1.json"
-CONTRACT_SHA256 = "92bef394c02c4657ab558e9ae0589a249578abb7c1fa875bb7d1aff91580c8c4"
+CONTRACT_SHA256 = "c35c2335bd4a79626afca8459eb2966722f0539e1a0efc8014bd14b132100a74"
 
 
 def _contract() -> dict[str, Any]:

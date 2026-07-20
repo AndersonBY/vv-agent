@@ -61,6 +61,19 @@ uv run python -m vv_agent app-server generate-ts --out ./app-server-schema/types
 uv run python -m vv_agent debug app-server send-message hello
 ```
 
+For tool capability metadata, denial policy, execution telemetry, or their
+durable/App Server projections, use the real producer suites rather than only
+validating fixture bytes:
+
+```bash
+uv run pytest tests/test_tool_orchestrator.py tests/test_runtime_hooks.py tests/test_events_v1.py tests/test_run_events_v1_invalid.py
+uv run pytest tests/test_runner.py tests/test_runner_events_producer_parity.py tests/test_runner_trace_v1.py
+uv run pytest tests/test_app_server_item_mapper.py tests/test_app_server_contract_parity.py
+uv run pytest tests/test_run_definition_producer.py tests/test_checkpoint_v2.py tests/test_checkpoint_runner_v2.py
+uv run pytest tests/test_distributed_checkpoint_v2.py tests/test_configured_sub_agent_parity.py
+uv run pytest tests/test_tool_metadata_contract.py tests/test_function_tool.py tests/test_tool_schema_contract.py tests/test_parity_evidence_manifests.py
+```
+
 Live tests are skipped unless explicitly enabled:
 
 ```bash
@@ -79,7 +92,12 @@ Useful live-test environment variables:
 
 | Change area | Primary tests |
 | --- | --- |
-| Shared contract and canonical producers | `tests/test_parity_evidence_manifests.py`, `tests/test_tool_schema_contract.py`, `tests/test_app_server_contract_parity.py`, `tests/test_runner_events_producer_parity.py` |
+| Shared contract and canonical producers | `tests/test_tool_metadata_contract.py`, `tests/test_parity_evidence_manifests.py`, `tests/test_tool_schema_contract.py`, `tests/test_app_server_contract_parity.py`, `tests/test_runner_events_producer_parity.py` |
+| Tool metadata construction and model-schema isolation | `tests/test_tool_metadata_contract.py`, `tests/test_run_definition_producer.py`, `tests/test_function_tool.py`, `tests/test_tool_schema_contract.py`, `tests/test_parity_evidence_manifests.py` |
+| Metadata denial, delegation, and distributed projection | `tests/test_tool_orchestrator.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_handoffs.py`, `tests/test_distributed_checkpoint_v2.py` |
+| Planned/started/completed telemetry and v1 compatibility | `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py`, `tests/test_events_v1.py`, `tests/test_run_events_v1_invalid.py`, `tests/test_runner.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_runner_trace_v1.py`, `tests/test_checkpoint_runner_v2.py` |
+| Tool telemetry App Server projection | `tests/test_app_server_item_mapper.py`, `tests/test_app_server_contract_parity.py` |
+| Tool metadata checkpoint freeze and legacy comparison | `tests/test_run_definition_producer.py`, `tests/test_checkpoint_v2.py`, `tests/test_checkpoint_runner_v2.py`, `tests/test_distributed_checkpoint_v2.py` |
 | Settings/model resolution | `tests/test_config.py` |
 | CLI | `tests/test_config.py`, CLI-specific assertions in existing tests |
 | Runtime loop and statuses | `tests/test_runtime.py`, `tests/test_cycle_runner.py` |

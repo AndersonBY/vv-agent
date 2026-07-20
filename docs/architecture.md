@@ -190,10 +190,14 @@ See `parity-contract.md` for the complete cross-language contract.
 Tool definitions and behavior are intentionally split:
 
 - `tools/base.py`: schema and execution result types.
+- `tools/metadata.py`: typed tool capability declarations, normalization, and
+  metadata-policy matching.
 - `tools/function.py`: public `FunctionTool` and `function_tool` decorator,
   including signature/dataclass/TypedDict/Pydantic schema inference.
 - `tools/outputs.py`: structured public tool output variants.
 - `tools/registry.py`: registration and lookup.
+- `tools/orchestrator.py`: policy/approval gates and the planned, started, and
+  completed executor lifecycle.
 - `tools/dispatcher.py`: argument normalization and handler dispatch.
 - `tools/handlers/`: concrete built-in behavior.
 - `constants/tool_names.py` and `constants/workspace.py`: stable tool names and
@@ -202,14 +206,68 @@ Tool definitions and behavior are intentionally split:
 Do not bury model-visible behavior in ad hoc handler strings without tests. Tool
 schema wording is part of the agent contract.
 
+`ToolMetadata` is an optional closed host declaration carried by
+`FunctionTool`, `ToolSpec`, `ToolExecutor`, and `ToolRegistry`. It contains:
+
+- one `side_effect` value from `unknown`, `none`, `read`, `write`, `execute`,
+  `network`, or `external`, with no inferred hierarchy;
+- the existing tool idempotency classification;
+- `terminal`, which says only that the tool may return `finish` or `wait_user`;
+- opaque exact-match `capability_tags` and `cost_dimensions`. Cost dimensions
+  name possible resource kinds; they are not measurements, prices, or budget
+  observations.
+
+Tag and cost-dimension lists trim only tab, LF, CR, and ASCII space, reject
+blank or over-128-code-point labels, deduplicate, sort by UTF-16 code units, and
+allow at most 32 normalized entries. Generic `FunctionTool.metadata` remains a
+separate compatibility mapping and is never promoted into `ToolMetadata`.
+Typed metadata is not added to `to_openai_schema()` or registry schema exports,
+so it does not change the model-visible tool contract.
+
+The legacy public `idempotency` input remains effective when typed metadata is
+absent. A typed `unknown` value may inherit a non-`unknown` legacy value; two
+different non-`unknown` declarations fail before model or tool work. When the
+typed declaration is present, its normalized effective value reaches the
+executor, event metadata, and checkpoint v2. With no typed declaration, the
+legacy value still reaches the executor and legacy run-definition field, while
+event metadata stays absent. `terminal=True` never causes a transition by
+itself; the existing result directive and completion policy remain authoritative.
+
 `Agent.as_tool()` compiles a child agent into a callable tool. The child result
 is returned as the tool output and the parent agent keeps control. `handoff()`
 compiles to a transfer tool whose result uses a finish directive; the target
 agent output becomes the run output and a typed `HandoffEvent` is emitted.
 
-`ToolPolicy` is enforced when tool schemas are planned: `allowed_tools` filters
-the final schema list to an allow-list, and `disallowed_tools` removes matching
-tools from defaults and custom function tools.
+`ToolPolicy` is enforced during schema planning and again at executor dispatch.
+In addition to `allowed_tools`, `disallowed_tools`, and `can_use_tool`, it has
+`denied_side_effects`, `denied_capability_tags`, `deny_terminal_tools`, and
+`denied_cost_dimensions`. List values form a normalized set union across Agent,
+configured Runner, and per-run layers; the terminal boolean uses logical OR.
+Configured sub-agents, agent-as-tool runs, and handoff targets inherit the
+effective parent denials and may only add more. Distributed execution carries
+that already-effective policy instead of creating another permission layer.
+
+These fields only deny declared capabilities. They use exact matching, return
+the existing `tool_not_allowed` error, and report policy sources in
+side-effect, terminal, capability-tag, then cost-dimension order. They cannot
+add a tool or bypass name, argument, approval, budget, planned-name, or runtime
+checks. A tool without typed metadata matches none of the metadata denials.
+
+After tool name and arguments normalize, `ToolOrchestrator` emits
+`tool_call_planned` before policy and approval. It emits `tool_call_started`
+only immediately before the executor may cause effects, then emits
+`tool_call_completed` after a `ToolExecutionResult` exists. Parse failures have
+no tool lifecycle. Unknown tools, policy denials, and approval short-circuits
+have planned plus completed but no started event. Completed events add the
+result directive, nullable error code, `execution_started`, nullable monotonic
+`duration_ms`, and the optional declaration. Cancellation or process loss may
+leave a started event without completion; checkpoint v2's operation journal,
+not telemetry, owns ambiguity and recovery.
+
+With no typed declaration and empty metadata-denial fields, schema planning,
+dispatch, completion, and model-visible schemas retain their previous behavior.
+Telemetry observation does not change result, policy, approval, completion, or
+event-store failure semantics.
 
 `FunctionTool.needs_approval` and `ToolPolicy.approval="always"` interrupt tool
 execution with a wait-user directive before user code runs. The runtime log is

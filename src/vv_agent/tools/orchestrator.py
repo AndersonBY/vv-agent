@@ -1,23 +1,42 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import replace
 from typing import Any, cast
 
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalProvider, ApprovalRequest, bind_request_cancellation
-from vv_agent.events import ApprovalRequestedEvent, ApprovalResolvedEvent, RunEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from vv_agent.events import (
+    ApprovalRequestedEvent,
+    ApprovalResolvedEvent,
+    RunEvent,
+    ToolCallCompletedEvent,
+    ToolCallPlannedEvent,
+    ToolCallStartedEvent,
+)
 from vv_agent.tools.base import ToolContext, is_tool_call_preapproved
 from vv_agent.tools.dispatcher import _needs_tool_call_id, _parse_arguments
-from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, is_tool_executor
+from vv_agent.tools.executor import (
+    RegistryToolExecutor,
+    ToolExecutor,
+    get_executor_tool_metadata,
+    is_tool_executor,
+)
 from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
+from vv_agent.tools.metadata import metadata_policy_denial_source
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 ToolEventSink = Callable[[RunEvent], None]
+ToolResultFinalizer = Callable[[ToolCall, ToolContext, ToolExecutionResult], ToolExecutionResult]
 _PLANNED_TOOL_NAMES_METADATA_KEY = "_vv_agent_planned_tool_names"
 _TOOL_DISPATCH_CALLBACK_METADATA_KEY = "_vv_agent_tool_dispatch_callback"
 _TOOL_DISPATCH_STARTED_METADATA_KEY = "_vv_agent_tool_dispatch_started"
+_TOOL_DISPATCH_STARTED_AT_METADATA_KEY = "_vv_agent_tool_dispatch_started_at_ns"
+_TOOL_DISPATCH_DURATION_MS_METADATA_KEY = "_vv_agent_tool_dispatch_duration_ms"
+_TOOL_TYPED_METADATA_KEY = "_vv_agent_tool_metadata"
+_JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
 
 
 class ToolOrchestrator:
@@ -53,6 +72,8 @@ class ToolOrchestrator:
         context: ToolContext,
         allowed_tool_names: Collection[str] | None = None,
         event_sink: ToolEventSink | None = None,
+        _precomputed_result: ToolExecutionResult | None = None,
+        _result_finalizer: ToolResultFinalizer | None = None,
     ) -> ToolExecutionResult:
         arguments, parse_error = _parse_arguments(call.id, call.arguments)
         if parse_error is not None:
@@ -70,7 +91,18 @@ class ToolOrchestrator:
         )
 
         executor = self._resolve_executor(normalized_call.name)
-        if executor is None:
+        tool_metadata = get_executor_tool_metadata(executor) if executor is not None else None
+        if tool_metadata is not None:
+            call_context.metadata[_TOOL_TYPED_METADATA_KEY] = tool_metadata
+        self._emit_planned(
+            normalized_call,
+            executor=executor,
+            context=call_context,
+            event_sink=event_sink,
+        )
+        if _precomputed_result is not None:
+            result = _precomputed_result
+        elif executor is None:
             policy_result = self._policy_denial_result(
                 None,
                 call=normalized_call,
@@ -78,45 +110,55 @@ class ToolOrchestrator:
                 allowed_tool_names=allowed_tool_names,
             )
             if policy_result is not None:
-                return policy_result
-            return self._error_result(call.id, f"Unknown tool: {call.name}", error_code="tool_not_found")
-
-        try:
-            policy_result = self._policy_denial_result(
-                executor,
-                call=normalized_call,
-                context=call_context,
-                allowed_tool_names=allowed_tool_names,
-            )
-            if policy_result is not None:
                 result = policy_result
             else:
-                approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
-                if approval_result is not None:
-                    result = approval_result
+                result = self._error_result(
+                    call.id,
+                    f"Unknown tool: {call.name}",
+                    error_code="tool_not_found",
+                )
+        else:
+            try:
+                policy_result = self._policy_denial_result(
+                    executor,
+                    call=normalized_call,
+                    context=call_context,
+                    allowed_tool_names=allowed_tool_names,
+                )
+                if policy_result is not None:
+                    result = policy_result
                 else:
-                    if not executor.metadata.get("policy_managed_by_handler"):
-                        mark_external_tool_execution_started(
-                            normalized_call,
-                            context=call_context,
-                            event_sink=event_sink,
-                        )
-                    result = executor.execute(normalized_call, call_context)
-        except ApprovalError:
-            raise
-        except Exception as exc:
-            if _is_cancelled_error(exc):
+                    approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
+                    if approval_result is not None:
+                        result = approval_result
+                    else:
+                        if not executor.metadata.get("policy_managed_by_handler"):
+                            mark_external_tool_execution_started(
+                                normalized_call,
+                                context=call_context,
+                                event_sink=event_sink,
+                            )
+                        result = executor.execute(normalized_call, call_context)
+            except ApprovalError:
                 raise
-            message = (
-                executor.failure_error_function(exc)
-                if executor.failure_error_function is not None
-                else f"Tool execution failed ({normalized_call.name}): {exc}"
-            )
-            result = self._error_result(
-                normalized_call.id,
-                message,
-                error_code="tool_execution_failed",
-            )
+            except Exception as exc:
+                if _is_cancelled_error(exc):
+                    raise
+                message = (
+                    executor.failure_error_function(exc)
+                    if executor.failure_error_function is not None
+                    else f"Tool execution failed ({normalized_call.name}): {exc}"
+                )
+                result = self._error_result(
+                    normalized_call.id,
+                    message,
+                    error_code="tool_execution_failed",
+                )
+
+        self._capture_execution_duration(call_context)
+
+        if _result_finalizer is not None:
+            result = _result_finalizer(normalized_call, call_context, result)
 
         if _needs_tool_call_id(result.tool_call_id):
             result.tool_call_id = normalized_call.id
@@ -126,6 +168,21 @@ class ToolOrchestrator:
 
         self._emit_completed(normalized_call, result=result, context=call_context, event_sink=event_sink)
         return result
+
+    @staticmethod
+    def _capture_execution_duration(context: ToolContext) -> None:
+        if context.metadata.get(_TOOL_DISPATCH_STARTED_METADATA_KEY) is not True:
+            return
+        if _TOOL_DISPATCH_DURATION_MS_METADATA_KEY in context.metadata:
+            return
+        started_at_ns = context.metadata.get(_TOOL_DISPATCH_STARTED_AT_METADATA_KEY)
+        if not isinstance(started_at_ns, int):
+            return
+        elapsed_ns = max(time.monotonic_ns() - started_at_ns, 0)
+        context.metadata[_TOOL_DISPATCH_DURATION_MS_METADATA_KEY] = min(
+            elapsed_ns // 1_000_000,
+            _JSON_SAFE_INTEGER_MAX,
+        )
 
     def _resolve_executor(self, name: str) -> ToolExecutor | None:
         executor = self._executors.get(name)
@@ -137,7 +194,13 @@ class ToolOrchestrator:
             return self.registry.get_executor(name)
         spec = self.registry.get(name)
         schema = self.registry.get_schema(name) if self.registry.has_schema(name) else None
-        return RegistryToolExecutor(name=spec.name, handler=spec.handler, schema=schema)
+        return RegistryToolExecutor(
+            name=spec.name,
+            handler=spec.handler,
+            schema=schema,
+            idempotency=spec.idempotency,
+            tool_metadata=spec.tool_metadata,
+        )
 
     @staticmethod
     def _approval_result(
@@ -244,7 +307,24 @@ class ToolOrchestrator:
             policy_source = "disallowed_tools"
         elif callable(can_use_tool) and not bool(can_use_tool(call.name, dict(call.arguments))):
             policy_source = "can_use_tool"
+        elif executor is not None:
+            policy_source = metadata_policy_denial_source(
+                get_executor_tool_metadata(executor),
+                denied_side_effects=metadata.get("_vv_agent_denied_side_effects", []),
+                denied_capability_tags=metadata.get(
+                    "_vv_agent_denied_capability_tags",
+                    [],
+                ),
+                deny_terminal_tools=metadata.get("_vv_agent_deny_terminal_tools", False),
+                denied_cost_dimensions=metadata.get(
+                    "_vv_agent_denied_cost_dimensions",
+                    [],
+                ),
+            )
         elif allowed_tool_names is not None and call.name not in allowed_tool_names:
+            policy_source = "planned_name"
+
+        if policy_source is None and allowed_tool_names is not None and call.name not in allowed_tool_names:
             policy_source = "planned_name"
 
         if policy_source is None:
@@ -464,19 +544,58 @@ class ToolOrchestrator:
         )
 
     @staticmethod
+    def _emit_planned(
+        call: ToolCall,
+        *,
+        executor: ToolExecutor | None,
+        context: ToolContext,
+        event_sink: ToolEventSink | None,
+    ) -> None:
+        if event_sink is None:
+            return
+        metadata = _runtime_metadata(context)
+        session_id = str(metadata.get("_vv_agent_session_id") or metadata.get("session_id") or "") or None
+        event_sink(
+            ToolCallPlannedEvent(
+                run_id=str(metadata.get("_vv_agent_run_id") or ""),
+                trace_id=str(metadata.get("_vv_agent_trace_id") or metadata.get("trace_id") or ""),
+                agent_name=str(metadata.get("_vv_agent_agent_name") or ""),
+                session_id=session_id,
+                cycle_index=context.cycle_index,
+                tool_name=call.name,
+                tool_call_id=call.id,
+                arguments=dict(call.arguments),
+                tool_metadata=(get_executor_tool_metadata(executor) if executor is not None else None),
+                metadata={
+                    "tool_name": call.name,
+                    "tool_call_id": call.id,
+                    "tool_arguments": dict(call.arguments),
+                },
+            )
+        )
+
+    @staticmethod
     def _emit_started(call: ToolCall, *, context: ToolContext, event_sink: ToolEventSink | None) -> None:
         if event_sink is None:
             return
         metadata = _runtime_metadata(context)
+        session_id = str(metadata.get("_vv_agent_session_id") or metadata.get("session_id") or "") or None
         event_sink(
             ToolCallStartedEvent(
                 run_id=str(metadata.get("_vv_agent_run_id") or ""),
                 trace_id=str(metadata.get("_vv_agent_trace_id") or metadata.get("trace_id") or ""),
                 agent_name=str(metadata.get("_vv_agent_agent_name") or ""),
+                session_id=session_id,
                 cycle_index=context.cycle_index,
                 tool_name=call.name,
                 tool_call_id=call.id,
-                metadata={"arguments": dict(call.arguments)},
+                arguments=dict(call.arguments),
+                tool_metadata=context.metadata.get(_TOOL_TYPED_METADATA_KEY),
+                metadata={
+                    "tool_name": call.name,
+                    "tool_call_id": call.id,
+                    "tool_arguments": dict(call.arguments),
+                },
             )
         )
 
@@ -491,19 +610,35 @@ class ToolOrchestrator:
         if event_sink is None:
             return
         metadata = _runtime_metadata(context)
+        execution_started = context.metadata.get(_TOOL_DISPATCH_STARTED_METADATA_KEY) is True
+        duration_ms = context.metadata.get(_TOOL_DISPATCH_DURATION_MS_METADATA_KEY)
+        if not execution_started or not isinstance(duration_ms, int):
+            duration_ms = None
+        session_id = str(metadata.get("_vv_agent_session_id") or metadata.get("session_id") or "") or None
         event_sink(
             ToolCallCompletedEvent(
                 run_id=str(metadata.get("_vv_agent_run_id") or ""),
                 trace_id=str(metadata.get("_vv_agent_trace_id") or metadata.get("trace_id") or ""),
                 agent_name=str(metadata.get("_vv_agent_agent_name") or ""),
+                session_id=session_id,
                 cycle_index=context.cycle_index,
                 tool_name=call.name,
                 tool_call_id=result.tool_call_id,
                 status=result.status_code.value if result.status_code else str(result.status or ""),
+                directive=result.directive.value,
+                error_code=result.error_code,
+                execution_started=execution_started,
+                duration_ms=duration_ms,
+                tool_metadata=context.metadata.get(_TOOL_TYPED_METADATA_KEY),
                 metadata={
-                    "arguments": dict(call.arguments),
+                    "tool_name": call.name,
+                    "tool_call_id": result.tool_call_id,
+                    "tool_arguments": dict(call.arguments),
+                    "status": result.status_code.value if result.status_code else str(result.status or ""),
                     "directive": result.directive.value,
                     "error_code": result.error_code,
+                    "content": result.content,
+                    "metadata": dict(result.metadata),
                 },
             )
         )
@@ -529,9 +664,13 @@ def mark_external_tool_execution_started(
     if context.metadata.get(_TOOL_DISPATCH_STARTED_METADATA_KEY) is True:
         return
     context.metadata[_TOOL_DISPATCH_STARTED_METADATA_KEY] = True
+    context.metadata[_TOOL_DISPATCH_STARTED_AT_METADATA_KEY] = time.monotonic_ns()
     callback = context.metadata.get(_TOOL_DISPATCH_CALLBACK_METADATA_KEY)
     if callable(callback):
         callback(call)
+    if event_sink is None:
+        runtime_event_sink = _runtime_metadata(context).get("_vv_agent_emit_event")
+        event_sink = runtime_event_sink if callable(runtime_event_sink) else None
     ToolOrchestrator._emit_started(call, context=context, event_sink=event_sink)
 
 

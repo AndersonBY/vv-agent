@@ -15,12 +15,44 @@ from vv_agent.context_providers import (
     collect_context_fragments,
 )
 from vv_agent.prompt.templates import render_sub_agents
-from vv_agent.run_config import RunConfig, _validate_bounded_int
+from vv_agent.run_config import RunConfig, ToolPolicy, _validate_bounded_int
 from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.function import FunctionTool
+from vv_agent.tools.metadata import ToolSideEffect
 from vv_agent.types import AgentTask, Message, NoToolPolicy
 
 RuntimeTask = AgentTask
+
+_TASK_TOOL_POLICY_METADATA_KEYS = (
+    "_vv_agent_allowed_tools",
+    "_vv_agent_disallowed_tools",
+    "_vv_agent_denied_side_effects",
+    "_vv_agent_denied_capability_tags",
+    "_vv_agent_deny_terminal_tools",
+    "_vv_agent_denied_cost_dimensions",
+)
+
+
+def _apply_tool_policy_metadata(
+    metadata: dict[str, Any],
+    policy: ToolPolicy | None,
+) -> None:
+    for key in _TASK_TOOL_POLICY_METADATA_KEYS:
+        metadata.pop(key, None)
+    if policy is None:
+        return
+    if policy.allowed_tools is not None:
+        metadata["_vv_agent_allowed_tools"] = list(policy.allowed_tools)
+    if policy.disallowed_tools:
+        metadata["_vv_agent_disallowed_tools"] = list(policy.disallowed_tools)
+    if policy.denied_side_effects:
+        metadata["_vv_agent_denied_side_effects"] = [ToolSideEffect(item).value for item in policy.denied_side_effects]
+    if policy.denied_capability_tags:
+        metadata["_vv_agent_denied_capability_tags"] = list(policy.denied_capability_tags)
+    if policy.deny_terminal_tools:
+        metadata["_vv_agent_deny_terminal_tools"] = True
+    if policy.denied_cost_dimensions:
+        metadata["_vv_agent_denied_cost_dimensions"] = list(policy.denied_cost_dimensions)
 
 
 class AgentCompiler:
@@ -37,19 +69,12 @@ class AgentCompiler:
         model = run_config.model or agent.model or resolved.selected_model
         metadata = dict(agent.metadata)
         metadata.update(run_config.metadata)
-        metadata.pop("_vv_agent_allowed_tools", None)
-        metadata.pop("_vv_agent_disallowed_tools", None)
+        _apply_tool_policy_metadata(metadata, run_config.tool_policy)
         metadata.setdefault("trace_id", trace_id)
         if resolved.context_length is not None:
             metadata.setdefault("model_context_window", resolved.context_length)
         if resolved.max_output_tokens is not None:
             metadata.setdefault("reserved_output_tokens", resolved.max_output_tokens)
-        if run_config.tool_policy is not None:
-            if run_config.tool_policy.allowed_tools is not None:
-                metadata["_vv_agent_allowed_tools"] = list(run_config.tool_policy.allowed_tools)
-            if run_config.tool_policy.disallowed_tools:
-                metadata["_vv_agent_disallowed_tools"] = list(run_config.tool_policy.disallowed_tools)
-
         no_tool_policy = run_config.no_tool_policy or agent.no_tool_policy or "continue"
         metadata["_vv_agent_tool_use_behavior"] = agent.tool_use_behavior
         if agent.stop_at_tool_names:
@@ -175,16 +200,9 @@ class AgentCompiler:
         metadata["_vv_agent_tool_use_behavior"] = controls["tool_use_behavior"]
         if controls["stop_at_tool_names"]:
             metadata["_vv_agent_stop_at_tool_names"] = list(controls["stop_at_tool_names"])
-        if run_config.tool_policy is not None:
-            if run_config.tool_policy.allowed_tools is not None:
-                metadata["_vv_agent_allowed_tools"] = list(run_config.tool_policy.allowed_tools)
-            if run_config.tool_policy.disallowed_tools:
-                metadata["_vv_agent_disallowed_tools"] = list(run_config.tool_policy.disallowed_tools)
+        _apply_tool_policy_metadata(metadata, run_config.tool_policy)
 
-        initial_messages = [
-            Message.from_dict(item)
-            for item in definition["initial_messages"]
-        ]
+        initial_messages = [Message.from_dict(item) for item in definition["initial_messages"]]
         stored_tool_names = {
             str(function["name"])
             for item in definition["tools"]
@@ -210,11 +228,7 @@ class AgentCompiler:
             agent_type=agent_definition.get("type"),
             native_multimodal=bool(controls["native_multimodal"]),
             extra_tool_names=[
-                *[
-                    tool.name
-                    for tool in agent.tools
-                    if isinstance(tool, FunctionTool) and tool.exposure != ToolExposure.HIDDEN
-                ],
+                *[tool.name for tool in agent.tools if isinstance(tool, FunctionTool) and tool.exposure != ToolExposure.HIDDEN],
                 *handoff_tool_names,
             ],
             model_settings=run_config.model_settings,
@@ -231,11 +245,7 @@ class AgentCompiler:
     ) -> None:
         sections = system_metadata.get("system_prompt_sections")
         section_items: list[Any] = sections if isinstance(sections, list) else []
-        section_map = {
-            str(item.get("id")): str(item.get("text") or "")
-            for item in section_items
-            if isinstance(item, dict)
-        }
+        section_map = {str(item.get("id")): str(item.get("text") or "") for item in section_items if isinstance(item, dict)}
         if isinstance(agent.instructions, str):
             expected = agent.instructions.strip()
             observed = section_map.get("agent_instructions")

@@ -6,7 +6,7 @@ import math
 import re
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from vv_agent.budget import RunBudgetLimits
@@ -24,6 +24,11 @@ from vv_agent.checkpoint import (
 from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.state import StateStoreSpec
 from vv_agent.tools import ToolRegistry, build_default_registry
+from vv_agent.tools.metadata import (
+    ToolSideEffect,
+    normalize_denied_side_effects,
+    normalize_metadata_labels,
+)
 from vv_agent.types import AgentTask
 
 DISTRIBUTED_RUN_SCHEMA_VERSION_V1 = "vv-agent.distributed-run.v1"
@@ -339,6 +344,10 @@ class DistributedToolPolicy:
     disallowed_tools: tuple[str, ...] = ()
     approval: Literal["default", "always", "never", "on_request"] = "default"
     predicate_ref: CapabilityRef | None = None
+    denied_side_effects: tuple[ToolSideEffect | str, ...] = ()
+    denied_capability_tags: tuple[str, ...] = ()
+    deny_terminal_tools: bool = False
+    denied_cost_dimensions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.approval not in {"default", "always", "never", "on_request"}:
@@ -349,14 +358,53 @@ class DistributedToolPolicy:
         ):
             if values is not None and any(not isinstance(value, str) or not value.strip() for value in values):
                 raise DistributedContractError(f"{field_name} must contain non-empty strings")
+        try:
+            denied_side_effects = tuple(value.value for value in normalize_denied_side_effects(self.denied_side_effects))
+            denied_capability_tags = tuple(
+                normalize_metadata_labels(
+                    self.denied_capability_tags,
+                    field_name="denied_capability_tags",
+                )
+            )
+            denied_cost_dimensions = tuple(
+                normalize_metadata_labels(
+                    self.denied_cost_dimensions,
+                    field_name="denied_cost_dimensions",
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise DistributedContractError(str(exc)) from exc
+        if not isinstance(self.deny_terminal_tools, bool):
+            raise DistributedContractError("tool_policy.deny_terminal_tools must be a boolean")
+        object.__setattr__(self, "denied_side_effects", denied_side_effects)
+        object.__setattr__(
+            self,
+            "denied_capability_tags",
+            denied_capability_tags,
+        )
+        object.__setattr__(
+            self,
+            "denied_cost_dimensions",
+            denied_cost_dimensions,
+        )
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, *, include_metadata_denials: bool = True) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
             "disallowed_tools": list(self.disallowed_tools),
             "approval": self.approval,
             "predicate_ref": self.predicate_ref.to_dict() if self.predicate_ref is not None else None,
         }
+        if include_metadata_denials:
+            payload.update(
+                {
+                    "denied_side_effects": list(self.denied_side_effects),
+                    "denied_capability_tags": list(self.denied_capability_tags),
+                    "deny_terminal_tools": self.deny_terminal_tools,
+                    "denied_cost_dimensions": list(self.denied_cost_dimensions),
+                }
+            )
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Any) -> DistributedToolPolicy:
@@ -368,6 +416,16 @@ class DistributedToolPolicy:
             raise DistributedContractError("tool_policy.allowed_tools must be an array or null")
         if not isinstance(disallowed, list):
             raise DistributedContractError("tool_policy.disallowed_tools must be an array")
+        denied_side_effects = payload.get("denied_side_effects", [])
+        denied_capability_tags = payload.get("denied_capability_tags", [])
+        denied_cost_dimensions = payload.get("denied_cost_dimensions", [])
+        for field_name, values in (
+            ("denied_side_effects", denied_side_effects),
+            ("denied_capability_tags", denied_capability_tags),
+            ("denied_cost_dimensions", denied_cost_dimensions),
+        ):
+            if not isinstance(values, list):
+                raise DistributedContractError(f"tool_policy.{field_name} must be an array")
         approval = payload.get("approval", "default")
         if not isinstance(approval, str):
             raise DistributedContractError("tool_policy.approval must be a string")
@@ -379,6 +437,10 @@ class DistributedToolPolicy:
             predicate_ref=(
                 CapabilityRef.from_dict(predicate, field_name="tool_policy.predicate_ref") if predicate is not None else None
             ),
+            denied_side_effects=tuple(denied_side_effects),
+            denied_capability_tags=tuple(denied_capability_tags),
+            deny_terminal_tools=payload.get("deny_terminal_tools", False),
+            denied_cost_dimensions=tuple(denied_cost_dimensions),
         )
 
     def resolve(self, registry: DistributedCapabilityRegistry) -> ToolPolicy:
@@ -395,7 +457,78 @@ class DistributedToolPolicy:
             disallowed_tools=list(self.disallowed_tools),
             approval=self.approval,
             can_use_tool=predicate,
+            denied_side_effects=list(self.denied_side_effects),
+            denied_capability_tags=list(self.denied_capability_tags),
+            deny_terminal_tools=self.deny_terminal_tools,
+            denied_cost_dimensions=list(self.denied_cost_dimensions),
         )
+
+
+def _policy_with_task_metadata_denials(
+    policy: DistributedToolPolicy,
+    task: AgentTask,
+) -> DistributedToolPolicy:
+    metadata = getattr(task, "metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise DistributedContractError("task.metadata must be an object")
+
+    def values(key: str) -> tuple[Any, ...]:
+        if key not in metadata:
+            return ()
+        value = metadata[key]
+        if not isinstance(value, list):
+            raise DistributedContractError(f"task.metadata.{key} must be an array")
+        return tuple(value)
+
+    deny_terminal_tools = policy.deny_terminal_tools
+    terminal_key = "_vv_agent_deny_terminal_tools"
+    if terminal_key in metadata:
+        terminal_value = metadata[terminal_key]
+        if not isinstance(terminal_value, bool):
+            raise DistributedContractError(f"task.metadata.{terminal_key} must be a boolean")
+        deny_terminal_tools = deny_terminal_tools or terminal_value
+
+    return replace(
+        policy,
+        denied_side_effects=(*policy.denied_side_effects, *values("_vv_agent_denied_side_effects")),
+        denied_capability_tags=(
+            *policy.denied_capability_tags,
+            *values("_vv_agent_denied_capability_tags"),
+        ),
+        deny_terminal_tools=deny_terminal_tools,
+        denied_cost_dimensions=(
+            *policy.denied_cost_dimensions,
+            *values("_vv_agent_denied_cost_dimensions"),
+        ),
+    )
+
+
+def _recipe_with_task_metadata_denials(
+    recipe: RuntimeRecipe,
+    task: AgentTask,
+) -> RuntimeRecipe:
+    capabilities = replace(
+        recipe.capabilities,
+        tool_policy=_policy_with_task_metadata_denials(recipe.capabilities.tool_policy, task),
+    )
+    return replace(recipe, capabilities=capabilities)
+
+
+def _task_with_policy_metadata_denials(
+    task: AgentTask,
+    policy: DistributedToolPolicy,
+) -> AgentTask:
+    effective_policy = _policy_with_task_metadata_denials(policy, task)
+    metadata = dict(task.metadata)
+    if effective_policy.denied_side_effects:
+        metadata["_vv_agent_denied_side_effects"] = list(effective_policy.denied_side_effects)
+    if effective_policy.denied_capability_tags:
+        metadata["_vv_agent_denied_capability_tags"] = list(effective_policy.denied_capability_tags)
+    if effective_policy.deny_terminal_tools:
+        metadata["_vv_agent_deny_terminal_tools"] = True
+    if effective_policy.denied_cost_dimensions:
+        metadata["_vv_agent_denied_cost_dimensions"] = list(effective_policy.denied_cost_dimensions)
+    return replace(task, metadata=metadata)
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,9 +569,17 @@ class DistributedCapabilities:
             raise DistributedContractError("checkpoint_extension_refs must be sorted by unique namespace")
 
     def to_dict(self, *, include_checkpoint: bool | None = None) -> dict[str, Any]:
+        if include_checkpoint is None:
+            include_checkpoint = bool(
+                self.checkpoint_store_ref is not None
+                or self.checkpoint_event_store_ref is not None
+                or self.checkpoint_extension_refs
+                or self.reconciliation_provider_ref is not None
+                or self.after_cycle_hook_refs
+            )
         payload = {
             "toolset_ref": self.toolset_ref.to_dict(),
-            "tool_policy": self.tool_policy.to_dict(),
+            "tool_policy": self.tool_policy.to_dict(include_metadata_denials=include_checkpoint),
             "llm_client_ref": self.llm_client_ref.to_dict() if self.llm_client_ref else None,
             "workspace_backend_ref": self.workspace_backend_ref.to_dict() if self.workspace_backend_ref else None,
             "approval_provider_ref": self.approval_provider_ref.to_dict() if self.approval_provider_ref else None,
@@ -453,14 +594,6 @@ class DistributedCapabilities:
             "hook_refs": [reference.to_dict() for reference in self.hook_refs],
             "observer_refs": [reference.to_dict() for reference in self.observer_refs],
         }
-        if include_checkpoint is None:
-            include_checkpoint = bool(
-                self.checkpoint_store_ref is not None
-                or self.checkpoint_event_store_ref is not None
-                or self.checkpoint_extension_refs
-                or self.reconciliation_provider_ref is not None
-                or self.after_cycle_hook_refs
-            )
         if include_checkpoint:
             payload.update(
                 {
@@ -724,6 +857,7 @@ class DistributedRunEnvelope:
         lease_duration_ms: int = DEFAULT_LEASE_DURATION_MS,
         budget_limits: RunBudgetLimits | None = None,
     ) -> DistributedRunEnvelope:
+        recipe = _recipe_with_task_metadata_denials(recipe, task)
         effective_run_id = run_id or str(task.metadata.get("_vv_agent_run_id") or root_run_id)
         idempotency_key = f"{effective_run_id}:cycle:{cycle_index}"
         return cls(
@@ -763,11 +897,17 @@ class DistributedRunEnvelope:
             raise DistributedContractError(f"distributed job {self.job_id} deadline has expired")
 
     def to_dict(self) -> dict[str, Any]:
+        serialized_task = self.task
+        if not self.is_checkpoint_v2:
+            serialized_task = _task_with_policy_metadata_denials(
+                self.task,
+                self.recipe.capabilities.tool_policy,
+            )
         payload = {
             "schema_version": self.schema_version,
             "job_id": self.job_id,
             "run_id": self.run_id,
-            "task": self.task.to_dict(),
+            "task": serialized_task.to_dict(),
             "budget_limits": self.budget_limits.to_dict() if self.budget_limits is not None else None,
             "recipe": self.recipe.to_dict(include_checkpoint_capabilities=self.is_checkpoint_v2),
             "cycle_name": self.cycle_name,

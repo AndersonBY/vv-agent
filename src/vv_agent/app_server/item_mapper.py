@@ -14,6 +14,7 @@ from vv_agent.events import (
     RunFailedEvent,
     RunStartedEvent,
     ToolCallCompletedEvent,
+    ToolCallPlannedEvent,
     ToolCallStartedEvent,
 )
 
@@ -80,32 +81,52 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
                 payload={"text": str(assistant_message)},
             )
             return _projection(item, "item/completed")
+    if isinstance(event, ToolCallPlannedEvent):
+        return ItemProjection()
     if isinstance(event, ToolCallStartedEvent):
+        payload: dict[str, Any] = {"toolName": event.tool_name, "toolCallId": event.tool_call_id}
+        tool_metadata = _tool_metadata_payload(event.tool_metadata)
+        if tool_metadata is not None:
+            payload["toolMetadata"] = tool_metadata
         item = _item(
             event,
             thread_id=thread_id,
             turn_id=turn_id,
             item_type="toolCall",
             status="started",
-            payload={"toolName": event.tool_name, "toolCallId": event.tool_call_id},
+            payload=payload,
         )
-        arguments = event.metadata.get("tool_arguments")
-        if not isinstance(arguments, dict):
-            arguments = event.metadata.get("arguments")
-        arguments = dict(arguments) if isinstance(arguments, dict) else {}
+        arguments = dict(event.arguments)
         return _projection(
             item,
             "item/started",
             additional_notifications=(("item/toolCall/delta", {**item.to_dict(), "delta": arguments}),),
         )
     if isinstance(event, ToolCallCompletedEvent):
+        payload: dict[str, Any] = {
+            "toolName": event.tool_name,
+            "toolCallId": event.tool_call_id,
+            "status": event.status,
+        }
+        additive_fields = {
+            "directive": "directive",
+            "error_code": "errorCode",
+            "execution_started": "executionStarted",
+            "duration_ms": "durationMs",
+        }
+        for event_field, payload_field in additive_fields.items():
+            if event.has_additive_field(event_field):
+                payload[payload_field] = getattr(event, event_field)
+        tool_metadata = _tool_metadata_payload(event.tool_metadata)
+        if tool_metadata is not None:
+            payload["toolMetadata"] = tool_metadata
         item = _item(
             event,
             thread_id=thread_id,
             turn_id=turn_id,
             item_type="toolCall",
             status=_tool_item_status(event.status),
-            payload={"toolName": event.tool_name, "toolCallId": event.tool_call_id, "status": event.status},
+            payload=payload,
         )
         return _projection(item, "item/completed")
     if isinstance(event, ApprovalRequestedEvent):
@@ -234,6 +255,19 @@ def _tool_item_status(status: str) -> str:
         "error": "failed",
         "wait_response": "inProgress",
     }.get(status, "completed")
+
+
+def _tool_metadata_payload(metadata: Any) -> dict[str, Any] | None:
+    if metadata is None:
+        return None
+    value = metadata.to_dict()
+    return {
+        "sideEffect": value["side_effect"],
+        "idempotency": value["idempotency"],
+        "terminal": value["terminal"],
+        "capabilityTags": list(value["capability_tags"]),
+        "costDimensions": list(value["cost_dimensions"]),
+    }
 
 
 def _item(

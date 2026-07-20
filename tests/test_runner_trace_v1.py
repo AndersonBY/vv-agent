@@ -12,7 +12,7 @@ from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 TRACE_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "runner_trace_v1.jsonl"
-TRACE_FIXTURE_SHA256 = "1396aab48578f9f7f0a6f8202efeeef38c36093b0645c11010f7aed7d93cb62b"
+TRACE_FIXTURE_SHA256 = "998fb1341dbecc29d1a3ddef95bc9b38a180510485f52c57ad4afcef2d576834"
 TRACE_FIELDS = (
     "type",
     "cycle_index",
@@ -23,6 +23,10 @@ TRACE_FIELDS = (
     "tool_call_id",
     "arguments",
     "status",
+    "directive",
+    "error_code",
+    "execution_started",
+    "duration_ms",
     "final_output",
 )
 

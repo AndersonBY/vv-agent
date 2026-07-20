@@ -25,6 +25,7 @@ from vv_agent.checkpoint import (
     ResumePolicy,
     ToolIdempotency,
     compute_operation_request_digest,
+    compute_run_definition_digest,
 )
 from vv_agent.event_store import IdempotentRunEventStore, RunEventStore
 from vv_agent.events import (
@@ -39,6 +40,7 @@ from vv_agent.events import (
     event_from_dict,
 )
 from vv_agent.llm.base import LlmRequest
+from vv_agent.runtime.checkpoint_codec_v2 import run_definition_comparison_copy
 from vv_agent.runtime.state_v2 import (
     CheckpointStoreV2,
     CheckpointV2,
@@ -1026,12 +1028,21 @@ class CheckpointResumeController:
                 )
 
     def _validate_existing_definition(self, checkpoint: CheckpointV2) -> None:
-        if checkpoint.run_definition_digest != self.run_definition_digest:
+        stored_digest = compute_run_definition_digest(checkpoint.run_definition)
+        if checkpoint.run_definition_digest != stored_digest:
             raise CheckpointError(
-                "checkpoint run definition digest does not match this run",
+                "checkpoint run definition digest does not match its embedded definition",
                 code="checkpoint_definition_mismatch",
             )
-        if checkpoint.run_definition != self.run_definition:
+        current_digest = compute_run_definition_digest(self.run_definition)
+        if self.run_definition_digest != current_digest:
+            raise CheckpointError(
+                "current run definition digest does not match its definition",
+                code="checkpoint_definition_mismatch",
+            )
+        stored_comparison = run_definition_comparison_copy(checkpoint.run_definition)
+        current_comparison = run_definition_comparison_copy(self.run_definition)
+        if stored_comparison != current_comparison:
             raise CheckpointError(
                 "checkpoint embedded run definition does not match this run",
                 code="checkpoint_definition_mismatch",

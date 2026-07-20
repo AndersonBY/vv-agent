@@ -13,6 +13,7 @@ from vv_agent.runtime import (
     BeforeLLMEvent,
     BeforeLLMPatch,
     BeforeToolCallEvent,
+    ExecutionContext,
 )
 from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
 from vv_agent.types import (
@@ -91,6 +92,7 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
         ]
     )
     runtime_events: list[tuple[str, dict[str, object]]] = []
+    lifecycle_events = []
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
@@ -100,13 +102,87 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
     )
     task = AgentTask(task_id="hook_tool_short_circuit", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
 
-    result = runtime.run(task)
+    result = runtime.run(
+        task,
+        ctx=ExecutionContext(
+            metadata={
+                "_vv_agent_agent_name": "hook-agent",
+                "_vv_agent_emit_event": lifecycle_events.append,
+                "_vv_agent_run_id": "run-hook",
+                "_vv_agent_trace_id": "trace-hook",
+            }
+        ),
+    )
     assert result.status == AgentStatus.COMPLETED
     assert result.cycles[0].tool_results[0].error_code == "blocked_by_hook"
     assert not any(
         event == "tool_started" and payload.get("tool_call_id") == "c1"
         for event, payload in runtime_events
     )
+    blocked_lifecycle = [
+        event for event in lifecycle_events if getattr(event, "tool_call_id", None) == "c1"
+    ]
+    assert [event.type for event in blocked_lifecycle] == [
+        "tool_call_planned",
+        "tool_call_completed",
+    ]
+    assert blocked_lifecycle[-1].execution_started is False
+
+
+def test_runtime_completed_event_contains_after_hook_result(tmp_path: Path) -> None:
+    class FinishAfterTodoHook(BaseRuntimeHook):
+        def after_tool_call(self, event: AfterToolCallEvent) -> ToolExecutionResult | None:
+            if event.call.name != TASK_LIST_TOOL_NAME:
+                return None
+            return ToolExecutionResult(
+                tool_call_id=event.result.tool_call_id,
+                content="hook content",
+                status_code=ToolResultStatus.SUCCESS,
+                directive=ToolDirective.FINISH,
+                metadata={"final_message": "finished-by-hook"},
+            )
+
+    lifecycle_events = []
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="todo",
+                    tool_calls=[
+                        ToolCall(
+                            id="hook-finalized",
+                            name=TASK_LIST_TOOL_NAME,
+                            arguments={"todos": [{"title": "a", "status": "completed", "priority": "medium"}]},
+                        )
+                    ],
+                )
+            ]
+        ),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        hooks=[FinishAfterTodoHook()],
+    )
+    result = runtime.run(
+        AgentTask(task_id="hook_completed_event", model="m", system_prompt="sys", user_prompt="go", max_cycles=2),
+        ctx=ExecutionContext(
+            metadata={
+                "_vv_agent_agent_name": "hook-agent",
+                "_vv_agent_emit_event": lifecycle_events.append,
+                "_vv_agent_run_id": "run-hook",
+                "_vv_agent_trace_id": "trace-hook",
+            }
+        ),
+    )
+
+    assert result.final_answer == "finished-by-hook"
+    completed = next(
+        event
+        for event in lifecycle_events
+        if event.type == "tool_call_completed" and event.tool_call_id == "hook-finalized"
+    )
+    assert completed.directive == ToolDirective.FINISH.value
+    assert completed.metadata["content"] == "hook content"
+    assert completed.metadata["metadata"] == {"final_message": "finished-by-hook"}
 
 
 def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> None:

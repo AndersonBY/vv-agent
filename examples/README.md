@@ -37,7 +37,7 @@ typed events plus cancellation or approval control through `RunHandle`.
 | 05 | `05_ask_user_resume.py` | Tool approval and `WAIT_USER` events |
 | 06 | `06_runtime_hooks.py` | Low-level hooks passed through `RunConfig.hooks` |
 | 07 | `07_token_budget_guard.py` | Public token and tool-call run budgets |
-| 08 | `08_custom_tool.py` | `@function_tool` schema inference and structured output |
+| 08 | `08_custom_tool.py` | `@function_tool` schema inference, structured output, and optional host metadata |
 | 09 | `09_resource_loader.py` | JSON-backed agent profile loading |
 | 10 | `10_read_image.py` | Image metadata through a typed tool |
 | 11 | `11_sub_agent_pipeline.py` | `agent.as_tool()` and `handoff()` composition |
@@ -56,6 +56,11 @@ uv run python examples/08_custom_tool.py
 uv run python examples/11_sub_agent_pipeline.py
 uv run python examples/17_error_recovery.py
 ```
+
+Example 08 intentionally leaves `tool_metadata` unset. Hosts can pass
+`ToolMetadata(...)` to the decorator as shown in the [root README](../README.md);
+the declaration stays outside the inferred model schema, and leaving it absent
+preserves the example's behavior.
 
 ## Runtime Integration
 

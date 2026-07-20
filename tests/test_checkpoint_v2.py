@@ -30,6 +30,7 @@ from vv_agent.checkpoint import (
     validate_checkpoint_extension,
 )
 from vv_agent.runtime.checkpoint_codec_v2 import (
+    _strict_json_loads,
     checkpoint_v2_from_dict,
     checkpoint_v2_from_json,
     checkpoint_v2_to_dict,
@@ -37,8 +38,10 @@ from vv_agent.runtime.checkpoint_codec_v2 import (
     decode_checkpoint_dict,
     decode_checkpoint_json,
     migrate_terminal_checkpoint_v1,
+    run_definition_comparison_copy,
     validate_extension_state_size,
 )
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.state import Checkpoint, CheckpointConflictError, InMemoryStateStore
 from vv_agent.runtime.state_v2 import (
     CheckpointStoreV2,
@@ -54,7 +57,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
 
 
 def _fixture(name: str) -> dict[str, Any]:
-    return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+    return _strict_json_loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
 def _codec_case(name: str) -> dict[str, Any]:
@@ -117,11 +120,50 @@ def test_checkpoint_v2_round_trip_preserves_unknown_fields_and_uses_jcs() -> Non
     assert checkpoint_v2_from_json(wire) == checkpoint
 
 
+def test_checkpoint_v2_round_trip_restores_jcs_large_float_through_codec_and_sqlite(
+    tmp_path: Path,
+) -> None:
+    definition_case = next(
+        case
+        for case in _fixture("run_definition_v1.json")["golden_cases"]
+        if case["name"] == "full_unicode_float_and_capabilities"
+    )
+    checkpoint = _minimal_checkpoint(key="jcs-large-float")
+    checkpoint.run_definition = deepcopy(definition_case["definition"])
+    checkpoint.run_definition_digest = definition_case["sha256"]
+
+    wire = checkpoint_v2_to_json(checkpoint)
+    assert '"large_number":100000000000000000000' in wire
+    decoded = checkpoint_v2_from_json(wire)
+    large_number = decoded.run_definition["model"]["settings"]["extra_body"]["large_number"]
+    assert isinstance(large_number, float)
+    assert large_number == 1e20
+
+    store = SqliteStateStore(tmp_path / "jcs-large-float.sqlite3")
+    assert store.create_checkpoint_v2(checkpoint)
+    restored = store.load_checkpoint_v2(checkpoint.checkpoint_key)
+    assert restored is not None
+    restored_large_number = restored.run_definition["model"]["settings"]["extra_body"]["large_number"]
+    assert isinstance(restored_large_number, float)
+    assert restored_large_number == 1e20
+    assert restored.run_definition_digest == definition_case["sha256"]
+
+
+def test_run_definition_rejects_host_integer_above_i_json_safe_range() -> None:
+    definition = deepcopy(_fixture("run_definition_v1.json")["golden_cases"][0]["definition"])
+    definition["model"]["settings"] = {
+        "extra_body": {"count": 9_007_199_254_740_992},
+    }
+
+    with pytest.raises(CheckpointError) as error:
+        compute_run_definition_digest(definition)
+
+    assert error.value.code == "checkpoint_definition_not_i_json"
+
+
 def test_checkpoint_v2_validates_embedded_definition_schema_and_digest() -> None:
     payload = _codec_case("minimal_running")
-    assert checkpoint_v2_from_dict(payload).run_definition_digest == compute_run_definition_digest(
-        payload["run_definition"]
-    )
+    assert checkpoint_v2_from_dict(payload).run_definition_digest == compute_run_definition_digest(payload["run_definition"])
 
     missing_schema = deepcopy(payload)
     missing_schema.pop("run_definition_schema")
@@ -141,6 +183,147 @@ def test_checkpoint_v2_validates_embedded_definition_schema_and_digest() -> None
     with pytest.raises(CheckpointError) as error:
         checkpoint_v2_from_dict(unknown)
     assert error.value.code == "checkpoint_schema_unsupported"
+
+
+def test_checkpoint_resume_accepts_legacy_additive_defaults_without_rewriting() -> None:
+    legacy_case = next(case for case in _fixture("run_definition_legacy_v1.json")["cases"] if case["name"] == "minimal")
+    current_case = next(case for case in _fixture("run_definition_v1.json")["golden_cases"] if case["name"] == "minimal")
+    stored_definition = deepcopy(legacy_case["definition"])
+    store = InMemoryStateStore()
+    checkpoint = CheckpointV2(
+        checkpoint_key="legacy-definition",
+        task_id="legacy-task",
+        root_run_id="legacy-run",
+        trace_id="legacy-trace",
+        run_definition=deepcopy(stored_definition),
+        run_definition_digest=legacy_case["sha256"],
+        resume_attempt=1,
+        cycle_index=0,
+        status=AgentStatus.RUNNING,
+        messages=[],
+        cycles=[],
+    )
+    assert compute_run_definition_digest(stored_definition) == legacy_case["sha256"]
+    assert store.create_checkpoint_v2(checkpoint)
+    controller = CheckpointResumeController(
+        config=CheckpointConfig(
+            store=store,
+            key="legacy-definition",
+            resume_policy=ResumePolicy.REQUIRE_EXISTING,
+        ),
+        task_id="legacy-task",
+        run_id="legacy-run",
+        trace_id="legacy-trace",
+        run_definition=current_case["definition"],
+        run_definition_digest=current_case["sha256"],
+        initial_messages=[],
+        initial_shared_state={},
+        initial_budget_usage=None,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+    )
+
+    assert controller.admit() is None
+    retained = store.load_checkpoint_v2("legacy-definition")
+    assert retained is not None
+    assert retained.run_definition == stored_definition
+    assert retained.run_definition_digest == legacy_case["sha256"]
+
+
+@pytest.mark.parametrize("surface", ["tool_metadata", "tool_policy"])
+def test_checkpoint_resume_rejects_non_default_current_metadata_or_policy_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+) -> None:
+    legacy_case = next(case for case in _fixture("run_definition_legacy_v1.json")["cases"] if case["name"] == "minimal")
+    stored_definition = deepcopy(legacy_case["definition"])
+    stored_digest = legacy_case["sha256"]
+    if surface == "tool_metadata":
+        stored_definition["tools"] = [
+            {
+                "schema": {
+                    "type": "function",
+                    "function": {
+                        "name": "inspect_source",
+                        "description": "Inspect one source.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "idempotency": "supported",
+                "timeout_seconds": None,
+                "approval": {"mode": "static", "required": False},
+            }
+        ]
+        stored_digest = compute_run_definition_digest(stored_definition)
+    current_definition = run_definition_comparison_copy(stored_definition)
+    if surface == "tool_metadata":
+        current_definition["tools"][0]["tool_metadata"] = {
+            "side_effect": "read",
+            "idempotency": "supported",
+            "terminal": False,
+            "capability_tags": ["source.inspect"],
+            "cost_dimensions": [],
+        }
+    else:
+        current_definition["tool_policy"]["deny_terminal_tools"] = True
+    checkpoint_key = f"legacy-{surface}-mismatch"
+    store = InMemoryStateStore()
+    checkpoint = CheckpointV2(
+        checkpoint_key=checkpoint_key,
+        task_id="legacy-task",
+        root_run_id="legacy-run",
+        trace_id="legacy-trace",
+        run_definition=deepcopy(stored_definition),
+        run_definition_digest=stored_digest,
+        resume_attempt=1,
+        cycle_index=0,
+        status=AgentStatus.RUNNING,
+        messages=[],
+        cycles=[],
+    )
+    assert store.create_checkpoint_v2(checkpoint)
+    claims = 0
+    original_claim = store.claim_checkpoint_v2
+
+    def count_claim(*args: Any, **kwargs: Any) -> Any:
+        nonlocal claims
+        claims += 1
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(store, "claim_checkpoint_v2", count_claim)
+    controller = CheckpointResumeController(
+        config=CheckpointConfig(
+            store=store,
+            key=checkpoint_key,
+            resume_policy=ResumePolicy.REQUIRE_EXISTING,
+        ),
+        task_id="legacy-task",
+        run_id="legacy-run",
+        trace_id="legacy-trace",
+        run_definition=current_definition,
+        run_definition_digest=compute_run_definition_digest(current_definition),
+        initial_messages=[],
+        initial_shared_state={},
+        initial_budget_usage=None,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+    )
+
+    with pytest.raises(CheckpointError) as error:
+        controller.admit()
+
+    assert error.value.code == "checkpoint_definition_mismatch"
+    assert claims == 0
+    retained = store.load_checkpoint_v2(checkpoint_key)
+    assert retained is not None
+    assert retained.run_definition == stored_definition
+    assert retained.run_definition_digest == stored_digest
 
 
 def test_checkpoint_v2_invalid_fixture_cases_have_stable_codes() -> None:
@@ -212,9 +395,7 @@ def test_checkpoint_v2_strict_dual_decoder_and_terminal_v1_migration() -> None:
     assert error.value.code == "checkpoint_migration_requires_reconciliation"
 
     old_v2 = next(
-        case
-        for case in migration_cases
-        if case["name"] == "checkpoint_0_5_0_v2_requires_explicit_definition_migration"
+        case for case in migration_cases if case["name"] == "checkpoint_0_5_0_v2_requires_explicit_definition_migration"
     )
     with pytest.raises(CheckpointError) as error:
         decode_checkpoint_dict(old_v2["source_payload"])
@@ -906,9 +1087,7 @@ def test_store_preserves_unknown_top_level_fields(
 
 def test_sqlite_v2_schema_has_definition_columns_and_separate_namespace(tmp_path: Path) -> None:
     store = SqliteStateStore(tmp_path / "schema.sqlite3")
-    columns = {
-        row[1] for row in store._conn.execute("PRAGMA table_info(checkpoints_v2)").fetchall()
-    }
+    columns = {row[1] for row in store._conn.execute("PRAGMA table_info(checkpoints_v2)").fetchall()}
     assert {"run_definition_schema", "run_definition"} <= columns
     checkpoint = _minimal_checkpoint()
     assert store.create_checkpoint_v2(checkpoint)
@@ -944,8 +1123,6 @@ def test_cross_runtime_sqlite_v2_probe_from_environment() -> None:
         assert checkpoint is not None
         assert checkpoint.messages == [Message(role="user", content="from Rust v2")]
         assert checkpoint.shared_state == {"format": "checkpoint-v2", "writer": "rust"}
-        assert checkpoint.run_definition_digest == compute_run_definition_digest(
-            checkpoint.run_definition
-        )
+        assert checkpoint.run_definition_digest == compute_run_definition_digest(checkpoint.run_definition)
         return
     raise AssertionError(f"unknown cross-runtime v2 mode: {mode}")

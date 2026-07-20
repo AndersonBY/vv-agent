@@ -18,6 +18,7 @@ from vv_agent import (
 )
 from vv_agent.checkpoint import AmbiguousToolPolicy, OperationState, ResumePolicy
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.events import ToolCallCompletedEvent
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime.state import InMemoryStateStore
@@ -468,6 +469,113 @@ def test_approval_resume_uses_distinct_checkpoint_and_replays_same_tool_identity
                 )
             )
         ).resume(state)
+
+
+def test_approval_resume_emits_planned_and_completed_without_started_for_durable_tool_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryStateStore()
+    effects: list[str] = []
+    provider_runs = 0
+
+    @function_tool(
+        name="approved_replay_write",
+        needs_approval=True,
+        idempotency=ToolIdempotency.SUPPORTED,
+    )
+    def approved_replay_write(context: ToolContext) -> str:
+        assert context.idempotency_key is not None
+        effects.append(context.idempotency_key)
+        return "written once"
+
+    def model_factory() -> ScriptedLLM:
+        nonlocal provider_runs
+        provider_runs += 1
+        if provider_runs == 1:
+            return ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                id="call-approved-replay",
+                                name="approved_replay_write",
+                                arguments={},
+                            )
+                        ],
+                    )
+                ]
+            )
+        return ScriptedLLM(steps=[LLMResponse(content="done after replay")])
+
+    agent = Agent(
+        name="approval-replay-agent",
+        instructions="Write only after approval.",
+        model="test-model",
+        tools=[approved_replay_write],
+    )
+    source = Runner.run_sync(
+        agent,
+        "perform one approved write",
+        run_config=_config(
+            store,
+            key="approval-replay-source",
+            provider=_provider(model_factory),
+            max_cycles=1,
+        ),
+    )
+    state = source.into_state()
+    state.approve(state.pending_approval_ids()[0])
+    configured = Runner.configured(
+        RunConfig(
+            checkpoint_config=CheckpointConfig(
+                key="approval-replay-target",
+                resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                store=store,
+            )
+        )
+    )
+    original_execute = Runner._execute_checkpoint_approved_tool
+    crash_once = True
+
+    def crash_after_durable_result(*args: Any, **kwargs: Any) -> Any:
+        nonlocal crash_once
+        outcome = original_execute(*args, **kwargs)
+        if crash_once:
+            crash_once = False
+            raise SystemExit("crash after durable tool result")
+        return outcome
+
+    monkeypatch.setattr(Runner, "_execute_checkpoint_approved_tool", staticmethod(crash_after_durable_result))
+
+    with pytest.raises(SystemExit, match="durable tool result"):
+        configured.resume(state)
+    assert len(effects) == 1
+    crashed = store.load_checkpoint_v2("approval-replay-target")
+    assert crashed is not None
+    assert crashed.tool_journal[0].state is OperationState.SUCCEEDED
+    with store._lock:
+        store._store_v2["approval-replay-target"].lease_expires_at_ms = 1
+
+    resumed = configured.resume(state)
+
+    assert resumed.status is AgentStatus.COMPLETED
+    assert resumed.final_output == "done after replay"
+    assert len(effects) == 1
+    replay_lifecycle = [
+        event
+        for event in resumed.events
+        if getattr(event, "tool_call_id", None) == "call-approved-replay"
+        and event.type.startswith("tool_call_")
+    ]
+    assert [event.type for event in replay_lifecycle] == [
+        "tool_call_planned",
+        "tool_call_completed",
+    ]
+    completed = replay_lifecycle[-1]
+    assert isinstance(completed, ToolCallCompletedEvent)
+    assert completed.execution_started is False
+    assert completed.duration_ms is None
 
 
 def test_ptl_retry_uses_distinct_model_operation_slots() -> None:

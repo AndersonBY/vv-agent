@@ -139,12 +139,46 @@ The core Runner emits `run_started` followed by `agent_started`, then
 only when the model client invokes the real stream callback; the complete
 `cycle_llm_response` diagnostic is not projected as a duplicate delta.
 
+Actual tool execution uses a three-event lifecycle after serialized arguments
+have been normalized:
+
+1. `tool_call_planned` before policy, approval, or dispatch;
+2. `tool_call_started` immediately before the executor may cause effects;
+3. `tool_call_completed` after a `ToolExecutionResult` exists.
+
+The corresponding public Python classes are `ToolCallPlannedEvent`,
+`ToolCallStartedEvent`, and `ToolCallCompletedEvent`.
+
+Planned and started events contain normalized `arguments` and optional
+`tool_metadata`. A completed event contains lowercase `status`, `directive`, a
+nullable `error_code`, `execution_started`, nullable monotonic `duration_ms`,
+and optional `tool_metadata`. Supported status values are `success`, `error`,
+`wait_response`, `running`, and `pending_compress`; directives are `continue`,
+`finish`, and `wait_user`. Duration is a non-negative JSON-safe integer floored
+to milliseconds, and is null when execution never crossed the started boundary.
+
+Invalid serialized arguments fail before planning and emit none of these
+events. Unknown tools, policy denials, and approval short-circuits emit planned
+plus completed with `execution_started=False`, no started event, and null
+duration. Cancellation or process loss after started may leave no completed
+event; these observations do not provide exactly-once execution or replace the
+checkpoint v2 operation journal.
+
 When a configured session accepts the current turn through `add_items()`, the
 Runner emits `session_persisted`. Run, trace, agent, and session identities are
 captured by Runner and cannot be replaced by model stream payloads or user
 metadata. Tool completion statuses use lowercase wire values such as `success`,
 `error`, and `wait_response`. `event_from_dict()` accepts legacy
 `created_at_ms` input and normalizes it to seconds in `created_at`.
+
+The event wire version remains `v1`. Contract 0.8 writers always include
+`directive`, `error_code`, `execution_started`, and `duration_ms` on newly
+written completed events. Readers still accept older completed events without
+those additive fields and preserve their absence rather than inventing an
+execution fact or duration. An undeclared `tool_metadata` field stays omitted;
+keys inside generic event metadata never fabricate the typed declaration. Thus
+consumers that ignore the additive fields, and runs that leave tool metadata
+and its policy fields disabled, retain their prior behavior.
 
 `tests/fixtures/parity/runner_events_v1.jsonl` is the normalized real-producer
 fixture shared with the Rust SDK. Random event/run ids and timestamps are

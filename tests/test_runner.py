@@ -341,6 +341,10 @@ def test_stop_on_first_tool_finishes_only_after_a_successful_tool(tmp_path: Path
     assert result.final_output == "first output"
     assert calls == ["first"]
     assert result.raw_result.cycles[0].tool_results[1].error_code == "skipped_due_to_finish"
+    assert not any(
+        event.type.startswith("tool_call_") and getattr(event, "tool_call_id", None) == "c2"
+        for event in result.events
+    )
 
 
 def test_stop_on_first_tool_does_not_finish_on_a_no_tool_response(tmp_path: Path) -> None:
@@ -578,6 +582,7 @@ def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
         "llm_started",
         "assistant_delta",
         "assistant_delta",
+        "tool_call_planned",
         "tool_call_started",
         "tool_call_completed",
         "run_completed",

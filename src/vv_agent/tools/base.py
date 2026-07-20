@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.checkpoint import ToolIdempotency
+from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
 from vv_agent.types import SubTaskOutcome, SubTaskRequest, ToolExecutionResult
 
 if TYPE_CHECKING:
@@ -124,10 +125,13 @@ class ToolSpec:
     name: str
     handler: ToolHandler
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
+    tool_metadata: ToolMetadata | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.idempotency, ToolIdempotency):
-            self.idempotency = ToolIdempotency(self.idempotency)
+        self.tool_metadata, self.idempotency = normalize_tool_metadata(
+            self.tool_metadata,
+            legacy_idempotency=self.idempotency,
+        )
 
 
 ToolCallContext = ToolContext

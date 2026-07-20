@@ -17,7 +17,17 @@
             "nested": {
               "scope": "sources"
             }
-          }
+          },
+          "denied_side_effects": [
+            "network"
+          ],
+          "denied_capability_tags": [
+            "network.unrestricted"
+          ],
+          "deny_terminal_tools": true,
+          "denied_cost_dimensions": [
+            "workflow.credit"
+          ]
         }
       },
       {
@@ -29,7 +39,11 @@
           "system_prompt": null,
           "max_cycles": 8,
           "exclude_tools": [],
-          "metadata": {}
+          "metadata": {},
+          "denied_side_effects": [],
+          "denied_capability_tags": [],
+          "deny_terminal_tools": false,
+          "denied_cost_dimensions": []
         }
       }
     ],
@@ -53,7 +67,17 @@
         "nested": {
           "scope": "sources"
         }
-      }
+      },
+      "denied_side_effects": [
+        "network"
+      ],
+      "denied_capability_tags": [
+        "network.unrestricted"
+      ],
+      "deny_terminal_tools": true,
+      "denied_cost_dimensions": [
+        "workflow.credit"
+      ]
     }
   },
   "projection": {

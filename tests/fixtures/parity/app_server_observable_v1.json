@@ -211,6 +211,191 @@
     ],
     "typescriptSelfContained": true
   },
+  "toolLifecycle": {
+    "plannedHasNoNotification": {
+      "event": {
+        "type": "tool_call_planned",
+        "event_id": "evt_tool_planned",
+        "created_at": 100,
+        "tool_name": "inspect",
+        "tool_call_id": "call_tool",
+        "arguments": {
+          "path": "README.md"
+        },
+        "tool_metadata": {
+          "side_effect": "read",
+          "idempotency": "supported",
+          "terminal": false,
+          "capability_tags": [
+            "source.inspect"
+          ],
+          "cost_dimensions": [
+            "workspace.bytes_read"
+          ]
+        }
+      },
+      "notifications": [],
+      "persistedItem": null,
+      "argumentsAvailableToApprovalRouting": true,
+      "presentedAsExecution": false
+    },
+    "executed": {
+      "startedNotifications": [
+        {
+          "jsonrpc": "2.0",
+          "method": "item/started",
+          "params": {
+            "itemId": "item_evt_tool_started",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
+            "status": "started",
+            "payload": {
+              "toolName": "inspect",
+              "toolCallId": "call_tool",
+              "toolMetadata": {
+                "sideEffect": "read",
+                "idempotency": "supported",
+                "terminal": false,
+                "capabilityTags": [
+                  "source.inspect"
+                ],
+                "costDimensions": [
+                  "workspace.bytes_read"
+                ]
+              }
+            },
+            "createdAt": 100.1,
+            "updatedAt": 100.1
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "item/toolCall/delta",
+          "params": {
+            "itemId": "item_evt_tool_started",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
+            "status": "started",
+            "payload": {
+              "toolName": "inspect",
+              "toolCallId": "call_tool",
+              "toolMetadata": {
+                "sideEffect": "read",
+                "idempotency": "supported",
+                "terminal": false,
+                "capabilityTags": [
+                  "source.inspect"
+                ],
+                "costDimensions": [
+                  "workspace.bytes_read"
+                ]
+              }
+            },
+            "createdAt": 100.1,
+            "updatedAt": 100.1,
+            "delta": {
+              "path": "README.md"
+            }
+          }
+        }
+      ],
+      "completedNotifications": [
+        {
+          "jsonrpc": "2.0",
+          "method": "item/completed",
+          "params": {
+            "itemId": "item_evt_tool_completed",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
+            "status": "completed",
+            "payload": {
+              "toolName": "inspect",
+              "toolCallId": "call_tool",
+              "status": "success",
+              "directive": "continue",
+              "errorCode": null,
+              "executionStarted": true,
+              "durationMs": 7,
+              "toolMetadata": {
+                "sideEffect": "read",
+                "idempotency": "supported",
+                "terminal": false,
+                "capabilityTags": [
+                  "source.inspect"
+                ],
+                "costDimensions": [
+                  "workspace.bytes_read"
+                ]
+              }
+            },
+            "createdAt": 100.2,
+            "updatedAt": 100.2
+          }
+        }
+      ]
+    },
+    "policyDenial": {
+      "startedNotifications": [],
+      "completedNotifications": [
+        {
+          "jsonrpc": "2.0",
+          "method": "item/completed",
+          "params": {
+            "itemId": "item_evt_tool_denied",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
+            "status": "failed",
+            "payload": {
+              "toolName": "write_record",
+              "toolCallId": "call_denied",
+              "status": "error",
+              "directive": "continue",
+              "errorCode": "tool_not_allowed",
+              "executionStarted": false,
+              "durationMs": null,
+              "toolMetadata": {
+                "sideEffect": "write",
+                "idempotency": "unsupported",
+                "terminal": false,
+                "capabilityTags": [
+                  "record.write"
+                ],
+                "costDimensions": []
+              }
+            },
+            "createdAt": 100.3,
+            "updatedAt": 100.3
+          }
+        }
+      ]
+    },
+    "legacyCompleted": {
+      "inputHasAdditiveFields": false,
+      "notification": {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "itemId": "item_evt_tool_legacy",
+          "threadId": "thread-tool",
+          "turnId": "turn-tool",
+          "type": "toolCall",
+          "status": "completed",
+          "payload": {
+            "toolName": "lookup",
+            "toolCallId": "call_legacy",
+            "status": "success"
+          },
+          "createdAt": 99,
+          "updatedAt": 99
+        }
+      },
+      "fabricatedFields": []
+    }
+  },
   "durableResume": {
     "method": "turn/resume",
     "requestFields": [

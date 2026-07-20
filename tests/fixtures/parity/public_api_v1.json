@@ -9,6 +9,11 @@
           "rust": "vv_agent::Agent"
         },
         {
+          "id": "agent.sub_agent_config",
+          "python": "vv_agent.SubAgentConfig",
+          "rust": "vv_agent::SubAgentConfig"
+        },
+        {
           "id": "agent.run_context",
           "python": "vv_agent.RunContext",
           "rust": "vv_agent::RunContext"
@@ -468,6 +473,16 @@
           "id": "tools.idempotency",
           "python": "vv_agent.ToolIdempotency",
           "rust": "vv_agent::ToolIdempotency"
+        },
+        {
+          "id": "tools.metadata",
+          "python": "vv_agent.ToolMetadata",
+          "rust": "vv_agent::ToolMetadata"
+        },
+        {
+          "id": "tools.side_effect",
+          "python": "vv_agent.ToolSideEffect",
+          "rust": "vv_agent::ToolSideEffect"
         }
       ],
       "id": "tools"
@@ -639,6 +654,12 @@
           "id": "tracing.jsonl_exporter",
           "python": "vv_agent.JsonlTraceExporter",
           "rust": "vv_agent::JsonlTraceExporter"
+        },
+        {
+          "adaptation": "Python exports a concrete event class; Rust exports a RunEventPayload variant.",
+          "id": "events.tool_call_planned",
+          "python": "vv_agent.ToolCallPlannedEvent",
+          "rust": "vv_agent::RunEventPayload::ToolCallPlanned"
         }
       ],
       "id": "tracing"
@@ -1144,6 +1165,156 @@
       ],
       "python_target": "vv_agent.Agent",
       "rust_target": "vv_agent::Agent"
+    },
+    {
+      "id": "sub_agent_config",
+      "members": [
+        {
+          "id": "model",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "model"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "model"
+          }
+        },
+        {
+          "id": "description",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "description"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "description"
+          }
+        },
+        {
+          "id": "backend",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "backend"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "backend"
+          }
+        },
+        {
+          "id": "system_prompt",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "system_prompt"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "system_prompt"
+          }
+        },
+        {
+          "id": "max_cycles",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "max_cycles"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "max_cycles"
+          }
+        },
+        {
+          "id": "exclude_tools",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "exclude_tools"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "exclude_tools"
+          }
+        },
+        {
+          "id": "metadata",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "metadata"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "metadata"
+          }
+        },
+        {
+          "id": "denied_side_effects",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "denied_side_effects"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "denied_side_effects"
+          }
+        },
+        {
+          "id": "denied_capability_tags",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "denied_capability_tags"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "denied_capability_tags"
+          }
+        },
+        {
+          "id": "deny_terminal_tools",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "deny_terminal_tools"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "deny_terminal_tools"
+          }
+        },
+        {
+          "id": "denied_cost_dimensions",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "denied_cost_dimensions"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "denied_cost_dimensions"
+          }
+        }
+      ],
+      "python_target": "vv_agent.SubAgentConfig",
+      "rust_target": "vv_agent::SubAgentConfig"
     },
     {
       "id": "runner",
@@ -3832,6 +4003,78 @@
       ]
     },
     {
+      "id": "tool_metadata",
+      "members": [
+        {
+          "id": "side_effect",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "side_effect"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "side_effect"
+          }
+        },
+        {
+          "id": "idempotency",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "idempotency"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "idempotency"
+          }
+        },
+        {
+          "id": "terminal",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "terminal"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "terminal"
+          }
+        },
+        {
+          "id": "capability_tags",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "capability_tags"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "capability_tags"
+          }
+        },
+        {
+          "id": "cost_dimensions",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "cost_dimensions"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "cost_dimensions"
+          }
+        }
+      ],
+      "python_target": "vv_agent.ToolMetadata",
+      "rust_target": "vv_agent::ToolMetadata"
+    },
+    {
       "id": "tool",
       "members": [
         {
@@ -3970,6 +4213,19 @@
           }
         },
         {
+          "id": "tool_metadata",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "tool_metadata"
+          },
+          "rust": {
+            "kind": "method",
+            "name": "tool_metadata"
+          }
+        },
+        {
           "adaptation": "Python returns the OpenAI schema directly; Rust returns ToolSpec containing it.",
           "id": "to_spec",
           "kind": "operation",
@@ -4029,6 +4285,117 @@
       ],
       "python_target": "vv_agent.FunctionTool",
       "rust_target": "vv_agent::Tool"
+    },
+    {
+      "id": "tool_policy",
+      "members": [
+        {
+          "id": "allowed_tools",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "allowed_tools"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "allowed_tools"
+          }
+        },
+        {
+          "id": "disallowed_tools",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "disallowed_tools"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "disallowed_tools"
+          }
+        },
+        {
+          "id": "approval",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "approval"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "approval"
+          }
+        },
+        {
+          "id": "can_use_tool",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "can_use_tool"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "can_use_tool"
+          }
+        },
+        {
+          "id": "denied_side_effects",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "denied_side_effects"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "denied_side_effects"
+          }
+        },
+        {
+          "id": "denied_capability_tags",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "denied_capability_tags"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "denied_capability_tags"
+          }
+        },
+        {
+          "id": "deny_terminal_tools",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "deny_terminal_tools"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "deny_terminal_tools"
+          }
+        },
+        {
+          "id": "denied_cost_dimensions",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "denied_cost_dimensions"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "denied_cost_dimensions"
+          }
+        }
+      ],
+      "python_target": "vv_agent.ToolPolicy",
+      "rust_target": "vv_agent::ToolPolicy"
     },
     {
       "id": "tool_registry",

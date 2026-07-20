@@ -71,7 +71,7 @@ from vv_agent.workspace import (
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
 EVENT_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_events_v1.jsonl"
-CONTRACT_SHA256 = "deb4f20c995c51f76f71590f91756ec6ab35f99128889bfa774cd2635d07106d"
+CONTRACT_SHA256 = "6b69dacc298d056d5d57ee6071c2cd8333d63467c64933d6dfd8266e29094cd0"
 EVENT_CONTRACT_SHA256 = "c2816a3962a44a3c0f5172edbffe4c88352142fee13f457da9a0667ceef996b0"
 
 
@@ -511,6 +511,10 @@ def test_sub_agent_config_from_wire_normalizes_model() -> None:
         "system_prompt": restored.system_prompt,
         "max_cycles": restored.max_cycles,
         "exclude_tools": restored.exclude_tools,
+        "denied_side_effects": restored.denied_side_effects,
+        "denied_capability_tags": restored.denied_capability_tags,
+        "deny_terminal_tools": restored.deny_terminal_tools,
+        "denied_cost_dimensions": restored.denied_cost_dimensions,
         "metadata": restored.metadata,
     } == fixture["wire_defaults"]
 
@@ -527,7 +531,17 @@ def test_sub_agent_config_from_wire_rejects_invalid_values(payload: dict[str, An
         SubAgentConfig.from_dict(payload)
 
 
-@pytest.mark.parametrize(("field", "fixture_key"), [("backend", "backend_non_string"), ("max_cycles", "max_cycles_negative")])
+@pytest.mark.parametrize(
+    ("field", "fixture_key"),
+    [
+        ("backend", "backend_non_string"),
+        ("max_cycles", "max_cycles_negative"),
+        ("denied_side_effects", "denied_side_effects_non_array"),
+        ("denied_capability_tags", "denied_capability_tags_non_array"),
+        ("deny_terminal_tools", "deny_terminal_tools_non_boolean"),
+        ("denied_cost_dimensions", "denied_cost_dimensions_non_array"),
+    ],
+)
 def test_sub_agent_config_from_wire_rejects_shared_type_and_range_corpus(
     field: str,
     fixture_key: str,

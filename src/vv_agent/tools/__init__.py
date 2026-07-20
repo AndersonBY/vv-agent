@@ -2,6 +2,7 @@ from vv_agent.tools.base import ToolCallContext, ToolContext, ToolHandler, ToolS
 from vv_agent.tools.dispatcher import dispatch_tool_call
 from vv_agent.tools.executor import FunctionToolExecutor, RegistryToolExecutor, ToolExecutor, ToolExposure
 from vv_agent.tools.function import FunctionTool, Tool, function_tool
+from vv_agent.tools.metadata import ToolMetadata, ToolSideEffect
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.tools.outputs import (
     ToolOutput,
@@ -29,6 +30,7 @@ __all__ = [
     "ToolExecutor",
     "ToolExposure",
     "ToolHandler",
+    "ToolMetadata",
     "ToolNotFoundError",
     "ToolOrchestrator",
     "ToolOutput",
@@ -38,6 +40,7 @@ __all__ = [
     "ToolOutputJson",
     "ToolOutputText",
     "ToolRegistry",
+    "ToolSideEffect",
     "ToolSpec",
     "build_default_registry",
     "dispatch_tool_call",

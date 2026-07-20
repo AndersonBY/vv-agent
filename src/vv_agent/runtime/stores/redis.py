@@ -14,6 +14,7 @@ from typing import Any
 from vv_agent.checkpoint import EventCursor, canonical_json_bytes
 from vv_agent.runtime.checkpoint_codec import checkpoint_from_json, checkpoint_to_json
 from vv_agent.runtime.checkpoint_codec_v2 import (
+    _strict_json_loads,
     checkpoint_v2_from_dict,
     checkpoint_v2_from_json,
     checkpoint_v2_to_dict,
@@ -715,8 +716,8 @@ def _checkpoint_v2_to_storage(checkpoint: CheckpointV2) -> tuple[str, int | None
 
 def _checkpoint_v2_from_storage(raw: str | bytes, raw_lease: object | None) -> CheckpointV2:
     try:
-        payload = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = _strict_json_loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("redis checkpoint v2 payload is invalid") from exc
     if not isinstance(payload, dict):
         raise ValueError("redis checkpoint v2 payload must be an object")
@@ -726,8 +727,8 @@ def _checkpoint_v2_from_storage(raw: str | bytes, raw_lease: object | None) -> C
 
 def _checkpoint_key_from_storage(raw: str | bytes) -> str:
     try:
-        payload = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = _strict_json_loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("redis checkpoint v2 payload is invalid") from exc
     if not isinstance(payload, dict):
         raise ValueError("redis checkpoint v2 payload must be an object")

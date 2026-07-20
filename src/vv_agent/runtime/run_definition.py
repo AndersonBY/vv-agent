@@ -35,9 +35,7 @@ _RUNTIME_METADATA_KEYS = {
     "_vv_agent_run_id",
     "_vv_agent_trace_id",
 }
-_KNOWN_CREDENTIAL_HEADERS = frozenset(
-    {"authorization", "proxy-authorization", "x-api-key", "api-key"}
-)
+_KNOWN_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "x-api-key", "api-key"})
 
 
 def build_run_definition(
@@ -165,6 +163,17 @@ def _tool_definitions(
         idempotency = getattr(executor, "idempotency", ToolIdempotency.UNKNOWN)
         if not isinstance(idempotency, ToolIdempotency):
             idempotency = ToolIdempotency(idempotency)
+        tool_metadata = getattr(executor, "tool_metadata", None)
+        if tool_metadata is None:
+            tool_metadata_payload = None
+        else:
+            to_dict = getattr(tool_metadata, "to_dict", None)
+            if not callable(to_dict):
+                raise CheckpointError(
+                    f"tool {name!r} has invalid typed metadata",
+                    code="checkpoint_definition_invalid",
+                )
+            tool_metadata_payload = to_dict()
         needs_approval = getattr(executor, "needs_approval", False)
         if callable(needs_approval):
             approval_ref = _take_ref(refs, f"tool_approval:{name}", required=True)
@@ -175,6 +184,7 @@ def _tool_definitions(
             {
                 "schema": schema,
                 "idempotency": idempotency.value,
+                "tool_metadata": tool_metadata_payload,
                 "timeout_seconds": getattr(executor, "timeout_seconds", None),
                 "approval": approval,
             }
@@ -195,6 +205,10 @@ def _tool_policy_definition(
         "approval": policy.approval,
         "predicate_ref": predicate_ref,
         "approval_timeout_seconds": approval_timeout_seconds,
+        "denied_side_effects": [getattr(value, "value", value) for value in getattr(policy, "denied_side_effects", [])],
+        "denied_capability_tags": list(getattr(policy, "denied_capability_tags", [])),
+        "deny_terminal_tools": getattr(policy, "deny_terminal_tools", False),
+        "denied_cost_dimensions": list(getattr(policy, "denied_cost_dimensions", [])),
     }
 
 
@@ -244,22 +258,10 @@ def _validate_behavior_capability_refs(
         required_slots.append("agent.instructions")
     required_slots.extend(f"input_guardrail:{index}" for index, _ in enumerate(agent.input_guardrails))
     required_slots.extend(f"output_guardrail:{index}" for index, _ in enumerate(agent.output_guardrails))
-    required_slots.extend(
-        f"runtime_hook:{index}"
-        for index, _ in enumerate([*agent.hooks, *run_config.hooks])
-    )
-    required_slots.extend(
-        f"after_cycle_hook:{index}"
-        for index, _ in enumerate(run_config.after_cycle_hooks)
-    )
-    required_slots.extend(
-        f"context_provider:{index}"
-        for index, _ in enumerate(run_config.context_providers)
-    )
-    required_slots.extend(
-        f"memory_provider:{index}"
-        for index, _ in enumerate(run_config.memory_providers)
-    )
+    required_slots.extend(f"runtime_hook:{index}" for index, _ in enumerate([*agent.hooks, *run_config.hooks]))
+    required_slots.extend(f"after_cycle_hook:{index}" for index, _ in enumerate(run_config.after_cycle_hooks))
+    required_slots.extend(f"context_provider:{index}" for index, _ in enumerate(run_config.context_providers))
+    required_slots.extend(f"memory_provider:{index}" for index, _ in enumerate(run_config.memory_providers))
     for present, slot in (
         (bool(_behavior_metadata(agent=agent, run_config=run_config)), "behavior_affecting_run_metadata"),
         (run_config.before_cycle_messages is not None, "before_cycle_messages"),
@@ -398,11 +400,7 @@ def _decode_pointer_token(token: str) -> str:
 
 def _behavior_metadata(*, agent: Agent, run_config: RunConfig) -> dict[str, Any]:
     metadata = {**agent.metadata, **run_config.metadata}
-    return {
-        key: deepcopy(value)
-        for key, value in metadata.items()
-        if key not in _RUNTIME_METADATA_KEYS
-    }
+    return {key: deepcopy(value) for key, value in metadata.items() if key not in _RUNTIME_METADATA_KEYS}
 
 
 def _normalize_extra_headers(model_settings_payload: dict[str, Any]) -> None:
@@ -443,8 +441,7 @@ def _require_declared_credential_headers(
     missing = [
         name
         for name in sorted(headers)
-        if name in _KNOWN_CREDENTIAL_HEADERS
-        and f"/model/settings/extra_headers/{name}" not in declared
+        if name in _KNOWN_CREDENTIAL_HEADERS and f"/model/settings/extra_headers/{name}" not in declared
     ]
     if missing:
         raise CheckpointError(

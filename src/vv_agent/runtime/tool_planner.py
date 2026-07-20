@@ -14,6 +14,7 @@ from vv_agent.constants import (
     WORKSPACE_TOOLS,
 )
 from vv_agent.runtime.shell import resolve_shell_invocation
+from vv_agent.tools.metadata import metadata_policy_denial_source
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import AgentTask
 
@@ -169,6 +170,25 @@ def plan_tool_schemas(
     memory_usage_percentage: int | None = None,
 ) -> list[dict[str, Any]]:
     tool_names = plan_tool_names(task, memory_usage_percentage=memory_usage_percentage)
-    available_names = [name for name in tool_names if registry.has_tool(name) and registry.has_schema(name)]
+    available_names = [
+        name
+        for name in tool_names
+        if registry.has_tool(name)
+        and registry.has_schema(name)
+        and metadata_policy_denial_source(
+            registry.tool_metadata(name),
+            denied_side_effects=task.metadata.get("_vv_agent_denied_side_effects", []),
+            denied_capability_tags=task.metadata.get(
+                "_vv_agent_denied_capability_tags",
+                [],
+            ),
+            deny_terminal_tools=task.metadata.get("_vv_agent_deny_terminal_tools", False),
+            denied_cost_dimensions=task.metadata.get(
+                "_vv_agent_denied_cost_dimensions",
+                [],
+            ),
+        )
+        is None
+    ]
     schemas = registry.list_openai_schemas(tool_names=available_names)
     return _patch_dynamic_tool_schemas(task=task, tool_schemas=schemas)

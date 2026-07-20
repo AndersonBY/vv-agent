@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from vv_agent.app_server.item_mapper import item_id_for_event, map_run_event
 from vv_agent.events import (
     ApprovalRequestedEvent,
@@ -11,7 +14,13 @@ from vv_agent.events import (
     RunFailedEvent,
     RunStartedEvent,
     ToolCallCompletedEvent,
+    ToolCallPlannedEvent,
     ToolCallStartedEvent,
+)
+from vv_agent.tools.metadata import ToolMetadata
+
+_TOOL_METADATA_CONTRACT = json.loads(
+    (Path(__file__).parent / "fixtures" / "parity" / "tool_metadata_v1.json").read_text(encoding="utf-8")
 )
 
 
@@ -93,6 +102,111 @@ def test_tool_call_events_map_to_started_and_completed_items() -> None:
     failed_projection = map_run_event(failed, thread_id="thread_1", turn_id="turn_1")
     assert failed_projection.item is not None
     assert failed_projection.item.status == "failed"
+
+
+def test_planned_tool_call_is_not_projected_as_an_app_server_item() -> None:
+    projection_contract = _TOOL_METADATA_CONTRACT["app_server_projection"]
+    assert projection_contract["tool_call_planned"] == "no_notification"
+    assert projection_contract["planned_is_never_presented_as_execution_started"] is True
+    event = ToolCallPlannedEvent(
+        run_id="run_1",
+        trace_id="trace_1",
+        tool_name="lookup",
+        tool_call_id="call_planned",
+        arguments={"query": "parity"},
+        event_id="evt_planned",
+        created_at=3,
+    )
+
+    projection = map_run_event(event, thread_id="thread_1", turn_id="turn_1")
+
+    assert projection == projection.__class__()
+
+
+def test_typed_tool_metadata_and_completed_observations_are_projected_without_legacy_fabrication() -> None:
+    projection_contract = _TOOL_METADATA_CONTRACT["app_server_projection"]
+    assert "toolMetadata" in projection_contract["tool_call_started"]
+    assert all(
+        field_name in projection_contract["tool_call_completed"]
+        for field_name in ("directive", "errorCode", "executionStarted", "durationMs", "toolMetadata")
+    )
+    producer_case = next(
+        case for case in _TOOL_METADATA_CONTRACT["producer_cases"] if case["name"] == "executed_tool"
+    )
+    metadata = ToolMetadata.from_dict(producer_case["tool_metadata"])
+    started = ToolCallStartedEvent(
+        run_id="run_1",
+        trace_id="trace_1",
+        tool_name="inspect",
+        tool_call_id="call_typed",
+        arguments={"path": "README.md"},
+        tool_metadata=metadata,
+        event_id="evt_typed_started",
+        created_at=3,
+    )
+    completed = ToolCallCompletedEvent(
+        run_id="run_1",
+        trace_id="trace_1",
+        tool_name="inspect",
+        tool_call_id="call_typed",
+        status="success",
+        directive="continue",
+        error_code=None,
+        execution_started=True,
+        duration_ms=7,
+        tool_metadata=metadata,
+        event_id="evt_typed_completed",
+        created_at=4,
+    )
+    legacy = ToolCallCompletedEvent(
+        run_id="run_1",
+        trace_id="trace_1",
+        tool_name="lookup",
+        tool_call_id="call_legacy",
+        status="success",
+        event_id="evt_legacy_completed",
+        created_at=5,
+    )
+
+    started_projection = map_run_event(started, thread_id="thread_1", turn_id="turn_1")
+    completed_projection = map_run_event(completed, thread_id="thread_1", turn_id="turn_1")
+    legacy_projection = map_run_event(legacy, thread_id="thread_1", turn_id="turn_1")
+
+    assert started_projection.item is not None
+    assert started_projection.item.payload["toolMetadata"] == {
+        "sideEffect": "read",
+        "idempotency": "supported",
+        "terminal": False,
+        "capabilityTags": ["source.inspect"],
+        "costDimensions": ["workspace.bytes_read"],
+    }
+    assert started_projection.additional_notifications[0][1]["payload"]["toolMetadata"] == started_projection.item.payload[
+        "toolMetadata"
+    ]
+    assert started_projection.additional_notifications[0][1]["delta"] == {"path": "README.md"}
+    assert completed_projection.item is not None
+    assert completed_projection.item.payload == {
+        "toolName": "inspect",
+        "toolCallId": "call_typed",
+        "status": "success",
+        "directive": "continue",
+        "errorCode": None,
+        "executionStarted": True,
+        "durationMs": 7,
+        "toolMetadata": {
+            "sideEffect": "read",
+            "idempotency": "supported",
+            "terminal": False,
+            "capabilityTags": ["source.inspect"],
+            "costDimensions": ["workspace.bytes_read"],
+        },
+    }
+    assert legacy_projection.item is not None
+    assert legacy_projection.item.payload == {
+        "toolName": "lookup",
+        "toolCallId": "call_legacy",
+        "status": "success",
+    }
 
 
 def test_tool_call_progress_maps_to_tool_call_delta_notification() -> None:

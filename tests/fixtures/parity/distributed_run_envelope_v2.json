@@ -106,7 +106,17 @@
           "predicate_ref": {
             "id": "policy.project",
             "version": "3"
-          }
+          },
+          "denied_side_effects": [
+            "execute"
+          ],
+          "denied_capability_tags": [
+            "filesystem.delete"
+          ],
+          "deny_terminal_tools": false,
+          "denied_cost_dimensions": [
+            "gpu.second"
+          ]
         },
         "llm_client_ref": {
           "id": "llm.primary",
@@ -330,9 +340,47 @@
       "error": "max_extension_state_bytes must be between 0 and 9007199254740991"
     }
   ],
+  "capability_resolution_cases": [
+    {
+      "name": "tool_metadata_drift_fails_before_claim",
+      "model_visible_schema_digest_unchanged": true,
+      "stored_tool": {
+        "name": "read_record",
+        "tool_metadata": {
+          "side_effect": "read",
+          "idempotency": "supported",
+          "terminal": false,
+          "capability_tags": [
+            "record.read"
+          ],
+          "cost_dimensions": []
+        }
+      },
+      "resolved_tool": {
+        "name": "read_record",
+        "tool_metadata": {
+          "side_effect": "write",
+          "idempotency": "supported",
+          "terminal": false,
+          "capability_tags": [
+            "record.read"
+          ],
+          "cost_dimensions": []
+        }
+      },
+      "expected": {
+        "error_code": "checkpoint_definition_mismatch",
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    }
+  ],
   "worker_rules": {
     "capability_resolution_before_claim": true,
+    "resolved_tool_metadata_compared_with_embedded_definition_before_claim": true,
     "after_cycle_hook_resolution_before_claim": true,
+    "metadata_tool_policy_fields_are_serialized_before_claim": true,
     "initial_claim_renewal_before_operations": true,
     "operation_progress_cas_preserves_claim": true,
     "heartbeat_updates_lease_only": true,

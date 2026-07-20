@@ -18,7 +18,11 @@ from typing import Any
 
 from vv_agent.agent import RunContext
 from vv_agent.budget import BudgetEvaluator, HostCostMeter
-from vv_agent.checkpoint import CheckpointError, validate_checkpoint_extension
+from vv_agent.checkpoint import (
+    CheckpointError,
+    compute_run_definition_digest,
+    validate_checkpoint_extension,
+)
 from vv_agent.config import build_openai_llm_from_local_settings
 from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.backends.distributed import (
@@ -28,7 +32,9 @@ from vv_agent.runtime.backends.distributed import (
     DistributedCapabilityRegistry,
     DistributedRunEnvelope,
     RuntimeRecipe,
+    _policy_with_task_metadata_denials,
 )
+from vv_agent.runtime.checkpoint_codec_v2 import run_definition_comparison_copy
 from vv_agent.runtime.checkpoint_resume import (
     CheckpointReconciliationRequired,
     CheckpointResumeController,
@@ -247,7 +253,10 @@ def _validate_v2_task_and_capabilities(
 ) -> None:
     config = envelope.checkpoint_config
     assert config is not None
-    definition = checkpoint.run_definition
+    stored_digest = compute_run_definition_digest(checkpoint.run_definition)
+    if checkpoint.run_definition_digest != stored_digest:
+        raise _definition_mismatch("distributed run definition digest does not match the embedded definition")
+    definition = run_definition_comparison_copy(checkpoint.run_definition)
     if checkpoint.checkpoint_key != config.key:
         raise _definition_mismatch("distributed checkpoint key does not match the durable checkpoint")
     if checkpoint.task_id != envelope.task.task_id:
@@ -343,6 +352,10 @@ def _validate_v2_task_and_capabilities(
         "approval": capabilities.tool_policy.approval,
         "predicate_ref": _reference_payload(capabilities.tool_policy.predicate_ref),
         "approval_timeout_seconds": capabilities.approval_timeout_seconds,
+        "denied_side_effects": list(capabilities.tool_policy.denied_side_effects),
+        "denied_capability_tags": list(capabilities.tool_policy.denied_capability_tags),
+        "deny_terminal_tools": capabilities.tool_policy.deny_terminal_tools,
+        "denied_cost_dimensions": list(capabilities.tool_policy.denied_cost_dimensions),
     }
     if actual_policy != expected_policy:
         raise _definition_mismatch("distributed tool policy does not match the run definition")
@@ -478,6 +491,8 @@ def _effective_v2_claim_mode(
 def _rebuild_runtime(
     recipe: RuntimeRecipe,
     capability_registry: DistributedCapabilityRegistry,
+    *,
+    task: AgentTask | None = None,
 ) -> tuple[AgentRuntime, ExecutionContext, SubTaskManager, ToolPolicy, HostCostMeter | None]:
     """Reconstruct an AgentRuntime from a RuntimeRecipe on the worker."""
     capabilities = recipe.capabilities
@@ -495,7 +510,10 @@ def _rebuild_runtime(
             timeout_seconds=recipe.timeout_seconds,
         )
     tool_registry = capability_registry.resolve_toolset(capabilities.toolset_ref)
-    tool_policy = capabilities.tool_policy.resolve(capability_registry)
+    distributed_tool_policy = capabilities.tool_policy
+    if task is not None:
+        distributed_tool_policy = _policy_with_task_metadata_denials(distributed_tool_policy, task)
+    tool_policy = distributed_tool_policy.resolve(capability_registry)
     hooks = _resolve_many(capability_registry, "hook", capabilities.hook_refs)
     after_cycle_hooks = _resolve_many(
         capability_registry,
@@ -543,6 +561,19 @@ def _rebuild_runtime(
         "_vv_agent_disallowed_tools": list(tool_policy.disallowed_tools),
         "_vv_agent_tool_policy_approval": tool_policy.approval,
     }
+    denied_side_effects = [
+        getattr(value, "value", value) for value in getattr(tool_policy, "denied_side_effects", [])
+    ]
+    if denied_side_effects:
+        metadata["_vv_agent_denied_side_effects"] = denied_side_effects
+    denied_capability_tags = list(getattr(tool_policy, "denied_capability_tags", []))
+    if denied_capability_tags:
+        metadata["_vv_agent_denied_capability_tags"] = denied_capability_tags
+    if getattr(tool_policy, "deny_terminal_tools", False):
+        metadata["_vv_agent_deny_terminal_tools"] = True
+    denied_cost_dimensions = list(getattr(tool_policy, "denied_cost_dimensions", []))
+    if denied_cost_dimensions:
+        metadata["_vv_agent_denied_cost_dimensions"] = denied_cost_dimensions
     if tool_policy.can_use_tool is not None:
         metadata["_vv_agent_tool_policy_can_use_tool"] = tool_policy.can_use_tool
     if event_sink is not None:
@@ -651,6 +682,7 @@ def _run_single_cycle_v2(
     runtime, ctx, sub_task_manager, tool_policy, host_cost_meter = _rebuild_runtime(
         envelope.recipe,
         capability_registry,
+        task=envelope.task,
     )
     task = envelope.task
     if tool_policy.allowed_tools is None:
@@ -918,7 +950,11 @@ def run_single_cycle(
         }
     envelope.ensure_not_expired()
     registry = capability_registry or DistributedCapabilityRegistry()
-    runtime, ctx, sub_task_manager, tool_policy, host_cost_meter = _rebuild_runtime(recipe, registry)
+    runtime, ctx, sub_task_manager, tool_policy, host_cost_meter = _rebuild_runtime(
+        recipe,
+        registry,
+        task=task,
+    )
     heartbeat_store = _build_state_store(recipe)
     if tool_policy.allowed_tools is None:
         task.metadata.pop("_vv_agent_allowed_tools", None)
