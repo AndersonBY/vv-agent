@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from vv_agent.background_task import BackgroundAgentTask
 from vv_agent.handoffs import Handoff, handoff
 from vv_agent.model_settings import ModelSettings
+from vv_agent.output_validation import OutputRepair, OutputValidator
 from vv_agent.run_config import _validate_bounded_int
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.outputs import ToolOutputText
@@ -54,6 +55,12 @@ class Agent[TContext]:
     metadata: dict[str, Any] = field(default_factory=dict)
     sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)
     no_tool_policy: NoToolPolicy | None = None
+    output_validation_enabled: bool = False
+    output_validator: OutputValidator | None = None
+    output_repair: OutputRepair | None = None
+    output_validation_max_repairs: int = 1
+    output_repair_model: Any | None = None
+    output_repair_model_settings: Any | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -62,6 +69,18 @@ class Agent[TContext]:
             raise ValueError("agent instructions cannot be empty")
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
         _validate_no_tool_policy(self.no_tool_policy, "Agent.no_tool_policy")
+        if not isinstance(self.output_validation_enabled, bool):
+            raise TypeError("output_validation_enabled must be a boolean")
+        if isinstance(self.output_validation_max_repairs, bool) or self.output_validation_max_repairs not in {0, 1}:
+            raise ValueError("output_validation_max_repairs must be 0 or 1")
+        if self.output_validation_enabled and self.output_validator is None:
+            raise ValueError("enabled output validation requires an output_validator")
+        if self.output_repair is not None and self.output_validator is None:
+            raise ValueError("output_repair requires an output_validator")
+        if self.output_validator is not None and not callable(self.output_validator):
+            raise TypeError("output_validator must be callable")
+        if self.output_repair is not None and not callable(self.output_repair):
+            raise TypeError("output_repair must be callable")
 
         normalized_sub_agents: dict[str, SubAgentConfig] = {}
         for sub_agent_id, config in self.sub_agents.items():

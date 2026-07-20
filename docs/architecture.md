@@ -113,6 +113,7 @@ fields remain available but do not prove cache-accounting availability.
 | `src/vv_agent/run_handle.py` | Live `Runner.start()` handle for event streaming, cancellation, approvals, and final result retrieval. |
 | `src/vv_agent/run_config.py` | Per-run configuration, model provider binding, tool policy, workspace, session, and tracing options. |
 | `src/vv_agent/model_settings.py` | Model call parameters and override merging. |
+| `src/vv_agent/output_validation.py` | Typed host output-validation result, context, and tools-free repair request contracts. |
 | `src/vv_agent/events.py` | Typed run events and dict conversion for UI consumers. |
 | `src/vv_agent/event_store.py` | Run event persistence and replay protocol plus JSONL implementation. |
 | `src/vv_agent/approval.py` | Approval provider protocol, request/decision objects, and in-process approval broker. |
@@ -296,6 +297,13 @@ Rewrite results replace the user input before the runtime task is compiled.
 Output guardrails run after the runtime returns. Rewrite results replace
 `RunResult.final_output`; block and approval results convert the public run
 status to failed and expose the guardrail message.
+
+Optional output validation is a separate default-off host extension. After the
+existing terminal observation is persisted, an explicitly enabled typed
+validator may accept the final value or return a coded rejection. A host repair
+callback may supply one replacement, which is coerced through `output_type` and
+validated again. The repair request has no tools, and the framework does not
+infer task or answer semantics. See `output-validation.md`.
 
 Trace processors are read from `RunConfig.tracing["processors"]`. `Runner`
 starts a `run` span for each invocation and starts/ends `tool` spans from typed

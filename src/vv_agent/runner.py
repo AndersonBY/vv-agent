@@ -44,6 +44,12 @@ from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm.base import LLMClient
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
+from vv_agent.output_validation import (
+    OUTPUT_VALIDATION_FAILED,
+    OutputRepairRequest,
+    OutputValidationContext,
+    OutputValidationResult,
+)
 from vv_agent.result import ApprovalSnapshot, RunResult, RunState, _PendingToolApproval, _RunResumeContext
 from vv_agent.run_config import (
     DEFAULT_SETTINGS_FILE,
@@ -636,6 +642,13 @@ class Runner:
             raw_result=raw_result,
             final_output=raw_result.final_answer or raw_result.wait_reason,
             cancellation_token=effective_config.cancellation_token,
+        )
+        final_output, output_coercion_error = cls._apply_optional_output_validation(
+            agent=resume_context.agent,
+            run_context=guardrail_context,
+            raw_result=raw_result,
+            final_output=final_output,
+            output_coercion_error=output_coercion_error,
         )
         terminal_event = cls._terminal_event(
             result=raw_result,
@@ -1736,6 +1749,13 @@ class Runner:
                     final_output=final_output,
                     cancellation_token=run_config.cancellation_token,
                 )
+                final_output, output_coercion_error = cls._apply_optional_output_validation(
+                    agent=agent,
+                    run_context=guardrail_context,
+                    raw_result=raw_result,
+                    final_output=final_output,
+                    output_coercion_error=output_coercion_error,
+                )
                 new_items = cls._new_session_items(
                     initial_messages=initial_messages,
                     result=raw_result,
@@ -1791,6 +1811,8 @@ class Runner:
             "completion_tool_name": raw_result.completion_tool_name,
             "partial_output": raw_result.partial_output,
         }
+        if raw_result.error_code is not None:
+            trace_metadata["error_code"] = raw_result.error_code
         if output_coercion_error is not None:
             raise output_coercion_error
         result = RunResult(
@@ -1884,6 +1906,128 @@ class Runner:
             except Exception as exc:
                 output_coercion_error = ValueError(f"failed to validate final output: {exc}")
         return final_output, output_coercion_error
+
+    @classmethod
+    def _apply_optional_output_validation(
+        cls,
+        *,
+        agent: Agent,
+        run_context: RunContext[Any],
+        raw_result: AgentResult,
+        final_output: Any,
+        output_coercion_error: Exception | None,
+    ) -> tuple[Any, Exception | None]:
+        validator = agent.output_validator
+        if not agent.output_validation_enabled or validator is None or raw_result.status is not AgentStatus.COMPLETED:
+            return final_output, output_coercion_error
+
+        validation_context = OutputValidationContext(
+            run_id=run_context.run_id,
+            agent_name=run_context.agent_name,
+            output_type=agent.output_type,
+        )
+        candidate, result, repairable = cls._run_output_validator(
+            agent=agent,
+            validator=validator,
+            validation_context=validation_context,
+            candidate=final_output,
+            output_coercion_error=output_coercion_error,
+            coerce=False,
+        )
+        if result.valid:
+            return candidate, None
+
+        invalid_output = candidate
+        if repairable and agent.output_repair is not None and agent.output_validation_max_repairs == 1:
+            request = OutputRepairRequest(
+                invalid_output=invalid_output,
+                validation_code=cast(str, result.code),
+                validation_message=result.message,
+                model=agent.output_repair_model,
+                model_settings=deepcopy(agent.output_repair_model_settings),
+                tools=(),
+            )
+            try:
+                repaired_output = agent.output_repair(request)
+            except Exception as exc:
+                result = OutputValidationResult.reject("repair_provider_error", str(exc))
+            else:
+                candidate, result, _ = cls._run_output_validator(
+                    agent=agent,
+                    validator=validator,
+                    validation_context=validation_context,
+                    candidate=repaired_output,
+                    output_coercion_error=None,
+                    coerce=True,
+                )
+                if result.valid:
+                    cls._replace_raw_result_output(raw_result, candidate)
+                    return candidate, None
+
+        error = cls._output_validation_error(result)
+        cls._mark_output_validation_failure(
+            raw_result=raw_result,
+            error=error,
+            invalid_output=candidate,
+        )
+        return error, None
+
+    @classmethod
+    def _run_output_validator(
+        cls,
+        *,
+        agent: Agent,
+        validator: Callable[[Any, OutputValidationContext], OutputValidationResult],
+        validation_context: OutputValidationContext,
+        candidate: Any,
+        output_coercion_error: Exception | None,
+        coerce: bool,
+    ) -> tuple[Any, OutputValidationResult, bool]:
+        if output_coercion_error is not None:
+            return candidate, OutputValidationResult.reject("output_type_invalid", str(output_coercion_error)), True
+        if coerce:
+            try:
+                candidate = cls._coerce_output_type(agent=agent, final_output=candidate)
+            except Exception as exc:
+                return candidate, OutputValidationResult.reject("output_type_invalid", str(exc)), True
+        try:
+            result = validator(candidate, validation_context)
+        except Exception as exc:
+            return candidate, OutputValidationResult.reject("output_validator_error", str(exc)), False
+        if not isinstance(result, OutputValidationResult):
+            return (
+                candidate,
+                OutputValidationResult.reject(
+                    "output_validator_contract_invalid",
+                    "output_validator must return OutputValidationResult",
+                ),
+                False,
+            )
+        return candidate, result, True
+
+    @staticmethod
+    def _output_validation_error(result: OutputValidationResult) -> str:
+        detail = cast(str, result.code)
+        if result.message:
+            detail = f"{detail}: {result.message}"
+        return f"{OUTPUT_VALIDATION_FAILED}: {detail}"
+
+    @staticmethod
+    def _mark_output_validation_failure(*, raw_result: AgentResult, error: str, invalid_output: Any) -> None:
+        raw_result.status = AgentStatus.FAILED
+        raw_result.completion_reason = CompletionReason.FAILED
+        raw_result.completion_tool_name = None
+        serializable = RunResult._serializable_output(invalid_output)
+        if serializable is not None and not isinstance(serializable, str):
+            try:
+                serializable = json.dumps(serializable, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            except (TypeError, ValueError):
+                serializable = str(serializable)
+        raw_result.partial_output = cast(str | None, serializable) or _last_assistant_output(raw_result.cycles)
+        raw_result.final_answer = None
+        raw_result.wait_reason = None
+        raw_result.error = error
+        raw_result.error_code = OUTPUT_VALIDATION_FAILED
 
     @staticmethod
     def _replace_raw_result_output(result: AgentResult, output: Any) -> None:

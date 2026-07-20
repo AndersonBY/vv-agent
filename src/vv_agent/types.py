@@ -889,6 +889,7 @@ class AgentResult:
     budget_exhaustion: BudgetExhaustion | None = None
     checkpoint_key: str | None = None
     resume_observation: ResumeObservation | None = None
+    error_code: str | None = None
 
     @property
     def todo_list(self) -> list[dict[str, Any]]:
@@ -919,6 +920,8 @@ class AgentResult:
             payload["budget_usage"] = self.budget_usage.to_dict()
         if self.budget_exhaustion is not None:
             payload["budget_exhaustion"] = self.budget_exhaustion.to_dict()
+        if self.error_code is not None:
+            payload["error_code"] = self.error_code
         return payload
 
     @classmethod
@@ -948,6 +951,9 @@ class AgentResult:
         resume_observation_raw = data.get("resume_observation")
         if resume_observation_raw is not None and not isinstance(resume_observation_raw, dict):
             raise TypeError("AgentResult field 'resume_observation' must be an object or None")
+        error_code = data.get("error_code")
+        if error_code is not None and not isinstance(error_code, str):
+            raise TypeError("AgentResult field 'error_code' must be a string or None")
         return cls(
             status=AgentStatus(data["status"]),
             completion_reason=(CompletionReason(completion_reason_raw) if completion_reason_raw is not None else None),
@@ -970,4 +976,5 @@ class AgentResult:
                 if resume_observation_raw is not None
                 else None
             ),
+            error_code=error_code,
         )

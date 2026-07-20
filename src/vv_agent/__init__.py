@@ -113,6 +113,16 @@ from vv_agent.interactive import (
 from vv_agent.llm import VVLlmClient, VvLlmClient
 from vv_agent.model import ModelError, ModelProvider, ModelRef, ScriptedModelProvider, VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings, ResponseFormat, RetrySettings, ToolChoice
+from vv_agent.output_validation import (
+    OUTPUT_VALIDATION_FAILED,
+    OutputRepair,
+    OutputRepairRequest,
+    OutputValidationContext,
+    OutputValidationResult,
+    OutputValidator,
+    output_repair,
+    output_validator,
+)
 from vv_agent.result import ApprovalSnapshot, RunResult, RunState
 from vv_agent.run_config import ApprovalPolicy, RunConfig, ToolPolicy
 from vv_agent.run_handle import RunHandle, RunHandleController, RunHandleState
@@ -169,6 +179,7 @@ from vv_agent.types import (
 )
 
 __all__ = [
+    "OUTPUT_VALIDATION_FAILED",
     "AfterCycleAction",
     "AfterCycleDecision",
     "AfterCycleHook",
@@ -259,6 +270,11 @@ __all__ = [
     "OperationAmbiguousEvent",
     "OperationReplayedEvent",
     "OutgoingRouter",
+    "OutputRepair",
+    "OutputRepairRequest",
+    "OutputValidationContext",
+    "OutputValidationResult",
+    "OutputValidator",
     "ReasoningDeltaEvent",
     "ReconciliationProvider",
     "ReconciliationRequiredEvent",
@@ -340,6 +356,8 @@ __all__ = [
     "input_guardrail",
     "load_llm_settings_from_file",
     "output_guardrail",
+    "output_repair",
+    "output_validator",
     "resolve_model_endpoint",
     "session_store_conformance",
 ]

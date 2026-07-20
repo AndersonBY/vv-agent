@@ -10,6 +10,8 @@ from vv_agent import (
     CheckpointConfig,
     ContextFragment,
     MemorySession,
+    OutputValidationContext,
+    OutputValidationResult,
     RunConfig,
     Runner,
     ToolContext,
@@ -148,6 +150,64 @@ def test_runner_checkpoint_terminal_replay_repeats_typed_output_validation() -> 
     with pytest.raises(ValueError, match="failed to validate final output"):
         Runner.run_sync(agent, "return invalid typed output", run_config=config)
     assert model_calls == 1
+
+
+def test_runner_checkpoint_terminal_replay_reuses_validated_failure() -> None:
+    store = InMemoryStateStore()
+    model_calls = 0
+    validator_calls = 0
+
+    def completed_model() -> ScriptedLLM:
+        def complete(_request: Any) -> LLMResponse:
+            nonlocal model_calls
+            model_calls += 1
+            return LLMResponse(content="invalid")
+
+        return ScriptedLLM(steps=[complete])
+
+    def validate(_output: Any, _context: OutputValidationContext) -> OutputValidationResult:
+        nonlocal validator_calls
+        validator_calls += 1
+        return OutputValidationResult.reject("invalid")
+
+    agent = Agent(
+        name="validated-checkpoint-agent",
+        instructions="Return the answer.",
+        model="test-model",
+        output_validation_enabled=True,
+        output_validator=validate,
+    )
+    config = RunConfig(
+        model_provider=_provider(completed_model),
+        max_cycles=1,
+        no_tool_policy="finish",
+        checkpoint_config=CheckpointConfig(
+            key="validated-terminal-replay",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+            capability_refs={
+                "output_validator": {"id": "output.validation", "version": "1"},
+            },
+        ),
+    )
+
+    first = Runner.run_sync(agent, "return invalid output", run_config=config)
+    assert first.status is AgentStatus.FAILED
+    assert first.error_code == "output_validation_failed"
+    assert model_calls == 1
+    assert validator_calls == 1
+    terminal = store.load_checkpoint_v2("validated-terminal-replay")
+    assert terminal is not None
+    assert terminal.status is AgentStatus.FAILED
+    assert terminal.terminal_result is not None
+    assert terminal.terminal_result.error_code == "output_validation_failed"
+
+    replay = Runner.run_sync(agent, "return invalid output", run_config=config)
+    assert replay.status is AgentStatus.FAILED
+    assert replay.error_code == "output_validation_failed"
+    assert model_calls == 1
+    assert validator_calls == 1
+    assert not any(event.type in {"run_completed", "run_failed"} for event in replay.events)
 
 
 def test_runner_injects_stable_tool_idempotency_key_and_replay_does_not_repeat_effect() -> None:
