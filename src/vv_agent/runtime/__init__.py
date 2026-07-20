@@ -20,12 +20,24 @@ from vv_agent.runtime.hooks import (
     RuntimeHook,
     RuntimeHookManager,
 )
+from vv_agent.runtime.lifecycle import (
+    AfterCycleAction,
+    AfterCycleDecision,
+    AfterCycleHook,
+    AfterCycleSnapshot,
+    NativeCycleOutcome,
+    NativeCycleOutcomeKind,
+)
 from vv_agent.runtime.state import Checkpoint, InMemoryStateStore, StateStore
 from vv_agent.runtime.state_v2 import CheckpointStoreV2, CheckpointV2, OperationJournalEntry
 from vv_agent.runtime.sub_task_manager import ManagedSubTask, SubTaskManager
 from vv_agent.runtime.tool_call_runner import ToolCallRunner
 
 __all__ = [
+    "AfterCycleAction",
+    "AfterCycleDecision",
+    "AfterCycleHook",
+    "AfterCycleSnapshot",
     "AfterLLMEvent",
     "AfterToolCallEvent",
     "AgentRuntime",
@@ -46,6 +58,8 @@ __all__ = [
     "InMemoryStateStore",
     "InlineBackend",
     "ManagedSubTask",
+    "NativeCycleOutcome",
+    "NativeCycleOutcomeKind",
     "OperationJournalEntry",
     "RuntimeHook",
     "RuntimeHookManager",

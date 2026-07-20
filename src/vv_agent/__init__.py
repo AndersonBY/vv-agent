@@ -113,6 +113,14 @@ from vv_agent.result import ApprovalSnapshot, RunResult, RunState
 from vv_agent.run_config import ApprovalPolicy, RunConfig, ToolPolicy
 from vv_agent.run_handle import RunHandle, RunHandleController, RunHandleState
 from vv_agent.runner import ConfiguredRunner, Runner
+from vv_agent.runtime.lifecycle import (
+    AfterCycleAction,
+    AfterCycleDecision,
+    AfterCycleHook,
+    AfterCycleSnapshot,
+    NativeCycleOutcome,
+    NativeCycleOutcomeKind,
+)
 from vv_agent.sessions import (
     MemorySession,
     MemorySessionStore,
@@ -154,6 +162,10 @@ from vv_agent.types import (
 )
 
 __all__ = [
+    "AfterCycleAction",
+    "AfterCycleDecision",
+    "AfterCycleHook",
+    "AfterCycleSnapshot",
     "Agent",
     "AgentResolutionRequest",
     "AgentSession",
@@ -232,6 +244,8 @@ __all__ = [
     "ModelRef",
     "ModelRetryDuplicateRiskEvent",
     "ModelSettings",
+    "NativeCycleOutcome",
+    "NativeCycleOutcomeKind",
     "NoToolPolicy",
     "OperationAmbiguousEvent",
     "OperationReplayedEvent",

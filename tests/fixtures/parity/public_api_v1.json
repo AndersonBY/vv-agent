@@ -96,6 +96,36 @@
           "rust": "vv_agent::ContextProvider"
         },
         {
+          "id": "run_config.after_cycle_hook",
+          "python": "vv_agent.AfterCycleHook",
+          "rust": "vv_agent::AfterCycleHook"
+        },
+        {
+          "id": "run_config.after_cycle_snapshot",
+          "python": "vv_agent.AfterCycleSnapshot",
+          "rust": "vv_agent::AfterCycleSnapshot"
+        },
+        {
+          "id": "run_config.after_cycle_decision",
+          "python": "vv_agent.AfterCycleDecision",
+          "rust": "vv_agent::AfterCycleDecision"
+        },
+        {
+          "id": "run_config.after_cycle_action",
+          "python": "vv_agent.AfterCycleAction",
+          "rust": "vv_agent::AfterCycleAction"
+        },
+        {
+          "id": "run_config.native_cycle_outcome",
+          "python": "vv_agent.NativeCycleOutcome",
+          "rust": "vv_agent::NativeCycleOutcome"
+        },
+        {
+          "id": "run_config.native_cycle_outcome_kind",
+          "python": "vv_agent.NativeCycleOutcomeKind",
+          "rust": "vv_agent::NativeCycleOutcomeKind"
+        },
+        {
           "id": "run_config.run_budget_limits",
           "python": "vv_agent.RunBudgetLimits",
           "rust": "vv_agent::RunBudgetLimits"
@@ -1454,6 +1484,19 @@
           "rust": {
             "kind": "field",
             "name": "hooks"
+          }
+        },
+        {
+          "id": "after_cycle_hooks",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "after_cycle_hooks"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "after_cycle_hooks"
           }
         },
         {

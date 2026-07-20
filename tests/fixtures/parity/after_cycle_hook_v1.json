@@ -1,0 +1,438 @@
+{
+  "schema_version": "vv-agent.after-cycle-hook.v1",
+  "default_behavior": {
+    "configured_hooks": [],
+    "invocation_count": 0,
+    "runtime_trace_unchanged": true,
+    "tool_permissions_unchanged": true,
+    "continuation_hint_unchanged": true,
+    "checkpoint_extension_state_added": false
+  },
+  "snapshot": {
+    "required_fields": [
+      "task_id",
+      "cycle_index",
+      "max_cycles",
+      "remaining_cycles",
+      "cycle",
+      "messages",
+      "shared_state",
+      "cumulative_token_usage",
+      "available_tool_names",
+      "disallowed_tool_names",
+      "native_outcome"
+    ],
+    "copy_semantics": "hook_mutation_cannot_mutate_runtime_messages_cycle_or_shared_state",
+    "timing": "after_assistant_and_all_planned_tool_results_before_native_terminal_projection_or_cycle_commit",
+    "native_outcome": {
+      "required_fields": [
+        "kind",
+        "completion_reason",
+        "completion_tool_name",
+        "steer_allowed"
+      ],
+      "kind_values": [
+        "continue",
+        "completed",
+        "wait_user",
+        "max_cycles"
+      ],
+      "steer_allowed_for": [
+        "continue",
+        "completed"
+      ]
+    },
+    "task_domain_fields_forbidden": [
+      "task_type",
+      "research_phase",
+      "coding_phase",
+      "milestone",
+      "answer_confidence",
+      "lease_policy"
+    ]
+  },
+  "decision": {
+    "closed_fields": [
+      "action",
+      "steering_messages",
+      "disallow_tools",
+      "stop"
+    ],
+    "action_values": [
+      "continue",
+      "steer",
+      "stop_non_success"
+    ],
+    "canonical_continue": {
+      "action": "continue",
+      "steering_messages": [],
+      "disallow_tools": [],
+      "stop": null
+    },
+    "rules": {
+      "continue_accepts_only_optional_permission_narrowing": true,
+      "steer_requires_one_or_more_non_empty_user_messages": true,
+      "steering_messages_are_next_cycle_user_messages": true,
+      "steering_replaces_default_continuation_hint": true,
+      "stop_requires_non_empty_code_and_message": true,
+      "stop_status": "failed",
+      "stop_completion_reason": "failed",
+      "completed_status_cannot_be_returned_by_hook": true,
+      "wait_user_status_cannot_be_returned_by_hook": true,
+      "permission_changes_are_union_only": true,
+      "permission_expansion_fields_do_not_exist": true,
+      "unknown_fields_are_invalid": true
+    },
+    "limits": {
+      "max_steering_messages": 32,
+      "max_steering_message_utf8_bytes": 16384,
+      "max_total_steering_utf8_bytes": 65536,
+      "max_disallow_tools": 1024,
+      "max_tool_name_utf8_bytes": 256,
+      "max_stop_code_ascii_bytes": 128,
+      "max_stop_message_utf8_bytes": 4096
+    },
+    "error_codes": {
+      "invalid_decision": "after_cycle_decision_invalid",
+      "hook_failure": "after_cycle_hook_failed",
+      "steer_unavailable": "after_cycle_steer_unavailable",
+      "control_state_invalid": "after_cycle_control_state_invalid"
+    }
+  },
+  "composition": {
+    "hook_order": "runner_default_then_per_run",
+    "snapshot_visibility": "all_hooks_receive_the_same_immutable_base_snapshot",
+    "steering_merge": "concatenate_in_registration_order",
+    "permission_merge": "set_union_then_utf16_sort_for_durable_state",
+    "stop_merge": "first_stop_wins_and_later_hooks_are_not_called",
+    "failure_merge": "first_exception_or_invalid_decision_fails_closed"
+  },
+  "terminal_precedence": [
+    "already_raised_execution_failure",
+    "cancellation",
+    "budget_exhaustion",
+    "after_cycle_stop_non_success",
+    "after_cycle_steer",
+    "native_completed_or_wait_user",
+    "max_cycles",
+    "continue"
+  ],
+  "permission_state": {
+    "schema_version": "vv-agent.after-cycle-control.v1",
+    "reserved_shared_state_key": "_vv_agent_after_cycle_control",
+    "closed_fields": [
+      "schema_version",
+      "disallowed_tools"
+    ],
+    "created_only_after_non_empty_permission_narrowing": true,
+    "survives_checkpoint_v1_and_v2": true,
+    "applies_to_next_model_tool_schema_and_tool_dispatch": true,
+    "cannot_remove_agent_runner_or_run_level_denials": true
+  },
+  "durability": {
+    "stateful_hook_uses_existing_checkpoint_extension_protocol": true,
+    "hook_and_state_codec_may_be_the_same_host_object": true,
+    "extension_namespace_and_version_are_pinned_in_run_definition": true,
+    "extension_snapshot_occurs_after_decision_before_cycle_commit": true,
+    "extension_restore_occurs_before_first_resumed_cycle": true,
+    "committed_cycle_hook_is_not_reinvoked_on_resume": true,
+    "uncommitted_cycle_may_be_replayed": true,
+    "hook_must_not_perform_unjournaled_external_side_effects": true,
+    "decision_for_same_snapshot_must_be_deterministic_or_idempotent": true
+  },
+  "distributed": {
+    "wire_field": "recipe.capabilities.after_cycle_hook_refs",
+    "reference_shape": {
+      "id": "lifecycle.policy",
+      "version": "1"
+    },
+    "resolved_before_claim": true,
+    "run_definition_capability_slots": [
+      "after_cycle_hook:0"
+    ],
+    "stateful_pairing": {
+      "hook_ref": {
+        "id": "lifecycle.policy",
+        "version": "1"
+      },
+      "checkpoint_extension_ref": {
+        "namespace": "com.example.lifecycle",
+        "reference": {
+          "id": "lifecycle.policy-state",
+          "version": "1"
+        },
+        "required": true
+      }
+    },
+    "missing_hook_failure_boundary": "before_checkpoint_claim_model_or_tool_operation"
+  },
+  "runner_cases": [
+    {
+      "name": "disabled_is_exact_noop",
+      "hooks": [],
+      "cycles": [
+        {
+          "assistant": "still working",
+          "tool_calls": []
+        }
+      ],
+      "no_tool_policy": "continue",
+      "max_cycles": 2,
+      "expected": {
+        "hook_invocations": 0,
+        "next_user_messages": [
+          "Continue working on the task."
+        ],
+        "reserved_state_present": false,
+        "native_outcome": "continue"
+      }
+    },
+    {
+      "name": "continue_observes_without_mutation",
+      "hooks": [
+        {
+          "decision": {
+            "action": "continue",
+            "steering_messages": [],
+            "disallow_tools": [],
+            "stop": null
+          }
+        }
+      ],
+      "cycles": [
+        {
+          "assistant": "done",
+          "tool_calls": []
+        }
+      ],
+      "no_tool_policy": "finish",
+      "max_cycles": 2,
+      "expected": {
+        "status": "completed",
+        "completion_reason": "no_tool_finish",
+        "hook_invocations": 1,
+        "messages_added_by_hook": 0,
+        "reserved_state_present": false
+      }
+    },
+    {
+      "name": "steer_defers_native_completion",
+      "hooks": [
+        {
+          "decisions": [
+            {
+              "action": "steer",
+              "steering_messages": [
+                "Check the output once more."
+              ],
+              "disallow_tools": [],
+              "stop": null
+            },
+            {
+              "action": "continue",
+              "steering_messages": [],
+              "disallow_tools": [],
+              "stop": null
+            }
+          ]
+        }
+      ],
+      "cycles": [
+        {
+          "assistant": "first answer",
+          "tool_calls": []
+        },
+        {
+          "assistant": "checked answer",
+          "tool_calls": []
+        }
+      ],
+      "no_tool_policy": "finish",
+      "max_cycles": 3,
+      "expected": {
+        "status": "completed",
+        "completion_reason": "no_tool_finish",
+        "hook_invocations": 2,
+        "injected_user_messages": [
+          "Check the output once more."
+        ],
+        "default_continuation_hint_count": 0
+      }
+    },
+    {
+      "name": "permission_narrowing_is_enforced_and_durable",
+      "hooks": [
+        {
+          "decision": {
+            "action": "continue",
+            "steering_messages": [],
+            "disallow_tools": [
+              "bash"
+            ],
+            "stop": null
+          }
+        }
+      ],
+      "initial_available_tools": [
+        "bash",
+        "read_file"
+      ],
+      "expected": {
+        "next_available_tools": [
+          "read_file"
+        ],
+        "dispatch_of_bash": "tool_not_allowed",
+        "durable_control_state": {
+          "schema_version": "vv-agent.after-cycle-control.v1",
+          "disallowed_tools": [
+            "bash"
+          ]
+        }
+      }
+    },
+    {
+      "name": "stop_cannot_be_projected_as_success",
+      "hooks": [
+        {
+          "decision": {
+            "action": "stop_non_success",
+            "steering_messages": [],
+            "disallow_tools": [],
+            "stop": {
+              "code": "host.policy_stop",
+              "message": "Host policy stopped this run."
+            }
+          }
+        }
+      ],
+      "native_outcome": {
+        "kind": "completed",
+        "completion_reason": "tool_finish",
+        "completion_tool_name": "task_finish",
+        "steer_allowed": true
+      },
+      "expected": {
+        "status": "failed",
+        "completion_reason": "failed",
+        "final_answer": null,
+        "error": "host.policy_stop: Host policy stopped this run.",
+        "run_completed_event_count": 0
+      }
+    },
+    {
+      "name": "steer_at_max_cycles_fails_closed",
+      "hooks": [
+        {
+          "decision": {
+            "action": "steer",
+            "steering_messages": [
+              "Try again."
+            ],
+            "disallow_tools": [],
+            "stop": null
+          }
+        }
+      ],
+      "native_outcome": {
+        "kind": "max_cycles",
+        "completion_reason": "max_cycles",
+        "completion_tool_name": null,
+        "steer_allowed": false
+      },
+      "expected": {
+        "status": "failed",
+        "completion_reason": "failed",
+        "error_code": "after_cycle_steer_unavailable",
+        "additional_model_calls": 0
+      }
+    },
+    {
+      "name": "checkpoint_resume_restores_hook_and_control_state",
+      "hook": {
+        "namespace": "com.example.lifecycle",
+        "version": "1",
+        "required": true,
+        "snapshot_after_cycle_1": {
+          "observed_cycles": 1
+        }
+      },
+      "committed_control_state": {
+        "schema_version": "vv-agent.after-cycle-control.v1",
+        "disallowed_tools": [
+          "bash"
+        ]
+      },
+      "expected_after_resume": {
+        "first_hook_snapshot_cycle": 2,
+        "restored_extension_state": {
+          "observed_cycles": 1
+        },
+        "available_tools": [
+          "read_file"
+        ],
+        "cycle_1_hook_reinvocations": 0
+      }
+    }
+  ],
+  "invalid_decisions": [
+    {
+      "name": "unknown_action",
+      "decision": {
+        "action": "complete",
+        "steering_messages": [],
+        "disallow_tools": [],
+        "stop": null
+      },
+      "error_code": "after_cycle_decision_invalid"
+    },
+    {
+      "name": "empty_steer",
+      "decision": {
+        "action": "steer",
+        "steering_messages": [],
+        "disallow_tools": [],
+        "stop": null
+      },
+      "error_code": "after_cycle_decision_invalid"
+    },
+    {
+      "name": "continue_with_stop_payload",
+      "decision": {
+        "action": "continue",
+        "steering_messages": [],
+        "disallow_tools": [],
+        "stop": {
+          "code": "unexpected",
+          "message": "not allowed"
+        }
+      },
+      "error_code": "after_cycle_decision_invalid"
+    },
+    {
+      "name": "stop_without_message",
+      "decision": {
+        "action": "stop_non_success",
+        "steering_messages": [],
+        "disallow_tools": [],
+        "stop": {
+          "code": "host.stop",
+          "message": ""
+        }
+      },
+      "error_code": "after_cycle_decision_invalid"
+    },
+    {
+      "name": "permission_expansion_field",
+      "decision": {
+        "action": "continue",
+        "steering_messages": [],
+        "disallow_tools": [],
+        "allow_tools": [
+          "bash"
+        ],
+        "stop": null
+      },
+      "error_code": "after_cycle_decision_invalid"
+    }
+  ]
+}

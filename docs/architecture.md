@@ -79,6 +79,9 @@ implementing providers instead of patching runtime internals:
 - `vv_agent.tools.ToolExecutor` or `FunctionTool` collections for product
   tools.
 - `RunEventStore` for app history and parent/child run graph replay.
+- `AfterCycleHook` for an optional task-neutral observation/control point after
+  a complete cycle. It may steer the next cycle, add tool denials, or stop with
+  failure; it cannot expand permissions or manufacture success/waiting states.
 
 Raw runtime logs remain available for compatibility, but typed `RunEvent` is
 the primary state contract for host UIs.

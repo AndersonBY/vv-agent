@@ -71,6 +71,7 @@ Never repair a contract failure by editing a file under
 | Token and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py` |
 | Assistant reasoning history | `src/vv_agent/types.py`, `src/vv_agent/memory/manager.py`, `src/vv_agent/memory/message_sanitizer.py`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_runner.py`, `tests/test_message_sanitizer.py`, `tests/test_sub_task_status.py` |
 | Run budgets | `src/vv_agent/budget.py`, `src/vv_agent/runtime/engine.py`, `tests/test_run_budget.py` |
+| After-cycle lifecycle hooks | `src/vv_agent/runtime/lifecycle.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/run_definition.py`, `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/backends/celery_tasks.py`, `tests/test_after_cycle_hooks.py`, `tests/test_distributed_checkpoint_v2.py` |
 | Durable checkpoint/resume v2 | `src/vv_agent/checkpoint.py`, `src/vv_agent/runtime/checkpoint_codec_v2.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/run_definition.py`, `tests/test_checkpoint_runner_v2.py`, `tests/test_checkpoint_fault_matrix.py` |
 | Distributed runtime | `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/checkpoint_codec.py` |
 | App Server | `src/vv_agent/app_server/`, `tests/test_app_server_contract_parity.py` |
@@ -92,6 +93,10 @@ The following are API-shape adaptations, not behavioral differences:
   envelope, checkpoint, lease, and terminal-state contract;
 - Python settings-file model controls map to the equivalent Rust
   `ModelProvider` capability.
+- Python exposes copied snapshots through frozen dataclasses and a protocol
+  callback; Rust uses immutable structs and a trait object. Both compose
+  runner-default hooks before per-run hooks, persist only cumulative denials,
+  and resolve distributed `after_cycle_hook_refs` before checkpoint claim.
 
 Add a new adaptation only when both implementations preserve input, output,
 safety, persistence, cancellation, and lifecycle semantics.

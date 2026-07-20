@@ -384,6 +384,7 @@ def _validate_v2_task_and_capabilities(
     for prefix, references in (
         ("memory_provider", capabilities.memory_provider_refs),
         ("runtime_hook", capabilities.hook_refs),
+        ("after_cycle_hook", capabilities.after_cycle_hook_refs),
     ):
         for index, reference in enumerate(references):
             slot = f"{prefix}:{index}"
@@ -496,6 +497,11 @@ def _rebuild_runtime(
     tool_registry = capability_registry.resolve_toolset(capabilities.toolset_ref)
     tool_policy = capabilities.tool_policy.resolve(capability_registry)
     hooks = _resolve_many(capability_registry, "hook", capabilities.hook_refs)
+    after_cycle_hooks = _resolve_many(
+        capability_registry,
+        "after_cycle_hook",
+        capabilities.after_cycle_hook_refs,
+    )
     observers = _resolve_many(capability_registry, "observer", capabilities.observer_refs)
     event_sink = (
         capability_registry.resolve("event_sink", capabilities.event_sink_ref)
@@ -528,6 +534,7 @@ def _rebuild_runtime(
         settings_file=recipe.settings_file,
         default_backend=recipe.backend,
         hooks=hooks,
+        after_cycle_hooks=after_cycle_hooks,
         workspace_backend=workspace_backend,
     )
     metadata: dict[str, Any] = {

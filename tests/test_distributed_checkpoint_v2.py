@@ -9,7 +9,15 @@ from typing import Any
 
 import pytest
 
-from vv_agent import Agent, CheckpointConfig, MemorySession, RunConfig, Runner
+from vv_agent import (
+    AfterCycleDecision,
+    AfterCycleSnapshot,
+    Agent,
+    CheckpointConfig,
+    MemorySession,
+    RunConfig,
+    Runner,
+)
 from vv_agent.checkpoint import ResumePolicy
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult
@@ -20,6 +28,7 @@ from vv_agent.runtime.backends.celery_tasks import run_single_cycle
 from vv_agent.runtime.backends.distributed import (
     DISTRIBUTED_RUN_SCHEMA_VERSION_V2,
     CapabilityRef,
+    CheckpointExtensionRef,
     DistributedCapabilities,
     DistributedCapabilityError,
     DistributedCapabilityRegistry,
@@ -155,6 +164,137 @@ def test_distributed_v2_static_invalid_cases_fail_before_worker_resolution() -> 
             DistributedRunEnvelope.from_dict(payload)
 
 
+def test_celery_v2_resolves_and_restores_stateful_after_cycle_hook(
+    tmp_path: Path,
+) -> None:
+    class StatefulLifecycleHook:
+        namespace = "com.example.lifecycle"
+        version = "1"
+        required = True
+
+        def __init__(self) -> None:
+            self.observed_cycles = 0
+            self.restored_states: list[int] = []
+            self.snapshot_cycles: list[int] = []
+
+        def after_cycle(self, snapshot: AfterCycleSnapshot) -> AfterCycleDecision:
+            self.observed_cycles += 1
+            self.snapshot_cycles.append(snapshot.cycle_index)
+            if self.observed_cycles == 1:
+                return AfterCycleDecision.steer(
+                    ["Verify the candidate answer."],
+                    disallow_tools=["task_finish"],
+                )
+            return AfterCycleDecision.continue_run()
+
+        def snapshot(self) -> dict[str, int]:
+            return {"observed_cycles": self.observed_cycles}
+
+        def restore(self, state: Any) -> None:
+            assert isinstance(state, dict)
+            value = state.get("observed_cycles")
+            assert isinstance(value, int)
+            self.observed_cycles = value
+            self.restored_states.append(value)
+
+    store = InMemoryStateStore()
+    checkpoint_ref = CapabilityRef("checkpoint.lifecycle", "2")
+    llm_ref = CapabilityRef("llm.lifecycle", "1")
+    hook_ref = CapabilityRef("lifecycle.policy", "1")
+    extension_ref = CapabilityRef("lifecycle.policy-state", "1")
+    hook = StatefulLifecycleHook()
+    requests: list[Any] = []
+
+    def first_answer(request: Any) -> LLMResponse:
+        requests.append(request)
+        return LLMResponse(content="candidate")
+
+    def verified_answer(request: Any) -> LLMResponse:
+        requests.append(request)
+        return LLMResponse(content="verified")
+
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register(
+        "llm_client",
+        llm_ref,
+        ScriptedLLM(steps=[first_answer, verified_answer]),
+    )
+    registry.register("after_cycle_hook", hook_ref, hook)
+    registry.register("checkpoint_extension", extension_ref, hook)
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            after_cycle_hook_refs=(hook_ref,),
+            checkpoint_store_ref=checkpoint_ref,
+            checkpoint_extension_refs=(
+                CheckpointExtensionRef(
+                    namespace=hook.namespace,
+                    reference=extension_ref,
+                    required=True,
+                ),
+            ),
+        ),
+    )
+    app = _ImmediateApp(registry=registry, store=store)
+    backend = CeleryBackend(
+        celery_app=app,
+        state_store=store,
+        runtime_recipe=recipe,
+        dispatch_timeout_seconds=1,
+    )
+    config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=3,
+        no_tool_policy="finish",
+        after_cycle_hooks=[hook],
+        checkpoint_config=CheckpointConfig(
+            key="distributed-after-cycle",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+            required_extension_namespaces=[hook.namespace],
+            capability_refs={
+                "after_cycle_hook:0": hook_ref.to_dict(),
+            },
+        ),
+        checkpoint_extensions=[hook],
+    )
+
+    result = Runner.run_sync(
+        Agent(
+            name="distributed-lifecycle-agent",
+            instructions="Return one checked answer.",
+            model="test-model",
+        ),
+        "answer",
+        run_config=config,
+    )
+
+    assert result.status is AgentStatus.COMPLETED
+    assert result.final_output == "verified"
+    assert hook.snapshot_cycles == [1, 2]
+    assert 1 in hook.restored_states
+    assert len(requests) == 2
+    assert requests[1].messages[-1].content == "Verify the candidate answer."
+    assert all(
+        envelope["recipe"]["capabilities"]["after_cycle_hook_refs"]
+        == [hook_ref.to_dict()]
+        for envelope in app.envelopes
+    )
+    terminal = store.load_checkpoint_v2("distributed-after-cycle")
+    assert terminal is not None
+    assert terminal.shared_state["_vv_agent_after_cycle_control"] == {
+        "schema_version": "vv-agent.after-cycle-control.v1",
+        "disallowed_tools": ["task_finish"],
+    }
+    assert terminal.extension_state[hook.namespace].state == {"observed_cycles": 2}
+
+
 @pytest.mark.parametrize("transport_redelivered", [False, True])
 def test_celery_v2_returns_candidate_then_runner_owns_terminal_order(
     tmp_path: Path,
@@ -279,6 +419,10 @@ def test_celery_v2_returns_candidate_then_runner_owns_terminal_order(
         ("root_identity", "checkpoint_definition_mismatch"),
         ("checkpoint_policy", "checkpoint_definition_mismatch"),
         ("missing_capability", "unknown distributed capability hook hook.missing@1"),
+        (
+            "missing_after_cycle_capability",
+            "unknown distributed capability after_cycle_hook lifecycle.missing@1",
+        ),
     ],
 )
 def test_celery_v2_rejects_identity_definition_config_and_capability_before_claim(
@@ -319,8 +463,12 @@ def test_celery_v2_rejects_identity_definition_config_and_capability_before_clai
             envelope["root_run_id"] = "run-other"
         elif case_name == "checkpoint_policy":
             envelope["checkpoint_config"]["ambiguous_tool_policy"] = "retry_idempotent_only"
-        else:
+        elif case_name == "missing_capability":
             envelope["recipe"]["capabilities"]["hook_refs"] = [{"id": "hook.missing", "version": "1"}]
+        else:
+            envelope["recipe"]["capabilities"]["after_cycle_hook_refs"] = [
+                {"id": "lifecycle.missing", "version": "1"}
+            ]
 
     app = _ImmediateApp(
         registry=registry,
@@ -350,7 +498,7 @@ def test_celery_v2_rejects_identity_definition_config_and_capability_before_clai
         ),
     )
 
-    if case_name == "missing_capability":
+    if case_name in {"missing_capability", "missing_after_cycle_capability"}:
         with pytest.raises(DistributedCapabilityError, match=expected_error):
             Runner.run_sync(agent, "validate first", run_config=config)
     else:

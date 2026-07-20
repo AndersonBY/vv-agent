@@ -5,6 +5,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from threading import RLock
@@ -19,6 +20,7 @@ from vv_agent.budget import (
     HostCostMeter,
     RunBudgetLimits,
 )
+from vv_agent.checkpoint import utf16_sort_key
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import (
@@ -43,6 +45,18 @@ from vv_agent.runtime.checkpoint_resume import (
 from vv_agent.runtime.context import ExecutionContext, StreamCallback
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
+from vv_agent.runtime.lifecycle import (
+    AfterCycleAction,
+    AfterCycleDecision,
+    AfterCycleHook,
+    AfterCycleHookError,
+    AfterCycleHookManager,
+    AfterCycleSnapshot,
+    NativeCycleOutcome,
+    NativeCycleOutcomeKind,
+    persist_after_cycle_disallowed_tools,
+    read_after_cycle_disallowed_tools,
+)
 from vv_agent.runtime.sub_task_identity import normalize_identity_string, take_sub_task_identity
 from vv_agent.runtime.sub_task_manager import (
     _TURN_LOG_HANDLER_METADATA_KEY,
@@ -51,7 +65,7 @@ from vv_agent.runtime.sub_task_manager import (
 )
 from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.runtime.tool_call_runner import ToolCallRunner, _ConfiguredSubTaskCancelledError
-from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints
+from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints, plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
 from vv_agent.types import (
     AgentResult,
@@ -431,6 +445,7 @@ class AgentRuntime:
         tool_registry_factory: Callable[[], ToolRegistry] | None = None,
         sub_agent_timeout_seconds: float = 90.0,
         hooks: list[RuntimeHook] | None = None,
+        after_cycle_hooks: list[AfterCycleHook] | None = None,
         execution_backend: ExecutionBackend | None = None,
         workspace_backend: WorkspaceBackend | None = None,
     ) -> None:
@@ -448,6 +463,9 @@ class AgentRuntime:
         self.tool_registry_factory = tool_registry_factory
         self.sub_agent_timeout_seconds = max(sub_agent_timeout_seconds, 1.0)
         self.hook_manager = RuntimeHookManager(hooks=list(hooks or []))
+        self.after_cycle_hook_manager = AfterCycleHookManager(
+            hooks=list(after_cycle_hooks or [])
+        )
         self.execution_backend: ExecutionBackend = execution_backend or InlineBackend()
         self._workspace_backend = workspace_backend
         self._memory_summary_clients: dict[tuple[str, str], LLMClient] = {}
@@ -481,6 +499,10 @@ class AgentRuntime:
         checkpoint_controller: CheckpointResumeController | None = None,
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
+        had_configured_disallowed_tools = "_vv_agent_disallowed_tools" in task.metadata
+        configured_disallowed_tools = deepcopy(
+            task.metadata.get("_vv_agent_disallowed_tools")
+        )
         effective_shared_state = shared_state if shared_state is not None else task.initial_shared_state
         shared = dict(effective_shared_state)
         shared.setdefault("todo_list", [])
@@ -614,18 +636,24 @@ class AgentRuntime:
             sub_task_manager=effective_sub_task_manager,
             budget_controller=budget_controller,
         )
-        if result is None:
-            try:
-                result = self.execution_backend.execute(
-                    task=task,
-                    initial_messages=messages,
-                    shared_state=shared,
-                    cycle_executor=cycle_executor,
-                    ctx=runtime_ctx,
-                    max_cycles=task.max_cycles,
-                )
-            except CheckpointReconciliationRequired as interruption:
-                result = interruption.result
+        try:
+            if result is None:
+                try:
+                    result = self.execution_backend.execute(
+                        task=task,
+                        initial_messages=messages,
+                        shared_state=shared,
+                        cycle_executor=cycle_executor,
+                        ctx=runtime_ctx,
+                        max_cycles=task.max_cycles,
+                    )
+                except CheckpointReconciliationRequired as interruption:
+                    result = interruption.result
+        finally:
+            if had_configured_disallowed_tools:
+                task.metadata["_vv_agent_disallowed_tools"] = configured_disallowed_tools
+            else:
+                task.metadata.pop("_vv_agent_disallowed_tools", None)
 
         if budget_controller is not None:
             cancelled = bool(
@@ -723,6 +751,26 @@ class AgentRuntime:
                     shared_state=shared,
                     token_usage=summarize_task_token_usage(cycles),
                     budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
+                )
+
+            try:
+                self._apply_persisted_after_cycle_denials(
+                    task=task,
+                    shared_state=shared,
+                )
+            except AfterCycleHookError as exc:
+                self._emit_log(
+                    "after_cycle_failed",
+                    cycle=cycle_index,
+                    error_code=exc.code,
+                    error=str(exc),
+                )
+                return self._after_cycle_failure_result(
+                    messages=messages,
+                    cycles=cycles,
+                    shared_state=shared,
+                    error=f"{exc.code}: {exc}",
+                    budget_controller=budget_controller,
                 )
 
             if budget_controller is not None:
@@ -971,6 +1019,48 @@ class AgentRuntime:
                     )
 
                 if tool_result and tool_result.directive == ToolDirective.WAIT_USER:
+                    native_outcome = NativeCycleOutcome(
+                        kind=NativeCycleOutcomeKind.WAIT_USER,
+                        completion_reason=tool_outcome.completion_reason or CompletionReason.WAIT_USER,
+                        completion_tool_name=tool_outcome.completion_tool_name,
+                        steer_allowed=False,
+                    )
+                elif tool_result and tool_result.directive == ToolDirective.FINISH:
+                    native_outcome = NativeCycleOutcome(
+                        kind=NativeCycleOutcomeKind.COMPLETED,
+                        completion_reason=tool_outcome.completion_reason or CompletionReason.TOOL_FINISH,
+                        completion_tool_name=tool_outcome.completion_tool_name,
+                        steer_allowed=cycle_index < task.max_cycles,
+                    )
+                elif cycle_index >= task.max_cycles:
+                    native_outcome = NativeCycleOutcome(
+                        kind=NativeCycleOutcomeKind.MAX_CYCLES,
+                        completion_reason=CompletionReason.MAX_CYCLES,
+                        steer_allowed=False,
+                    )
+                else:
+                    native_outcome = NativeCycleOutcome(
+                        kind=NativeCycleOutcomeKind.CONTINUE,
+                        steer_allowed=True,
+                    )
+                after_cycle_decision, after_cycle_result = self._apply_after_cycle_hooks(
+                    task=task,
+                    cycle_record=cycle_record,
+                    messages=messages,
+                    cycles=cycles,
+                    shared_state=shared,
+                    native_outcome=native_outcome,
+                    budget_controller=budget_controller,
+                )
+                if after_cycle_result is not None:
+                    return after_cycle_result
+                if (
+                    after_cycle_decision is not None
+                    and after_cycle_decision.action is AfterCycleAction.STEER
+                ):
+                    return None
+
+                if tool_result and tool_result.directive == ToolDirective.WAIT_USER:
                     wait_reason = tool_result.metadata.get("question") if isinstance(tool_result.metadata, dict) else None
                     if not wait_reason:
                         wait_reason = tool_result.content
@@ -1018,6 +1108,46 @@ class AgentRuntime:
 
             cycles.append(cycle_record)
             if task.no_tool_policy == "finish":
+                native_outcome = NativeCycleOutcome(
+                    kind=NativeCycleOutcomeKind.COMPLETED,
+                    completion_reason=CompletionReason.NO_TOOL_FINISH,
+                    steer_allowed=cycle_index < task.max_cycles,
+                )
+            elif task.no_tool_policy == "wait_user":
+                native_outcome = NativeCycleOutcome(
+                    kind=NativeCycleOutcomeKind.WAIT_USER,
+                    completion_reason=CompletionReason.WAIT_USER,
+                    steer_allowed=False,
+                )
+            elif cycle_index >= task.max_cycles:
+                native_outcome = NativeCycleOutcome(
+                    kind=NativeCycleOutcomeKind.MAX_CYCLES,
+                    completion_reason=CompletionReason.MAX_CYCLES,
+                    steer_allowed=False,
+                )
+            else:
+                native_outcome = NativeCycleOutcome(
+                    kind=NativeCycleOutcomeKind.CONTINUE,
+                    steer_allowed=True,
+                )
+            after_cycle_decision, after_cycle_result = self._apply_after_cycle_hooks(
+                task=task,
+                cycle_record=cycle_record,
+                messages=messages,
+                cycles=cycles,
+                shared_state=shared,
+                native_outcome=native_outcome,
+                budget_controller=budget_controller,
+            )
+            if after_cycle_result is not None:
+                return after_cycle_result
+            if (
+                after_cycle_decision is not None
+                and after_cycle_decision.action is AfterCycleAction.STEER
+            ):
+                return None
+
+            if task.no_tool_policy == "finish":
                 self._emit_log(
                     "run_completed",
                     cycle=cycle_index,
@@ -1059,6 +1189,191 @@ class AgentRuntime:
             return None  # continue to next cycle
 
         return executor
+
+    def _apply_after_cycle_hooks(
+        self,
+        *,
+        task: AgentTask,
+        cycle_record: CycleRecord,
+        messages: list[Message],
+        cycles: list[CycleRecord],
+        shared_state: dict[str, Any],
+        native_outcome: NativeCycleOutcome,
+        budget_controller: _RunBudgetController | None,
+    ) -> tuple[AfterCycleDecision | None, AgentResult | None]:
+        if not self.after_cycle_hook_manager.has_hooks():
+            return None, None
+
+        try:
+            disallowed = self._effective_after_cycle_denials(
+                task=task,
+                shared_state=shared_state,
+            )
+            available_tool_names = [
+                name
+                for name in plan_tool_names(task)
+                if self.tool_registry.has_tool(name)
+                and self.tool_registry.has_schema(name)
+            ]
+            snapshot = AfterCycleSnapshot.capture(
+                task_id=task.task_id,
+                cycle_index=cycle_record.index,
+                max_cycles=task.max_cycles,
+                cycle=cycle_record,
+                messages=messages,
+                shared_state=shared_state,
+                cumulative_token_usage=summarize_task_token_usage(cycles),
+                available_tool_names=available_tool_names,
+                disallowed_tool_names=disallowed,
+                native_outcome=native_outcome,
+            )
+            decision = self.after_cycle_hook_manager.apply(snapshot)
+            if decision.disallow_tools:
+                persist_after_cycle_disallowed_tools(
+                    shared_state,
+                    decision.disallow_tools,
+                )
+                self._apply_persisted_after_cycle_denials(
+                    task=task,
+                    shared_state=shared_state,
+                )
+        except AfterCycleHookError as exc:
+            self._emit_log(
+                "after_cycle_failed",
+                cycle=cycle_record.index,
+                error_code=exc.code,
+                error=str(exc),
+            )
+            return None, self._after_cycle_failure_result(
+                messages=messages,
+                cycles=cycles,
+                shared_state=shared_state,
+                error=f"{exc.code}: {exc}",
+                budget_controller=budget_controller,
+            )
+        except Exception as exc:
+            code = "after_cycle_hook_failed"
+            self._emit_log(
+                "after_cycle_failed",
+                cycle=cycle_record.index,
+                error_code=code,
+                error=str(exc),
+            )
+            return None, self._after_cycle_failure_result(
+                messages=messages,
+                cycles=cycles,
+                shared_state=shared_state,
+                error=f"{code}: failed to prepare after-cycle snapshot: {exc}",
+                budget_controller=budget_controller,
+            )
+
+        if decision.action is AfterCycleAction.STOP_NON_SUCCESS:
+            assert decision.stop is not None
+            self._emit_log(
+                "after_cycle_stopped",
+                cycle=cycle_record.index,
+                error_code=decision.stop.code,
+                error=decision.stop.message,
+            )
+            return decision, self._after_cycle_failure_result(
+                messages=messages,
+                cycles=cycles,
+                shared_state=shared_state,
+                error=f"{decision.stop.code}: {decision.stop.message}",
+                budget_controller=budget_controller,
+            )
+
+        if decision.action is AfterCycleAction.STEER:
+            if not native_outcome.steer_allowed:
+                code = "after_cycle_steer_unavailable"
+                self._emit_log(
+                    "after_cycle_failed",
+                    cycle=cycle_record.index,
+                    error_code=code,
+                    error="after-cycle steering is unavailable at this boundary",
+                )
+                return decision, self._after_cycle_failure_result(
+                    messages=messages,
+                    cycles=cycles,
+                    shared_state=shared_state,
+                    error=f"{code}: after-cycle steering is unavailable at this boundary",
+                    budget_controller=budget_controller,
+                )
+            messages.extend(
+                Message(role="user", content=content)
+                for content in decision.steering_messages
+            )
+            self._emit_log(
+                "after_cycle_steered",
+                cycle=cycle_record.index,
+                steering_count=len(decision.steering_messages),
+                disallowed_tools=list(decision.disallow_tools),
+            )
+        else:
+            self._emit_log(
+                "after_cycle_decision",
+                cycle=cycle_record.index,
+                action=decision.action.value,
+                disallowed_tools=list(decision.disallow_tools),
+            )
+        return decision, None
+
+    @staticmethod
+    def _after_cycle_failure_result(
+        *,
+        messages: list[Message],
+        cycles: list[CycleRecord],
+        shared_state: dict[str, Any],
+        error: str,
+        budget_controller: _RunBudgetController | None,
+    ) -> AgentResult:
+        return AgentResult(
+            status=AgentStatus.FAILED,
+            completion_reason=CompletionReason.FAILED,
+            partial_output=_last_assistant_output(cycles),
+            messages=messages,
+            cycles=cycles,
+            error=error,
+            shared_state=shared_state,
+            token_usage=summarize_task_token_usage(cycles),
+            budget_usage=(
+                budget_controller.snapshot
+                if budget_controller is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _effective_after_cycle_denials(
+        *,
+        task: AgentTask,
+        shared_state: dict[str, Any],
+    ) -> list[str]:
+        configured = task.metadata.get("_vv_agent_disallowed_tools")
+        configured_values = (
+            [value for value in configured if isinstance(value, str)]
+            if isinstance(configured, list)
+            else []
+        )
+        persisted = read_after_cycle_disallowed_tools(shared_state)
+        return sorted(
+            set([*configured_values, *persisted]),
+            key=utf16_sort_key,
+        )
+
+    @classmethod
+    def _apply_persisted_after_cycle_denials(
+        cls,
+        *,
+        task: AgentTask,
+        shared_state: dict[str, Any],
+    ) -> None:
+        effective = cls._effective_after_cycle_denials(
+            task=task,
+            shared_state=shared_state,
+        )
+        if effective:
+            task.metadata["_vv_agent_disallowed_tools"] = effective
 
     def _emit_cycle_tool_results(self, *, cycle_record: CycleRecord) -> None:
         for idx, result in enumerate(cycle_record.tool_results):

@@ -211,6 +211,36 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::ContextProvider",
             },
             {
+                "id": "run_config.after_cycle_hook",
+                "python": "vv_agent.AfterCycleHook",
+                "rust": "vv_agent::AfterCycleHook",
+            },
+            {
+                "id": "run_config.after_cycle_snapshot",
+                "python": "vv_agent.AfterCycleSnapshot",
+                "rust": "vv_agent::AfterCycleSnapshot",
+            },
+            {
+                "id": "run_config.after_cycle_decision",
+                "python": "vv_agent.AfterCycleDecision",
+                "rust": "vv_agent::AfterCycleDecision",
+            },
+            {
+                "id": "run_config.after_cycle_action",
+                "python": "vv_agent.AfterCycleAction",
+                "rust": "vv_agent::AfterCycleAction",
+            },
+            {
+                "id": "run_config.native_cycle_outcome",
+                "python": "vv_agent.NativeCycleOutcome",
+                "rust": "vv_agent::NativeCycleOutcome",
+            },
+            {
+                "id": "run_config.native_cycle_outcome_kind",
+                "python": "vv_agent.NativeCycleOutcomeKind",
+                "rust": "vv_agent::NativeCycleOutcomeKind",
+            },
+            {
                 "id": "run_config.run_budget_limits",
                 "python": "vv_agent.RunBudgetLimits",
                 "rust": "vv_agent::RunBudgetLimits",
@@ -942,6 +972,7 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _field("execution_backend", "execution_backend", "execution_backend"),
             _field("cancellation_token", "cancellation_token", "cancellation_token"),
             _field("hooks", "hooks", "hooks"),
+            _field("after_cycle_hooks", "after_cycle_hooks", "after_cycle_hooks"),
             _field("event_store", "event_store", "event_store"),
             _field("event_store_fail_closed", "event_store_fail_closed", "event_store_fail_closed"),
             _field("approval_provider", "approval_provider", "approval_provider"),
@@ -1886,7 +1917,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 141
+    assert len(capability_ids) == 147
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -1896,7 +1927,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 228
+        == 229
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

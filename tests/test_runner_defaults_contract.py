@@ -5,7 +5,18 @@ from typing import cast
 
 import pytest
 
-from vv_agent import Agent, ModelRef, ModelSettings, RunConfig, Runner, ScriptedModelProvider, ToolContext, function_tool
+from vv_agent import (
+    AfterCycleDecision,
+    AfterCycleSnapshot,
+    Agent,
+    ModelRef,
+    ModelSettings,
+    RunConfig,
+    Runner,
+    ScriptedModelProvider,
+    ToolContext,
+    function_tool,
+)
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
@@ -230,6 +241,44 @@ def test_explicit_framework_values_override_configured_runner_defaults() -> None
     assert inherited.timeout_seconds == 12.0
     assert overridden.settings_file == "local_settings.py"
     assert overridden.timeout_seconds == 90.0
+
+
+def test_configured_runner_runs_default_after_cycle_hooks_before_per_run_hooks(
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+
+    class OrderedHook:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def after_cycle(self, snapshot: AfterCycleSnapshot) -> AfterCycleDecision:
+            del snapshot
+            order.append(self.name)
+            return AfterCycleDecision.continue_run()
+
+    provider = ScriptedModelProvider.from_steps(
+        "scripted",
+        "test-model",
+        [LLMResponse(content="done")],
+    )
+    runner = Runner.configured(
+        RunConfig(
+            model_provider=provider,
+            workspace=tmp_path,
+            no_tool_policy="finish",
+            after_cycle_hooks=[OrderedHook("runner")],
+        )
+    )
+    result = runner.run_sync(
+        Agent(name="ordered-hooks", instructions="Answer.", model="test-model"),
+        "answer",
+        run_config=RunConfig(after_cycle_hooks=[OrderedHook("run")]),
+    )
+
+    assert result.status is AgentStatus.COMPLETED
+    assert result.final_output == "done"
+    assert order == ["runner", "run"]
 
 
 def test_resume_uses_the_runner_that_created_the_state(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from vv_agent import Agent, ModelSettings, RunConfig
+from vv_agent import AfterCycleDecision, AfterCycleSnapshot, Agent, ModelSettings, RunConfig
 from vv_agent.checkpoint import CheckpointConfig, CheckpointError
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.runtime.run_definition import build_run_definition
@@ -85,3 +85,49 @@ def test_behavior_callbacks_require_explicit_stable_refs() -> None:
         )
 
     assert error.value.code == "checkpoint_definition_unstable"
+
+
+def test_after_cycle_hooks_are_pinned_as_behavior_capability_refs() -> None:
+    class ObserverHook:
+        def after_cycle(self, snapshot: AfterCycleSnapshot) -> AfterCycleDecision:
+            del snapshot
+            return AfterCycleDecision.continue_run()
+
+    agent, config, resolved, task = _minimal_inputs()
+    config.after_cycle_hooks = [ObserverHook()]
+
+    with pytest.raises(CheckpointError) as error:
+        build_run_definition(
+            agent=agent,
+            root_input="Summarize the status.",
+            run_config=config,
+            resolved=resolved,
+            model_settings=ModelSettings(),
+            task=task,
+            registry=ToolRegistry(),
+            initial_messages=[],
+        )
+
+    assert error.value.code == "checkpoint_definition_unstable"
+    assert "after_cycle_hook:0" in str(error.value)
+
+    assert config.checkpoint_config is not None
+    config.checkpoint_config.capability_refs["after_cycle_hook:0"] = {
+        "id": "lifecycle.observer",
+        "version": "1",
+    }
+    definition, _digest = build_run_definition(
+        agent=agent,
+        root_input="Summarize the status.",
+        run_config=config,
+        resolved=resolved,
+        model_settings=ModelSettings(),
+        task=task,
+        registry=ToolRegistry(),
+        initial_messages=[],
+    )
+
+    assert definition["capability_refs"]["after_cycle_hook:0"] == {
+        "id": "lifecycle.observer",
+        "version": "1",
+    }

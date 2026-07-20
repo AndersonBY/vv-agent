@@ -48,6 +48,7 @@ CapabilityKind = Literal[
     "app_state",
     "memory_provider",
     "hook",
+    "after_cycle_hook",
     "observer",
     "sub_task_manager",
     "tool_predicate",
@@ -413,6 +414,7 @@ class DistributedCapabilities:
     sub_task_manager_ref: CapabilityRef | None = None
     memory_provider_refs: tuple[CapabilityRef, ...] = ()
     hook_refs: tuple[CapabilityRef, ...] = ()
+    after_cycle_hook_refs: tuple[CapabilityRef, ...] = ()
     observer_refs: tuple[CapabilityRef, ...] = ()
     checkpoint_store_ref: CapabilityRef | None = None
     checkpoint_event_store_ref: CapabilityRef | None = None
@@ -457,6 +459,7 @@ class DistributedCapabilities:
                 or self.checkpoint_event_store_ref is not None
                 or self.checkpoint_extension_refs
                 or self.reconciliation_provider_ref is not None
+                or self.after_cycle_hook_refs
             )
         if include_checkpoint:
             payload.update(
@@ -468,6 +471,7 @@ class DistributedCapabilities:
                         self.checkpoint_event_store_ref.to_dict() if self.checkpoint_event_store_ref is not None else None
                     ),
                     "checkpoint_extension_refs": [reference.to_dict() for reference in self.checkpoint_extension_refs],
+                    "after_cycle_hook_refs": [reference.to_dict() for reference in self.after_cycle_hook_refs],
                     "reconciliation_provider_ref": (
                         self.reconciliation_provider_ref.to_dict() if self.reconciliation_provider_ref is not None else None
                     ),
@@ -507,6 +511,7 @@ class DistributedCapabilities:
             sub_task_manager_ref=_optional_ref(payload, "sub_task_manager_ref"),
             memory_provider_refs=refs("memory_provider_refs"),
             hook_refs=refs("hook_refs"),
+            after_cycle_hook_refs=refs("after_cycle_hook_refs"),
             observer_refs=refs("observer_refs"),
             checkpoint_store_ref=_optional_ref(payload, "checkpoint_store_ref"),
             checkpoint_event_store_ref=_optional_ref(payload, "checkpoint_event_store_ref"),
@@ -628,6 +633,7 @@ class DistributedRunEnvelope:
                 or capabilities.checkpoint_event_store_ref is not None
                 or capabilities.checkpoint_extension_refs
                 or capabilities.reconciliation_provider_ref is not None
+                or capabilities.after_cycle_hook_refs
             ):
                 raise DistributedContractError("distributed v1 envelope cannot contain checkpoint v2 capability refs")
             if any(
@@ -919,6 +925,7 @@ class DistributedCapabilityRegistry:
         for kind, references in (
             ("memory_provider", capabilities.memory_provider_refs),
             ("hook", capabilities.hook_refs),
+            ("after_cycle_hook", capabilities.after_cycle_hook_refs),
             ("observer", capabilities.observer_refs),
         ):
             for reference in references:

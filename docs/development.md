@@ -87,7 +87,7 @@ Useful live-test environment variables:
 | Live handles and event replay | `tests/test_run_handle_live_stream.py`, `tests/test_event_store.py`, `tests/test_events_v1.py`, `tests/test_session_graph_events.py` |
 | App Server protocol, transport, replay, approvals, schema, and CLI | `tests/test_app_server_jsonrpc.py`, `tests/test_app_server_initialize.py`, `tests/test_app_server_transport.py`, `tests/test_app_server_request_serialization.py`, `tests/test_app_server_thread_store.py`, `tests/test_app_server_thread_turn.py`, `tests/test_app_server_item_mapper.py`, `tests/test_app_server_approval.py`, `tests/test_app_server_replay.py`, `tests/test_app_server_schema.py`, `tests/test_app_server_cli.py` |
 | Provider contracts | `tests/test_approval_protocol.py`, `tests/test_context_providers.py`, `tests/test_memory_provider.py`, `tests/test_interactive_approval_bridge.py`, `tests/test_interactive_memory_provider_bridge.py` |
-| Hooks | `tests/test_runtime_hooks.py` |
+| LLM/tool hooks and after-cycle lifecycle hooks | `tests/test_runtime_hooks.py`, `tests/test_after_cycle_hooks.py`, `tests/test_distributed_checkpoint_v2.py` |
 | Tools and schemas | `tests/test_tools.py`, `tests/test_tool_schemas.py`, `tests/test_tool_planner.py`, `tests/test_tool_orchestrator.py` |
 | Memory and compaction | `tests/test_memory.py`, `tests/test_microcompact.py`, `tests/test_session_memory.py` |
 | Execution backends | `tests/test_backends.py`, `tests/test_state_store.py` |

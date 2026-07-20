@@ -16,6 +16,7 @@ from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
+from vv_agent.runtime.lifecycle import AfterCycleHook
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import Message, NoToolPolicy, _validate_no_tool_policy
 
@@ -146,6 +147,7 @@ class RunConfig:
     event_store_fail_closed: bool = False
     stream: StreamHandler | None = None
     hooks: list[RuntimeHook] = field(default_factory=list)
+    after_cycle_hooks: list[AfterCycleHook] = field(default_factory=list)
     tracing: dict[str, Any] | None = None
     context: Any | None = None
     context_providers: list[ContextProvider] = field(default_factory=list)
@@ -190,6 +192,9 @@ class RunConfig:
         for extension in self.checkpoint_extensions:
             if not isinstance(extension, CheckpointExtension):
                 raise TypeError("RunConfig.checkpoint_extensions must contain CheckpointExtension values")
+        for hook in self.after_cycle_hooks:
+            if not isinstance(hook, AfterCycleHook):
+                raise TypeError("RunConfig.after_cycle_hooks must contain AfterCycleHook values")
         if self.reconciliation_provider is not None and not isinstance(
             self.reconciliation_provider, ReconciliationProvider
         ):

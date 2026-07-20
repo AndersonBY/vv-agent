@@ -249,6 +249,10 @@ def _validate_behavior_capability_refs(
         for index, _ in enumerate([*agent.hooks, *run_config.hooks])
     )
     required_slots.extend(
+        f"after_cycle_hook:{index}"
+        for index, _ in enumerate(run_config.after_cycle_hooks)
+    )
+    required_slots.extend(
         f"context_provider:{index}"
         for index, _ in enumerate(run_config.context_providers)
     )

@@ -874,6 +874,10 @@ class Runner:
             event_store_fail_closed=defaults.event_store_fail_closed or config.event_store_fail_closed,
             stream=prefer_run("stream"),
             hooks=[*defaults.hooks, *config.hooks],
+            after_cycle_hooks=[
+                *defaults.after_cycle_hooks,
+                *config.after_cycle_hooks,
+            ],
             tracing=prefer_run("tracing"),
             context=prefer_run("context"),
             context_providers=[*defaults.context_providers, *config.context_providers],
@@ -1337,6 +1341,7 @@ class Runner:
             execution_backend=run_config.execution_backend,
             workspace_backend=run_config.workspace_backend,
             hooks=[*agent.hooks, *run_config.hooks],
+            after_cycle_hooks=run_config.after_cycle_hooks,
         )
         compiler = AgentCompiler()
         if checkpoint_resume:
