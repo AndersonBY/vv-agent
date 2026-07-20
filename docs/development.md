@@ -68,6 +68,7 @@ validating fixture bytes:
 ```bash
 uv run pytest tests/test_tool_orchestrator.py tests/test_runtime_hooks.py tests/test_events_v1.py tests/test_run_events_v1_invalid.py
 uv run pytest tests/test_runner.py tests/test_runner_events_producer_parity.py tests/test_runner_trace_v1.py
+uv run pytest tests/test_output_validation_contract.py tests/test_checkpoint_runner_v2.py
 uv run pytest tests/test_app_server_item_mapper.py tests/test_app_server_contract_parity.py
 uv run pytest tests/test_run_definition_producer.py tests/test_checkpoint_v2.py tests/test_checkpoint_runner_v2.py
 uv run pytest tests/test_distributed_checkpoint_v2.py tests/test_configured_sub_agent_parity.py
@@ -98,6 +99,7 @@ Useful live-test environment variables:
 | Planned/started/completed telemetry and v1 compatibility | `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py`, `tests/test_events_v1.py`, `tests/test_run_events_v1_invalid.py`, `tests/test_runner.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_runner_trace_v1.py`, `tests/test_checkpoint_runner_v2.py` |
 | Tool telemetry App Server projection | `tests/test_app_server_item_mapper.py`, `tests/test_app_server_contract_parity.py` |
 | Tool metadata checkpoint freeze and legacy comparison | `tests/test_run_definition_producer.py`, `tests/test_checkpoint_v2.py`, `tests/test_checkpoint_runner_v2.py`, `tests/test_distributed_checkpoint_v2.py` |
+| Optional output validation and tools-free repair | `tests/test_output_validation_contract.py`, `tests/test_checkpoint_runner_v2.py` |
 | Settings/model resolution | `tests/test_config.py` |
 | CLI | `tests/test_config.py`, CLI-specific assertions in existing tests |
 | Runtime loop and statuses | `tests/test_runtime.py`, `tests/test_cycle_runner.py` |

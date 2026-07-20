@@ -272,7 +272,15 @@ def _validate_behavior_capability_refs(
         (run_config.llm_builder is not None, "llm_builder"),
         (run_config.tool_registry_factory is not None, "tool_registry_factory"),
         (run_config.sub_task_manager is not None, "sub_task_manager"),
-        (agent.output_type not in {None, str, dict, list}, "output_validator"),
+        (
+            (agent.output_validation_enabled and agent.output_validator is not None)
+            or agent.output_type not in {None, str, dict, list},
+            "output_validator",
+        ),
+        (
+            agent.output_validation_enabled and agent.output_repair is not None and agent.output_validation_max_repairs == 1,
+            "output_repair",
+        ),
     ):
         if present:
             required_slots.append(slot)

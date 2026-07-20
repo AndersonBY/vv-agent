@@ -17,8 +17,8 @@ The normative behavior and change workflow no longer live in this repository.
 `tests/fixtures/parity/` is generated from that release. It is committed for
 offline and reproducible tests, but it is not an editable source of truth.
 
-The current lock selects contract `0.8.1` at revision
-`537b3ee582f137731a5a1ab5f8da646fce5cf6d7`. The central support matrix is
+The current lock selects contract `0.9.0` at revision
+`5d829037ae069606835d2868de79ffdba6ef0304`. The central support matrix is
 still `pending-adoption`; this document maps the Python producers but does not
 claim cross-repository verification.
 
@@ -73,6 +73,7 @@ Never repair a contract failure by editing a file under
 | Metadata-denial policy and delegation | `src/vv_agent/run_config.py`, `src/vv_agent/types.py`, `src/vv_agent/runner.py`, `src/vv_agent/runtime/compiler.py`, `src/vv_agent/runtime/tool_planner.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/sub_task_manager.py`, `tests/test_tool_orchestrator.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_handoffs.py` |
 | Tool execution telemetry and event wire v1 | `src/vv_agent/tools/orchestrator.py`, `src/vv_agent/runtime/tool_call_runner.py`, `src/vv_agent/events.py`, `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py`, `tests/test_events_v1.py`, `tests/test_run_events_v1_invalid.py`, `tests/test_runner.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_runner_trace_v1.py`, `tests/test_checkpoint_runner_v2.py` |
 | Agent, Runner, result, live control | `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `src/vv_agent/run_handle.py` |
+| Optional output validation and repair | `src/vv_agent/output_validation.py`, `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `tests/test_output_validation_contract.py` |
 | Delegation and background tasks | `src/vv_agent/background_task.py`, `src/vv_agent/handoffs.py`, `src/vv_agent/runtime/sub_task_manager.py` |
 | Sessions and stores | `src/vv_agent/sessions/`, `src/vv_agent/runtime/stores/`, `tests/test_session_store_parity.py` |
 | Events and tracing | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `src/vv_agent/tracing.py` |
@@ -138,6 +139,32 @@ model-visible function schema. With no declaration and empty new policy fields,
 public schemas, planning, dispatch, event metadata presence, and runtime results
 retain the previous behavior.
 
+## Output Validation Mapping
+
+Python registers `output_validator` and optional `output_repair` callbacks on
+`Agent`; `output_validation_enabled` remains false unless the host opts in.
+`OutputValidationResult` is the typed valid/invalid outcome, while
+`OutputValidationContext` exposes only run identity, agent identity, and the
+existing `output_type`. A callback receives `(final_output,
+validation_context)` in canonical order.
+
+The Runner preserves the existing `output_type` coercion path. When validation
+is enabled, an output-type failure can be sent to the one permitted repair, and
+the replacement must pass both coercion and the same host validator. Python
+maps the canonical empty repair-tool list to the immutable empty tuple `()`.
+It does not call the primary model or construct a second tool registry.
+
+The optional validator and at-most-once repair run on the terminal candidate
+before session persistence, checkpoint finalization, and terminal-event
+emission. Typed rejection returns
+`RunResult.error_code == "output_validation_failed"` and commits one failed
+terminal; successful repair commits one completed terminal containing the
+replacement. Terminal checkpoint replay reuses the validated result without
+calling either host callback again. Registered-but-disabled and accepted
+validators preserve the prior event and trace observation. Real producer
+coverage lives in `tests/test_output_validation_contract.py` and
+`tests/test_checkpoint_runner_v2.py`.
+
 ## Python Adaptations
 
 The following are API-shape adaptations, not behavioral differences:
@@ -146,6 +173,10 @@ The following are API-shape adaptations, not behavioral differences:
   traits, builders, and `Result`;
 - synchronous convenience wrappers may coexist with async internals;
 - Python `output_type` coercion maps to Rust typed deserialization;
+- Python exposes synchronous `output_validator` and `output_repair` callbacks
+  and an immutable empty repair-tool tuple. These are API-shape adaptations of
+  the language-neutral callback lifecycle, not permission to diverge from its
+  at-most-once behavior.
 - Celery adapters map to Rust Apalis adapters through the same distributed
   envelope, checkpoint, lease, and terminal-state contract;
 - Python settings-file model controls map to the equivalent Rust

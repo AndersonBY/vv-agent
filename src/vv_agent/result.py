@@ -155,6 +155,10 @@ class RunResult:
         return self.raw_result.resume_observation
 
     @property
+    def error_code(self) -> str | None:
+        return self.raw_result.error_code
+
+    @property
     def approvals(self) -> tuple[ApprovalSnapshot, ...]:
         return self.approval_snapshot()
 
@@ -165,7 +169,7 @@ class RunResult:
         return RunState.from_result(self)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "input": self.input,
             "new_items": [item.to_dict() for item in self.new_items],
             "final_output": self._serializable_output(self.final_output),
@@ -187,6 +191,9 @@ class RunResult:
             "agent_name": self.agent_name,
             "resolved_model": self._resolved_model_dict(),
         }
+        if self.error_code is not None:
+            payload["error_code"] = self.error_code
+        return payload
 
     def _resolved_model_dict(self) -> dict[str, Any] | None:
         if self.resolved_model is None:

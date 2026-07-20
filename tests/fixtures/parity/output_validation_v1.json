@@ -1,0 +1,125 @@
+{
+  "schema_version": "vv-agent.output-validation.v1",
+  "capability": "optional_host_output_validation",
+  "defaults": {
+    "enabled": false,
+    "max_repairs": 1,
+    "repair_tools": [],
+    "repair_model": null,
+    "repair_model_settings": null
+  },
+  "validator": {
+    "registration": "host_selected_typed_callback",
+    "input": ["final_output", "validation_context"],
+    "outcomes": ["valid", "invalid"],
+    "invalid_fields": ["code", "message"],
+    "invalid_code_is_non_empty": true
+  },
+  "repair": {
+    "registration": "optional_host_selected_callback",
+    "request_fields": [
+      "invalid_output",
+      "validation_code",
+      "validation_message",
+      "model",
+      "model_settings",
+      "tools"
+    ],
+    "tools_are_always_empty": true,
+    "model_and_settings_are_independent_from_primary_run": true,
+    "framework_does_not_classify_task_or_rewrite_business_answer": true,
+    "maximum_attempts": 1,
+    "provider_failure": "typed_validation_failure"
+  },
+  "terminal_rules": {
+    "disabled_preserves_trace_and_terminal_observation": true,
+    "valid_output_preserves_trace_and_terminal_observation": true,
+    "invalid_without_repair_is_typed_failure": true,
+    "invalid_after_one_failed_repair_is_typed_failure": true,
+    "repair_success_revalidates_before_success": true,
+    "second_repair_is_blocked": true,
+    "validator_never_expands_tool_permissions": true
+  },
+  "runner_cases": [
+    {
+      "name": "disabled",
+      "config": {"enabled": false},
+      "validator": "would_fail",
+      "expected": {
+        "validator_calls": 0,
+        "repair_calls": 0,
+        "status": "completed",
+        "trace_unchanged": true
+      }
+    },
+    {
+      "name": "valid_without_repair",
+      "config": {"enabled": true, "max_repairs": 1},
+      "validator": "pass",
+      "expected": {
+        "validator_calls": 1,
+        "repair_calls": 0,
+        "status": "completed",
+        "final_output": "valid"
+      }
+    },
+    {
+      "name": "invalid_without_repair_handler",
+      "config": {"enabled": true, "max_repairs": 1, "repair": null},
+      "validator": "fail",
+      "expected": {
+        "validator_calls": 1,
+        "repair_calls": 0,
+        "status": "failed",
+        "error_code": "output_validation_failed"
+      }
+    },
+    {
+      "name": "one_repair_then_valid",
+      "config": {"enabled": true, "max_repairs": 1},
+      "validator": "fail_then_pass",
+      "repair": "returns_valid",
+      "expected": {
+        "validator_calls": 2,
+        "repair_calls": 1,
+        "status": "completed",
+        "final_output": "repaired"
+      }
+    },
+    {
+      "name": "repair_result_still_invalid",
+      "config": {"enabled": true, "max_repairs": 1},
+      "validator": "always_fail",
+      "repair": "returns_invalid",
+      "expected": {
+        "validator_calls": 2,
+        "repair_calls": 1,
+        "status": "failed",
+        "error_code": "output_validation_failed",
+        "second_repair_attempted": false
+      }
+    },
+    {
+      "name": "repair_provider_failure",
+      "config": {"enabled": true, "max_repairs": 1},
+      "validator": "fail",
+      "repair": "raises_provider_error",
+      "expected": {
+        "validator_calls": 1,
+        "repair_calls": 1,
+        "status": "failed",
+        "error_code": "output_validation_failed",
+        "provider_error_is_observed": true
+      }
+    }
+  ],
+  "task_independence": {
+    "forbidden_framework_fields": [
+      "task_category",
+      "answer_pattern",
+      "domain_milestone",
+      "stop_when_semantically_complete"
+    ],
+    "prompt_and_tool_schema_unchanged": true
+  }
+}
