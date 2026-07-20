@@ -17,8 +17,9 @@ from vv_agent import (
     MemorySession,
     RunConfig,
     Runner,
+    ToolPolicy,
 )
-from vv_agent.checkpoint import ResumePolicy
+from vv_agent.checkpoint import ResumePolicy, ToolIdempotency
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
@@ -34,9 +35,20 @@ from vv_agent.runtime.backends.distributed import (
     DistributedCapabilityRegistry,
     DistributedContractError,
     DistributedRunEnvelope,
+    DistributedToolPolicy,
     RuntimeRecipe,
+    ToolsetRef,
+    toolset_schema_digest,
 )
 from vv_agent.runtime.state import InMemoryStateStore
+from vv_agent.tools import (
+    FunctionTool,
+    ToolMetadata,
+    ToolOutputText,
+    ToolSideEffect,
+    build_default_registry,
+)
+from vv_agent.tools.executor import FunctionToolExecutor
 from vv_agent.types import AgentStatus, LLMResponse
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "distributed_run_envelope_v2.json"
@@ -139,6 +151,214 @@ def test_distributed_v2_fixture_round_trips_with_discriminator() -> None:
 
     assert envelope.schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION_V2
     assert envelope.to_dict() == canonical
+
+
+def test_distributed_tool_policy_round_trips_metadata_denials() -> None:
+    payload = {
+        "allowed_tools": ["read_file"],
+        "disallowed_tools": ["bash"],
+        "approval": "never",
+        "predicate_ref": None,
+        "denied_side_effects": ["execute"],
+        "denied_capability_tags": [" filesystem.delete "],
+        "deny_terminal_tools": True,
+        "denied_cost_dimensions": ["gpu.second"],
+    }
+
+    policy = DistributedToolPolicy.from_dict(payload)
+
+    assert policy.to_dict() == {
+        **payload,
+        "denied_capability_tags": ["filesystem.delete"],
+    }
+    resolved = policy.resolve(DistributedCapabilityRegistry())
+    assert resolved.denied_side_effects == ["execute"]
+    assert resolved.denied_capability_tags == ["filesystem.delete"]
+    assert resolved.deny_terminal_tools is True
+    assert resolved.denied_cost_dimensions == ["gpu.second"]
+    assert policy.to_dict(include_metadata_denials=False) == {
+        "allowed_tools": ["read_file"],
+        "disallowed_tools": ["bash"],
+        "approval": "never",
+        "predicate_ref": None,
+    }
+
+
+def test_celery_v2_projects_effective_metadata_policy_into_envelope(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryStateStore()
+    checkpoint_ref = CapabilityRef("checkpoint.metadata-policy", "2")
+    llm_ref = CapabilityRef("llm.metadata-policy", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[LLMResponse(content="done")]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _ImmediateApp(registry=registry, store=store)
+    backend = CeleryBackend(
+        celery_app=app,
+        state_store=store,
+        runtime_recipe=recipe,
+        dispatch_timeout_seconds=1,
+    )
+
+    result = Runner.run_sync(
+        Agent(
+            name="metadata-policy-agent",
+            instructions="Return one answer.",
+            model="test-model",
+        ),
+        "answer without tools",
+        run_config=RunConfig(
+            model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+            execution_backend=backend,
+            max_cycles=1,
+            no_tool_policy="finish",
+            tool_policy=ToolPolicy(
+                denied_side_effects=["execute"],
+                denied_capability_tags=["filesystem.delete"],
+                deny_terminal_tools=True,
+                denied_cost_dimensions=["gpu.second"],
+            ),
+            checkpoint_config=CheckpointConfig(
+                key="distributed-metadata-policy",
+                resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                store=store,
+            ),
+        ),
+    )
+
+    assert result.status is AgentStatus.COMPLETED
+    assert len(app.envelopes) == 1
+    assert app.envelopes[0]["recipe"]["capabilities"]["tool_policy"] == {
+        "allowed_tools": None,
+        "disallowed_tools": [],
+        "approval": "default",
+        "predicate_ref": None,
+        "denied_side_effects": ["execute"],
+        "denied_capability_tags": ["filesystem.delete"],
+        "deny_terminal_tools": True,
+        "denied_cost_dimensions": ["gpu.second"],
+    }
+
+
+def test_celery_v2_rejects_resolved_tool_metadata_drift_before_claim(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryStateStore()
+    checkpoint_ref = CapabilityRef("checkpoint.metadata-drift", "2")
+    llm_ref = CapabilityRef("llm.metadata-drift", "1")
+    worker_model_calls = 0
+
+    def worker_complete(_request: Any) -> LLMResponse:
+        nonlocal worker_model_calls
+        worker_model_calls += 1
+        return LLMResponse(content="must not run")
+
+    schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+
+    def invoke(_context: Any, _arguments: dict[str, Any]) -> ToolOutputText:
+        return ToolOutputText(text="ok")
+
+    local_tool = FunctionTool(
+        name="inspect_source",
+        description="Inspect one source.",
+        params_json_schema=schema,
+        on_invoke=invoke,
+        tool_metadata=ToolMetadata(
+            side_effect=ToolSideEffect.READ,
+            idempotency=ToolIdempotency.SUPPORTED,
+            capability_tags=["source.inspect"],
+        ),
+    )
+    worker_tool = FunctionTool(
+        name="inspect_source",
+        description="Inspect one source.",
+        params_json_schema=schema,
+        on_invoke=invoke,
+        tool_metadata=ToolMetadata(
+            side_effect=ToolSideEffect.WRITE,
+            idempotency=ToolIdempotency.SUPPORTED,
+            capability_tags=["source.inspect"],
+        ),
+    )
+    worker_tools = build_default_registry()
+    worker_tools.register_executor(FunctionToolExecutor(worker_tool))
+    toolset_ref = ToolsetRef(
+        id="toolset.metadata-drift",
+        version="1",
+        schema_digest=toolset_schema_digest(worker_tools),
+    )
+    registry = DistributedCapabilityRegistry()
+    registry.register_toolset(toolset_ref, worker_tools)
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register(
+        "llm_client",
+        llm_ref,
+        ScriptedLLM(steps=[worker_complete]),
+    )
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            toolset_ref=toolset_ref,
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _ImmediateApp(registry=registry, store=store)
+    backend = CeleryBackend(
+        celery_app=app,
+        state_store=store,
+        runtime_recipe=recipe,
+        dispatch_timeout_seconds=1,
+    )
+
+    with pytest.raises(Exception) as caught:
+        Runner.run_sync(
+            Agent(
+                name="metadata-drift-agent",
+                instructions="Inspect only when needed.",
+                model="test-model",
+                tools=[local_tool],
+            ),
+            "answer without executing",
+            run_config=RunConfig(
+                model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+                execution_backend=backend,
+                max_cycles=1,
+                no_tool_policy="finish",
+                checkpoint_config=CheckpointConfig(
+                    key="distributed-metadata-drift",
+                    resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    store=store,
+                ),
+            ),
+        )
+
+    assert getattr(caught.value, "code", None) == "checkpoint_definition_mismatch"
+    checkpoint = store.load_checkpoint_v2("distributed-metadata-drift")
+    assert checkpoint is not None
+    assert checkpoint.claim_token is None
+    assert checkpoint.model_call_journal == []
+    assert checkpoint.tool_journal == []
+    assert worker_model_calls == 0
 
 
 def test_distributed_v2_static_invalid_cases_fail_before_worker_resolution() -> None:
@@ -281,11 +501,7 @@ def test_celery_v2_resolves_and_restores_stateful_after_cycle_hook(
     assert 1 in hook.restored_states
     assert len(requests) == 2
     assert requests[1].messages[-1].content == "Verify the candidate answer."
-    assert all(
-        envelope["recipe"]["capabilities"]["after_cycle_hook_refs"]
-        == [hook_ref.to_dict()]
-        for envelope in app.envelopes
-    )
+    assert all(envelope["recipe"]["capabilities"]["after_cycle_hook_refs"] == [hook_ref.to_dict()] for envelope in app.envelopes)
     terminal = store.load_checkpoint_v2("distributed-after-cycle")
     assert terminal is not None
     assert terminal.shared_state["_vv_agent_after_cycle_control"] == {
@@ -418,6 +634,7 @@ def test_celery_v2_returns_candidate_then_runner_owns_terminal_order(
         ("resume_attempt", "checkpoint_resume_attempt_mismatch"),
         ("root_identity", "checkpoint_definition_mismatch"),
         ("checkpoint_policy", "checkpoint_definition_mismatch"),
+        ("metadata_policy", "checkpoint_definition_mismatch"),
         ("missing_capability", "unknown distributed capability hook hook.missing@1"),
         (
             "missing_after_cycle_capability",
@@ -463,12 +680,12 @@ def test_celery_v2_rejects_identity_definition_config_and_capability_before_clai
             envelope["root_run_id"] = "run-other"
         elif case_name == "checkpoint_policy":
             envelope["checkpoint_config"]["ambiguous_tool_policy"] = "retry_idempotent_only"
+        elif case_name == "metadata_policy":
+            envelope["recipe"]["capabilities"]["tool_policy"]["deny_terminal_tools"] = True
         elif case_name == "missing_capability":
             envelope["recipe"]["capabilities"]["hook_refs"] = [{"id": "hook.missing", "version": "1"}]
         else:
-            envelope["recipe"]["capabilities"]["after_cycle_hook_refs"] = [
-                {"id": "lifecycle.missing", "version": "1"}
-            ]
+            envelope["recipe"]["capabilities"]["after_cycle_hook_refs"] = [{"id": "lifecycle.missing", "version": "1"}]
 
     app = _ImmediateApp(
         registry=registry,

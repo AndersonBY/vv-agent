@@ -10,7 +10,7 @@ import pytest
 from vv_agent import CompletionReason, event_from_dict
 
 FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1_invalid.json"
-FIXTURE_SHA256 = "a4bd963d25a1755283da61e50c836cb79ca64112ff6dc1b4c37e40e9b79948ba"
+FIXTURE_SHA256 = "bd677d8c678655af4e6a5f0dd6d7a5193c43006ed871b575e53b022abe4dcf95"
 
 
 def _contract() -> dict[str, Any]:
@@ -117,3 +117,25 @@ def test_run_event_completion_validation_preserves_non_completion_compatibility(
 
     assert "future_field" not in encoded
     assert encoded["metadata"] == {"future_metadata": {"preserved": True}}
+
+
+@pytest.mark.parametrize("duration_ms", [True, -1, 1.5, 9_007_199_254_740_992])
+def test_tool_completion_duration_rejects_non_json_safe_values(duration_ms: Any) -> None:
+    payload = {
+        "version": "v1",
+        "type": "tool_call_completed",
+        "event_id": "evt_invalid_duration",
+        "run_id": "run_invalid_duration",
+        "trace_id": "trace_invalid_duration",
+        "created_at": 1.0,
+        "tool_name": "lookup",
+        "tool_call_id": "call_invalid_duration",
+        "status": "success",
+        "directive": "continue",
+        "error_code": None,
+        "execution_started": True,
+        "duration_ms": duration_ms,
+    }
+
+    with pytest.raises(ValueError, match="duration_ms"):
+        event_from_dict(payload)

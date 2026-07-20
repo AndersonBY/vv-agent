@@ -67,6 +67,7 @@ from vv_agent.sessions.base import checkpoint_session_commit_id, session_commit_
 from vv_agent.tools import ToolContext, ToolExposure, ToolSpec, build_default_registry
 from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, is_tool_executor
 from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
+from vv_agent.tools.metadata import ToolSideEffect, metadata_policy_denial_source
 from vv_agent.tools.orchestrator import (
     _TOOL_DISPATCH_CALLBACK_METADATA_KEY,
     mark_external_tool_execution_started,
@@ -91,6 +92,18 @@ _TOOL_POLICY_METADATA_KEYS = (
     "_vv_agent_disallowed_tools",
     "_vv_agent_tool_policy_approval",
     "_vv_agent_tool_policy_can_use_tool",
+    "_vv_agent_denied_side_effects",
+    "_vv_agent_denied_capability_tags",
+    "_vv_agent_deny_terminal_tools",
+    "_vv_agent_denied_cost_dimensions",
+)
+_TASK_TOOL_POLICY_METADATA_KEYS = (
+    "_vv_agent_allowed_tools",
+    "_vv_agent_disallowed_tools",
+    "_vv_agent_denied_side_effects",
+    "_vv_agent_denied_capability_tags",
+    "_vv_agent_deny_terminal_tools",
+    "_vv_agent_denied_cost_dimensions",
 )
 _PLANNED_TOOL_NAMES_METADATA_KEY = "_vv_agent_planned_tool_names"
 _INITIAL_BUDGET_USAGE_METADATA_KEY = "_vv_agent_initial_budget_usage"
@@ -106,6 +119,7 @@ _RUNTIME_TERMINAL_LOG_EVENTS = frozenset(
         "run_wait_user",
     }
 )
+_RUNTIME_DIRECT_TOOL_EVENT_LOGS = frozenset({"tool_started", "tool_result"})
 
 
 def _tool_policy_metadata(policy: ToolPolicy | None) -> dict[str, Any]:
@@ -120,6 +134,14 @@ def _tool_policy_metadata(policy: ToolPolicy | None) -> dict[str, Any]:
         metadata["_vv_agent_tool_policy_can_use_tool"] = policy.can_use_tool
     if policy.approval != "default":
         metadata["_vv_agent_tool_policy_approval"] = policy.approval
+    if policy.denied_side_effects:
+        metadata["_vv_agent_denied_side_effects"] = [ToolSideEffect(item).value for item in policy.denied_side_effects]
+    if policy.denied_capability_tags:
+        metadata["_vv_agent_denied_capability_tags"] = list(policy.denied_capability_tags)
+    if policy.deny_terminal_tools:
+        metadata["_vv_agent_deny_terminal_tools"] = True
+    if policy.denied_cost_dimensions:
+        metadata["_vv_agent_denied_cost_dimensions"] = list(policy.denied_cost_dimensions)
     return metadata
 
 
@@ -365,11 +387,7 @@ class Runner:
         if resume_input is not None:
             raise ValueError("input cannot be provided when resuming an approved tool call")
         source_checkpoint_key = pending.source_checkpoint_key or source.checkpoint_key
-        approval_checkpoint_config = (
-            runner_defaults.checkpoint_config
-            if runner_defaults is not None
-            else None
-        )
+        approval_checkpoint_config = runner_defaults.checkpoint_config if runner_defaults is not None else None
         if source_checkpoint_key is not None and (
             approval_checkpoint_config is None
             or approval_checkpoint_config.key is None
@@ -388,27 +406,15 @@ class Runner:
                 approval,
                 effective_config=effective_config,
             )
-        approval_checkpoint_key = (
-            approval_checkpoint_config.key
-            if approval_checkpoint_config is not None
-            else None
-        )
+        approval_checkpoint_key = approval_checkpoint_config.key if approval_checkpoint_config is not None else None
         if not resume_context.claim_approval(
             approval.interruption_id,
             checkpoint_key=approval_checkpoint_key,
         ):
             raise RuntimeError("approval_already_consumed")
         if approval_checkpoint_config is not None:
-            configured_extensions = (
-                list(runner_defaults.checkpoint_extensions)
-                if runner_defaults is not None
-                else []
-            )
-            configured_reconciliation = (
-                runner_defaults.reconciliation_provider
-                if runner_defaults is not None
-                else None
-            )
+            configured_extensions = list(runner_defaults.checkpoint_extensions) if runner_defaults is not None else []
+            configured_reconciliation = runner_defaults.reconciliation_provider if runner_defaults is not None else None
             checkpoint_run_config = replace(
                 effective_config,
                 checkpoint_config=approval_checkpoint_config,
@@ -441,6 +447,12 @@ class Runner:
                 host_cost_meter=effective_config.host_cost_meter,
                 initial_usage=source.budget_usage,
             )
+        resume_tool_events: list[RunEvent] = []
+
+        def capture_resume_tool_event(event: RunEvent) -> None:
+            resume_tool_events.append(event)
+            cls._emit_chain_event(event, run_config=effective_config, event_sink=None)
+
         call = pending.call
         context = replace(
             pending.context,
@@ -448,24 +460,51 @@ class Runner:
         )
         if context.ctx is None:
             raise ValueError("captured approval context is missing its execution context")
-        context.ctx._approved_tool_approval = pending
+        context = replace(
+            context,
+            ctx=replace(
+                context.ctx,
+                cancellation_token=effective_config.cancellation_token,
+                metadata={
+                    **context.ctx.metadata,
+                    "_vv_agent_agent_name": source.agent_name,
+                    "_vv_agent_emit_event": capture_resume_tool_event,
+                    "_vv_agent_run_id": resumed_run_id,
+                    "_vv_agent_trace_id": source.trace_id,
+                    "_vv_agent_session_id": cls._resolve_event_session_id(effective_config),
+                    "trace_id": source.trace_id,
+                },
+                _approved_tool_approval=pending,
+            ),
+        )
+        behavior_reason: CompletionReason | None = None
+
+        def finalize_result(
+            normalized_call: ToolCall,
+            dispatch_context: ToolContext,
+            raw_tool_result: ToolExecutionResult,
+        ) -> ToolExecutionResult:
+            nonlocal behavior_reason
+            final_result = pending.hook_manager.apply_after_tool_call(
+                task=pending.task,
+                cycle_index=pending.cycle_index,
+                call=normalized_call,
+                context=dispatch_context,
+                result=raw_tool_result,
+            )
+            behavior_reason = ToolCallRunner._apply_tool_use_behavior(
+                task=pending.task,
+                call=normalized_call,
+                result=final_result,
+            )
+            return final_result
+
         tool_result = pending.orchestrator.run_one(
             call,
             context=context,
             allowed_tool_names=pending.allowed_tool_names,
-        )
-        tool_result = pending.hook_manager.apply_after_tool_call(
-            task=pending.task,
-            cycle_index=pending.cycle_index,
-            call=call,
-            context=context,
-            result=tool_result,
-        )
-
-        behavior_reason = ToolCallRunner._apply_tool_use_behavior(
-            task=pending.task,
-            call=call,
-            result=tool_result,
+            event_sink=capture_resume_tool_event,
+            _result_finalizer=finalize_result,
         )
 
         raw_result = deepcopy(source.raw_result)
@@ -545,6 +584,7 @@ class Runner:
                 resume_context.agent,
                 resume_context.input,
                 run_config=config,
+                _run_id=resumed_run_id,
             )
             continued.metadata.update(
                 {
@@ -552,8 +592,10 @@ class Runner:
                     "approved_interruption_id": approval.interruption_id,
                 }
             )
+            prior_events = [*resume_tool_events, *resume_budget_events]
             if resume_budget_events:
-                continued.events = [*source.events, *resume_budget_events, *continued.events]
+                prior_events = [*source.events, *prior_events]
+            continued.events = [*prior_events, *continued.events]
             return continued
 
         if raw_result.completion_reason == CompletionReason.BUDGET_EXHAUSTED:
@@ -619,7 +661,12 @@ class Runner:
             final_output=final_output,
             status=raw_result.status,
             raw_result=raw_result,
-            events=[*source.events, *resume_budget_events, terminal_event],
+            events=[
+                *source.events,
+                *resume_tool_events,
+                *resume_budget_events,
+                terminal_event,
+            ],
             token_usage=raw_result.token_usage,
             trace_id=source.trace_id,
             run_id=resumed_run_id,
@@ -737,7 +784,7 @@ class Runner:
         checkpoint_controller: CheckpointResumeController,
         shared_state: dict[str, Any],
         session: Any | None,
-    ) -> tuple[ToolExecutionResult, dict[str, Any]]:
+    ) -> tuple[ToolExecutionResult, dict[str, Any], CompletionReason | None]:
         call = pending.call
         if pending.source_idempotency_support is not None:
             idempotency = ToolIdempotency(pending.source_idempotency_support)
@@ -766,41 +813,58 @@ class Runner:
             idempotency_key=plan.idempotency_key,
             session=session,
         )
-        if plan.replay_result is not None:
-            result = plan.replay_result
-        else:
-            def mark_started(started_call: ToolCall) -> None:
-                checkpoint_controller.tool_started(
-                    cycle_index=1,
-                    call=started_call,
-                )
 
-            context = replace(
-                context,
-                metadata={
-                    **context.metadata,
-                    _TOOL_DISPATCH_CALLBACK_METADATA_KEY: mark_started,
-                },
+        def mark_started(started_call: ToolCall) -> None:
+            checkpoint_controller.tool_started(
+                cycle_index=1,
+                call=started_call,
             )
-            ctx._approved_tool_approval = pending
-            result = pending.orchestrator.run_one(
-                call,
-                context=context,
-                allowed_tool_names=pending.allowed_tool_names,
-            )
-            result = pending.hook_manager.apply_after_tool_call(
+
+        context = replace(
+            context,
+            metadata={
+                **context.metadata,
+                _TOOL_DISPATCH_CALLBACK_METADATA_KEY: mark_started,
+            },
+        )
+        behavior_reason: CompletionReason | None = None
+
+        def finalize_result(
+            normalized_call: ToolCall,
+            dispatch_context: ToolContext,
+            raw_result: ToolExecutionResult,
+        ) -> ToolExecutionResult:
+            nonlocal behavior_reason
+            final_result = pending.hook_manager.apply_after_tool_call(
                 task=task,
                 cycle_index=1,
-                call=call,
-                context=context,
-                result=result,
+                call=normalized_call,
+                context=dispatch_context,
+                result=raw_result,
             )
-            checkpoint_controller.finish_tool(
-                cycle_index=1,
-                call=call,
-                result=result,
+            behavior_reason = ToolCallRunner._apply_tool_use_behavior(
+                task=task,
+                call=normalized_call,
+                result=final_result,
             )
-        return result, deepcopy(context.shared_state)
+            return final_result
+
+        event_sink = ctx.metadata.get("_vv_agent_emit_event")
+        ctx._approved_tool_approval = pending
+        result = pending.orchestrator.run_one(
+            call,
+            context=context,
+            allowed_tool_names=pending.allowed_tool_names,
+            event_sink=event_sink if callable(event_sink) else None,
+            _precomputed_result=plan.replay_result,
+            _result_finalizer=finalize_result,
+        )
+        checkpoint_controller.finish_tool(
+            cycle_index=1,
+            call=call,
+            result=result,
+        )
+        return result, deepcopy(context.shared_state), behavior_reason
 
     @staticmethod
     def _effective_run_config(
@@ -921,6 +985,7 @@ class Runner:
         initial_result: RunResult | None = None,
         _compiled_invocation: _CompiledTaskInvocation | None = None,
         _approval_invocation: _ApprovalResumeInvocation | None = None,
+        _run_id: str | None = None,
     ) -> RunResult:
         base_config = run_config
         defaults = runner_defaults or RunConfig()
@@ -931,6 +996,7 @@ class Runner:
         next_result = initial_result
         next_compiled_invocation = _compiled_invocation
         next_approval_invocation = _approval_invocation
+        next_run_id = _run_id
         handoff_count = 0
         max_handoffs = cls._effective_run_config(
             agent,
@@ -959,9 +1025,11 @@ class Runner:
                         resume_config=base_config,
                         _compiled_invocation=next_compiled_invocation,
                         _approval_invocation=next_approval_invocation,
+                        _run_id=next_run_id,
                     )
                     next_compiled_invocation = None
                     next_approval_invocation = None
+                    next_run_id = None
                 except Exception as exc:
                     if pending is not None:
                         completed = HandoffCompletedEvent(
@@ -989,9 +1057,7 @@ class Runner:
                 base_config = replace(
                     base_config,
                     metadata={
-                        key: value
-                        for key, value in base_config.metadata.items()
-                        if key != _INITIAL_BUDGET_USAGE_METADATA_KEY
+                        key: value for key, value in base_config.metadata.items() if key != _INITIAL_BUDGET_USAGE_METADATA_KEY
                     },
                 )
             request = cls._extract_handoff(result)
@@ -1063,9 +1129,29 @@ class Runner:
             base_config = replace(
                 base_config,
                 shared_state=deepcopy(result.raw_result.shared_state),
+                tool_policy=cls._inherit_handoff_metadata_denials(
+                    base_config.tool_policy,
+                    effective_config.tool_policy,
+                ),
             )
             current_agent = transfer.agent
             current_input = request.input
+
+    @staticmethod
+    def _inherit_handoff_metadata_denials(
+        base_policy: ToolPolicy | None,
+        source_effective_policy: ToolPolicy | None,
+    ) -> ToolPolicy | None:
+        if source_effective_policy is None:
+            return base_policy
+        base = base_policy or ToolPolicy()
+        return replace(
+            base,
+            denied_side_effects=list(source_effective_policy.denied_side_effects),
+            denied_capability_tags=list(source_effective_policy.denied_capability_tags),
+            deny_terminal_tools=source_effective_policy.deny_terminal_tools,
+            denied_cost_dimensions=list(source_effective_policy.denied_cost_dimensions),
+        )
 
     @staticmethod
     def _emit_chain_event(
@@ -1106,6 +1192,7 @@ class Runner:
         resume_config: RunConfig | None = None,
         _compiled_invocation: _CompiledTaskInvocation | None = None,
         _approval_invocation: _ApprovalResumeInvocation | None = None,
+        _run_id: str | None = None,
     ) -> RunResult:
         preloaded_checkpoint = CheckpointResumeController.preload(run_config.checkpoint_config)
         if run_config.approval_provider is not None and run_config.approval_broker is None:
@@ -1118,7 +1205,7 @@ class Runner:
             run_id = preloaded_checkpoint.root_run_id
             trace_id = preloaded_checkpoint.trace_id
         else:
-            run_id = f"run_{uuid.uuid4().hex}"
+            run_id = _run_id or f"run_{uuid.uuid4().hex}"
             trace_id = cls._resolve_trace_id(run_config)
         trace = _RunTrace(
             processors=cls._trace_processors(run_config),
@@ -1174,9 +1261,7 @@ class Runner:
                     "checkpoint v2 does not yet support handoff state",
                     code="checkpoint_handoff_unsupported",
                 )
-            if run_config.session is not None and not callable(
-                getattr(run_config.session, "add_items_once", None)
-            ):
+            if run_config.session is not None and not callable(getattr(run_config.session, "add_items_once", None)):
                 raise CheckpointError(
                     "checkpoint v2 requires an append-once session",
                     code="checkpoint_session_idempotency_unsupported",
@@ -1189,9 +1274,7 @@ class Runner:
             and run_config.checkpoint_config is not None
             and run_config.checkpoint_config.resume_policy is not ResumePolicy.NEW
         )
-        frozen_definition = (
-            preloaded_checkpoint.run_definition if checkpoint_resume else None
-        )
+        frozen_definition = preloaded_checkpoint.run_definition if checkpoint_resume else None
         if frozen_definition is not None:
             frozen_input = str(frozen_definition["root_input"])
             if user_input != frozen_input:
@@ -1222,7 +1305,9 @@ class Runner:
             capture_event(event, persist=False)
 
         def log_handler(event: str, payload: dict[str, Any]) -> None:
-            if event not in _RUNTIME_TERMINAL_LOG_EVENTS:
+            metadata = payload.get("metadata")
+            is_legacy_handoff = event == "tool_result" and isinstance(metadata, dict) and metadata.get("mode") == "handoff"
+            if event not in _RUNTIME_TERMINAL_LOG_EVENTS | _RUNTIME_DIRECT_TOOL_EVENT_LOGS or is_legacy_handoff:
                 capture_event(
                     event_from_runtime_log(
                         event,
@@ -1262,9 +1347,7 @@ class Runner:
         elif context_model is not None:
             context_model = getattr(context_model, "model_id", context_model)
         effective_run_metadata = (
-            dict(frozen_definition["run_metadata"])
-            if frozen_definition is not None
-            else dict(run_config.metadata)
+            dict(frozen_definition["run_metadata"]) if frozen_definition is not None else dict(run_config.metadata)
         )
         guardrail_context = RunContext(
             context=run_config.context,
@@ -1375,7 +1458,7 @@ class Runner:
         policy_metadata = _tool_policy_metadata(policy)
         for key in _TOOL_POLICY_METADATA_KEYS:
             task.metadata.pop(key, None)
-        for key in ("_vv_agent_allowed_tools", "_vv_agent_disallowed_tools"):
+        for key in _TASK_TOOL_POLICY_METADATA_KEYS:
             if key in policy_metadata:
                 task.metadata[key] = policy_metadata[key]
         task.extra_tool_names = [
@@ -1384,20 +1467,14 @@ class Runner:
         ]
         if frozen_definition is not None:
             assert preloaded_checkpoint is not None
-            initial_messages = [
-                Message.from_dict(item)
-                for item in frozen_definition["initial_messages"]
-            ]
+            initial_messages = [Message.from_dict(item) for item in frozen_definition["initial_messages"]]
             prepared_initial_messages = deepcopy(preloaded_checkpoint.messages)
         elif _approval_invocation is not None:
             pending_call_id = _approval_invocation.pending.call.id
             initial_messages = [
                 deepcopy(message)
                 for message in _approval_invocation.source.raw_result.messages
-                if not (
-                    message.role == "tool"
-                    and message.tool_call_id == pending_call_id
-                )
+                if not (message.role == "tool" and message.tool_call_id == pending_call_id)
             ]
             prepared_initial_messages = deepcopy(initial_messages)
         else:
@@ -1499,13 +1576,12 @@ class Runner:
                     host_cost_meter=run_config.host_cost_meter,
                     initial_usage=initial_budget_usage,
                 )
-                approval_exhaustion = approval_budget.preflight_tools(
-                    [_approval_invocation.pending.call.name]
-                )
+                approval_exhaustion = approval_budget.preflight_tools([_approval_invocation.pending.call.name])
             approval_shared_state = deepcopy(run_config.shared_state or {})
             tool_result: ToolExecutionResult | None = None
+            approval_behavior_reason: CompletionReason | None = None
             if approval_exhaustion is None:
-                tool_result, approval_shared_state = cls._execute_checkpoint_approved_tool(
+                tool_result, approval_shared_state, approval_behavior_reason = cls._execute_checkpoint_approved_tool(
                     pending=_approval_invocation.pending,
                     task=task,
                     ctx=ctx,
@@ -1545,11 +1621,7 @@ class Runner:
                     )
                 capture_event(budget_event)
 
-            if (
-                tool_result is not None
-                and approval_exhaustion is None
-                and tool_result.directive is ToolDirective.CONTINUE
-            ):
+            if tool_result is not None and approval_exhaustion is None and tool_result.directive is ToolDirective.CONTINUE:
                 raw_result = runtime.run(
                     task,
                     workspace=cls._resolve_workspace(run_config.workspace),
@@ -1592,23 +1664,16 @@ class Runner:
                         ]
                         cycle.tool_results.append(tool_result)
                         break
-                    behavior_reason = ToolCallRunner._apply_tool_use_behavior(
-                        task=task,
-                        call=_approval_invocation.pending.call,
-                        result=tool_result,
-                    )
                     if tool_result.directive is ToolDirective.WAIT_USER:
                         raw_result.status = AgentStatus.WAIT_USER
                         raw_result.completion_reason = CompletionReason.WAIT_USER
                         raw_result.completion_tool_name = _approval_invocation.pending.call.name
                         raw_result.final_answer = None
                         raw_result.error = None
-                        raw_result.wait_reason = str(
-                            tool_result.metadata.get("question") or tool_result.content
-                        )
+                        raw_result.wait_reason = str(tool_result.metadata.get("question") or tool_result.content)
                     else:
                         raw_result.status = AgentStatus.COMPLETED
-                        raw_result.completion_reason = behavior_reason or CompletionReason.TOOL_FINISH
+                        raw_result.completion_reason = approval_behavior_reason or CompletionReason.TOOL_FINISH
                         raw_result.completion_tool_name = _approval_invocation.pending.call.name
                         raw_result.partial_output = None
                         raw_result.final_answer = AgentRuntime._extract_final_message(tool_result)
@@ -1660,9 +1725,7 @@ class Runner:
                             final_output=final_output,
                         )
                     except Exception as exc:
-                        output_coercion_error = ValueError(
-                            f"failed to validate final output: {exc}"
-                        )
+                        output_coercion_error = ValueError(f"failed to validate final output: {exc}")
             elif reconciliation_required or operator_abort:
                 new_items = []
             else:
@@ -1688,9 +1751,7 @@ class Runner:
                         session_id=event_session_id or "",
                     )
                     if checkpoint_controller is not None:
-                        commit_id = checkpoint_session_commit_id(
-                            checkpoint_controller.checkpoint_key
-                        )
+                        commit_id = checkpoint_session_commit_id(checkpoint_controller.checkpoint_key)
                         payload_digest = session_commit_payload_digest(session_items)
                         run_config.session.add_items_once(
                             commit_id,
@@ -2018,6 +2079,7 @@ class Runner:
                     planner_extra=is_model_visible,
                 )
                 continue
+
             def handler(context: ToolContext, arguments: dict[str, Any], *, _tool: FunctionTool = tool) -> ToolExecutionResult:
                 return cls._execute_function_tool(_tool, context=context, arguments=arguments, run_config=run_config)
 
@@ -2033,6 +2095,7 @@ class Runner:
                     failure_error_function=tool.failure_error_function,
                     metadata={**tool.metadata, "policy_managed_by_handler": True},
                     idempotency=tool.idempotency,
+                    tool_metadata=tool.tool_metadata,
                 ),
                 expose_to_model=is_model_visible,
                 planner_extra=is_model_visible,
@@ -2207,6 +2270,10 @@ class Runner:
             disallowed = runtime_metadata.get("_vv_agent_disallowed_tools")
             can_use_tool = runtime_metadata.get("_vv_agent_tool_policy_can_use_tool")
             approval = runtime_metadata.get("_vv_agent_tool_policy_approval")
+            denied_side_effects = runtime_metadata.get("_vv_agent_denied_side_effects")
+            denied_capability_tags = runtime_metadata.get("_vv_agent_denied_capability_tags")
+            deny_terminal_tools = runtime_metadata.get("_vv_agent_deny_terminal_tools")
+            denied_cost_dimensions = runtime_metadata.get("_vv_agent_denied_cost_dimensions")
             tool_policy = None
             if policy_keys_present:
                 tool_policy = ToolPolicy(
@@ -2216,6 +2283,10 @@ class Runner:
                     ),
                     approval=(approval if approval in {"always", "never", "on_request"} else "default"),
                     can_use_tool=can_use_tool if callable(can_use_tool) else None,
+                    denied_side_effects=(denied_side_effects if isinstance(denied_side_effects, list) else []),
+                    denied_capability_tags=(denied_capability_tags if isinstance(denied_capability_tags, list) else []),
+                    deny_terminal_tools=(deny_terminal_tools if isinstance(deny_terminal_tools, bool) else False),
+                    denied_cost_dimensions=(denied_cost_dimensions if isinstance(denied_cost_dimensions, list) else []),
                 )
         else:
             tool_policy = fallback.tool_policy
@@ -2267,6 +2338,14 @@ class Runner:
                 policy_source = "disallowed_tools"
             elif policy.can_use_tool is not None and not bool(policy.can_use_tool(tool.name, dict(arguments))):
                 policy_source = "can_use_tool"
+            else:
+                policy_source = metadata_policy_denial_source(
+                    tool.tool_metadata,
+                    denied_side_effects=policy.denied_side_effects,
+                    denied_capability_tags=policy.denied_capability_tags,
+                    deny_terminal_tools=policy.deny_terminal_tools,
+                    denied_cost_dimensions=policy.denied_cost_dimensions,
+                )
 
         planned_tool_names = context.metadata.get(_PLANNED_TOOL_NAMES_METADATA_KEY)
         if (
@@ -2341,15 +2420,36 @@ class Runner:
         message = f"Approval required for tool {tool.name}."
         runtime_metadata = context.ctx.metadata if context.ctx is not None else {}
         run_id = str(runtime_metadata.get("_vv_agent_run_id") or "run")
-        interruption_id = ApprovalRequest.create(
+        trace_id = str(runtime_metadata.get("_vv_agent_trace_id") or runtime_metadata.get("trace_id") or "")
+        agent_name = str(runtime_metadata.get("_vv_agent_agent_name") or "")
+        request = ApprovalRequest.create(
             tool_name=tool.name,
             tool_call_id=context.tool_call_id,
             arguments=arguments,
             run_id=run_id,
-            trace_id=str(runtime_metadata.get("_vv_agent_trace_id") or runtime_metadata.get("trace_id") or ""),
-            agent_name=str(runtime_metadata.get("_vv_agent_agent_name") or ""),
+            trace_id=trace_id,
+            agent_name=agent_name,
             cycle_index=context.cycle_index,
-        ).request_id
+        )
+        event_sink = runtime_metadata.get("_vv_agent_emit_event")
+        if callable(event_sink):
+            event_sink(
+                ApprovalRequestedEvent(
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    agent_name=agent_name,
+                    session_id=str(runtime_metadata.get("_vv_agent_session_id") or "") or None,
+                    cycle_index=context.cycle_index,
+                    request_id=request.request_id,
+                    tool_name=tool.name,
+                    tool_call_id=context.tool_call_id,
+                    message=message,
+                    metadata={
+                        "arguments": dict(arguments),
+                        "tool_name": tool.name,
+                    },
+                )
+            )
         return ToolExecutionResult(
             tool_call_id="",
             content=message,
@@ -2359,8 +2459,8 @@ class Runner:
             metadata={
                 "mode": "approval_requested",
                 "approval_required": True,
-                "approval_interruption_id": interruption_id,
-                "request_id": interruption_id,
+                "approval_interruption_id": request.request_id,
+                "request_id": request.request_id,
                 "tool_name": tool.name,
                 "arguments": dict(arguments),
                 "message": message,
@@ -2611,11 +2711,7 @@ class Runner:
             checkpoint_config=None,
             checkpoint_extensions=[],
             reconciliation_provider=None,
-            metadata={
-                key: value
-                for key, value in parent_config.metadata.items()
-                if key != _INITIAL_BUDGET_USAGE_METADATA_KEY
-            },
+            metadata={key: value for key, value in parent_config.metadata.items() if key != _INITIAL_BUDGET_USAGE_METADATA_KEY},
         )
 
     @staticmethod

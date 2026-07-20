@@ -143,6 +143,11 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
         "id": "agent",
         "capabilities": [
             {"id": "agent.definition", "python": "vv_agent.Agent", "rust": "vv_agent::Agent"},
+            {
+                "id": "agent.sub_agent_config",
+                "python": "vv_agent.SubAgentConfig",
+                "rust": "vv_agent::SubAgentConfig",
+            },
             {"id": "agent.run_context", "python": "vv_agent.RunContext", "rust": "vv_agent::RunContext"},
             {
                 "id": "agent.tool_use_behavior",
@@ -552,6 +557,16 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "python": "vv_agent.ToolIdempotency",
                 "rust": "vv_agent::ToolIdempotency",
             },
+            {
+                "id": "tools.metadata",
+                "python": "vv_agent.ToolMetadata",
+                "rust": "vv_agent::ToolMetadata",
+            },
+            {
+                "id": "tools.side_effect",
+                "python": "vv_agent.ToolSideEffect",
+                "rust": "vv_agent::ToolSideEffect",
+            },
         ],
     },
     {
@@ -698,6 +713,12 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "id": "tracing.jsonl_exporter",
                 "python": "vv_agent.JsonlTraceExporter",
                 "rust": "vv_agent::JsonlTraceExporter",
+            },
+            {
+                "adaptation": "Python exports a concrete event class; Rust exports a RunEventPayload variant.",
+                "id": "events.tool_call_planned",
+                "python": "vv_agent.ToolCallPlannedEvent",
+                "rust": "vv_agent::RunEventPayload::ToolCallPlanned",
             },
         ],
     },
@@ -919,6 +940,24 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _operation("resolve_instructions", "resolve_instructions", "resolve_instructions"),
             _operation("as_tool", "as_tool", "as_tool"),
             _operation("as_background_task", "as_background_task", "as_background_task"),
+        ],
+    },
+    {
+        "id": "sub_agent_config",
+        "python_target": "vv_agent.SubAgentConfig",
+        "rust_target": "vv_agent::SubAgentConfig",
+        "members": [
+            _field("model", "model", "model"),
+            _field("description", "description", "description"),
+            _field("backend", "backend", "backend"),
+            _field("system_prompt", "system_prompt", "system_prompt"),
+            _field("max_cycles", "max_cycles", "max_cycles"),
+            _field("exclude_tools", "exclude_tools", "exclude_tools"),
+            _field("metadata", "metadata", "metadata"),
+            _field("denied_side_effects", "denied_side_effects", "denied_side_effects"),
+            _field("denied_capability_tags", "denied_capability_tags", "denied_capability_tags"),
+            _field("deny_terminal_tools", "deny_terminal_tools", "deny_terminal_tools"),
+            _field("denied_cost_dimensions", "denied_cost_dimensions", "denied_cost_dimensions"),
         ],
     },
     {
@@ -1283,6 +1322,18 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
         ],
     },
     {
+        "id": "tool_metadata",
+        "python_target": "vv_agent.ToolMetadata",
+        "rust_target": "vv_agent::ToolMetadata",
+        "members": [
+            _field("side_effect", "side_effect", "side_effect"),
+            _field("idempotency", "idempotency", "idempotency"),
+            _field("terminal", "terminal", "terminal"),
+            _field("capability_tags", "capability_tags", "capability_tags"),
+            _field("cost_dimensions", "cost_dimensions", "cost_dimensions"),
+        ],
+    },
+    {
         "id": "tool",
         "python_target": "vv_agent.FunctionTool",
         "rust_target": "vv_agent::Tool",
@@ -1327,6 +1378,7 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 rust_target="vv_agent::ToolExecutor",
             ),
             _field("idempotency", "idempotency", "idempotency", rust_kind="method"),
+            _field("tool_metadata", "tool_metadata", "tool_metadata", rust_kind="method"),
             _operation(
                 "to_spec",
                 "to_openai_schema",
@@ -1340,6 +1392,21 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 adaptation="Rust executes through ToolExecutor after adapting Tool to ToolSpec.",
                 rust_target="vv_agent::ToolExecutor",
             ),
+        ],
+    },
+    {
+        "id": "tool_policy",
+        "python_target": "vv_agent.ToolPolicy",
+        "rust_target": "vv_agent::ToolPolicy",
+        "members": [
+            _field("allowed_tools", "allowed_tools", "allowed_tools"),
+            _field("disallowed_tools", "disallowed_tools", "disallowed_tools"),
+            _field("approval", "approval", "approval"),
+            _field("can_use_tool", "can_use_tool", "can_use_tool"),
+            _field("denied_side_effects", "denied_side_effects", "denied_side_effects"),
+            _field("denied_capability_tags", "denied_capability_tags", "denied_capability_tags"),
+            _field("deny_terminal_tools", "deny_terminal_tools", "deny_terminal_tools"),
+            _field("denied_cost_dimensions", "denied_cost_dimensions", "denied_cost_dimensions"),
         ],
     },
     {
@@ -1917,7 +1984,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 147
+    assert len(capability_ids) == 151
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -1927,7 +1994,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 229
+        == 254
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

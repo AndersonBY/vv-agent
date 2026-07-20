@@ -25,7 +25,7 @@ from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.types import LLMResponse, Message, ToolCall
 
 RUNNER_EVENTS_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "runner_events_v1.jsonl"
-RUNNER_EVENTS_FIXTURE_SHA256 = "3000b4d1647b39a5b938465a2e9aad2bff49eeb75d4ba31a8a326bf456f80965"
+RUNNER_EVENTS_FIXTURE_SHA256 = "76903d30f5f55697a7364f2b0c3caa66bb0205b14012a7e10c3c2dcf07d81b32"
 STREAM_PROJECTION_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "stream_projection_v1.json"
 STREAM_PROJECTION_FIXTURE_SHA256 = "95a3b7d527efad68492d810038ff7be0eecefcd278f8ddad690359c497d79b0a"
 

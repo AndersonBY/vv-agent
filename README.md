@@ -137,6 +137,16 @@ whose `parent_run_id` points at the requested run. Raw runtime logs remain
 available for compatibility through the runtime log callbacks, but `RunEvent`
 is the primary UI and app-state contract.
 
+For a normalized tool call, the execution lifecycle is
+`tool_call_planned`, optional approval events, `tool_call_started` immediately
+before effects may begin, and `tool_call_completed` after a result exists.
+Argument parse failures emit none of these events. Policy, approval, and
+unknown-tool short-circuits emit planned plus completed without started;
+completed events report `directive`, nullable `error_code`,
+`execution_started`, and nullable monotonic `duration_ms`. A started event may
+remain unmatched after cancellation or process loss, so checkpoint v2's
+operation journal remains the recovery authority.
+
 The lower-level `AgentRuntime` API remains available for backend integrations
 that need direct cycle-loop control.
 
@@ -288,6 +298,52 @@ approval gate for trusted runs. The four policy modes are `default`, `always`,
 `never`, and `on_request`: `default` inherits the next configured policy,
 whereas explicit `on_request` follows each tool's static or dynamic approval
 declaration.
+
+Custom tools may also attach an optional host-visible capability declaration:
+
+```python
+from vv_agent import (
+    ToolIdempotency,
+    ToolMetadata,
+    ToolPolicy,
+    ToolSideEffect,
+    function_tool,
+)
+
+@function_tool(
+    tool_metadata=ToolMetadata(
+        side_effect=ToolSideEffect.EXTERNAL,
+        idempotency=ToolIdempotency.UNSUPPORTED,
+        terminal=False,
+        capability_tags=["ticket.write"],
+        cost_dimensions=["support_api.request"],
+    )
+)
+def create_ticket(title: str) -> dict[str, str]:
+    return {"ticket_id": "TCK-1001", "title": title}
+
+policy = ToolPolicy(
+    denied_side_effects=[ToolSideEffect.EXECUTE],
+    denied_capability_tags=["filesystem.delete"],
+    deny_terminal_tools=True,
+    denied_cost_dimensions=["gpu.second"],
+)
+```
+
+`side_effect` is one coarse declaration with no inferred hierarchy;
+`capability_tags` and `cost_dimensions` are opaque exact-match labels, and cost
+dimensions are not measurements or prices. `terminal=True` only declares that
+a tool may return `finish` or `wait_user`; it never ends a run by itself. The
+four new policy fields are cumulative denials across Agent, configured Runner,
+per-run, and delegated-child layers, and a matching denial returns
+`tool_not_allowed`. They cannot grant a capability or remove an existing name,
+argument, approval, budget, or runtime restriction.
+
+Typed metadata is separate from generic `FunctionTool.metadata` and is not
+added to the model-visible function schema. The existing `idempotency=` input
+remains a compatibility alias; conflicting non-`unknown` legacy and typed
+values fail before model or tool work. When typed metadata and the new denials
+are omitted, model schemas and runtime behavior remain unchanged.
 
 ### Guardrails And Tracing
 

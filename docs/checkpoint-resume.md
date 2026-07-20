@@ -8,6 +8,8 @@ to the Python implementation and shows the supported public entry point.
 
 Checkpoint v2 is disabled unless a `CheckpointConfig` is attached to the run.
 Existing checkpoint v1 codecs and distributed behavior remain available.
+Checkpoint v1 and `vv-agent.distributed-run.v1` writers and fixtures do not gain
+the checkpoint-v2 tool metadata or metadata-policy fields.
 
 ```python
 from vv_agent import Agent, CheckpointConfig, RunConfig, Runner
@@ -46,6 +48,11 @@ Before the first model or tool operation, Runner persists a credential-redacted
 RFC 8785 run definition. It includes the compiled prompt, effective model
 settings, model-visible tools in request order, tool policies and idempotency,
 budgets, output schema, metadata that changes behavior, and extension versions.
+Each frozen tool retains the legacy `idempotency` projection and adds
+`tool_metadata`, either the normalized typed declaration or null. The effective
+policy freezes `denied_side_effects`, `denied_capability_tags`,
+`deny_terminal_tools`, and `denied_cost_dimensions` alongside the existing
+name, predicate, and approval controls.
 
 Process-local behavior must have a stable `{id, version}` capability reference.
 This includes dynamic instructions, context and memory providers, guardrails,
@@ -58,6 +65,17 @@ Recovery preserves the original run ID, trace ID, task ID, prompt, initial
 messages, shared state, and session boundary. It does not call dynamic
 instructions, input guardrails, context providers, or session reads again.
 Current schemas and capability versions are still checked before external work.
+Resume also compares the current effective tool declarations and metadata
+denials with the stored definition before claim or external operations. Generic
+tool metadata is never promoted into the typed declaration.
+
+Definitions written by contract 0.7.1 do not contain these additive nested
+fields. Resume first verifies the digest against the stored definition, then
+adds null/empty/false defaults only to an in-memory comparison copy. It never
+rewrites the stored definition or its original digest. A current non-default
+declaration or denial therefore still produces
+`checkpoint_definition_mismatch` before external work, while default current
+values remain compatible with the exact legacy bytes.
 
 ## Operation Journal
 
@@ -74,6 +92,13 @@ The durable states are `planned`, `started`, `succeeded`, `failed`, and
 - A tool retry requires both `retry_idempotent_only` and a tool declaration of
   `ToolIdempotency.SUPPORTED`; the same idempotency key is reused.
 - Unknown or unsupported tool idempotency never causes a silent retry.
+
+The typed `tool_call_planned`, `tool_call_started`, and `tool_call_completed`
+events are execution observations, not this durable journal. A policy or
+approval short-circuit can have planned plus completed telemetry without a
+started journal operation; a crash after the started boundary can leave
+telemetry incomplete. Journal receipts and reconciliation remain authoritative
+for replay, ambiguity, and duplicate-risk decisions.
 
 Without a safe decision, the public result is
 `AgentStatus.RECONCILIATION_REQUIRED`. It has no completion reason and does not
@@ -111,6 +136,11 @@ never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,
 encryption, retention, and checkpoint redaction remain host responsibilities.
 
+Leaving typed tool metadata absent and all four metadata-denial fields at their
+defaults preserves the prior run definition comparison, model-visible schema,
+and execution behavior. Leaving checkpoint v2 disabled preserves the existing
+v1 persistence and distributed wire behavior.
+
 Checkpoint-enabled roots currently reject handoffs. Agent-as-tool and
 background children do not inherit the parent checkpoint config, key,
 extensions, or reconciliation provider; a host must assign a distinct child
@@ -128,6 +158,7 @@ uv run pytest tests/test_checkpoint_v2.py
 uv run pytest tests/test_checkpoint_runner_v2.py
 uv run pytest tests/test_checkpoint_fault_matrix.py
 uv run pytest tests/test_checkpoint_resume_events.py
+uv run pytest tests/test_run_definition_producer.py tests/test_distributed_checkpoint_v2.py
 ```
 
 The fault suite covers F1-F8 deterministic persistence boundaries and a real

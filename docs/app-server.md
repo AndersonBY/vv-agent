@@ -175,6 +175,22 @@ Important notification methods:
 | `thread/closed` | Mark a loaded thread closed after the last subscriber leaves. |
 | `turn/completed` | Mark the turn terminal and persist final output or error. |
 
+Tool planning is deliberately not an App Server item lifecycle. A
+`tool_call_planned` event produces no item or notification and is never shown
+as execution. The existing `tool_call_started` projection still emits a
+`toolCall` `item/started` plus its argument delta; when the tool declared typed
+metadata, the item payload also contains `toolMetadata` with `sideEffect`,
+`idempotency`, `terminal`, `capabilityTags`, and `costDimensions`.
+
+The existing `tool_call_completed` projection still emits `item/completed`.
+Newly produced completed events add `directive`, `errorCode`,
+`executionStarted`, and `durationMs` to the tool-call payload, plus
+`toolMetadata` when declared. A policy or approval short-circuit has only a
+failed or in-progress completed item and never receives a fabricated started
+item. A legacy completed event without the additive event fields keeps its
+legacy payload; the mapper does not invent values. Older clients may ignore
+all additive payload keys.
+
 When a run budget is configured, `turn/completed` may also contain
 `budgetUsage` and `budgetExhaustion`. A budget stop projects as `status:
 "failed"` with `completionReason: "budget_exhausted"`; it is never reported as

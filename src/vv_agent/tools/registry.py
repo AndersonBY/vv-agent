@@ -6,6 +6,7 @@ from typing import Any
 
 from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
 from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, ToolExposure
+from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
 from vv_agent.types import ToolCall, ToolExecutionResult
 
 
@@ -31,6 +32,7 @@ class ToolRegistry:
                 handler=spec.handler,
                 schema=deepcopy(schema) if schema else None,
                 idempotency=spec.idempotency,
+                tool_metadata=spec.tool_metadata,
             )
 
     def register_many(self, specs: list[ToolSpec]) -> None:
@@ -75,6 +77,10 @@ class ToolRegistry:
     def tool_idempotency(self, name: str) -> Any:
         executor = self.get_executor(name)
         return getattr(executor, "idempotency", self.get(name).idempotency)
+
+    def tool_metadata(self, name: str) -> ToolMetadata | None:
+        executor = self.get_executor(name)
+        return getattr(executor, "tool_metadata", self.get(name).tool_metadata)
 
     def mark_policy_managed_by_handler(self, name: str) -> None:
         executor = self.get_executor(name)
@@ -121,6 +127,9 @@ class ToolRegistry:
         handler: ToolHandler,
         description: str,
         parameters: dict[str, Any] | None = None,
+        *,
+        idempotency: Any = "unknown",
+        tool_metadata: ToolMetadata | dict[str, Any] | None = None,
     ) -> None:
         """Register a custom tool in one step (schema + handler)."""
         schema: dict[str, Any] = {
@@ -131,8 +140,19 @@ class ToolRegistry:
                 "parameters": parameters or {"type": "object", "properties": {}, "required": []},
             },
         }
+        normalized_tool_metadata, normalized_idempotency = normalize_tool_metadata(
+            tool_metadata,
+            legacy_idempotency=idempotency,
+        )
         self.register_schema(name, schema)
-        self.register(ToolSpec(name=name, handler=handler))
+        self.register(
+            ToolSpec(
+                name=name,
+                handler=handler,
+                idempotency=normalized_idempotency,
+                tool_metadata=normalized_tool_metadata,
+            )
+        )
         self._planner_extra_tool_names.add(name)
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:

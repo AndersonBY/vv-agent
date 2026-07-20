@@ -10,6 +10,7 @@ from typing import Any
 from vv_agent.checkpoint import EventCursor
 from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict, checkpoint_from_json, checkpoint_to_dict, checkpoint_to_json
 from vv_agent.runtime.checkpoint_codec_v2 import (
+    _strict_json_loads,
     checkpoint_v2_from_dict,
     checkpoint_v2_from_json,
     checkpoint_v2_to_dict,
@@ -968,6 +969,6 @@ def _json_dump(value: Any) -> str:
 
 def _json_load(value: object, field_name: str) -> Any:
     try:
-        return json.loads(str(value))
-    except json.JSONDecodeError as exc:
+        return _strict_json_loads(str(value))
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"invalid checkpoint v2 {field_name} JSON") from exc

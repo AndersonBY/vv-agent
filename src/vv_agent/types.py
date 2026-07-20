@@ -527,6 +527,10 @@ class SubAgentConfig:
     max_cycles: int = 8
     exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    denied_side_effects: list[str] = field(default_factory=list)
+    denied_capability_tags: list[str] = field(default_factory=list)
+    deny_terminal_tools: bool = False
+    denied_cost_dimensions: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str):
@@ -550,6 +554,21 @@ class SubAgentConfig:
             raise TypeError("sub-agent exclude_tools must be a list of strings")
         if not isinstance(self.metadata, dict) or not all(isinstance(key, str) for key in self.metadata):
             raise TypeError("sub-agent metadata must be a dict with string keys")
+        from vv_agent.tools.metadata import normalize_denied_side_effects, normalize_metadata_labels
+
+        self.denied_side_effects = [
+            item.value for item in normalize_denied_side_effects(self.denied_side_effects)
+        ]
+        self.denied_capability_tags = normalize_metadata_labels(
+            self.denied_capability_tags,
+            field_name="denied_capability_tags",
+        )
+        if not isinstance(self.deny_terminal_tools, bool):
+            raise TypeError("sub-agent deny_terminal_tools must be a boolean")
+        self.denied_cost_dimensions = normalize_metadata_labels(
+            self.denied_cost_dimensions,
+            field_name="denied_cost_dimensions",
+        )
         self.model = normalized_model
         self.exclude_tools = list(self.exclude_tools)
         self.metadata = dict(self.metadata)
@@ -562,6 +581,10 @@ class SubAgentConfig:
             "system_prompt": self.system_prompt,
             "max_cycles": self.max_cycles,
             "exclude_tools": list(self.exclude_tools),
+            "denied_side_effects": list(self.denied_side_effects),
+            "denied_capability_tags": list(self.denied_capability_tags),
+            "deny_terminal_tools": self.deny_terminal_tools,
+            "denied_cost_dimensions": list(self.denied_cost_dimensions),
             "metadata": dict(self.metadata),
         }
 
@@ -576,6 +599,10 @@ class SubAgentConfig:
             system_prompt=data.get("system_prompt"),
             max_cycles=data.get("max_cycles", 8),
             exclude_tools=data.get("exclude_tools", []),
+            denied_side_effects=data.get("denied_side_effects", []),
+            denied_capability_tags=data.get("denied_capability_tags", []),
+            deny_terminal_tools=data.get("deny_terminal_tools", False),
+            denied_cost_dimensions=data.get("denied_cost_dimensions", []),
             metadata=data.get("metadata", {}),
         )
 

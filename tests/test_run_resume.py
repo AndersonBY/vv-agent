@@ -27,7 +27,7 @@ from vv_agent.event_store import JsonlRunEventStore
 from vv_agent.llm import ScriptedLLM
 from vv_agent.result import RunState
 from vv_agent.runtime import CancellationToken, InlineBackend
-from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
+from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolDirective
 
 
 def _approval_resume_case(name: str) -> dict[str, Any]:
@@ -106,6 +106,20 @@ def test_interrupted_result_snapshot_and_runner_resume_execute_approved_call_onc
     assert resumed.final_output == "deleted danger.txt"
     assert executions == ["danger.txt"]
     assert llm_calls == 1
+    resumed_lifecycle = [
+        event
+        for event in resumed.events
+        if event.run_id == resumed.run_id and getattr(event, "tool_call_id", None) == "delete-call"
+    ]
+    assert [event.type for event in resumed_lifecycle] == [
+        "tool_call_planned",
+        "tool_call_started",
+        "tool_call_completed",
+    ]
+    completed = resumed_lifecycle[-1]
+    assert completed.directive == ToolDirective.FINISH.value
+    assert completed.execution_started is True
+    assert completed.duration_ms is not None
 
 
 def test_approval_resume_preserves_budget_usage_without_reserving_the_tool_twice(tmp_path: Path) -> None:
@@ -213,6 +227,14 @@ def test_approved_continue_tool_returns_to_the_model_loop(tmp_path: Path) -> Non
     assert len(resumed.raw_result.cycles) == expected["cycles"]
     assert executions == ["item"]
     assert model.steps == []
+    terminal_types = {"run_completed", "run_failed", "run_cancelled"}
+    assert not any(event.run_id == interrupted.run_id and event.type in terminal_types for event in resumed.events)
+    resumed_lifecycle = [
+        event.type
+        for event in resumed.events
+        if event.run_id == resumed.run_id and getattr(event, "tool_call_id", None) == "lookup-call"
+    ]
+    assert resumed_lifecycle == ["tool_call_planned", "tool_call_started", "tool_call_completed"]
 
 
 @pytest.mark.parametrize(

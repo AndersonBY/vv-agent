@@ -53,6 +53,10 @@ class _SubTaskTurnSnapshot:
     disallowed_tools: tuple[str, ...] | None = None
     can_use_tool: Callable[[str, dict[str, Any]], bool] | None = None
     approval: str | None = None
+    denied_side_effects: tuple[str, ...] = ()
+    denied_capability_tags: tuple[str, ...] = ()
+    deny_terminal_tools: bool = False
+    denied_cost_dimensions: tuple[str, ...] = ()
 
     def tool_policy_metadata(self) -> dict[str, Any]:
         metadata: dict[str, Any] = {}
@@ -64,6 +68,18 @@ class _SubTaskTurnSnapshot:
             metadata["_vv_agent_tool_policy_can_use_tool"] = self.can_use_tool
         if self.approval is not None:
             metadata["_vv_agent_tool_policy_approval"] = self.approval
+        if self.denied_side_effects:
+            metadata["_vv_agent_denied_side_effects"] = list(self.denied_side_effects)
+        if self.denied_capability_tags:
+            metadata["_vv_agent_denied_capability_tags"] = list(
+                self.denied_capability_tags
+            )
+        if self.deny_terminal_tools:
+            metadata["_vv_agent_deny_terminal_tools"] = True
+        if self.denied_cost_dimensions:
+            metadata["_vv_agent_denied_cost_dimensions"] = list(
+                self.denied_cost_dimensions
+            )
         return metadata
 
 
@@ -734,6 +750,22 @@ class SubTaskManager:
         )
         can_use_tool = runtime_metadata.get("_vv_agent_tool_policy_can_use_tool")
         approval = runtime_metadata.get("_vv_agent_tool_policy_approval")
+        denied_side_effects = runtime_metadata.get(
+            "_vv_agent_denied_side_effects",
+            task_metadata.get("_vv_agent_denied_side_effects"),
+        )
+        denied_capability_tags = runtime_metadata.get(
+            "_vv_agent_denied_capability_tags",
+            task_metadata.get("_vv_agent_denied_capability_tags"),
+        )
+        deny_terminal_tools = runtime_metadata.get(
+            "_vv_agent_deny_terminal_tools",
+            task_metadata.get("_vv_agent_deny_terminal_tools"),
+        )
+        denied_cost_dimensions = runtime_metadata.get(
+            "_vv_agent_denied_cost_dimensions",
+            task_metadata.get("_vv_agent_denied_cost_dimensions"),
+        )
         event_sink = runtime_metadata.get("_vv_agent_emit_event")
         parent_log_handler = tool_context_metadata.get(_TURN_LOG_HANDLER_METADATA_KEY)
         return _SubTaskTurnSnapshot(
@@ -773,6 +805,24 @@ class SubTaskManager:
             ),
             can_use_tool=can_use_tool if callable(can_use_tool) else None,
             approval=approval if approval in {"always", "never", "on_request"} else None,
+            denied_side_effects=(
+                tuple(item for item in denied_side_effects if isinstance(item, str))
+                if isinstance(denied_side_effects, list)
+                else ()
+            ),
+            denied_capability_tags=(
+                tuple(item for item in denied_capability_tags if isinstance(item, str))
+                if isinstance(denied_capability_tags, list)
+                else ()
+            ),
+            deny_terminal_tools=(
+                deny_terminal_tools if isinstance(deny_terminal_tools, bool) else False
+            ),
+            denied_cost_dimensions=(
+                tuple(item for item in denied_cost_dimensions if isinstance(item, str))
+                if isinstance(denied_cost_dimensions, list)
+                else ()
+            ),
         )
 
     def _forward_session_event(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -17,6 +17,11 @@ from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.runtime.lifecycle import AfterCycleHook
+from vv_agent.tools.metadata import (
+    ToolSideEffect,
+    normalize_denied_side_effects,
+    normalize_metadata_labels,
+)
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import Message, NoToolPolicy, _validate_no_tool_policy
 
@@ -65,11 +70,26 @@ class ToolPolicy:
     disallowed_tools: list[str] = field(default_factory=list)
     approval: ApprovalPolicy = "default"
     can_use_tool: CanUseTool | None = None
+    denied_side_effects: Sequence[ToolSideEffect | str] = field(default_factory=list)
+    denied_capability_tags: list[str] = field(default_factory=list)
+    deny_terminal_tools: bool = False
+    denied_cost_dimensions: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.approval not in _APPROVAL_POLICIES:
             supported = ", ".join(sorted(_APPROVAL_POLICIES))
             raise ValueError(f"approval must be one of: {supported}")
+        self.denied_side_effects = normalize_denied_side_effects(self.denied_side_effects)
+        self.denied_capability_tags = normalize_metadata_labels(
+            self.denied_capability_tags,
+            field_name="denied_capability_tags",
+        )
+        if not isinstance(self.deny_terminal_tools, bool):
+            raise TypeError("deny_terminal_tools must be a boolean")
+        self.denied_cost_dimensions = normalize_metadata_labels(
+            self.denied_cost_dimensions,
+            field_name="denied_cost_dimensions",
+        )
 
 
 def merge_tool_policies(
@@ -95,6 +115,25 @@ def merge_tool_policy_layers(
         None,
     )
     disallowed_tools = list(dict.fromkeys([*agent.disallowed_tools, *runner.disallowed_tools, *run.disallowed_tools]))
+    denied_side_effects = normalize_denied_side_effects(
+        [*agent.denied_side_effects, *runner.denied_side_effects, *run.denied_side_effects]
+    )
+    denied_capability_tags = normalize_metadata_labels(
+        [
+            *agent.denied_capability_tags,
+            *runner.denied_capability_tags,
+            *run.denied_capability_tags,
+        ],
+        field_name="denied_capability_tags",
+    )
+    denied_cost_dimensions = normalize_metadata_labels(
+        [
+            *agent.denied_cost_dimensions,
+            *runner.denied_cost_dimensions,
+            *run.denied_cost_dimensions,
+        ],
+        field_name="denied_cost_dimensions",
+    )
 
     approval = next(
         (policy.approval for policy in (run, agent, runner) if policy.approval != "default"),
@@ -109,6 +148,10 @@ def merge_tool_policy_layers(
         disallowed_tools=disallowed_tools,
         approval=approval,
         can_use_tool=can_use_tool,
+        denied_side_effects=denied_side_effects,
+        denied_capability_tags=denied_capability_tags,
+        deny_terminal_tools=(agent.deny_terminal_tools or runner.deny_terminal_tools or run.deny_terminal_tools),
+        denied_cost_dimensions=denied_cost_dimensions,
     )
 
 
@@ -195,9 +238,7 @@ class RunConfig:
         for hook in self.after_cycle_hooks:
             if not isinstance(hook, AfterCycleHook):
                 raise TypeError("RunConfig.after_cycle_hooks must contain AfterCycleHook values")
-        if self.reconciliation_provider is not None and not isinstance(
-            self.reconciliation_provider, ReconciliationProvider
-        ):
+        if self.reconciliation_provider is not None and not isinstance(self.reconciliation_provider, ReconciliationProvider):
             raise TypeError("RunConfig.reconciliation_provider must provide reconcile() or be None")
 
     def with_cancellation_token(self, cancellation_token: CancellationToken) -> RunConfig:

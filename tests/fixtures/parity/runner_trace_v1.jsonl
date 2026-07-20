@@ -2,11 +2,13 @@
 {"type":"cycle_started","cycle_index":1,"agent_name":"trace-agent"}
 {"type":"llm_started","cycle_index":1,"agent_name":"trace-agent","model":"direct"}
 {"type":"assistant_delta","cycle_index":1,"agent_name":"trace-agent","delta":"lookup"}
+{"type":"tool_call_planned","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","arguments":{"query":"parity"}}
 {"type":"tool_call_started","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","arguments":{"query":"parity"}}
-{"type":"tool_call_completed","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","status":"success"}
+{"type":"tool_call_completed","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","status":"success","directive":"continue","error_code":null,"execution_started":true,"duration_ms":0}
 {"type":"cycle_started","cycle_index":2,"agent_name":"trace-agent"}
 {"type":"llm_started","cycle_index":2,"agent_name":"trace-agent","model":"direct"}
 {"type":"assistant_delta","cycle_index":2,"agent_name":"trace-agent","delta":"finish"}
+{"type":"tool_call_planned","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","arguments":{"message":"done"}}
 {"type":"tool_call_started","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","arguments":{"message":"done"}}
-{"type":"tool_call_completed","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","status":"success"}
+{"type":"tool_call_completed","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","status":"success","directive":"finish","error_code":null,"execution_started":true,"duration_ms":0}
 {"type":"run_completed","cycle_index":2,"agent_name":"trace-agent","status":"completed","final_output":"done"}

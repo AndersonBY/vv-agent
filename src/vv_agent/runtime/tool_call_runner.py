@@ -81,9 +81,7 @@ class ToolCallRunner:
                 call=call,
                 context=context,
             )
-            checkpoint_controller = (
-                ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
-            )
+            checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
             checkpoint_plan = None
             if isinstance(checkpoint_controller, CheckpointResumeController):
                 try:
@@ -97,110 +95,112 @@ class ToolCallRunner:
                     call=patched_call,
                     idempotency_support=idempotency,
                 )
-            if short_circuit_result is not None:
-                result = short_circuit_result
-                if not result.tool_call_id:
-                    result.tool_call_id = call.id
-            elif checkpoint_plan is not None and checkpoint_plan.replay_result is not None:
-                result = checkpoint_plan.replay_result
-            else:
-                bound_checkpoint_controller = (
-                    checkpoint_controller
-                    if isinstance(checkpoint_controller, CheckpointResumeController)
-                    else None
-                )
+            bound_checkpoint_controller = (
+                checkpoint_controller if isinstance(checkpoint_controller, CheckpointResumeController) else None
+            )
 
-                def mark_started(
-                    started_call: ToolCall,
-                    _checkpoint_controller: CheckpointResumeController | None = bound_checkpoint_controller,
-                    _cycle_index: int = context.cycle_index,
-                    _on_tool_start: Callable[[ToolCall], None] | None = on_tool_start,
-                ) -> None:
-                    if _checkpoint_controller is not None:
-                        _checkpoint_controller.tool_started(
-                            cycle_index=_cycle_index,
-                            call=started_call,
-                        )
-                    if _on_tool_start is not None:
-                        _on_tool_start(started_call)
+            def mark_started(
+                started_call: ToolCall,
+                _checkpoint_controller: CheckpointResumeController | None = bound_checkpoint_controller,
+                _cycle_index: int = context.cycle_index,
+                _on_tool_start: Callable[[ToolCall], None] | None = on_tool_start,
+            ) -> None:
+                if _checkpoint_controller is not None:
+                    _checkpoint_controller.tool_started(
+                        cycle_index=_cycle_index,
+                        call=started_call,
+                    )
+                if _on_tool_start is not None:
+                    _on_tool_start(started_call)
 
-                call_context = replace(
-                    context,
-                    tool_call_id=patched_call.id,
-                    tool_name=patched_call.name,
-                    arguments=dict(patched_call.arguments),
-                    idempotency_key=(
-                        checkpoint_plan.idempotency_key if checkpoint_plan is not None else None
-                    ),
-                    metadata={
-                        **context.metadata,
-                        _TOOL_DISPATCH_CALLBACK_METADATA_KEY: mark_started,
-                    },
-                )
-                result = self.tool_orchestrator.run_one(
-                    patched_call,
-                    context=call_context,
-                    allowed_tool_names=allowed_tool_names,
-                )
-                if result.error_code == "tool_approval_required" and ctx is not None and isinstance(result.metadata, dict):
-                    interruption_id = result.metadata.get("approval_interruption_id")
+            call_context = replace(
+                context,
+                tool_call_id=patched_call.id,
+                tool_name=patched_call.name,
+                arguments=dict(patched_call.arguments),
+                idempotency_key=(checkpoint_plan.idempotency_key if checkpoint_plan is not None else None),
+                metadata={
+                    **context.metadata,
+                    _TOOL_DISPATCH_CALLBACK_METADATA_KEY: mark_started,
+                },
+            )
+            replay_result = checkpoint_plan.replay_result if checkpoint_plan is not None else None
+            precomputed_result = short_circuit_result or replay_result
+            dispatched = precomputed_result is None
+            behavior_reason: CompletionReason | None = None
+
+            def finalize_result(
+                normalized_call: ToolCall,
+                dispatch_context: ToolContext,
+                raw_result: ToolExecutionResult,
+                _dispatched: bool = dispatched,
+                _checkpoint_controller: CheckpointResumeController | None = bound_checkpoint_controller,
+                _checkpoint_plan=checkpoint_plan,
+            ) -> ToolExecutionResult:
+                nonlocal behavior_reason
+                if (
+                    _dispatched
+                    and raw_result.error_code == "tool_approval_required"
+                    and ctx is not None
+                    and isinstance(raw_result.metadata, dict)
+                ):
+                    interruption_id = raw_result.metadata.get("approval_interruption_id")
                     if isinstance(interruption_id, str) and interruption_id.strip():
                         ctx._pending_tool_approval = _PendingToolApproval(
                             interruption_id=interruption_id,
-                            call=deepcopy(patched_call),
+                            call=deepcopy(normalized_call),
                             cycle_index=context.cycle_index,
                             context=replace(
-                                call_context,
-                                arguments=deepcopy(call_context.arguments),
-                                shared_state=deepcopy(call_context.shared_state),
+                                dispatch_context,
+                                arguments=deepcopy(dispatch_context.arguments),
+                                shared_state=deepcopy(dispatch_context.shared_state),
                             ),
                             allowed_tool_names=frozenset(allowed_tool_names),
                             orchestrator=self.tool_orchestrator,
                             task=task,
                             hook_manager=self.hook_manager,
                             source_checkpoint_key=(
-                                checkpoint_controller.checkpoint_key
-                                if isinstance(checkpoint_controller, CheckpointResumeController)
-                                else None
+                                _checkpoint_controller.checkpoint_key if _checkpoint_controller is not None else None
                             ),
-                            source_operation_id=(
-                                checkpoint_plan.operation_id
-                                if checkpoint_plan is not None
-                                else None
-                            ),
-                            source_request_digest=(
-                                checkpoint_plan.request_digest
-                                if checkpoint_plan is not None
-                                else None
-                            ),
-                            source_idempotency_key=(
-                                checkpoint_plan.idempotency_key
-                                if checkpoint_plan is not None
-                                else None
-                            ),
+                            source_operation_id=(_checkpoint_plan.operation_id if _checkpoint_plan is not None else None),
+                            source_request_digest=(_checkpoint_plan.request_digest if _checkpoint_plan is not None else None),
+                            source_idempotency_key=(_checkpoint_plan.idempotency_key if _checkpoint_plan is not None else None),
                             source_idempotency_support=(
-                                checkpoint_plan.idempotency_support.value
-                                if checkpoint_plan is not None
-                                else None
+                                _checkpoint_plan.idempotency_support.value if _checkpoint_plan is not None else None
                             ),
                         )
-                if ctx is not None and not self._defer_cancellation_check(task=task, call=patched_call):
+                if _dispatched and ctx is not None and not self._defer_cancellation_check(task=task, call=normalized_call):
                     ctx.check_cancelled()
-            result = self.hook_manager.apply_after_tool_call(
-                task=task,
-                cycle_index=context.cycle_index,
-                call=patched_call,
-                context=replace(
-                    context,
-                    tool_call_id=patched_call.id,
-                    tool_name=patched_call.name,
-                    arguments=dict(patched_call.arguments),
-                ),
-                result=result,
+                final_result = self.hook_manager.apply_after_tool_call(
+                    task=task,
+                    cycle_index=context.cycle_index,
+                    call=normalized_call,
+                    context=replace(
+                        context,
+                        tool_call_id=normalized_call.id,
+                        tool_name=normalized_call.name,
+                        arguments=dict(normalized_call.arguments),
+                    ),
+                    result=raw_result,
+                )
+                if self._needs_tool_call_id(final_result.tool_call_id):
+                    final_result.tool_call_id = normalized_call.id
+                behavior_reason = self._apply_tool_use_behavior(
+                    task=task,
+                    call=normalized_call,
+                    result=final_result,
+                )
+                return final_result
+
+            event_sink = ctx.metadata.get("_vv_agent_emit_event") if ctx is not None else None
+            result = self.tool_orchestrator.run_one(
+                patched_call,
+                context=call_context,
+                allowed_tool_names=allowed_tool_names,
+                event_sink=event_sink if callable(event_sink) else None,
+                _precomputed_result=precomputed_result,
+                _result_finalizer=finalize_result,
             )
-            if self._needs_tool_call_id(result.tool_call_id):
-                result.tool_call_id = patched_call.id
-            behavior_reason = self._apply_tool_use_behavior(task=task, call=patched_call, result=result)
             if isinstance(checkpoint_controller, CheckpointResumeController):
                 checkpoint_controller.finish_tool(
                     cycle_index=context.cycle_index,
@@ -227,9 +227,7 @@ class ToolCallRunner:
             if result.directive in (ToolDirective.WAIT_USER, ToolDirective.FINISH):
                 latest_directive_result = result
                 completion_reason = behavior_reason or (
-                    CompletionReason.WAIT_USER
-                    if result.directive == ToolDirective.WAIT_USER
-                    else CompletionReason.TOOL_FINISH
+                    CompletionReason.WAIT_USER if result.directive == ToolDirective.WAIT_USER else CompletionReason.TOOL_FINISH
                 )
                 completion_tool_name = patched_call.name
                 skip_code = "skipped_due_to_wait_user" if result.directive == ToolDirective.WAIT_USER else "skipped_due_to_finish"
@@ -298,11 +296,7 @@ class ToolCallRunner:
             should_stop = call.name in stop_names
         if should_stop:
             result.directive = ToolDirective.FINISH
-            return (
-                CompletionReason.STOP_ON_FIRST_TOOL
-                if behavior == "stop_on_first_tool"
-                else CompletionReason.STOP_AT_TOOL_NAME
-            )
+            return CompletionReason.STOP_ON_FIRST_TOOL if behavior == "stop_on_first_tool" else CompletionReason.STOP_AT_TOOL_NAME
         return None
 
     @staticmethod

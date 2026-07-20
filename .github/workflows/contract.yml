@@ -36,5 +36,6 @@ jobs:
           uv run pytest \
             tests/test_parity_evidence_manifests.py \
             tests/test_tool_schema_contract.py \
+            tests/test_tool_metadata_contract.py \
             tests/test_app_server_contract_parity.py \
             tests/test_runner_events_producer_parity.py

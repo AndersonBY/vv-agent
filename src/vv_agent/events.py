@@ -4,7 +4,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from math import isfinite
-from typing import Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from vv_agent.budget import (
     BudgetDimension,
@@ -22,10 +22,25 @@ from vv_agent.checkpoint import (
 )
 from vv_agent.types import CompletionReason
 
+if TYPE_CHECKING:
+    from vv_agent.tools.metadata import ToolMetadata
+
 RUN_EVENT_VERSION = "v1"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
 _APPROVAL_ACTIONS = frozenset({"allow", "allow_session", "deny", "timeout"})
 _JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
+_TOOL_STATUS_VALUES = frozenset({"success", "error", "wait_response", "running", "pending_compress"})
+_TOOL_DIRECTIVE_VALUES = frozenset({"continue", "finish", "wait_user"})
+_TOOL_COMPLETED_ADDITIVE_FIELDS = frozenset(
+    {"directive", "error_code", "execution_started", "duration_ms"}
+)
+
+
+class _MissingToolLifecycleField:
+    __slots__ = ()
+
+
+_MISSING_TOOL_LIFECYCLE_FIELD = _MissingToolLifecycleField()
 
 
 class _StreamEventCommon(TypedDict):
@@ -99,7 +114,58 @@ def _canonical_tool_status(status: Any) -> str:
     normalized = str(status or "").strip().lower()
     if normalized == "completed":
         return "success"
+    if normalized not in _TOOL_STATUS_VALUES:
+        raise ValueError(f"Unsupported tool event status: {status!r}")
     return normalized
+
+
+def _wire_tool_status(value: Any) -> str:
+    if not isinstance(value, str) or value not in _TOOL_STATUS_VALUES:
+        raise ValueError(f"Unsupported tool event status: {value!r}")
+    return value
+
+
+def _tool_directive(value: Any) -> str:
+    if not isinstance(value, str) or value not in _TOOL_DIRECTIVE_VALUES:
+        raise ValueError(f"Unsupported tool event directive: {value!r}")
+    return value
+
+
+def _tool_error_code(value: Any) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError("Run event error_code must be a string or null")
+    return value
+
+
+def _tool_execution_started(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("Run event execution_started must be a boolean")
+    return value
+
+
+def _tool_duration_ms(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _JSON_SAFE_INTEGER_MAX:
+        raise ValueError("Run event duration_ms must be a non-negative JSON-safe integer or null")
+    return value
+
+
+def _event_tool_metadata(value: ToolMetadata | dict[str, Any] | None) -> ToolMetadata | None:
+    if value is None:
+        return None
+    from vv_agent.tools.metadata import ToolMetadata
+
+    if isinstance(value, ToolMetadata):
+        source = value.to_dict()
+    elif isinstance(value, dict):
+        source = value
+    else:
+        raise ValueError("Run event tool_metadata must be an object")
+    try:
+        return ToolMetadata.from_dict(source)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid run event tool_metadata: {exc}") from exc
 
 
 def _canonical_approval_action(action: Any) -> ApprovalAction | None:
@@ -765,11 +831,67 @@ class ModelToolCallProgressEvent(RunEvent):
         return _model_tool_stream_dict(self)
 
 
+def _set_effectful_tool_call_event_fields(
+    event: RunEvent,
+    *,
+    type: str,
+    run_id: str,
+    trace_id: str,
+    tool_name: str,
+    tool_call_id: str,
+    arguments: dict[str, Any] | None,
+    tool_metadata: ToolMetadata | dict[str, Any] | None,
+    cycle_index: int | None,
+    agent_name: str | None,
+    session_id: str | None,
+    parent_event_id: str | None,
+    parent_run_id: str | None,
+    event_id: str | None,
+    created_at: float | None,
+    metadata: dict[str, Any] | None,
+) -> None:
+    _set_run_event_fields(
+        event,
+        type=type,
+        run_id=run_id,
+        trace_id=trace_id,
+        cycle_index=cycle_index,
+        agent_name=agent_name,
+        session_id=session_id,
+        parent_event_id=parent_event_id,
+        parent_run_id=parent_run_id,
+        event_id=event_id,
+        created_at=created_at,
+        metadata=metadata,
+    )
+    object.__setattr__(event, "tool_name", _required_event_text(tool_name, "tool_name"))
+    object.__setattr__(event, "tool_call_id", _required_event_text(tool_call_id, "tool_call_id"))
+    metadata_arguments = metadata.get("arguments") if isinstance(metadata, dict) else None
+    if not isinstance(metadata_arguments, dict) and isinstance(metadata, dict):
+        metadata_arguments = metadata.get("tool_arguments")
+    resolved_arguments = arguments if arguments is not None else metadata_arguments
+    if resolved_arguments is not None and not isinstance(resolved_arguments, dict):
+        raise ValueError("Run event tool arguments must be an object")
+    object.__setattr__(event, "arguments", dict(resolved_arguments or {}))
+    object.__setattr__(event, "tool_metadata", _event_tool_metadata(tool_metadata))
+
+
+def _effectful_tool_call_event_dict(event: ToolCallPlannedEvent | ToolCallStartedEvent) -> dict[str, Any]:
+    payload = RunEvent.to_dict(event)
+    payload["tool_name"] = event.tool_name
+    payload["tool_call_id"] = event.tool_call_id
+    payload["arguments"] = dict(event.arguments)
+    if event.tool_metadata is not None:
+        payload["tool_metadata"] = event.tool_metadata.to_dict()
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
-class ToolCallStartedEvent(RunEvent):
+class ToolCallPlannedEvent(RunEvent):
     tool_name: str = ""
     tool_call_id: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
+    tool_metadata: ToolMetadata | None = None
 
     def __init__(
         self,
@@ -779,6 +901,7 @@ class ToolCallStartedEvent(RunEvent):
         tool_name: str,
         tool_call_id: str,
         arguments: dict[str, Any] | None = None,
+        tool_metadata: ToolMetadata | dict[str, Any] | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -788,11 +911,15 @@ class ToolCallStartedEvent(RunEvent):
         created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        _set_run_event_fields(
+        _set_effectful_tool_call_event_fields(
             self,
-            type="tool_call_started",
+            type="tool_call_planned",
             run_id=run_id,
             trace_id=trace_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            arguments=arguments,
+            tool_metadata=tool_metadata,
             cycle_index=cycle_index,
             agent_name=agent_name,
             session_id=session_id,
@@ -802,18 +929,57 @@ class ToolCallStartedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "tool_name", tool_name)
-        object.__setattr__(self, "tool_call_id", tool_call_id)
-        metadata_arguments = metadata.get("arguments") if isinstance(metadata, dict) else None
-        resolved_arguments = arguments if arguments is not None else metadata_arguments
-        object.__setattr__(self, "arguments", dict(resolved_arguments) if isinstance(resolved_arguments, dict) else {})
 
     def to_dict(self) -> dict[str, Any]:
-        payload = RunEvent.to_dict(self)
-        payload["tool_name"] = self.tool_name
-        payload["tool_call_id"] = self.tool_call_id
-        payload["arguments"] = dict(self.arguments)
-        return payload
+        return _effectful_tool_call_event_dict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallStartedEvent(RunEvent):
+    tool_name: str = ""
+    tool_call_id: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
+    tool_metadata: ToolMetadata | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        tool_name: str,
+        tool_call_id: str,
+        arguments: dict[str, Any] | None = None,
+        tool_metadata: ToolMetadata | dict[str, Any] | None = None,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_effectful_tool_call_event_fields(
+            self,
+            type="tool_call_started",
+            run_id=run_id,
+            trace_id=trace_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            arguments=arguments,
+            tool_metadata=tool_metadata,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _effectful_tool_call_event_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -821,6 +987,12 @@ class ToolCallCompletedEvent(RunEvent):
     tool_name: str = ""
     tool_call_id: str = ""
     status: str = ""
+    directive: str | None = None
+    error_code: str | None = None
+    execution_started: bool | None = None
+    duration_ms: int | None = None
+    tool_metadata: ToolMetadata | None = None
+    _present_additive_fields: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __init__(
         self,
@@ -830,6 +1002,11 @@ class ToolCallCompletedEvent(RunEvent):
         tool_name: str,
         tool_call_id: str,
         status: str,
+        directive: str | _MissingToolLifecycleField = _MISSING_TOOL_LIFECYCLE_FIELD,
+        error_code: str | None | _MissingToolLifecycleField = _MISSING_TOOL_LIFECYCLE_FIELD,
+        execution_started: bool | _MissingToolLifecycleField = _MISSING_TOOL_LIFECYCLE_FIELD,
+        duration_ms: int | None | _MissingToolLifecycleField = _MISSING_TOOL_LIFECYCLE_FIELD,
+        tool_metadata: ToolMetadata | dict[str, Any] | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -853,15 +1030,54 @@ class ToolCallCompletedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "tool_name", tool_name)
-        object.__setattr__(self, "tool_call_id", tool_call_id)
+        object.__setattr__(self, "tool_name", _required_event_text(tool_name, "tool_name"))
+        object.__setattr__(self, "tool_call_id", _required_event_text(tool_call_id, "tool_call_id"))
         object.__setattr__(self, "status", _canonical_tool_status(status))
+        present_fields: set[str] = set()
+        if not isinstance(directive, _MissingToolLifecycleField):
+            present_fields.add("directive")
+            directive_value = _tool_directive(directive)
+        else:
+            directive_value = None
+        if not isinstance(error_code, _MissingToolLifecycleField):
+            present_fields.add("error_code")
+            error_code_value = _tool_error_code(error_code)
+        else:
+            error_code_value = None
+        if not isinstance(execution_started, _MissingToolLifecycleField):
+            present_fields.add("execution_started")
+            execution_started_value = _tool_execution_started(execution_started)
+        else:
+            execution_started_value = None
+        if not isinstance(duration_ms, _MissingToolLifecycleField):
+            present_fields.add("duration_ms")
+            duration_ms_value = _tool_duration_ms(duration_ms)
+        else:
+            duration_ms_value = None
+        if execution_started_value is False and duration_ms_value is not None:
+            raise ValueError("Run event duration_ms must be null when execution_started is false")
+        object.__setattr__(self, "directive", directive_value)
+        object.__setattr__(self, "error_code", error_code_value)
+        object.__setattr__(self, "execution_started", execution_started_value)
+        object.__setattr__(self, "duration_ms", duration_ms_value)
+        object.__setattr__(self, "tool_metadata", _event_tool_metadata(tool_metadata))
+        object.__setattr__(self, "_present_additive_fields", frozenset(present_fields))
+
+    def has_additive_field(self, field_name: str) -> bool:
+        if field_name not in _TOOL_COMPLETED_ADDITIVE_FIELDS:
+            raise ValueError(f"Unknown tool lifecycle field: {field_name}")
+        return field_name in self._present_additive_fields
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["tool_name"] = self.tool_name
         payload["tool_call_id"] = self.tool_call_id
         payload["status"] = self.status
+        for field_name in ("directive", "error_code", "execution_started", "duration_ms"):
+            if self.has_additive_field(field_name):
+                payload[field_name] = getattr(self, field_name)
+        if self.tool_metadata is not None:
+            payload["tool_metadata"] = self.tool_metadata.to_dict()
         return payload
 
 
@@ -2084,8 +2300,30 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
 
     if "metadata" in payload and not isinstance(payload["metadata"], dict):
         raise ValueError("Run event metadata must be an object")
-    if payload["type"] == "tool_call_started" and "arguments" in payload and not isinstance(payload["arguments"], dict):
+    tool_lifecycle_types = {"tool_call_planned", "tool_call_started", "tool_call_completed"}
+    if payload["type"] in tool_lifecycle_types:
+        _required_event_text(payload.get("tool_call_id"), "tool_call_id")
+        _required_event_text(payload.get("tool_name"), "tool_name")
+        if "tool_metadata" in payload:
+            if not isinstance(payload["tool_metadata"], dict):
+                raise ValueError("Run event tool_metadata must be an object")
+            _event_tool_metadata(payload["tool_metadata"])
+    if payload["type"] in {"tool_call_planned", "tool_call_started"} and not isinstance(
+        payload.get("arguments"), dict
+    ):
         raise ValueError("Run event tool arguments must be an object")
+    if payload["type"] == "tool_call_completed":
+        _wire_tool_status(payload.get("status"))
+        if "directive" in payload:
+            _tool_directive(payload["directive"])
+        if "error_code" in payload:
+            _tool_error_code(payload["error_code"])
+        if "execution_started" in payload:
+            _tool_execution_started(payload["execution_started"])
+        if "duration_ms" in payload:
+            _tool_duration_ms(payload["duration_ms"])
+        if payload.get("execution_started") is False and payload.get("duration_ms") is not None:
+            raise ValueError("Run event duration_ms must be null when execution_started is false")
     if payload["type"] in {"assistant_delta", "reasoning_delta"}:
         _stream_delta(payload.get("delta"))
     typed_stream_events = {
@@ -2240,19 +2478,27 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             estimated_tokens=payload.get("estimated_tokens"),
             **_with_cycle_and_agent(payload, common),
         )
-    if event_type == "tool_call_started":
-        arguments = payload.get("arguments")
-        return ToolCallStartedEvent(
-            tool_name=str(payload.get("tool_name") or ""),
-            tool_call_id=str(payload.get("tool_call_id") or ""),
-            arguments=arguments if isinstance(arguments, dict) else None,
+    if event_type in {"tool_call_planned", "tool_call_started"}:
+        event_class = ToolCallPlannedEvent if event_type == "tool_call_planned" else ToolCallStartedEvent
+        return event_class(
+            tool_name=payload["tool_name"],
+            tool_call_id=payload["tool_call_id"],
+            arguments=payload["arguments"],
+            tool_metadata=payload.get("tool_metadata"),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "tool_call_completed":
+        additive_fields = {
+            field_name: payload[field_name]
+            for field_name in _TOOL_COMPLETED_ADDITIVE_FIELDS
+            if field_name in payload
+        }
         return ToolCallCompletedEvent(
-            tool_name=str(payload.get("tool_name") or ""),
-            tool_call_id=str(payload.get("tool_call_id") or ""),
-            status=str(payload.get("status") or ""),
+            tool_name=payload["tool_name"],
+            tool_call_id=payload["tool_call_id"],
+            status=payload["status"],
+            tool_metadata=payload.get("tool_metadata"),
+            **additive_fields,
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "approval_requested":
@@ -2639,6 +2885,20 @@ def event_from_runtime_log(
             summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
             metadata=dict(payload),
         )
+    if event == "tool_call_planned":
+        arguments = payload.get("arguments", payload.get("tool_arguments"))
+        return ToolCallPlannedEvent(
+            run_id=run_id,
+            trace_id=trace_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            cycle_index=cycle_index,
+            tool_name=str(payload.get("tool_name") or ""),
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            arguments=arguments if isinstance(arguments, dict) else None,
+            tool_metadata=payload.get("tool_metadata"),
+            metadata=dict(payload),
+        )
     if event == "tool_result":
         metadata = payload.get("metadata")
         if isinstance(metadata, dict) and metadata.get("mode") == "approval_requested":
@@ -2665,6 +2925,11 @@ def event_from_runtime_log(
                 cycle_index=cycle_index,
                 metadata=dict(metadata),
             )
+        additive_fields = {
+            field_name: payload[field_name]
+            for field_name in _TOOL_COMPLETED_ADDITIVE_FIELDS
+            if field_name in payload
+        }
         return ToolCallCompletedEvent(
             run_id=run_id,
             trace_id=trace_id,
@@ -2674,6 +2939,8 @@ def event_from_runtime_log(
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
             status=str(payload.get("status") or ""),
+            tool_metadata=payload.get("tool_metadata"),
+            **additive_fields,
             metadata=dict(payload),
         )
     if event in {"tool_started", "tool_call_started"}:
@@ -2687,6 +2954,7 @@ def event_from_runtime_log(
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
             arguments=arguments if isinstance(arguments, dict) else None,
+            tool_metadata=payload.get("tool_metadata"),
             metadata=dict(payload),
         )
     if event == "run_state_changed":

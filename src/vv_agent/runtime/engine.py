@@ -67,6 +67,7 @@ from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.runtime.tool_call_runner import ToolCallRunner, _ConfiguredSubTaskCancelledError
 from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints, plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
+from vv_agent.tools.metadata import normalize_denied_side_effects, normalize_metadata_labels
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -109,6 +110,10 @@ _TOOL_POLICY_METADATA_KEYS = (
     "_vv_agent_disallowed_tools",
     "_vv_agent_tool_policy_approval",
     "_vv_agent_tool_policy_can_use_tool",
+    "_vv_agent_denied_side_effects",
+    "_vv_agent_denied_capability_tags",
+    "_vv_agent_deny_terminal_tools",
+    "_vv_agent_denied_cost_dimensions",
 )
 _RESERVED_SUB_AGENT_METADATA_KEYS = (
     "browser_scope_key",
@@ -2648,12 +2653,85 @@ class AgentRuntime:
             value = runtime_metadata.get(key, task_metadata.get(key))
             if isinstance(value, list) and all(isinstance(item, str) for item in value):
                 projected[key] = list(value)
+        denied_side_effects = runtime_metadata.get(
+            "_vv_agent_denied_side_effects",
+            task_metadata.get("_vv_agent_denied_side_effects"),
+        )
+        if isinstance(denied_side_effects, list):
+            projected["_vv_agent_denied_side_effects"] = [
+                item.value for item in normalize_denied_side_effects(denied_side_effects)
+            ]
+        denied_capability_tags = runtime_metadata.get(
+            "_vv_agent_denied_capability_tags",
+            task_metadata.get("_vv_agent_denied_capability_tags"),
+        )
+        if isinstance(denied_capability_tags, list):
+            projected["_vv_agent_denied_capability_tags"] = normalize_metadata_labels(
+                denied_capability_tags,
+                field_name="denied_capability_tags",
+            )
+        deny_terminal_tools = runtime_metadata.get(
+            "_vv_agent_deny_terminal_tools",
+            task_metadata.get("_vv_agent_deny_terminal_tools"),
+        )
+        if isinstance(deny_terminal_tools, bool):
+            projected["_vv_agent_deny_terminal_tools"] = deny_terminal_tools
+        denied_cost_dimensions = runtime_metadata.get(
+            "_vv_agent_denied_cost_dimensions",
+            task_metadata.get("_vv_agent_denied_cost_dimensions"),
+        )
+        if isinstance(denied_cost_dimensions, list):
+            projected["_vv_agent_denied_cost_dimensions"] = normalize_metadata_labels(
+                denied_cost_dimensions,
+                field_name="denied_cost_dimensions",
+            )
         can_use_tool = runtime_metadata.get("_vv_agent_tool_policy_can_use_tool")
         if callable(can_use_tool):
             projected["_vv_agent_tool_policy_can_use_tool"] = can_use_tool
         approval = runtime_metadata.get("_vv_agent_tool_policy_approval")
         if isinstance(approval, str) and approval in {"always", "never", "on_request"}:
             projected["_vv_agent_tool_policy_approval"] = approval
+        return projected
+
+    @staticmethod
+    def _configured_child_metadata_denials(
+        parent_policy_metadata: dict[str, Any],
+        sub_agent: SubAgentConfig,
+    ) -> dict[str, Any]:
+        denied_side_effects = normalize_denied_side_effects(
+            [
+                *parent_policy_metadata.get("_vv_agent_denied_side_effects", []),
+                *sub_agent.denied_side_effects,
+            ]
+        )
+        denied_capability_tags = normalize_metadata_labels(
+            [
+                *parent_policy_metadata.get("_vv_agent_denied_capability_tags", []),
+                *sub_agent.denied_capability_tags,
+            ],
+            field_name="denied_capability_tags",
+        )
+        denied_cost_dimensions = normalize_metadata_labels(
+            [
+                *parent_policy_metadata.get("_vv_agent_denied_cost_dimensions", []),
+                *sub_agent.denied_cost_dimensions,
+            ],
+            field_name="denied_cost_dimensions",
+        )
+        projected: dict[str, Any] = {}
+        if denied_side_effects:
+            projected["_vv_agent_denied_side_effects"] = [
+                item.value for item in denied_side_effects
+            ]
+        if denied_capability_tags:
+            projected["_vv_agent_denied_capability_tags"] = denied_capability_tags
+        if (
+            parent_policy_metadata.get("_vv_agent_deny_terminal_tools") is True
+            or sub_agent.deny_terminal_tools
+        ):
+            projected["_vv_agent_deny_terminal_tools"] = True
+        if denied_cost_dimensions:
+            projected["_vv_agent_denied_cost_dimensions"] = denied_cost_dimensions
         return projected
 
     @staticmethod
@@ -2766,6 +2844,12 @@ class AgentRuntime:
         for key in _RESERVED_SUB_AGENT_METADATA_KEYS:
             metadata.pop(key, None)
         metadata.update(parent_tool_policy_metadata or {})
+        metadata.update(
+            self._configured_child_metadata_denials(
+                parent_tool_policy_metadata or {},
+                sub_agent,
+            )
+        )
         if resolved_context_length is not None:
             metadata.setdefault("model_context_window", resolved_context_length)
         if resolved_max_output_tokens is not None:
@@ -2966,6 +3050,10 @@ class AgentRuntime:
             "_vv_agent_disallowed_tools",
             "_vv_agent_tool_policy_approval",
             "_vv_agent_tool_policy_can_use_tool",
+            "_vv_agent_denied_side_effects",
+            "_vv_agent_denied_capability_tags",
+            "_vv_agent_deny_terminal_tools",
+            "_vv_agent_denied_cost_dimensions",
             "_vv_agent_trace_context",
             "_vv_agent_trace_id",
             "trace_context",

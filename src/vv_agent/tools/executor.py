@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from vv_agent.checkpoint import ToolIdempotency
 from vv_agent.tools.base import ToolContext, ToolSpec
+from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
 from vv_agent.types import ToolCall, ToolExecutionResult
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ class ToolExecutor(Protocol):
     failure_error_function: ToolErrorFormatter | None
     metadata: dict[str, Any]
     idempotency: ToolIdempotency
+    tool_metadata: ToolMetadata | None
 
     def spec(self, context: ToolContext | None = None) -> ToolSpec: ...
 
@@ -39,6 +41,11 @@ class ToolExecutor(Protocol):
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult: ...
 
     def requires_approval(self, context: ToolContext, arguments: dict[str, Any]) -> bool: ...
+
+
+def get_executor_tool_metadata(executor: ToolExecutor) -> ToolMetadata | None:
+    """Read additive metadata without excluding legacy structural executors."""
+    return cast(ToolMetadata | None, getattr(executor, "tool_metadata", None))
 
 
 @dataclass(slots=True)
@@ -85,6 +92,10 @@ class FunctionToolExecutor:
     def idempotency(self) -> ToolIdempotency:
         return self.tool.idempotency
 
+    @property
+    def tool_metadata(self) -> ToolMetadata | None:
+        return self.tool.tool_metadata
+
     def spec(self, context: ToolContext | None = None) -> ToolSpec:
         del context
 
@@ -92,7 +103,12 @@ class FunctionToolExecutor:
             call = ToolCall(id=tool_context.tool_call_id, name=self.name, arguments=dict(arguments))
             return self.execute(call, tool_context)
 
-        return ToolSpec(name=self.name, handler=handler, idempotency=self.idempotency)
+        return ToolSpec(
+            name=self.name,
+            handler=handler,
+            idempotency=self.idempotency,
+            tool_metadata=self.tool_metadata,
+        )
 
     def openai_schema(self, context: ToolContext | None = None) -> dict[str, Any]:
         del context
@@ -122,10 +138,13 @@ class RegistryToolExecutor:
     failure_error_function: ToolErrorFormatter | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
+    tool_metadata: ToolMetadata | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.idempotency, ToolIdempotency):
-            self.idempotency = ToolIdempotency(self.idempotency)
+        self.tool_metadata, self.idempotency = normalize_tool_metadata(
+            self.tool_metadata,
+            legacy_idempotency=self.idempotency,
+        )
         self.sync_description_from_schema()
 
     def sync_description_from_schema(self) -> None:
@@ -151,7 +170,12 @@ class RegistryToolExecutor:
 
     def spec(self, context: ToolContext | None = None) -> ToolSpec:
         del context
-        return ToolSpec(name=self.name, handler=self.handler, idempotency=self.idempotency)
+        return ToolSpec(
+            name=self.name,
+            handler=self.handler,
+            idempotency=self.idempotency,
+            tool_metadata=self.tool_metadata,
+        )
 
     def openai_schema(self, context: ToolContext | None = None) -> dict[str, Any]:
         del context

@@ -38,7 +38,7 @@ from vv_agent.runtime.backends.distributed import (
 from vv_agent.runtime.engine import AgentRuntime
 from vv_agent.runtime.state import Checkpoint, CheckpointConflictError, InMemoryStateStore
 from vv_agent.runtime.stores.sqlite import SqliteStateStore
-from vv_agent.tools import build_default_registry
+from vv_agent.tools import ToolMetadata, ToolSideEffect, build_default_registry
 from vv_agent.types import (
     AgentStatus,
     AgentTask,
@@ -242,6 +242,115 @@ def test_distributed_worker_reconstructs_custom_tool_policy_and_app_state(tmp_pa
     terminal = store.load_checkpoint(task.task_id)
     assert terminal is not None and terminal.terminal_result is not None
     assert dispatch["checkpoint_revision"] == terminal.revision
+
+
+def test_distributed_v1_preserves_metadata_denials_and_blocks_execute_tool(tmp_path: Path) -> None:
+    store = SqliteStateStore(tmp_path / "metadata-denial.sqlite3")
+    task = AgentTask(
+        task_id="worker-metadata-denial",
+        model="model-x",
+        system_prompt="system",
+        user_prompt="prompt",
+        max_cycles=1,
+        extra_tool_names=["execute_probe"],
+    )
+    assert store.create_checkpoint(
+        Checkpoint(
+            task_id=task.task_id,
+            cycle_index=0,
+            status=AgentStatus.RUNNING,
+            messages=[Message(role="system", content="system"), Message(role="user", content="prompt")],
+            cycles=[],
+        )
+    )
+
+    executor_called = Event()
+
+    def execute_probe(_context: Any, _arguments: dict[str, Any]) -> ToolExecutionResult:
+        executor_called.set()
+        return ToolExecutionResult(tool_call_id="", content="must not run")
+
+    tools = build_default_registry()
+    tools.register_tool(
+        "execute_probe",
+        execute_probe,
+        "Execute a process.",
+        tool_metadata=ToolMetadata(
+            side_effect=ToolSideEffect.EXECUTE,
+            terminal=True,
+            capability_tags=["process.spawn"],
+            cost_dimensions=["cpu.second"],
+        ),
+    )
+    toolset = ToolsetRef(
+        id="toolset.metadata-denial",
+        version="1",
+        schema_digest=toolset_schema_digest(tools),
+    )
+    llm_ref = CapabilityRef("llm.metadata-denial", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register_toolset(toolset, tools)
+    registry.register(
+        "llm_client",
+        llm_ref,
+        ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="run probe",
+                    tool_calls=[ToolCall(id="execute-1", name="execute_probe", arguments={})],
+                )
+            ]
+        ),
+    )
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="backend-x",
+        model="model-x",
+        workspace=str(tmp_path / "workspace"),
+        state_store=store.state_store_spec(),
+        capabilities=DistributedCapabilities(
+            toolset_ref=toolset,
+            llm_client_ref=llm_ref,
+            tool_policy=DistributedToolPolicy(
+                denied_side_effects=("execute",),
+                denied_capability_tags=("process.spawn",),
+                deny_terminal_tools=True,
+                denied_cost_dimensions=("cpu.second",),
+            ),
+        ),
+    )
+    payload = DistributedRunEnvelope.for_cycle(
+        task=task,
+        recipe=recipe,
+        cycle_index=1,
+        run_id="run-worker-metadata-denial",
+        deadline_unix_ms=2_000_000_000_000,
+    ).to_dict()
+
+    assert payload["recipe"]["capabilities"]["tool_policy"] == {
+        "allowed_tools": None,
+        "disallowed_tools": [],
+        "approval": "default",
+        "predicate_ref": None,
+    }
+    assert payload["task"]["metadata"] == {
+        "_vv_agent_denied_side_effects": ["execute"],
+        "_vv_agent_denied_capability_tags": ["process.spawn"],
+        "_vv_agent_deny_terminal_tools": True,
+        "_vv_agent_denied_cost_dimensions": ["cpu.second"],
+    }
+    restored = DistributedRunEnvelope.from_v1_dict(payload)
+    assert restored.task.metadata == payload["task"]["metadata"]
+
+    dispatch = run_single_cycle(envelope_dict=payload, capability_registry=registry)
+
+    assert dispatch["finished"] is False
+    assert not executor_called.is_set()
+    checkpoint = store.load_checkpoint(task.task_id)
+    assert checkpoint is not None
+    denied = checkpoint.cycles[0].tool_results[0]
+    assert denied.error_code == "tool_not_allowed"
+    assert denied.metadata["policy_source"] == "metadata.side_effect"
 
 
 def test_distributed_budget_usage_persists_and_blocks_the_next_worker_cycle(tmp_path: Path) -> None:

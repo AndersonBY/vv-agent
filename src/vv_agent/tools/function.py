@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol, Union, get_args, get_origin, ge
 from vv_agent.checkpoint import ToolIdempotency
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.executor import ToolExposure
+from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
 from vv_agent.tools.outputs import ToolOutput, ToolOutputError, ToolOutputFile, ToolOutputImage, ToolOutputJson, ToolOutputText
 from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
 
@@ -31,6 +32,7 @@ class Tool(Protocol):
     is_enabled: bool | Callable[[Any, Any], bool]
     needs_approval: bool | ApprovalPredicate
     idempotency: ToolIdempotency
+    tool_metadata: ToolMetadata | None
 
     def invoke(self, context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput: ...
 
@@ -48,13 +50,16 @@ class FunctionTool:
     exposure: ToolExposure = ToolExposure.DIRECT
     failure_error_function: ToolErrorFormatter | None = None
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
+    tool_metadata: ToolMetadata | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
-        if not isinstance(self.idempotency, ToolIdempotency):
-            self.idempotency = ToolIdempotency(self.idempotency)
+        self.tool_metadata, self.idempotency = normalize_tool_metadata(
+            self.tool_metadata,
+            legacy_idempotency=self.idempotency,
+        )
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -118,9 +123,7 @@ class FunctionTool:
             metadata = {"output_type": "image", **dict(output.metadata)}
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
-                content=json.dumps(
-                    {"url": output.url, "path": output.path, "mime_type": output.mime_type}, ensure_ascii=False
-                ),
+                content=json.dumps({"url": output.url, "path": output.path, "mime_type": output.mime_type}, ensure_ascii=False),
                 image_url=output.url,
                 image_path=output.path,
                 metadata=metadata,
@@ -175,6 +178,7 @@ def function_tool(
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
+    tool_metadata: ToolMetadata | dict[str, Any] | None = None,
 ) -> FunctionTool: ...
 
 
@@ -192,6 +196,7 @@ def function_tool(
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
+    tool_metadata: ToolMetadata | dict[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 
 
@@ -208,6 +213,7 @@ def function_tool(
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
+    tool_metadata: ToolMetadata | dict[str, Any] | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     current_frame = inspect.currentframe()
     decorator_frame = current_frame.f_back if current_frame is not None else None
@@ -232,6 +238,10 @@ def function_tool(
             result = target(context, *positional, **keyword) if pass_context else target(*positional, **keyword)
             return _coerce_tool_output(result)
 
+        normalized_tool_metadata, normalized_idempotency = normalize_tool_metadata(
+            tool_metadata,
+            legacy_idempotency=idempotency,
+        )
         return FunctionTool(
             name=tool_name,
             description=tool_description,
@@ -243,7 +253,8 @@ def function_tool(
             timeout_seconds=timeout_seconds,
             exposure=exposure,
             failure_error_function=failure_error_function,
-            idempotency=idempotency,
+            idempotency=normalized_idempotency,
+            tool_metadata=normalized_tool_metadata,
         )
 
     if func is not None:
@@ -300,6 +311,7 @@ def adapt_tool(tool: Tool) -> FunctionTool:
         exposure=exposure,
         failure_error_function=getattr(tool, "failure_error_function", None),
         idempotency=getattr(tool, "idempotency", ToolIdempotency.UNKNOWN),
+        tool_metadata=getattr(tool, "tool_metadata", None),
         metadata=dict(metadata),
     )
 
@@ -500,8 +512,10 @@ def _is_typed_dict_type(annotation: Any) -> bool:
 
 
 def _is_pydantic_model_type(annotation: Any) -> bool:
-    return isinstance(annotation, type) and callable(getattr(annotation, "model_json_schema", None)) and callable(
-        getattr(annotation, "model_validate", None)
+    return (
+        isinstance(annotation, type)
+        and callable(getattr(annotation, "model_json_schema", None))
+        and callable(getattr(annotation, "model_validate", None))
     )
 
 

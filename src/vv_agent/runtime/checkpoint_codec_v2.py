@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from copy import deepcopy
 from typing import Any
 
 from vv_agent.budget import BudgetUsageSnapshot
@@ -60,6 +61,8 @@ _KNOWN_FIELDS = frozenset(
         "terminal_acknowledged",
     }
 )
+_MIN_I64 = -(1 << 63)
+_MAX_U64 = (1 << 64) - 1
 
 
 def checkpoint_v2_to_dict(
@@ -74,10 +77,7 @@ def checkpoint_v2_to_dict(
             f"checkpoint unknown_fields overlap known fields: {sorted(overlapping_unknown)!r}",
             code="checkpoint_unknown_field_invalid",
         )
-    extension_state = {
-        namespace: entry.to_dict()
-        for namespace, entry in sorted(checkpoint.extension_state.items())
-    }
+    extension_state = {namespace: entry.to_dict() for namespace, entry in sorted(checkpoint.extension_state.items())}
     validate_extension_state_size(
         extension_state,
         max_extension_state_bytes=max_extension_state_bytes,
@@ -98,12 +98,8 @@ def checkpoint_v2_to_dict(
         "messages": [message.to_dict() for message in checkpoint.messages],
         "cycles": [_cycle_to_dict(cycle) for cycle in checkpoint.cycles],
         "shared_state": checkpoint.shared_state,
-        "budget_usage": (
-            checkpoint.budget_usage.to_dict() if checkpoint.budget_usage is not None else None
-        ),
-        "event_cursor": (
-            checkpoint.event_cursor.to_dict() if checkpoint.event_cursor is not None else None
-        ),
+        "budget_usage": (checkpoint.budget_usage.to_dict() if checkpoint.budget_usage is not None else None),
+        "event_cursor": (checkpoint.event_cursor.to_dict() if checkpoint.event_cursor is not None else None),
         "event_outbox": [entry.to_dict() for entry in checkpoint.event_outbox],
         "extension_state": extension_state,
         "model_call_journal": [entry.to_dict() for entry in checkpoint.model_call_journal],
@@ -112,9 +108,7 @@ def checkpoint_v2_to_dict(
         "claim_token": checkpoint.claim_token,
         "claimed_cycle": checkpoint.claimed_cycle,
         "lease_expires_at_ms": checkpoint.lease_expires_at_ms,
-        "terminal_result": (
-            checkpoint.terminal_result.to_dict() if checkpoint.terminal_result is not None else None
-        ),
+        "terminal_result": (checkpoint.terminal_result.to_dict() if checkpoint.terminal_result is not None else None),
         "terminal_acknowledged": checkpoint.terminal_acknowledged,
     }
     return _json_object(payload, "checkpoint v2")
@@ -194,23 +188,16 @@ def checkpoint_v2_from_dict(
         shared_state=shared_state,
         budget_usage=BudgetUsageSnapshot.from_dict(budget_raw) if budget_raw is not None else None,
         event_cursor=EventCursor.from_dict(cursor_raw) if cursor_raw is not None else None,
-        event_outbox=[
-            EventOutboxEntry.from_dict(_object(item, "checkpoint outbox entry"))
-            for item in outbox_raw
-        ],
+        event_outbox=[EventOutboxEntry.from_dict(_object(item, "checkpoint outbox entry")) for item in outbox_raw],
         extension_state={
-            namespace: ExtensionStateEntry.from_dict(
-                _object(entry, f"checkpoint extension {namespace}")
-            )
+            namespace: ExtensionStateEntry.from_dict(_object(entry, f"checkpoint extension {namespace}"))
             for namespace, entry in extensions_raw.items()
         },
         model_call_journal=[
-            OperationJournalEntry.from_dict(_object(item, "checkpoint model journal entry"))
-            for item in model_journal_raw
+            OperationJournalEntry.from_dict(_object(item, "checkpoint model journal entry")) for item in model_journal_raw
         ],
         tool_journal=[
-            OperationJournalEntry.from_dict(_object(item, "checkpoint tool journal entry"))
-            for item in tool_journal_raw
+            OperationJournalEntry.from_dict(_object(item, "checkpoint tool journal entry")) for item in tool_journal_raw
         ],
         revision=payload.get("revision"),
         claim_token=payload.get("claim_token"),
@@ -218,9 +205,7 @@ def checkpoint_v2_from_dict(
         lease_expires_at_ms=payload.get("lease_expires_at_ms"),
         terminal_result=AgentResult.from_dict(terminal_raw) if terminal_raw is not None else None,
         terminal_acknowledged=payload.get("terminal_acknowledged"),
-        unknown_fields={
-            key: value for key, value in payload.items() if key not in _KNOWN_FIELDS
-        },
+        unknown_fields={key: value for key, value in payload.items() if key not in _KNOWN_FIELDS},
     )
     validate_checkpoint_v2(checkpoint)
     return checkpoint
@@ -261,6 +246,26 @@ def checkpoint_v2_from_json(
 
 def clone_checkpoint_v2(checkpoint: CheckpointV2) -> CheckpointV2:
     return checkpoint_v2_from_json(checkpoint_v2_to_json(checkpoint))
+
+
+def run_definition_comparison_copy(
+    definition: dict[str, Any],
+) -> dict[str, Any]:
+    """Add only contract-0.8 nested defaults to an in-memory comparison copy."""
+
+    comparison = deepcopy(definition)
+    tools = comparison.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, dict):
+                tool.setdefault("tool_metadata", None)
+    policy = comparison.get("tool_policy")
+    if isinstance(policy, dict):
+        policy.setdefault("denied_side_effects", [])
+        policy.setdefault("denied_capability_tags", [])
+        policy.setdefault("deny_terminal_tools", False)
+        policy.setdefault("denied_cost_dimensions", [])
+    return comparison
 
 
 def decode_checkpoint_dict(payload: Any) -> Checkpoint | CheckpointV2:
@@ -415,7 +420,7 @@ def _object(value: Any, field_name: str) -> dict[str, Any]:
 
 def _json_object(value: Any, field_name: str) -> dict[str, Any]:
     canonical = canonical_json_bytes(value, field_name)
-    decoded = json.loads(canonical)
+    decoded = _strict_json_loads(canonical)
     if not isinstance(decoded, dict):
         raise ValueError(f"{field_name} must be an object")
     return decoded
@@ -433,10 +438,20 @@ def _strict_json_loads(payload: str | bytes) -> Any:
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON number: {value}")
 
+    def parse_integer(value: str) -> int | float:
+        parsed = int(value)
+        if _MIN_I64 <= parsed <= _MAX_U64:
+            return parsed
+        # Match serde_json's portable number boundary. JCS can serialize a
+        # finite float such as 1e20 without an exponent, so values outside the
+        # integer wire range must be restored as IEEE-754 numbers.
+        return float(value)
+
     return json.loads(
         payload,
         object_pairs_hook=object_from_pairs,
         parse_constant=reject_constant,
+        parse_int=parse_integer,
     )
 
 

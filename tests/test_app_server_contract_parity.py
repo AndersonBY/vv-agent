@@ -32,13 +32,21 @@ from vv_agent.app_server import (
     TurnStartParams,
 )
 from vv_agent.app_server.host import AgentResolutionRequest, AppServerHost, RunConfigResolutionRequest
+from vv_agent.app_server.item_mapper import map_run_event
 from vv_agent.app_server.run_adapter import RunAdapter, StartedTurn
 from vv_agent.app_server.schema import _schema_bundle, typescript_schema_bundle
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadStore
+from vv_agent.events import (
+    ToolCallCompletedEvent,
+    ToolCallPlannedEvent,
+    ToolCallStartedEvent,
+    event_from_dict,
+)
 from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
 from vv_agent.runner import Runner
+from vv_agent.tools.metadata import ToolMetadata
 from vv_agent.types import AgentResult, AgentStatus, CompletionReason
 
 
@@ -49,6 +57,112 @@ def _observable_contract() -> dict[str, Any]:
 
 def _status_projection(name: str) -> dict[str, Any]:
     return next(case for case in _observable_contract()["terminal"]["agentStatusProjection"] if case["name"] == name)
+
+
+def _mapped_notifications(event: Any) -> list[dict[str, Any]]:
+    projection = map_run_event(event, thread_id="thread-tool", turn_id="turn-tool")
+    messages: list[dict[str, Any]] = []
+    if projection.notification_method is not None:
+        messages.append(
+            {
+                "jsonrpc": "2.0",
+                "method": projection.notification_method,
+                "params": projection.notification_params,
+            }
+        )
+    messages.extend(
+        {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }
+        for method, params in projection.additional_notifications
+    )
+    return messages
+
+
+def test_tool_lifecycle_app_server_projection_matches_shared_fixture() -> None:
+    contract = _observable_contract()["toolLifecycle"]
+    metadata = ToolMetadata.from_dict(contract["plannedHasNoNotification"]["event"]["tool_metadata"])
+
+    planned = ToolCallPlannedEvent(
+        run_id="run_tool",
+        trace_id="trace_tool",
+        event_id="evt_tool_planned",
+        created_at=100,
+        tool_name="inspect",
+        tool_call_id="call_tool",
+        arguments={"path": "README.md"},
+        tool_metadata=metadata,
+    )
+    assert _mapped_notifications(planned) == contract["plannedHasNoNotification"]["notifications"]
+
+    started = ToolCallStartedEvent(
+        run_id="run_tool",
+        trace_id="trace_tool",
+        event_id="evt_tool_started",
+        created_at=100.1,
+        tool_name="inspect",
+        tool_call_id="call_tool",
+        arguments={"path": "README.md"},
+        tool_metadata=metadata,
+    )
+    assert _mapped_notifications(started) == contract["executed"]["startedNotifications"]
+
+    completed = ToolCallCompletedEvent(
+        run_id="run_tool",
+        trace_id="trace_tool",
+        event_id="evt_tool_completed",
+        created_at=100.2,
+        tool_name="inspect",
+        tool_call_id="call_tool",
+        status="success",
+        directive="continue",
+        error_code=None,
+        execution_started=True,
+        duration_ms=7,
+        tool_metadata=metadata,
+    )
+    assert _mapped_notifications(completed) == contract["executed"]["completedNotifications"]
+
+    denied = ToolCallCompletedEvent(
+        run_id="run_tool",
+        trace_id="trace_tool",
+        event_id="evt_tool_denied",
+        created_at=100.3,
+        tool_name="write_record",
+        tool_call_id="call_denied",
+        status="error",
+        directive="continue",
+        error_code="tool_not_allowed",
+        execution_started=False,
+        duration_ms=None,
+        tool_metadata=ToolMetadata.from_dict(
+            {
+                "side_effect": "write",
+                "idempotency": "unsupported",
+                "terminal": False,
+                "capability_tags": ["record.write"],
+                "cost_dimensions": [],
+            }
+        ),
+    )
+    assert _mapped_notifications(denied) == contract["policyDenial"]["completedNotifications"]
+
+    legacy = event_from_dict(
+        {
+            "version": "v1",
+            "type": "tool_call_completed",
+            "event_id": "evt_tool_legacy",
+            "run_id": "run_tool",
+            "trace_id": "trace_tool",
+            "created_at": 99,
+            "tool_name": "lookup",
+            "tool_call_id": "call_legacy",
+            "status": "success",
+        }
+    )
+    assert _mapped_notifications(legacy) == [contract["legacyCompleted"]["notification"]]
 
 
 class _ContractHost:
