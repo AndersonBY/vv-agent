@@ -67,6 +67,22 @@ For multi-turn and tool-call requests, every assistant message retains its
 complete `reasoning_content`; streamed reasoning deltas are collected through
 the end of the provider stream before that message is stored.
 
+## Cache Usage Accounting
+
+`vv-agent` 0.7.2 requires `vv-llm` 0.3.107 or newer. Generic
+OpenAI-compatible providers still leave an omitted cache reading unknown, and
+an explicit `cached_tokens: 0` remains an observed zero. Moonshot is the one
+provider-specific exception: when a cold completion omits both top-level
+`cached_tokens` and `prompt_tokens_details`, `vv-llm` projects a zero cache read
+from Moonshot's documented response contract. Explicit `null` or malformed
+values remain unknown.
+
+The Agent runtime consumes the projected `prompt_tokens_details.cached_tokens`
+without rewriting the provider payload. For OpenAI-compatible usage,
+uncached input is `prompt_tokens - cached_tokens`; do not map that value onto
+Anthropic's `cache_read_input_tokens`, whose base `input_tokens` has a different
+meaning.
+
 ## Current User-Facing Defaults
 
 | Surface | Default |

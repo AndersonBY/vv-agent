@@ -1180,7 +1180,7 @@ wheels = [
 
 [[package]]
 name = "vv-agent"
-version = "0.7.1"
+version = "0.7.2"
 source = { editable = "." }
 dependencies = [
     { name = "openai" },
@@ -1218,7 +1218,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0" },
     { name = "ripgrep", marker = "sys_platform != 'win32'", specifier = ">=14.1.0" },
     { name = "ripgrep", marker = "sys_platform == 'win32'", specifier = ">=14.1.0,<15" },
-    { name = "vv-llm", specifier = ">=0.3.85" },
+    { name = "vv-llm", specifier = ">=0.3.107" },
 ]
 provides-extras = ["celery", "redis", "s3"]
 
@@ -1233,7 +1233,7 @@ dev = [
 
 [[package]]
 name = "vv-llm"
-version = "0.3.99"
+version = "0.3.107"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -1245,9 +1245,9 @@ dependencies = [
     { name = "qwen-tokenizer" },
     { name = "tiktoken" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/70/f3/cd13ed202d0cce2b2921b6adc98c89adcae78a55b927620cf655f2250932/vv_llm-0.3.99.tar.gz", hash = "sha256:64269a3fa2e8e68d12ef9faa06afb7bb47f22df72f9683c213941cc8d9bdd429", size = 73030, upload-time = "2026-05-30T13:43:11.261Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ac/98/418807b77617e944f9a0983d1a1ffbd703e651762b883e0e4c3196d25761/vv_llm-0.3.107.tar.gz", hash = "sha256:5654f21e9e647b431daa58771eaa3fb07b3e1e87d190699e9878b156ff99a460", size = 74547, upload-time = "2026-07-20T05:02:04.529Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5e/dc/2887b6d8b78e88745ede4252b8b229a3fdbd5e01138fbc3feb91e10ddfd9/vv_llm-0.3.99-py3-none-any.whl", hash = "sha256:02040c8d1ecafc6510e2e01207311db000fc2c7bd10d4b570344290cd1021900", size = 88096, upload-time = "2026-05-30T13:43:10.064Z" },
+    { url = "https://files.pythonhosted.org/packages/db/20/f323478ce34fe3d9c13912b4923c0ccd62d91156fa650cddc1818e148dc9/vv_llm-0.3.107-py3-none-any.whl", hash = "sha256:a087f258b53ef84713046b25550c59249ea5572a329b21b3d89e94ab4a2cdc98", size = 95411, upload-time = "2026-07-20T05:02:03.429Z" },
 ]
 
 [[package]]

@@ -8,12 +8,15 @@ from typing import Any, ClassVar, cast
 import httpx
 import pytest
 from openai.types.chat import ChatCompletionMessageParam
+from openai.types.completion_usage import PromptTokensDetails
 from vv_llm.types import APIConnectionError, APIStatusError
+from vv_llm.types.llm_parameters import Usage
 
 from vv_agent import constants as constants_module
 from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
 from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
 from vv_agent.model_settings import ModelSettings, RetrySettings, ToolChoice
+from vv_agent.runtime.token_usage import normalize_token_usage
 from vv_agent.types import Message
 
 TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
@@ -90,6 +93,64 @@ def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
 
     assert response.content == "ok from backup"
     assert response.raw["used_endpoint_id"] == "second"
+
+
+def test_llm_bridge_preserves_provider_reported_zero_cache_usage(monkeypatch) -> None:
+    usage = Usage(
+        prompt_tokens=11,
+        completion_tokens=7,
+        total_tokens=18,
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=0),
+    )
+    _FakeChatClient.behavior_by_endpoint = {
+        "moonshot": SimpleNamespace(
+            content="ok",
+            tool_calls=[],
+            reasoning_content=None,
+            usage=usage,
+        )
+    }
+    _FakeChatClient.seen_calls = []
+    monkeypatch.setattr(
+        "vv_agent.llm.vv_llm_client.create_chat_client",
+        _fake_create_chat_client,
+    )
+    monkeypatch.setattr(
+        "vv_agent.llm.vv_llm_client.format_messages",
+        _passthrough_format_messages,
+    )
+    monkeypatch.setattr(
+        VVLlmClient,
+        "_should_use_stream",
+        staticmethod(lambda model: False),
+    )
+
+    llm = VVLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="moonshot",
+                api_key="test-key",
+                api_base="https://api.moonshot.cn/v1",
+            )
+        ],
+        backend="moonshot",
+        selected_model="kimi-k2.6",
+        randomize_endpoints=False,
+    )
+    response = llm.complete(
+        model="kimi-k2.6",
+        messages=[Message(role="user", content="hello")],
+        tools=[],
+    )
+
+    normalized = normalize_token_usage(
+        response.raw["usage"],
+        usage_source=response.raw["usage_source"],
+    )
+    assert response.raw["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
+    assert normalized.cache_usage.read_tokens == 0
+    assert normalized.cache_usage.uncached_input_tokens == 11
+    assert normalized.usage_source.value == "provider_reported"
 
 
 def test_llm_retries_transient_status_on_the_same_endpoint(monkeypatch) -> None:
