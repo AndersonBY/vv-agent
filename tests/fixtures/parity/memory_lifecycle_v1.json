@@ -12,6 +12,173 @@
     "request_model": "session-memory-model",
     "resolution_count": 1
   },
+  "capacity_contract": {
+    "configured_default_threshold": 250000,
+    "context_window_fallback": 200000,
+    "reserved_output_tokens_fallback": 16000,
+    "autocompact_buffer_tokens_default": 13000,
+    "microcompact_trigger_ratio_default": 0.75,
+    "resolved_model_max_output_is_capability_not_request_default": true,
+    "reserved_output_precedence": [
+      "effective_model_settings.max_tokens",
+      "task_metadata.reserved_output_tokens",
+      "framework_fallback"
+    ],
+    "reserved_output_source_values": [
+      "model_settings",
+      "task_metadata",
+      "framework_fallback",
+      "framework_fallback_capped_by_model_capability"
+    ],
+    "formula": {
+      "derived_prompt_capacity": "max(model_context_window - reserved_output_tokens - autocompact_buffer_tokens, 0)",
+      "effective_threshold": "configured_threshold > 0 ? min(configured_threshold, derived_prompt_capacity) : derived_prompt_capacity",
+      "microcompact_threshold": "floor(effective_threshold * microcompact_trigger_ratio)",
+      "known_zero_capacity_stays_zero": true
+    },
+    "cases": [
+      {
+        "name": "kimi_k3_uses_full_configured_ceiling",
+        "input": {
+          "configured_threshold": 250000,
+          "model_context_window": 1048576,
+          "effective_model_max_tokens": null,
+          "task_metadata_reserved_output_tokens": null,
+          "model_max_output_tokens": 1048576,
+          "autocompact_buffer_tokens": 13000
+        },
+        "expected": {
+          "reserved_output_tokens": 16000,
+          "reserved_output_source": "framework_fallback",
+          "effective_threshold": 250000,
+          "microcompact_threshold": 187500
+        }
+      },
+      {
+        "name": "deepseek_v4_pro_uses_full_configured_ceiling",
+        "input": {
+          "configured_threshold": 250000,
+          "model_context_window": 1000000,
+          "effective_model_max_tokens": null,
+          "task_metadata_reserved_output_tokens": null,
+          "model_max_output_tokens": 384000,
+          "autocompact_buffer_tokens": 13000
+        },
+        "expected": {
+          "reserved_output_tokens": 16000,
+          "reserved_output_source": "framework_fallback",
+          "effective_threshold": 250000,
+          "microcompact_threshold": 187500
+        }
+      },
+      {
+        "name": "explicit_request_limit_wins",
+        "input": {
+          "configured_threshold": 250000,
+          "model_context_window": 256000,
+          "effective_model_max_tokens": 4096,
+          "task_metadata_reserved_output_tokens": 32000,
+          "model_max_output_tokens": 256000,
+          "autocompact_buffer_tokens": 13000
+        },
+        "expected": {
+          "reserved_output_tokens": 4096,
+          "reserved_output_source": "model_settings",
+          "effective_threshold": 238904,
+          "microcompact_threshold": 179178
+        }
+      },
+      {
+        "name": "explicit_host_reserve_wins_without_request_limit",
+        "input": {
+          "configured_threshold": 250000,
+          "model_context_window": 256000,
+          "effective_model_max_tokens": null,
+          "task_metadata_reserved_output_tokens": 32768,
+          "model_max_output_tokens": 256000,
+          "autocompact_buffer_tokens": 13000
+        },
+        "expected": {
+          "reserved_output_tokens": 32768,
+          "reserved_output_source": "task_metadata",
+          "effective_threshold": 210232,
+          "microcompact_threshold": 157674
+        }
+      },
+      {
+        "name": "fallback_is_capped_by_smaller_model_capability",
+        "input": {
+          "configured_threshold": 250000,
+          "model_context_window": 32000,
+          "effective_model_max_tokens": null,
+          "task_metadata_reserved_output_tokens": null,
+          "model_max_output_tokens": 8192,
+          "autocompact_buffer_tokens": 13000
+        },
+        "expected": {
+          "reserved_output_tokens": 8192,
+          "reserved_output_source": "framework_fallback_capped_by_model_capability",
+          "effective_threshold": 10808,
+          "microcompact_threshold": 8106
+        }
+      },
+      {
+        "name": "known_zero_capacity_stays_zero",
+        "input": {
+          "configured_threshold": 250000,
+          "model_context_window": 10000,
+          "effective_model_max_tokens": 10000,
+          "task_metadata_reserved_output_tokens": null,
+          "model_max_output_tokens": 10000,
+          "autocompact_buffer_tokens": 13000
+        },
+        "expected": {
+          "reserved_output_tokens": 10000,
+          "reserved_output_source": "model_settings",
+          "effective_threshold": 0,
+          "microcompact_threshold": 0
+        }
+      }
+    ]
+  },
+  "compaction_events": {
+    "started": {
+      "trigger_values": [
+        "micro_threshold",
+        "full_threshold",
+        "prompt_too_long"
+      ],
+      "new_producer_fields": [
+        "trigger",
+        "configured_threshold",
+        "effective_threshold",
+        "microcompact_threshold",
+        "model_context_window",
+        "model_max_output_tokens",
+        "reserved_output_tokens",
+        "reserved_output_source",
+        "autocompact_buffer_tokens"
+      ]
+    },
+    "completed": {
+      "mode_values": [
+        "none",
+        "micro",
+        "structural",
+        "summary",
+        "emergency"
+      ],
+      "new_producer_fields": [
+        "mode",
+        "changed"
+      ],
+      "changed_is_content_aware": true,
+      "mode_is_strongest_applied_stage": true
+    },
+    "legacy_missing_additive_fields_are_accepted": true,
+    "unknown_enum_values_are_rejected": true,
+    "task_semantics_are_not_inspected": true
+  },
   "provider_attempts": {
     "prompt_too_long_failures_before_success": 2,
     "started_count": 2,

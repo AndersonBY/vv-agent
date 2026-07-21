@@ -62,7 +62,7 @@
       "max_output_tokens": 4096,
       "task_metadata": {
         "model_context_window": 32000,
-        "reserved_output_tokens": 4096
+        "model_max_output_tokens": 4096
       },
       "explicit_child_metadata_wins": true
     }
