@@ -24,9 +24,7 @@ from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.tools import ToolExposure, function_tool
 from vv_agent.types import AgentStatus, LLMResponse, Message, NoToolPolicy, ToolCall
 
-ASSISTANT_REASONING_FIXTURE_PATH = (
-    Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history_v1.json"
-)
+ASSISTANT_REASONING_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history_v1.json"
 
 
 def _assistant_reasoning_contract() -> dict[str, object]:
@@ -118,9 +116,7 @@ def test_runner_preserves_reasoning_only_history_for_next_model_request(tmp_path
         captured_requests.append(list(request.messages))
         return LLMResponse(
             content="",
-            tool_calls=[
-                ToolCall(id="finish-reasoning", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})
-            ],
+            tool_calls=[ToolCall(id="finish-reasoning", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
         )
 
     llm = ScriptedLLM(
@@ -159,9 +155,7 @@ def test_runner_preserves_reasoning_only_history_for_next_model_request(tmp_path
     assert expected["next_model_request_contains_reasoning_turn"] is True
     assert len(captured_requests) == 1
     replayed = next(
-        message
-        for message in captured_requests[0]
-        if message.role == "assistant" and message.reasoning_content == reasoning
+        message for message in captured_requests[0] if message.role == "assistant" and message.reasoning_content == reasoning
     )
     assert replayed.content == expected["next_model_request_visible_content"]
     assert replayed.content == reasoning_expected["visible_content"]
@@ -342,8 +336,7 @@ def test_stop_on_first_tool_finishes_only_after_a_successful_tool(tmp_path: Path
     assert calls == ["first"]
     assert result.raw_result.cycles[0].tool_results[1].error_code == "skipped_due_to_finish"
     assert not any(
-        event.type.startswith("tool_call_") and getattr(event, "tool_call_id", None) == "c2"
-        for event in result.events
+        event.type.startswith("tool_call_") and getattr(event, "tool_call_id", None) == "c2" for event in result.events
     )
 
 
@@ -356,9 +349,7 @@ def test_stop_on_first_tool_does_not_finish_on_a_no_tool_response(tmp_path: Path
                     LLMResponse(content="draft without a tool"),
                     LLMResponse(
                         content="",
-                        tool_calls=[
-                            ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})
-                        ],
+                        tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
                     ),
                 ]
             ),
@@ -472,6 +463,7 @@ def test_runner_prefers_resolved_catalog_token_limits_for_memory(tmp_path: Path,
     from vv_agent.memory import MemoryManager
 
     manager_kwargs: list[dict[str, object]] = []
+    observed_requests: list[LlmRequest] = []
 
     def capture_memory_manager(**kwargs):
         manager_kwargs.append(kwargs)
@@ -485,25 +477,32 @@ def test_runner_prefers_resolved_catalog_token_limits_for_memory(tmp_path: Path,
 
     def model_provider(agent: Agent, run_config: RunConfig):
         del agent, run_config
+
+        def capture_request(request: LlmRequest) -> LLMResponse:
+            observed_requests.append(request)
+            return LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+            )
+
         return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="done",
-                        tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-                    )
-                ]
-            ),
+            ScriptedLLM(steps=[capture_request]),
             _fake_resolved(context_length=64_000, max_output_tokens=8_000),
         )
 
     result = Runner.run_sync(
-        Agent(name="assistant", instructions="Use catalog limits.", model="m"),
+        Agent(
+            name="assistant",
+            instructions="Use catalog limits.",
+            model="m",
+            metadata={"model_context_window": 0},
+        ),
         "go",
         run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
     )
 
     assert result.status == AgentStatus.COMPLETED
+    assert observed_requests[0].metadata["model_context_window"] == 64_000
     assert manager_kwargs[0]["model_context_window"] == 64_000
     assert manager_kwargs[0]["model_max_output_tokens"] == 8_000
     assert manager_kwargs[0]["reserved_output_tokens"] == 8_000

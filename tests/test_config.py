@@ -11,6 +11,7 @@ from vv_agent.config import (
     build_vv_llm_settings,
     decode_api_key,
     load_llm_settings_from_file,
+    project_resolved_model_limits,
     resolve_model_endpoint,
 )
 
@@ -63,6 +64,24 @@ def test_load_llm_settings_from_file(sample_settings_file: Path) -> None:
     settings = load_llm_settings_from_file(sample_settings_file)
     assert "backends" in settings
     assert "moonshot" in settings["backends"]
+
+
+def test_project_resolved_model_limits_replaces_non_positive_context_only() -> None:
+    metadata = {
+        "model_context_window": 0,
+        "model_max_output_tokens": 2_048,
+    }
+
+    project_resolved_model_limits(
+        metadata,
+        context_length=64_000,
+        max_output_tokens=8_192,
+    )
+
+    assert metadata == {
+        "model_context_window": 64_000,
+        "model_max_output_tokens": 2_048,
+    }
 
 
 def test_load_llm_settings_supports_json_and_toml(tmp_path: Path) -> None:

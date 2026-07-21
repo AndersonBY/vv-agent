@@ -6,7 +6,9 @@ from vv_agent import (
     Agent,
     AgentStartedEvent,
     LLMStartedEvent,
+    MemoryCompactCompleted,
     MemoryCompactedEvent,
+    MemoryCompactStarted,
     RunConfig,
     Runner,
     ToolFinishedEvent,
@@ -28,6 +30,55 @@ def _resolved() -> ResolvedModelConfig:
         model_id="m",
         endpoint_options=[EndpointOption(endpoint=endpoint, model_id="m")],
     )
+
+
+def test_runtime_log_mapper_preserves_memory_event_identity() -> None:
+    common = {
+        "event_id": "evt_observed_memory",
+        "created_at": 123.25,
+        "cycle_index": 2,
+    }
+    started = event_from_runtime_log(
+        "memory_compact_started",
+        {
+            **common,
+            "message_count": 4,
+            "estimated_tokens": 3_800,
+            "trigger": "micro_threshold",
+            "configured_threshold": 4_000,
+            "effective_threshold": 4_000,
+            "microcompact_threshold": 3_000,
+            "model_context_window": 64_000,
+            "model_max_output_tokens": 8_192,
+            "reserved_output_tokens": 8_192,
+            "reserved_output_source": "framework_fallback_capped_by_model_capability",
+            "autocompact_buffer_tokens": 13_000,
+        },
+        run_id="run-memory",
+        trace_id="trace-memory",
+        agent_name="assistant",
+        user_input="continue",
+    )
+    completed = event_from_runtime_log(
+        "memory_compact_completed",
+        {
+            **common,
+            "before_count": 4,
+            "after_count": 4,
+            "mode": "micro",
+            "changed": True,
+        },
+        run_id="run-memory",
+        trace_id="trace-memory",
+        agent_name="assistant",
+        user_input="continue",
+    )
+
+    assert isinstance(started, MemoryCompactStarted)
+    assert isinstance(completed, MemoryCompactCompleted)
+    assert started.event_id == completed.event_id == common["event_id"]
+    assert started.created_at == completed.created_at == common["created_at"]
+    assert started.cycle_index == completed.cycle_index == common["cycle_index"]
 
 
 def test_runner_emits_tool_started_and_finished_events(tmp_path: Path) -> None:
@@ -181,15 +232,18 @@ def test_memory_compacted_event_dict_includes_counts() -> None:
     assert payload["version"] == "v1"
     assert payload["event_id"].startswith("evt_")
     assert payload["created_at"] > 0
-    assert {key: payload[key] for key in (
-        "type",
-        "run_id",
-        "trace_id",
-        "cycle_index",
-        "agent_name",
-        "before_count",
-        "after_count",
-    )} == {
+    assert {
+        key: payload[key]
+        for key in (
+            "type",
+            "run_id",
+            "trace_id",
+            "cycle_index",
+            "agent_name",
+            "before_count",
+            "after_count",
+        )
+    } == {
         "type": "memory_compacted",
         "run_id": "run",
         "trace_id": "trace",

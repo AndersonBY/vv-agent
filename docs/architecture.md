@@ -84,7 +84,9 @@ implementing providers instead of patching runtime internals:
   failure; it cannot expand permissions or manufacture success/waiting states.
 
 Raw runtime logs remain available for compatibility, but typed `RunEvent` is
-the primary state contract for host UIs.
+the primary state contract for host UIs. The Runner records a known typed event
+before notifying the corresponding raw runtime observer, and isolates observer
+exceptions; event-store fail-open/fail-closed behavior remains independent.
 
 Raw model stream callbacks are synchronous at-least-once observers, not a
 durable event store. The Runner projects only assistant/reasoning deltas and

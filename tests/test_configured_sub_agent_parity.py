@@ -445,9 +445,7 @@ def test_runtime_revalidates_mutated_sub_agent_config_and_pairs_events(
     setattr(sub_agent, field, invalid_value)
     events: list[Any] = []
     runtime = AgentRuntime(
-        llm_client=ScriptedLLM(
-            steps=[_delegate({"agent_id": "researcher", "task_description": "Collect facts"})]
-        ),
+        llm_client=ScriptedLLM(steps=[_delegate({"agent_id": "researcher", "task_description": "Collect facts"})]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )
@@ -1261,12 +1259,10 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
     lifecycle_contract = _contract()["lifecycle"]
     successful = cast(SubRunCompletedEvent, sub_events[1])
     assert successful.token_usage is not None
-    assert (
-        successful.token_usage["total_tokens"] == 0
-    ) is lifecycle_contract["preserve_successful_zero_token_usage"]
-    assert (
-        failed.metadata.get("error_code") == "invalid_sub_agent_system_prompt"
-    ) is lifecycle_contract["failure_error_code_in_metadata"]
+    assert (successful.token_usage["total_tokens"] == 0) is lifecycle_contract["preserve_successful_zero_token_usage"]
+    assert (failed.metadata.get("error_code") == "invalid_sub_agent_system_prompt") is lifecycle_contract[
+        "failure_error_code_in_metadata"
+    ]
     assert (failed.token_usage is None) is lifecycle_contract["omit_token_usage_when_unavailable"]
     assert [_normalize_sub_event(event) for event in sub_events] == _event_contract()
 
@@ -1318,6 +1314,7 @@ class _ExplicitBackendModelProvider:
     ("child_metadata", "expected_context", "expected_capability", "expected_reserve"),
     [
         ({}, 32_000, 4_096, None),
+        ({"model_context_window": 0}, 32_000, 4_096, None),
         (
             {"model_context_window": 12_345, "reserved_output_tokens": 678},
             12_345,
@@ -1325,7 +1322,11 @@ class _ExplicitBackendModelProvider:
             678,
         ),
     ],
-    ids=["resolved-limits", "explicit-child-metadata-wins"],
+    ids=[
+        "resolved-limits",
+        "non-positive-child-metadata-uses-resolved-limit",
+        "explicit-child-metadata-wins",
+    ],
 )
 def test_explicit_backend_and_resolved_limits_reach_real_child_request(
     tmp_path: Path,
@@ -1467,6 +1468,7 @@ def test_same_model_parent_client_reuse_inherits_parent_task_token_limits(tmp_pa
     assert child_requests[0].metadata["model_context_window"] == expected_metadata["model_context_window"]
     assert child_requests[0].metadata["model_max_output_tokens"] == expected_metadata["model_max_output_tokens"]
     assert "reserved_output_tokens" not in child_requests[0].metadata
+    assert child_requests[0].model_settings is None or child_requests[0].model_settings.max_tokens is None
 
 
 def _async_tool_context(tmp_path: Path, manager: SubTaskManager) -> ToolContext:
@@ -1749,8 +1751,7 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
             for name, present in {
                 "agent_name": child_run_context.agent_name == "researcher",
                 "cancellation_token": (
-                    child_ctx.cancellation_token is not None
-                    and child_ctx.cancellation_token is not parent_token
+                    child_ctx.cancellation_token is not None and child_ctx.cancellation_token is not parent_token
                 ),
                 "run_context": child_run_context is not parent_run_context,
                 "run_id": child_run_context.run_id == child_ctx.metadata.get("_vv_agent_run_id"),
@@ -1786,9 +1787,9 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
     record = manager.get(sub_event_pair[0].task_id or "")
     assert record is not None
     assert record.session is not None
-    assert (
-        record.parent_run_id == "parent-run" and record.parent_tool_call_id == "delegate"
-    ) is _contract()["manager"]["persists_parent_lineage"]
+    assert (record.parent_run_id == "parent-run" and record.parent_tool_call_id == "delegate") is _contract()["manager"][
+        "persists_parent_lineage"
+    ]
     assert _contract()["model_resolution"]["blank_backend_treated_as_absent"] is True
     assert record.resolved == _contract()["model_resolution"]["resolved_without_endpoint"]
     child_session = cast(Any, record.session)
@@ -2019,9 +2020,7 @@ def test_configured_child_stream_is_allowlisted_and_keeps_canonical_typed_identi
     for raw in raw_streams:
         producer_fields = set(stream_contract["producer_fields"][raw["event"]])
         assert set(raw).issubset(producer_fields | identity_fields | {cycle_field})
-        assert (set(raw) - identity_fields - {cycle_field}).isdisjoint(
-            stream_contract["reserved_producer_fields"]
-        )
+        assert (set(raw) - identity_fields - {cycle_field}).isdisjoint(stream_contract["reserved_producer_fields"])
         assert raw[cycle_field] == 1
     assert raw_streams[0]["content_delta"] == "child delta"
     assert raw_streams[0]["content_chars"] == 11
@@ -2044,9 +2043,7 @@ def test_configured_child_stream_is_allowlisted_and_keeps_canonical_typed_identi
         ModelToolCallProgressEvent,
     )
     typed_streams = [event for event in typed_events if isinstance(event, child_stream_types)]
-    assert [event.type for event in typed_streams] == [
-        stream_contract["typed_wire_types"][raw["event"]] for raw in raw_streams
-    ]
+    assert [event.type for event in typed_streams] == [stream_contract["typed_wire_types"][raw["event"]] for raw in raw_streams]
     for typed_event, raw in zip(typed_streams, raw_streams, strict=True):
         assert typed_event.run_id == started.run_id
         assert typed_event.trace_id == "trace-stream-contract"
@@ -2056,11 +2053,7 @@ def test_configured_child_stream_is_allowlisted_and_keeps_canonical_typed_identi
         assert typed_event.cycle_index == 1
         assert typed_event.metadata == raw
 
-    parent_terminals = [
-        event
-        for event in typed_events
-        if isinstance(event, RunCompletedEvent) and event.run_id == result.run_id
-    ]
+    parent_terminals = [event for event in typed_events if isinstance(event, RunCompletedEvent) and event.run_id == result.run_id]
     assert len(parent_terminals) == 1
     assert stream_contract["untrusted_terminal_cannot_suppress_real_terminal"] is True
 
@@ -2349,13 +2342,13 @@ def test_manual_approval_resume_runs_sub_task_status_with_accepting_turn_snapsho
                     )
                 ]
             ),
-                ResolvedModelConfig(
-                    backend="test",
-                    requested_model="approval-model",
-                    selected_model="approval-model",
-                    model_id="approval-model",
-                    endpoint_options=[],
-                ),
+            ResolvedModelConfig(
+                backend="test",
+                requested_model="approval-model",
+                selected_model="approval-model",
+                model_id="approval-model",
+                endpoint_options=[],
+            ),
         )
 
     runtime_task = AgentTask(
@@ -2364,9 +2357,7 @@ def test_manual_approval_resume_runs_sub_task_status_with_accepting_turn_snapsho
         system_prompt="Manage retained child.",
         user_prompt="Continue child.",
         max_cycles=1,
-        sub_agents={
-            "researcher": SubAgentConfig(model="approval-model", description="Retained child")
-        },
+        sub_agents={"researcher": SubAgentConfig(model="approval-model", description="Retained child")},
         metadata={"_vv_agent_tool_use_behavior": "stop_on_first_tool"},
     )
     interrupted = Runner._run_compiled_sync(
@@ -2442,9 +2433,7 @@ def test_model_resolution_failure_emits_started_before_resolution_and_one_comple
         raise RuntimeError("child model unavailable")
 
     runtime = AgentRuntime(
-        llm_client=ScriptedLLM(
-            steps=[_delegate({"agent_id": "researcher", "task_description": "Collect facts"})]
-        ),
+        llm_client=ScriptedLLM(steps=[_delegate({"agent_id": "researcher", "task_description": "Collect facts"})]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
         settings_file=tmp_path / "settings.py",
@@ -2480,9 +2469,7 @@ def test_model_resolution_failure_emits_started_before_resolution_and_one_comple
     assert resolution_requests == [("test", "child-model")]
     assert _contract()["model_resolution"]["blank_backend_treated_as_absent"] is True
     pair = _sub_events(events)
-    assert (observed_at_resolution == ["sub_run_started"]) is _contract()["lifecycle"][
-        "started_before_model_resolution"
-    ]
+    assert (observed_at_resolution == ["sub_run_started"]) is _contract()["lifecycle"]["started_before_model_resolution"]
     assert [event.type for event in pair] == ["sub_run_started", "sub_run_completed"]
     assert _lifecycle_is_fully_paired(events) is _contract()["lifecycle"]["completed_after_every_started"]
     assert pair[1].run_id == pair[0].run_id
@@ -2581,9 +2568,7 @@ def test_child_runtime_inherits_settings_file_and_default_backend(
         workspace_path: Path,
         ctx: Any = None,
     ) -> Any:
-        observed_runtime_config.append(
-            (self.settings_file, self.default_backend, bool(task.metadata.get("is_sub_task")))
-        )
+        observed_runtime_config.append((self.settings_file, self.default_backend, bool(task.metadata.get("is_sub_task"))))
         return original_build_memory_manager(
             self,
             task=task,
@@ -3000,9 +2985,7 @@ def test_parent_cancellation_reaches_batch_configured_sub_agent_workers(tmp_path
     assert parent_result.status == AgentStatus.FAILED
     assert parent_result.error == "Operation was cancelled"
     create_payload = json.loads(parent_result.cycles[0].tool_results[0].content)
-    assert all(
-        item["status"] == AgentStatus.FAILED.value for item in create_payload["details"]["results"]
-    )
+    assert all(item["status"] == AgentStatus.FAILED.value for item in create_payload["details"]["results"])
     grouped: dict[str, list[str]] = {}
     for event in _sub_events(events):
         grouped.setdefault(event.run_id, []).append(event.type)
@@ -3271,9 +3254,7 @@ def test_manager_timeout_preserves_lineage_and_filtered_snapshot(tmp_path: Path)
     assert timed_out_record.parent_run_id == "parent-run"
     assert timed_out_record.parent_tool_call_id == "delegate"
     assert timed_out_record.workspace_backend is not None
-    assert timed_out_record.workspace_backend.list_files(".", "**/*") == _contract()["workspace_filter"][
-        "visible_paths"
-    ]
+    assert timed_out_record.workspace_backend.list_files(".", "**/*") == _contract()["workspace_filter"]["visible_paths"]
     running_rejected = False
     with pytest.raises(RuntimeError, match="already running"):
         manager.continue_task(task_id=task_id, prompt="continue too early")
@@ -3293,9 +3274,7 @@ def test_manager_timeout_preserves_lineage_and_filtered_snapshot(tmp_path: Path)
     )
     snapshot = status_result.metadata["tasks"][0]["snapshot"]
     assert status_result.status_code == ToolResultStatus.SUCCESS
-    assert ("snapshot" in status_result.metadata["tasks"][0]) is manager_contract[
-        "snapshot_remains_queryable_after_timeout"
-    ]
+    assert ("snapshot" in status_result.metadata["tasks"][0]) is manager_contract["snapshot_remains_queryable_after_timeout"]
     assert snapshot["workspace_files"] == _contract()["workspace_filter"]["visible_paths"]
     assert status_result.metadata["tasks"][0]["status"] == AgentStatus.RUNNING.value
 
@@ -3596,10 +3575,7 @@ def test_configured_sub_agent_continuation_replays_complete_prior_turn(tmp_path:
     positions = [next(index for index, content in enumerate(contents) if required in content) for required in required_history]
     assert positions == sorted(positions)
     assistant_tool_call_ids = {
-        tool_call["id"]
-        for message in messages
-        if message.role == "assistant"
-        for tool_call in (message.tool_calls or [])
+        tool_call["id"] for message in messages if message.role == "assistant" for tool_call in (message.tool_calls or [])
     }
     tool_result_ids = {message.tool_call_id for message in messages if message.role == "tool"}
     complete_tool_turn = bool(assistant_tool_call_ids) and assistant_tool_call_ids <= tool_result_ids
@@ -3664,11 +3640,7 @@ class _ContinuationCancellationLLM:
         request_metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
         del model, tools, stream_callback, model_settings, request_metadata
-        is_child = bool(
-            messages
-            and messages[0].role == "system"
-            and messages[0].content == "Child prompt"
-        )
+        is_child = bool(messages and messages[0].role == "system" and messages[0].content == "Child prompt")
         with self._lock:
             if is_child:
                 self._child_calls += 1
@@ -3771,11 +3743,7 @@ class _PanicThenRecoverConfiguredLLM:
         request_metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
         del model, tools, stream_callback, model_settings, request_metadata
-        is_child = bool(
-            messages
-            and messages[0].role == "system"
-            and messages[0].content == "Child prompt"
-        )
+        is_child = bool(messages and messages[0].role == "system" and messages[0].content == "Child prompt")
         with self._lock:
             if is_child:
                 self._child_calls += 1
@@ -3857,9 +3825,7 @@ def test_configured_async_child_panic_cleans_up_and_retained_session_can_continu
     recovered_record = manager.wait(task_id, timeout=3)
 
     assert recovered_record is not None and recovered_record.outcome is not None
-    assert (recovered_record.outcome.status == AgentStatus.COMPLETED) is cleanup_contract[
-        "retained_session_can_continue"
-    ]
+    assert (recovered_record.outcome.status == AgentStatus.COMPLETED) is cleanup_contract["retained_session_can_continue"]
     assert recovered_record.outcome.final_answer == "child recovered"
     assert recovered_record.task_id == task_id
     assert recovered_record.session_id == session_id

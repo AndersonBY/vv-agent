@@ -124,6 +124,19 @@ JSON Schema:
 
 SummaryCallback = Callable[[str, str | None, str | None], str | None]
 CompactionMode = Literal["none", "micro", "structural", "summary", "emergency"]
+_COMPACTION_MODE_RANK: dict[CompactionMode, int] = {
+    "none": 0,
+    "micro": 1,
+    "structural": 2,
+    "summary": 3,
+    "emergency": 4,
+}
+
+
+def _strongest_compaction_mode(*modes: CompactionMode) -> CompactionMode:
+    return max(modes, key=_COMPACTION_MODE_RANK.__getitem__, default="none")
+
+
 ReservedOutputSource = Literal[
     "model_settings",
     "task_metadata",
@@ -239,6 +252,8 @@ class MemoryManager:
         sanitized_messages, sanitized = self._sanitize_empty_assistant_messages(cleaned)
         legacy_changed = summary_removed or sanitized
         working_messages = self.apply_session_memory_context(sanitized_messages)
+        if legacy_changed or working_messages != sanitized_messages:
+            strongest_mode = "structural"
 
         message_length = self._calculate_effective_length(
             working_messages,
@@ -251,17 +266,37 @@ class MemoryManager:
             current_tokens=message_length,
         )
         if extracted:
+            before_refresh = working_messages
             working_messages = self.apply_session_memory_context(sanitized_messages)
+            if working_messages != before_refresh:
+                strongest_mode = _strongest_compaction_mode(strongest_mode, "structural")
             message_length = self._calculate_effective_length(
                 working_messages,
                 total_tokens=None,
                 recent_tool_call_ids=recent_tool_call_ids,
             )
+        microcompacted_messages = working_messages
+        if not force and self.microcompact_trigger_threshold > 0 and message_length > self.microcompact_trigger_threshold:
+            microcompacted_messages, cleared = self.microcompact_messages(
+                working_messages,
+                cycle_index=cycle_index,
+            )
+            if cleared > 0:
+                strongest_mode = _strongest_compaction_mode(strongest_mode, "micro")
+                legacy_changed = True
+                message_length = self._calculate_effective_length(
+                    microcompacted_messages,
+                    total_tokens=None,
+                    recent_tool_call_ids=None,
+                )
+
         if not force and message_length <= self.autocompact_threshold:
             maybe_warned_messages, warning_inserted = self._maybe_append_memory_warning(
-                working_messages,
+                microcompacted_messages,
                 message_length=message_length,
             )
+            if warning_inserted:
+                strongest_mode = _strongest_compaction_mode(strongest_mode, "structural")
             return self._compaction_result(
                 original_messages,
                 maybe_warned_messages,
@@ -269,33 +304,9 @@ class MemoryManager:
                 legacy_changed or warning_inserted,
             )
 
-        microcompacted_messages = working_messages
-        microcompacted = False
-        if not force:
-            microcompacted_messages, cleared = self.microcompact_messages(
-                working_messages,
-                cycle_index=cycle_index,
-            )
-            microcompacted = cleared > 0
-            if microcompacted:
-                strongest_mode = "micro"
-                legacy_changed = True
-                message_length = self._calculate_effective_length(
-                    microcompacted_messages,
-                    total_tokens=None,
-                    recent_tool_call_ids=None,
-                )
-                if message_length <= self.autocompact_threshold:
-                    return self._compaction_result(
-                        original_messages,
-                        microcompacted_messages,
-                        strongest_mode,
-                        legacy_changed,
-                    )
-
         compacted_messages, compacted = self._compact_messages(microcompacted_messages, cycle_index=cycle_index)
         if compacted:
-            strongest_mode = "structural"
+            strongest_mode = _strongest_compaction_mode(strongest_mode, "structural")
             legacy_changed = True
         message_length = self._calculate_effective_length(
             compacted_messages,
@@ -312,7 +323,7 @@ class MemoryManager:
 
         summarized_messages, summarized = self.compress_memory(compacted_messages, cycle_index=cycle_index)
         if summarized:
-            strongest_mode = "summary"
+            strongest_mode = _strongest_compaction_mode(strongest_mode, "summary")
             legacy_changed = True
         if summarized and self.session_memory is not None:
             post_compaction_messages = self.apply_session_memory_context(summarized_messages)

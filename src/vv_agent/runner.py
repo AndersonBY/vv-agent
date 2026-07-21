@@ -125,7 +125,14 @@ _RUNTIME_TERMINAL_LOG_EVENTS = frozenset(
         "run_wait_user",
     }
 )
-_RUNTIME_DIRECT_TOOL_EVENT_LOGS = frozenset({"tool_started", "tool_result"})
+_RUNTIME_DIRECT_EVENT_LOGS = frozenset(
+    {
+        "memory_compact_completed",
+        "memory_compact_started",
+        "tool_result",
+        "tool_started",
+    }
+)
 
 
 def _tool_policy_metadata(policy: ToolPolicy | None) -> dict[str, Any]:
@@ -1320,7 +1327,7 @@ class Runner:
         def log_handler(event: str, payload: dict[str, Any]) -> None:
             metadata = payload.get("metadata")
             is_legacy_handoff = event == "tool_result" and isinstance(metadata, dict) and metadata.get("mode") == "handoff"
-            if event not in _RUNTIME_TERMINAL_LOG_EVENTS | _RUNTIME_DIRECT_TOOL_EVENT_LOGS or is_legacy_handoff:
+            if event not in _RUNTIME_TERMINAL_LOG_EVENTS | _RUNTIME_DIRECT_EVENT_LOGS or is_legacy_handoff:
                 capture_event(
                     event_from_runtime_log(
                         event,
@@ -1333,7 +1340,10 @@ class Runner:
                     )
                 )
             if run_config.runtime_log_handler is not None:
-                run_config.runtime_log_handler(event, payload)
+                try:
+                    run_config.runtime_log_handler(event, payload)
+                except BaseException as exc:
+                    warnings.warn(f"Runtime log observer failed: {exc}", RuntimeWarning, stacklevel=2)
 
         def stream_callback(payload: dict[str, Any]) -> None:
             canonical_child = isinstance(payload, _CanonicalSubAgentStreamPayload)

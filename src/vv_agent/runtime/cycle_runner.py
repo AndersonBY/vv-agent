@@ -41,10 +41,12 @@ class CycleRunner:
         llm_client: LLMClient,
         tool_registry: ToolRegistry,
         hook_manager: RuntimeHookManager | None = None,
+        runtime_event_handler: Callable[[RunEvent], None] | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
         self.hook_manager = hook_manager or RuntimeHookManager()
+        self.runtime_event_handler = runtime_event_handler
 
     def run_cycle(
         self,
@@ -404,7 +406,7 @@ class CycleRunner:
     ) -> None:
         providers = self._memory_providers_from_context(ctx)
         emit_event = self._event_emitter_from_context(ctx)
-        if not providers and emit_event is None:
+        if not providers and emit_event is None and self.runtime_event_handler is None:
             return
         event = MemoryCompactStarted(
             **self._memory_event_context(ctx),
@@ -461,6 +463,7 @@ class CycleRunner:
             )
         if emit_event is not None:
             emit_event(event)
+        self._notify_runtime_event_handler(event)
 
     def _emit_memory_compact_completed(
         self,
@@ -475,7 +478,7 @@ class CycleRunner:
     ) -> None:
         providers = self._memory_providers_from_context(ctx)
         emit_event = self._event_emitter_from_context(ctx)
-        if not providers and emit_event is None:
+        if not providers and emit_event is None and self.runtime_event_handler is None:
             return
         event = MemoryCompactCompleted(
             **self._memory_event_context(ctx),
@@ -506,6 +509,15 @@ class CycleRunner:
             )
         if emit_event is not None:
             emit_event(event)
+        self._notify_runtime_event_handler(event)
+
+    def _notify_runtime_event_handler(self, event: RunEvent) -> None:
+        if self.runtime_event_handler is None:
+            return
+        try:
+            self.runtime_event_handler(event)
+        except BaseException as exc:
+            warnings.warn(f"Runtime log observer failed: {exc}", RuntimeWarning, stacklevel=2)
 
     def _call_before_memory_providers(
         self,

@@ -76,6 +76,12 @@ framework fallback. A smaller `model_max_output_tokens` may cap only that
 fallback. This keeps model catalog capability separate from a caller-selected
 request limit.
 
+`model_context_window` must be positive to override resolved model capacity.
+Zero or negative metadata falls through to the resolved model and then the
+`200000` framework fallback; it does not describe a zero-sized model. A derived
+prompt capacity may still be zero when a positive context is exhausted by the
+selected reserve and auto-compaction buffer.
+
 For multi-turn and tool-call requests, every assistant message retains its
 complete `reasoning_content`; streamed reasoning deltas are collected through
 the end of the provider stream before that message is stored.

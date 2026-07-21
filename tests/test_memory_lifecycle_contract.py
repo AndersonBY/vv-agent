@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 
+from vv_agent import Agent, RunConfig, Runner
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.events import MemoryCompactCompleted, MemoryCompactStarted
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import (
     CLEARED_MARKER,
@@ -87,9 +89,7 @@ def test_runtime_resolves_memory_capacity_from_contract_cases(
         model_settings=settings,
         metadata=metadata,
     )
-    ctx = ExecutionContext(
-        metadata={"_vv_agent_model_settings": settings} if settings is not None else {}
-    )
+    ctx = ExecutionContext(metadata={"_vv_agent_model_settings": settings} if settings is not None else {})
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
@@ -128,6 +128,42 @@ def test_omitted_memory_compact_threshold_defaults_match_contract() -> None:
     assert task.memory_compact_threshold == expected
     assert restored.memory_compact_threshold == expected
     assert MemoryManager().compact_threshold == expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    _CONTRACT["capacity_contract"]["context_window_resolution"]["cases"],
+    ids=[case["name"] for case in _CONTRACT["capacity_contract"]["context_window_resolution"]["cases"]],
+)
+def test_runtime_context_window_resolution_matches_contract(
+    case: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = case["input"]
+    monkeypatch.setattr(
+        "vv_agent.runtime.engine.resolve_model_token_limits",
+        lambda _model: (inputs["resolved_model_context_window"], 32_000),
+    )
+    task = AgentTask(
+        task_id=case["name"],
+        model="capacity-model",
+        system_prompt="system",
+        user_prompt="run",
+        metadata={
+            "model_context_window": inputs["task_metadata_model_context_window"],
+            "session_memory_enabled": False,
+        },
+    )
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+
+    assert manager.model_context_window == case["expected_model_context_window"]
 
 
 def test_runtime_routes_summary_through_configured_backend_model_pair(tmp_path: Path) -> None:
@@ -208,9 +244,7 @@ def test_runtime_routes_session_extraction_through_its_own_backend_model_pair(
 
     def extract(request: LlmRequest) -> LLMResponse:
         extraction_requests.append(request)
-        return LLMResponse(
-            content='[{"category":"decision","content":"route extraction separately","importance":8}]'
-        )
+        return LLMResponse(content='[{"category":"decision","content":"route extraction separately","importance":8}]')
 
     extraction_llm = ScriptedLLM(steps=[extract])
 
@@ -391,7 +425,7 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
     assert [event.changed for event in provider.completed] == [True, False]
 
 
-def _microcompact_messages() -> list[Message]:
+def _microcompact_messages(recent_tool_chars: int = 800) -> list[Message]:
     return [
         Message(role="system", content="system"),
         Message(role="user", content="start"),
@@ -420,7 +454,7 @@ def _microcompact_messages() -> list[Message]:
                 }
             ],
         ),
-        Message(role="tool", content="y" * 800, tool_call_id="call_recent"),
+        Message(role="tool", content="y" * recent_tool_chars, tool_call_id="call_recent"),
     ]
 
 
@@ -481,6 +515,270 @@ def test_preemptive_compaction_producer_reports_content_aware_outcome(
         assert any(message.content == CLEARED_MARKER for message in next_messages)
 
 
+def test_preemptive_microcompact_runs_before_optional_warning() -> None:
+    contract = _CONTRACT["compaction_events"]["simultaneous_warning_and_microcompact"]
+    emitted: list[Any] = []
+    manager = MemoryManager(
+        compact_threshold=4_000,
+        model="main-model",
+        model_context_window=4_000,
+        reserved_output_tokens=0,
+        reserved_output_source="task_metadata",
+        autocompact_buffer_tokens=0,
+        include_memory_warning=True,
+        language="en-US",
+        microcompact_keep_recent_cycles=1,
+        microcompact_min_result_length=500,
+    )
+    runner = CycleRunner(
+        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+        tool_registry=build_default_registry(),
+    )
+
+    next_messages, _ = runner.run_cycle(
+        task=_ptl_task(),
+        messages=_microcompact_messages(),
+        cycle_index=4,
+        memory_manager=manager,
+        previous_prompt_tokens=3_800,
+        ctx=ExecutionContext(metadata={"_vv_agent_emit_event": emitted.append}),
+    )
+
+    assert contract["order"] == [
+        "microcompact_eligible_old_tool_results",
+        "recalculate_effective_length",
+        "append_memory_warning_only_if_post_microcompact_length_remains_eligible",
+    ]
+    assert any(message.content == CLEARED_MARKER for message in next_messages)
+    assert all("current memory usage has exceeded" not in message.content for message in next_messages)
+    completed = emitted[-1]
+    assert completed.mode == "micro"
+    assert completed.changed is True
+
+
+@pytest.mark.parametrize("initial_usage", [3_800, 4_200])
+def test_public_memory_manager_microcompacts_before_warning_on_both_threshold_paths(
+    initial_usage: int,
+) -> None:
+    manager = MemoryManager(
+        compact_threshold=4_000,
+        model="main-model",
+        model_context_window=4_000,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        include_memory_warning=True,
+        language="en-US",
+        microcompact_keep_recent_cycles=1,
+        microcompact_min_result_length=500,
+    )
+
+    result = manager.compact_with_result(
+        _microcompact_messages(),
+        cycle_index=4,
+        total_tokens=initial_usage,
+    )
+
+    assert result.changed is True
+    assert result.mode == "micro"
+    assert any(message.content == CLEARED_MARKER for message in result.messages)
+    assert all("current memory usage has exceeded" not in message.content for message in result.messages)
+
+
+def test_public_memory_manager_reports_structural_as_stronger_than_microcompact() -> None:
+    messages = _microcompact_messages()
+    messages.insert(2, Message(role="assistant", content=""))
+    manager = MemoryManager(
+        compact_threshold=4_000,
+        model="main-model",
+        model_context_window=4_000,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        microcompact_keep_recent_cycles=1,
+        microcompact_min_result_length=500,
+    )
+
+    result = manager.compact_with_result(
+        messages,
+        cycle_index=4,
+        total_tokens=3_800,
+    )
+
+    assert result.changed is True
+    assert result.mode == "structural"
+    assert any(message.content == CLEARED_MARKER for message in result.messages)
+    assert all(message.role != "assistant" or message.content for message in result.messages)
+
+
+def test_public_memory_manager_keeps_warning_when_post_microcompact_usage_requires_it() -> None:
+    messages = _microcompact_messages(recent_tool_chars=8_000)
+    manager = MemoryManager(
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        include_memory_warning=True,
+        language="en-US",
+        microcompact_keep_recent_cycles=1,
+        microcompact_min_result_length=500,
+    )
+    post_microcompact, cleared = manager.microcompact_messages(messages, cycle_index=4)
+    assert cleared == 1
+    post_tokens = manager._calculate_message_length(post_microcompact)
+    assert post_tokens > 900
+    full_threshold = post_tokens + 100
+    manager.compact_threshold = full_threshold
+    manager.model_context_window = full_threshold
+
+    result = manager.compact_with_result(
+        messages,
+        cycle_index=4,
+        total_tokens=full_threshold,
+    )
+
+    assert result.changed is True
+    assert result.mode == "structural"
+    assert any(message.content == CLEARED_MARKER for message in result.messages)
+    assert any("current memory usage has exceeded" in message.content for message in result.messages)
+
+
+def test_runner_memory_provider_runtime_payload_and_journal_share_identity(
+    tmp_path: Path,
+) -> None:
+    requests: list[LlmRequest] = []
+
+    def summarize(request: LlmRequest) -> LLMResponse:
+        requests.append(request)
+        return LLMResponse(content=_summary_payload())
+
+    def finish(request: LlmRequest) -> LLMResponse:
+        requests.append(request)
+        return LLMResponse(content="done")
+
+    llm = ScriptedLLM(steps=[summarize, finish])
+
+    def model_provider(_agent: Agent, _run_config: RunConfig):
+        return (
+            llm,
+            ResolvedModelConfig(
+                backend="test",
+                requested_model="capacity-model",
+                selected_model="capacity-model",
+                model_id="capacity-model",
+                endpoint_options=[],
+                context_length=64_000,
+                max_output_tokens=8_192,
+            ),
+        )
+
+    provider = RecordingMemoryProvider()
+    runtime_payloads: list[tuple[str, dict[str, Any]]] = []
+    observer_order: list[str] = []
+
+    def typed_observer(event: Any) -> None:
+        if isinstance(event, (MemoryCompactStarted, MemoryCompactCompleted)):
+            observer_order.append(f"typed:{event.type}")
+
+    def broken_runtime_observer(event: str, payload: dict[str, Any]) -> None:
+        runtime_payloads.append((event, dict(payload)))
+        if event.startswith("memory_compact_"):
+            observer_order.append(f"raw:{event}")
+        if event == "memory_compact_started":
+            raise RuntimeError("raw memory observer failed")
+
+    with pytest.warns(RuntimeWarning, match="Runtime log observer failed: raw memory observer failed"):
+        result = Runner.run_sync(
+            Agent(
+                name="capacity-agent",
+                instructions="Finish.",
+                model="capacity-model",
+                metadata={"model_context_window": 0},
+            ),
+            "finish",
+            run_config=RunConfig(
+                workspace=tmp_path,
+                model_provider=model_provider,
+                no_tool_policy="finish",
+                initial_messages=[
+                    Message(role="user", content="token " * 50_000),
+                    Message(role="assistant", content="working"),
+                ],
+                memory_providers=[provider],
+                runtime_log_handler=broken_runtime_observer,
+                stream=typed_observer,
+            ),
+        )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert requests[-1].metadata["model_context_window"] == 64_000
+    assert provider.started[0].model_context_window == 64_000
+    for event_name, provider_events, event_type in (
+        ("memory_compact_started", provider.started, MemoryCompactStarted),
+        ("memory_compact_completed", provider.completed, MemoryCompactCompleted),
+    ):
+        payloads = [payload for name, payload in runtime_payloads if name == event_name]
+        journal_events = [event for event in result.events if isinstance(event, event_type)]
+        assert len(payloads) == len(provider_events) == len(journal_events) == 1
+        provider_event = provider_events[0]
+        assert payloads[0]["event_id"] == provider_event.event_id
+        assert payloads[0]["created_at"] == provider_event.created_at
+        assert journal_events[0].event_id == provider_event.event_id
+        assert journal_events[0].created_at == provider_event.created_at
+    assert observer_order == [
+        "typed:memory_compact_started",
+        "raw:memory_compact_started",
+        "typed:memory_compact_completed",
+        "raw:memory_compact_completed",
+    ]
+
+
+def test_direct_runtime_memory_logs_are_emitted_and_observer_failures_are_isolated(
+    tmp_path: Path,
+) -> None:
+    runtime_logs: list[str] = []
+
+    def runtime_observer(event: str, _payload: dict[str, Any]) -> None:
+        runtime_logs.append(event)
+        if event == "memory_compact_started":
+            raise RuntimeError("direct memory observer failed")
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(
+            steps=[
+                LLMResponse(content=_summary_payload()),
+                LLMResponse(content="done"),
+            ]
+        ),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+        log_handler=runtime_observer,
+    )
+    task = AgentTask(
+        task_id="direct-memory-observer",
+        model="capacity-model",
+        system_prompt="system",
+        user_prompt="finish",
+        initial_messages=[
+            Message(role="user", content="u" * 120),
+            Message(role="assistant", content="a" * 120),
+            Message(role="user", content="c" * 120),
+        ],
+        max_cycles=1,
+        no_tool_policy="finish",
+        memory_compact_threshold=40,
+        metadata={
+            "model_context_window": 60,
+            "reserved_output_tokens": 10,
+            "autocompact_buffer_tokens": 10,
+            "session_memory_enabled": False,
+        },
+    )
+
+    with pytest.warns(RuntimeWarning, match="Runtime log observer failed: direct memory observer failed"):
+        result = runtime.run(task)
+
+    assert result.status == AgentStatus.COMPLETED
+    assert runtime_logs.count("memory_compact_started") == 1
+    assert runtime_logs.count("memory_compact_completed") == 1
+
+
 def test_memory_provider_attempt_errors_are_fail_open() -> None:
     contract = _CONTRACT["provider_attempts"]
     emitted: list[Any] = []
@@ -531,9 +829,7 @@ def test_memory_provider_attempt_errors_are_fail_open() -> None:
 def test_session_memory_refreshes_in_place_and_resets_token_baseline() -> None:
     contract = _CONTRACT["session_memory"]
     session_memory = SessionMemory(SessionMemoryConfig())
-    session_memory.state.entries = [
-        SessionMemoryEntry("decision", contract["stale_fact"], source_cycle=1)
-    ]
+    session_memory.state.entries = [SessionMemoryEntry("decision", contract["stale_fact"], source_cycle=1)]
     manager = MemoryManager(
         compact_threshold=40,
         model="main-model",
@@ -551,9 +847,7 @@ def test_session_memory_refreshes_in_place_and_resets_token_baseline() -> None:
         Message(role="user", content="c" * 120),
     ]
     stale = manager.apply_session_memory_context(messages)
-    session_memory.state.entries = [
-        SessionMemoryEntry("decision", contract["fresh_fact"], source_cycle=2)
-    ]
+    session_memory.state.entries = [SessionMemoryEntry("decision", contract["fresh_fact"], source_cycle=2)]
 
     refreshed = manager.apply_session_memory_context(stale)
 
@@ -562,9 +856,7 @@ def test_session_memory_refreshes_in_place_and_resets_token_baseline() -> None:
     assert refreshed[0].content.count("<Session Memory>") == contract["block_count"]
 
     compacted, changed = manager.compact(refreshed, cycle_index=3, force=True)
-    expected_baseline = manager._calculate_message_length(
-        manager.apply_session_memory_context(compacted)
-    )
+    expected_baseline = manager._calculate_message_length(manager.apply_session_memory_context(compacted))
 
     assert changed is True
     assert session_memory.state.initialized is contract["initialized_after_compaction"]
