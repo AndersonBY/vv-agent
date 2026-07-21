@@ -17,12 +17,14 @@ The normative behavior and change workflow no longer live in this repository.
 `tests/fixtures/parity/` is generated from that release. It is committed for
 offline and reproducible tests, but it is not an editable source of truth.
 
-The current lock selects contract `0.9.0` at revision
-`5d829037ae069606835d2868de79ffdba6ef0304`. The central support matrix records
-contract `0.9.0` as `verified`, backed by cross-repository conformance run
-[`29769410376`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29769410376).
+The current lock selects contract `0.10.0` at revision
+`4d721573c1b1e0a8bc4a277f0366c52c1a63b4b4`. The central support matrix records
+contract `0.10.0` and both implementations as `pending-adoption`; contract
+`0.9.0` remains the verified baseline, backed by cross-repository conformance
+run [`29769410376`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29769410376).
 This document maps the Python producers; the central matrix remains the
-authoritative verification record.
+authoritative verification record and must not move to `verified` until both
+implementations and cross-repository CI satisfy the central workflow.
 
 ## Required Reading
 
@@ -82,6 +84,7 @@ Never repair a contract failure by editing a file under
 | Model stream projection | `src/vv_agent/events.py`, `src/vv_agent/runner.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/app_server/item_mapper.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_configured_sub_agent_parity.py` |
 | Token and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py` |
 | Assistant reasoning history | `src/vv_agent/types.py`, `src/vv_agent/memory/manager.py`, `src/vv_agent/memory/message_sanitizer.py`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_runner.py`, `tests/test_message_sanitizer.py`, `tests/test_sub_task_status.py` |
+| Memory capacity and compaction lifecycle | `src/vv_agent/types.py`, `src/vv_agent/interactive.py`, `src/vv_agent/runtime/compiler.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/cycle_runner.py`, `src/vv_agent/memory/manager.py`, `src/vv_agent/memory/token_utils.py`, `src/vv_agent/events.py`, `tests/test_memory_lifecycle_contract.py`, `tests/test_memory_provider.py`, `tests/test_events_v1.py`, `tests/test_run_events_v1_invalid.py`, `tests/test_compiler.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_interactive_session_api.py` |
 | Run budgets | `src/vv_agent/budget.py`, `src/vv_agent/runtime/engine.py`, `tests/test_run_budget.py` |
 | After-cycle lifecycle hooks | `src/vv_agent/runtime/lifecycle.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/run_definition.py`, `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/backends/celery_tasks.py`, `tests/test_after_cycle_hooks.py`, `tests/test_distributed_checkpoint_v2.py` |
 | Durable checkpoint/resume v2 | `src/vv_agent/checkpoint.py`, `src/vv_agent/runtime/checkpoint_codec_v2.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/run_definition.py`, `tests/test_run_definition_producer.py`, `tests/test_checkpoint_v2.py`, `tests/test_checkpoint_runner_v2.py`, `tests/test_checkpoint_fault_matrix.py` |
@@ -92,6 +95,30 @@ Never repair a contract failure by editing a file under
 A fixture parser or private helper test cannot replace a real public producer
 test. A field that is declared but ignored by a planner, executor, provider, or
 store remains a contract failure.
+
+## Memory Capacity And Compaction Mapping
+
+The omitted `AgentTask`, `MemoryManager`, and interactive compaction threshold
+is `250000`. Explicit values and durable task/checkpoint records retain their
+stored value; decoding or resuming an older record does not rewrite it to the
+new default.
+
+The compiler records resolved context capability as `model_context_window` and
+resolved output capability as `model_max_output_tokens`. The latter is not an
+implicit request limit and is never copied into `reserved_output_tokens`.
+Runtime reserve resolution uses effective `ModelSettings.max_tokens`, then
+explicit task metadata, then the `16000` framework fallback. Only that fallback
+may be capped downward by a smaller model output capability. Context resolution
+uses explicit task metadata, resolved capability, then `200000`; the derived
+prompt capacity subtracts the reserve and `13000` autocompact buffer. A known
+derived capacity of zero remains zero.
+
+`CycleRunner` emits the typed trigger and resolved capacity snapshot on every
+new `memory_compact_started` event. It emits the strongest applied mode and a
+message-content comparison on `memory_compact_completed`. The v1 decoder keeps
+all additive fields absent when reading legacy events, while rejecting known
+fields with invalid types or unknown enum values. This resolution is mechanical
+and does not inspect task category, answer semantics, or semantic progress.
 
 ## Tool Metadata And Telemetry Mapping
 

@@ -1567,14 +1567,54 @@ class AgentRuntime:
             self._read_optional_str(metadata, "session_memory_extraction_model") or summary_model
         )
         session_memory_enabled = self._read_session_memory_enabled(metadata)
-        model_context_window = read_optional_int("model_context_window", minimum=1)
-        reserved_output_tokens = read_optional_int("reserved_output_tokens", minimum=0)
-        if model_context_window is None or reserved_output_tokens is None:
+        model_context_window = self._metadata_token_limit(
+            metadata,
+            "model_context_window",
+            minimum=1,
+        )
+        model_max_output_tokens = self._metadata_token_limit(
+            metadata,
+            "model_max_output_tokens",
+            minimum=0,
+        )
+        if model_context_window is None or model_max_output_tokens is None:
             fallback_context_window, fallback_max_output_tokens = resolve_model_token_limits(task.model)
             if model_context_window is None:
-                model_context_window = fallback_context_window or 200_000
-            if reserved_output_tokens is None:
-                reserved_output_tokens = fallback_max_output_tokens or 16_000
+                model_context_window = fallback_context_window
+            if model_max_output_tokens is None:
+                model_max_output_tokens = fallback_max_output_tokens
+        model_context_window = model_context_window or 200_000
+
+        effective_model_settings = task.model_settings
+        if ctx is not None:
+            runtime_model_settings = ctx.metadata.get("_vv_agent_model_settings")
+            if isinstance(runtime_model_settings, ModelSettings):
+                effective_model_settings = runtime_model_settings
+        request_max_tokens = (
+            effective_model_settings.max_tokens
+            if effective_model_settings is not None
+            else None
+        )
+        task_reserved_output_tokens = self._metadata_token_limit(
+            metadata,
+            "reserved_output_tokens",
+            minimum=0,
+        )
+        if request_max_tokens is not None:
+            reserved_output_tokens = request_max_tokens
+            reserved_output_source = "model_settings"
+        elif task_reserved_output_tokens is not None:
+            reserved_output_tokens = task_reserved_output_tokens
+            reserved_output_source = "task_metadata"
+        else:
+            reserved_output_tokens = 16_000
+            reserved_output_source = "framework_fallback"
+            if (
+                model_max_output_tokens is not None
+                and model_max_output_tokens < reserved_output_tokens
+            ):
+                reserved_output_tokens = model_max_output_tokens
+                reserved_output_source = "framework_fallback_capped_by_model_capability"
         session_memory: SessionMemory | None = None
         if session_memory_enabled:
             session_memory_scope = self._read_optional_str(metadata, "session_id", "task_id") or str(task.task_id or "").strip()
@@ -1598,7 +1638,9 @@ class AgentRuntime:
             keep_recent_messages=read_int("memory_keep_recent_messages", 10, minimum=1),
             model=task.model or "",
             model_context_window=model_context_window,
+            model_max_output_tokens=model_max_output_tokens,
             reserved_output_tokens=reserved_output_tokens,
+            reserved_output_source=reserved_output_source,
             autocompact_buffer_tokens=read_int("autocompact_buffer_tokens", 13_000, minimum=0),
             language=str(metadata.get("language", "zh-CN")),
             warning_threshold_percentage=warning_threshold,
@@ -2561,7 +2603,7 @@ class AgentRuntime:
                 ),
                 max_output_tokens=self._metadata_token_limit(
                     parent_task.metadata,
-                    "reserved_output_tokens",
+                    "model_max_output_tokens",
                     minimum=0,
                 ),
                 native_multimodal=parent_task.native_multimodal,
@@ -2853,7 +2895,7 @@ class AgentRuntime:
         if resolved_context_length is not None:
             metadata.setdefault("model_context_window", resolved_context_length)
         if resolved_max_output_tokens is not None:
-            metadata.setdefault("reserved_output_tokens", resolved_max_output_tokens)
+            metadata.setdefault("model_max_output_tokens", resolved_max_output_tokens)
         if generated_sections:
             metadata.setdefault("system_prompt_sections", generated_sections)
         metadata.update(

@@ -462,7 +462,7 @@ def _build_cli_task(
     if resolved.context_length is not None:
         metadata["model_context_window"] = resolved.context_length
     if resolved.max_output_tokens is not None:
-        metadata["reserved_output_tokens"] = resolved.max_output_tokens
+        metadata["model_max_output_tokens"] = resolved.max_output_tokens
 
     return AgentTask(
         task_id=task_id,

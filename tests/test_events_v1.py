@@ -17,7 +17,9 @@ from vv_agent import (
     HandoffEvent,
     HandoffStartedEvent,
     LLMStartedEvent,
+    MemoryCompactCompleted,
     MemoryCompactedEvent,
+    MemoryCompactStarted,
     ModelToolCallProgressEvent,
     ModelToolCallStartedEvent,
     ReasoningDeltaEvent,
@@ -41,7 +43,7 @@ from vv_agent.events import ToolCallPlannedEvent, event_from_runtime_log
 from vv_agent.tools.metadata import ToolMetadata
 
 PARITY_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1.jsonl"
-PARITY_FIXTURE_SHA256 = "3c45e094fdc8b2555e0d91664778866c4bc1dfe8c516a19d5cbe99209f6e3e41"
+PARITY_FIXTURE_SHA256 = "c0f0f39979ea5e9268716d15dd98609adb83058425cb6e1312942c128c878cd0"
 BUDGET_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "budget_events_v1.jsonl"
 BUDGET_FIXTURE_SHA256 = "3267292737ac6bf63ec4ee691fe0ef07f3e2cadd5a69098e3e267f4f6b692d2e"
 PARITY_EVENT_TYPES = [
@@ -209,6 +211,76 @@ def test_legacy_tool_completion_does_not_fabricate_additive_fields() -> None:
         for field_name in ("directive", "error_code", "execution_started", "duration_ms")
     )
     assert event.to_dict() == legacy_payload
+
+
+def test_legacy_memory_compaction_events_do_not_fabricate_additive_fields() -> None:
+    legacy_started = {
+        "version": "v1",
+        "type": "memory_compact_started",
+        "event_id": "evt_legacy_memory_started",
+        "run_id": "run_legacy_memory",
+        "trace_id": "trace_legacy_memory",
+        "created_at": 99.0,
+        "message_count": 4,
+        "estimated_tokens": 120,
+    }
+    legacy_completed = {
+        "version": "v1",
+        "type": "memory_compact_completed",
+        "event_id": "evt_legacy_memory_completed",
+        "run_id": "run_legacy_memory",
+        "trace_id": "trace_legacy_memory",
+        "created_at": 100.0,
+        "before_count": 4,
+        "after_count": 2,
+        "summary_tokens": 20,
+    }
+
+    started = event_from_dict(legacy_started)
+    completed = event_from_dict(legacy_completed)
+
+    assert isinstance(started, MemoryCompactStarted)
+    assert isinstance(completed, MemoryCompactCompleted)
+    assert started.trigger is None
+    assert started.model_max_output_tokens is None
+    assert completed.mode is None
+    assert completed.changed is None
+    assert all(
+        not started.has_additive_field(field_name)
+        for field_name in (
+            "trigger",
+            "configured_threshold",
+            "effective_threshold",
+            "microcompact_threshold",
+            "model_context_window",
+            "model_max_output_tokens",
+            "reserved_output_tokens",
+            "reserved_output_source",
+            "autocompact_buffer_tokens",
+        )
+    )
+    assert all(not completed.has_additive_field(field_name) for field_name in ("mode", "changed"))
+    assert started.to_dict() == legacy_started
+    assert completed.to_dict() == legacy_completed
+
+
+def test_memory_compact_started_accepts_explicit_null_model_output_capability() -> None:
+    payload = {
+        "version": "v1",
+        "type": "memory_compact_started",
+        "event_id": "evt_nullable_memory_capability",
+        "run_id": "run_nullable_memory_capability",
+        "trace_id": "trace_nullable_memory_capability",
+        "created_at": 101.0,
+        "message_count": 4,
+        "model_max_output_tokens": None,
+    }
+
+    event = event_from_dict(payload)
+
+    assert isinstance(event, MemoryCompactStarted)
+    assert event.has_additive_field("model_max_output_tokens")
+    assert event.to_dict() == payload
 
 
 def test_generic_event_metadata_does_not_fabricate_typed_tool_metadata() -> None:

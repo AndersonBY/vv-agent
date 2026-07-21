@@ -30,6 +30,7 @@ from vv_agent.events import (
     SubRunStartedEvent,
 )
 from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.memory import MemoryManager
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.run_config import RunConfig, ToolPolicy
@@ -71,7 +72,7 @@ from vv_agent.workspace import (
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
 EVENT_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_events_v1.jsonl"
-CONTRACT_SHA256 = "6b69dacc298d056d5d57ee6071c2cd8333d63467c64933d6dfd8266e29094cd0"
+CONTRACT_SHA256 = "31815c91a21868b4252a550a45ccdacdd2687443ae55527551a20bb77934fd43"
 EVENT_CONTRACT_SHA256 = "c2816a3962a44a3c0f5172edbffe4c88352142fee13f457da9a0667ceef996b0"
 
 
@@ -1314,12 +1315,13 @@ class _ExplicitBackendModelProvider:
 
 
 @pytest.mark.parametrize(
-    ("child_metadata", "expected_context", "expected_output"),
+    ("child_metadata", "expected_context", "expected_capability", "expected_reserve"),
     [
-        ({}, 32_000, 4_096),
+        ({}, 32_000, 4_096, None),
         (
             {"model_context_window": 12_345, "reserved_output_tokens": 678},
             12_345,
+            4_096,
             678,
         ),
     ],
@@ -1329,10 +1331,19 @@ def test_explicit_backend_and_resolved_limits_reach_real_child_request(
     tmp_path: Path,
     child_metadata: dict[str, int],
     expected_context: int,
-    expected_output: int,
+    expected_capability: int,
+    expected_reserve: int | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model_contract = _contract()["model_resolution"]
     observed_requests: list[LlmRequest] = []
+    manager_kwargs: list[dict[str, Any]] = []
+
+    def capture_memory_manager(**kwargs: Any) -> MemoryManager:
+        manager_kwargs.append(kwargs)
+        return MemoryManager(**kwargs)
+
+    monkeypatch.setattr("vv_agent.runtime.engine.MemoryManager", capture_memory_manager)
 
     def capture_child(request: LlmRequest) -> LLMResponse:
         observed_requests.append(request)
@@ -1375,6 +1386,7 @@ def test_explicit_backend_and_resolved_limits_reach_real_child_request(
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-model-contract",
             "_vv_agent_emit_event": events.append,
+            "_vv_agent_model_settings": ModelSettings(max_tokens=512),
         }
     )
 
@@ -1388,11 +1400,16 @@ def test_explicit_backend_and_resolved_limits_reach_real_child_request(
     assert observed_requests
     request_metadata = observed_requests[0].metadata
     assert request_metadata["model_context_window"] == expected_context
-    assert request_metadata["reserved_output_tokens"] == expected_output
-    assert (
-        request_metadata["model_context_window"],
-        request_metadata["reserved_output_tokens"],
-    ) == (expected_context, expected_output)
+    assert request_metadata["model_max_output_tokens"] == expected_capability
+    if expected_reserve is None:
+        assert "reserved_output_tokens" not in request_metadata
+    else:
+        assert request_metadata["reserved_output_tokens"] == expected_reserve
+    child_manager = manager_kwargs[-1]
+    assert child_manager["model_context_window"] == expected_context
+    assert child_manager["model_max_output_tokens"] == expected_capability
+    assert child_manager["reserved_output_tokens"] == 512
+    assert child_manager["reserved_output_source"] == "model_settings"
     assert model_contract["resolved_token_limits"]["explicit_child_metadata_wins"] is True
     started = next(event for event in _sub_events(events) if isinstance(event, SubRunStartedEvent))
     record = manager.get(started.task_id or "")
@@ -1448,7 +1465,8 @@ def test_same_model_parent_client_reuse_inherits_parent_task_token_limits(tmp_pa
     assert model_contract["same_model_reuses_parent_client_only_without_explicit_backend"] is True
     assert model_contract["same_model_parent_client_inherits_token_limits"] is True
     assert child_requests[0].metadata["model_context_window"] == expected_metadata["model_context_window"]
-    assert child_requests[0].metadata["reserved_output_tokens"] == expected_metadata["reserved_output_tokens"]
+    assert child_requests[0].metadata["model_max_output_tokens"] == expected_metadata["model_max_output_tokens"]
+    assert "reserved_output_tokens" not in child_requests[0].metadata
 
 
 def _async_tool_context(tmp_path: Path, manager: SubTaskManager) -> ToolContext:

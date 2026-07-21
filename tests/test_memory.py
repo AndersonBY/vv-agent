@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
+from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig, SessionMemoryEntry
 from vv_agent.memory.microcompact import CLEARED_MARKER
 from vv_agent.types import Message
 
@@ -279,8 +279,8 @@ def test_memory_thresholds_respect_configured_ceiling() -> None:
     )
 
     assert manager.effective_context_window == 184_000
-    assert manager.autocompact_threshold == 128_000
-    assert manager.warning_threshold == 115_200
+    assert manager.autocompact_threshold == 171_000
+    assert manager.warning_threshold == 153_900
 
 
 def test_memory_thresholds_fall_back_to_model_limit_when_smaller() -> None:
@@ -366,6 +366,33 @@ def test_memory_compaction_preserves_session_memory_and_excludes_it_from_summary
     assert "preserve prior decisions" in request_messages[0].content
 
 
+def test_session_memory_projection_does_not_change_legacy_compaction_flag() -> None:
+    session_memory = SessionMemory(SessionMemoryConfig(token_model="gpt-5.4"))
+    session_memory.state.entries = [
+        SessionMemoryEntry(
+            "decision",
+            "keep the Python API small",
+            source_cycle=2,
+            importance=9,
+        )
+    ]
+    manager = _build_manager(
+        compact_threshold=10_000,
+        model_context_window=20_000,
+        reserved_output_tokens=100,
+        autocompact_buffer_tokens=0,
+        session_memory=session_memory,
+    )
+    messages = [Message(role="system", content="sys"), Message(role="user", content="small")]
+
+    updated, changed = manager.compact(messages)
+
+    assert changed is False
+    assert updated != messages
+    assert "<Session Memory>" in updated[0].content
+    assert "keep the Python API small" in updated[0].content
+
+
 def test_memory_compaction_strips_analysis_and_restores_key_files(tmp_path: Path) -> None:
     file_path = tmp_path / "demo.py"
     file_path.write_text("print('restored')\n", encoding="utf-8")
@@ -373,7 +400,7 @@ def test_memory_compaction_strips_analysis_and_restores_key_files(tmp_path: Path
     def summary_with_analysis(_prompt: str, _backend: str | None, _model: str | None) -> str:
         return (
             "<analysis>drafting scratchpad</analysis>\n"
-            '{'
+            "{"
             '"summary_version":"2.0",'
             '"original_user_messages":["please update demo.py"],'
             '"user_constraints":["keep behavior"],'
@@ -385,7 +412,7 @@ def test_memory_compaction_strips_analysis_and_restores_key_files(tmp_path: Path
             '"open_issues":[],'
             '"current_work_state":"waiting for verification",'
             '"next_steps":["run tests"]'
-            '}'
+            "}"
         )
 
     manager = _build_manager(
@@ -570,11 +597,7 @@ def test_memory_normalize_orphan_tool_messages_respects_message_order_with_reuse
     assert changed is True
 
     assistant_tool_call_indices = [idx for idx, msg in enumerate(compacted) if msg.role == "assistant" and msg.tool_calls]
-    tool_indices = [
-        idx
-        for idx, msg in enumerate(compacted)
-        if msg.role == "tool" and msg.tool_call_id == "screen_capture:4"
-    ]
+    tool_indices = [idx for idx, msg in enumerate(compacted) if msg.role == "tool" and msg.tool_call_id == "screen_capture:4"]
     assert len(assistant_tool_call_indices) == 1
     assert len(tool_indices) == 1
     assert tool_indices[0] > assistant_tool_call_indices[0]

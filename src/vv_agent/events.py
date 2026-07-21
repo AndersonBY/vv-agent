@@ -27,7 +27,37 @@ if TYPE_CHECKING:
 
 RUN_EVENT_VERSION = "v1"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
+MemoryCompactTrigger = Literal["micro_threshold", "full_threshold", "prompt_too_long"]
+MemoryCompactMode = Literal["none", "micro", "structural", "summary", "emergency"]
+ReservedOutputSource = Literal[
+    "model_settings",
+    "task_metadata",
+    "framework_fallback",
+    "framework_fallback_capped_by_model_capability",
+]
 _APPROVAL_ACTIONS = frozenset({"allow", "allow_session", "deny", "timeout"})
+_MEMORY_COMPACT_TRIGGER_VALUES = frozenset({"micro_threshold", "full_threshold", "prompt_too_long"})
+_MEMORY_COMPACT_MODE_VALUES = frozenset({"none", "micro", "structural", "summary", "emergency"})
+_RESERVED_OUTPUT_SOURCE_VALUES = frozenset(
+    {
+        "model_settings",
+        "task_metadata",
+        "framework_fallback",
+        "framework_fallback_capped_by_model_capability",
+    }
+)
+_MEMORY_COMPACT_STARTED_ADDITIVE_FIELDS = (
+    "trigger",
+    "configured_threshold",
+    "effective_threshold",
+    "microcompact_threshold",
+    "model_context_window",
+    "model_max_output_tokens",
+    "reserved_output_tokens",
+    "reserved_output_source",
+    "autocompact_buffer_tokens",
+)
+_MEMORY_COMPACT_COMPLETED_ADDITIVE_FIELDS = ("mode", "changed")
 _JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
 _TOOL_STATUS_VALUES = frozenset({"success", "error", "wait_response", "running", "pending_compress"})
 _TOOL_DIRECTIVE_VALUES = frozenset({"continue", "finish", "wait_user"})
@@ -41,6 +71,13 @@ class _MissingToolLifecycleField:
 
 
 _MISSING_TOOL_LIFECYCLE_FIELD = _MissingToolLifecycleField()
+
+
+class _MissingMemoryCompactionField:
+    __slots__ = ()
+
+
+_MISSING_MEMORY_COMPACTION_FIELD = _MissingMemoryCompactionField()
 
 
 class _StreamEventCommon(TypedDict):
@@ -64,6 +101,37 @@ def _optional_stream_counter(value: Any, field_name: str) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _JSON_SAFE_INTEGER_MAX:
         raise ValueError(f"Run event {field_name} must be a non-negative JSON-safe integer or null")
+    return value
+
+
+def _memory_compact_counter(value: Any, field_name: str) -> int:
+    counter = _optional_stream_counter(value, field_name)
+    if counter is None:
+        raise ValueError(f"Run event {field_name} must be a non-negative JSON-safe integer")
+    return counter
+
+
+def _memory_compact_trigger(value: Any) -> MemoryCompactTrigger:
+    if not isinstance(value, str) or value not in _MEMORY_COMPACT_TRIGGER_VALUES:
+        raise ValueError(f"Unsupported memory compact trigger: {value!r}")
+    return cast(MemoryCompactTrigger, value)
+
+
+def _memory_compact_mode(value: Any) -> MemoryCompactMode:
+    if not isinstance(value, str) or value not in _MEMORY_COMPACT_MODE_VALUES:
+        raise ValueError(f"Unsupported memory compact mode: {value!r}")
+    return cast(MemoryCompactMode, value)
+
+
+def _reserved_output_source(value: Any) -> ReservedOutputSource:
+    if not isinstance(value, str) or value not in _RESERVED_OUTPUT_SOURCE_VALUES:
+        raise ValueError(f"Unsupported memory compact reserved_output_source: {value!r}")
+    return cast(ReservedOutputSource, value)
+
+
+def _memory_compact_changed(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("Run event changed must be a boolean")
     return value
 
 
@@ -481,6 +549,16 @@ class MemoryCompactedEvent(RunEvent):
 class MemoryCompactStarted(RunEvent):
     message_count: int = 0
     estimated_tokens: int | None = None
+    trigger: MemoryCompactTrigger | None = None
+    configured_threshold: int | None = None
+    effective_threshold: int | None = None
+    microcompact_threshold: int | None = None
+    model_context_window: int | None = None
+    model_max_output_tokens: int | None = None
+    reserved_output_tokens: int | None = None
+    reserved_output_source: ReservedOutputSource | None = None
+    autocompact_buffer_tokens: int | None = None
+    _present_additive_fields: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __init__(
         self,
@@ -491,6 +569,15 @@ class MemoryCompactStarted(RunEvent):
         agent_name: str | None = None,
         message_count: int = 0,
         estimated_tokens: int | None = None,
+        trigger: MemoryCompactTrigger | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        configured_threshold: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        effective_threshold: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        microcompact_threshold: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        model_context_window: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        model_max_output_tokens: int | None | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        reserved_output_tokens: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        reserved_output_source: ReservedOutputSource | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        autocompact_buffer_tokens: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
@@ -514,12 +601,66 @@ class MemoryCompactStarted(RunEvent):
         )
         object.__setattr__(self, "message_count", message_count)
         object.__setattr__(self, "estimated_tokens", estimated_tokens)
+        values: dict[str, Any] = {
+            "trigger": trigger,
+            "configured_threshold": configured_threshold,
+            "effective_threshold": effective_threshold,
+            "microcompact_threshold": microcompact_threshold,
+            "model_context_window": model_context_window,
+            "model_max_output_tokens": model_max_output_tokens,
+            "reserved_output_tokens": reserved_output_tokens,
+            "reserved_output_source": reserved_output_source,
+            "autocompact_buffer_tokens": autocompact_buffer_tokens,
+        }
+        present_fields = {
+            field_name
+            for field_name, value in values.items()
+            if not isinstance(value, _MissingMemoryCompactionField)
+        }
+        trigger_value = None if isinstance(trigger, _MissingMemoryCompactionField) else _memory_compact_trigger(trigger)
+        source_value = (
+            None
+            if isinstance(reserved_output_source, _MissingMemoryCompactionField)
+            else _reserved_output_source(reserved_output_source)
+        )
+        object.__setattr__(self, "trigger", trigger_value)
+        for field_name in (
+            "configured_threshold",
+            "effective_threshold",
+            "microcompact_threshold",
+            "model_context_window",
+            "model_max_output_tokens",
+            "reserved_output_tokens",
+            "autocompact_buffer_tokens",
+        ):
+            value = values[field_name]
+            object.__setattr__(
+                self,
+                field_name,
+                None
+                if isinstance(value, _MissingMemoryCompactionField)
+                else (
+                    _optional_stream_counter(value, field_name)
+                    if field_name == "model_max_output_tokens"
+                    else _memory_compact_counter(value, field_name)
+                ),
+            )
+        object.__setattr__(self, "reserved_output_source", source_value)
+        object.__setattr__(self, "_present_additive_fields", frozenset(present_fields))
+
+    def has_additive_field(self, field_name: str) -> bool:
+        if field_name not in _MEMORY_COMPACT_STARTED_ADDITIVE_FIELDS:
+            raise ValueError(f"Unknown memory compact started field: {field_name}")
+        return field_name in self._present_additive_fields
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["message_count"] = self.message_count
         if self.estimated_tokens is not None:
             payload["estimated_tokens"] = self.estimated_tokens
+        for field_name in _MEMORY_COMPACT_STARTED_ADDITIVE_FIELDS:
+            if self.has_additive_field(field_name):
+                payload[field_name] = getattr(self, field_name)
         return payload
 
 
@@ -528,6 +669,9 @@ class MemoryCompactCompleted(RunEvent):
     before_count: int = 0
     after_count: int = 0
     summary_tokens: int | None = None
+    mode: MemoryCompactMode | None = None
+    changed: bool | None = None
+    _present_additive_fields: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __init__(
         self,
@@ -539,6 +683,8 @@ class MemoryCompactCompleted(RunEvent):
         before_count: int = 0,
         after_count: int = 0,
         summary_tokens: int | None = None,
+        mode: MemoryCompactMode | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        changed: bool | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
@@ -563,6 +709,25 @@ class MemoryCompactCompleted(RunEvent):
         object.__setattr__(self, "before_count", before_count)
         object.__setattr__(self, "after_count", after_count)
         object.__setattr__(self, "summary_tokens", summary_tokens)
+        present_fields: set[str] = set()
+        if isinstance(mode, _MissingMemoryCompactionField):
+            mode_value = None
+        else:
+            present_fields.add("mode")
+            mode_value = _memory_compact_mode(mode)
+        if isinstance(changed, _MissingMemoryCompactionField):
+            changed_value = None
+        else:
+            present_fields.add("changed")
+            changed_value = _memory_compact_changed(changed)
+        object.__setattr__(self, "mode", mode_value)
+        object.__setattr__(self, "changed", changed_value)
+        object.__setattr__(self, "_present_additive_fields", frozenset(present_fields))
+
+    def has_additive_field(self, field_name: str) -> bool:
+        if field_name not in _MEMORY_COMPACT_COMPLETED_ADDITIVE_FIELDS:
+            raise ValueError(f"Unknown memory compact completed field: {field_name}")
+        return field_name in self._present_additive_fields
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -570,6 +735,9 @@ class MemoryCompactCompleted(RunEvent):
         payload["after_count"] = self.after_count
         if self.summary_tokens is not None:
             payload["summary_tokens"] = self.summary_tokens
+        for field_name in _MEMORY_COMPACT_COMPLETED_ADDITIVE_FIELDS:
+            if self.has_additive_field(field_name):
+                payload[field_name] = getattr(self, field_name)
         return payload
 
 
@@ -2324,6 +2492,30 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             _tool_duration_ms(payload["duration_ms"])
         if payload.get("execution_started") is False and payload.get("duration_ms") is not None:
             raise ValueError("Run event duration_ms must be null when execution_started is false")
+    if payload["type"] == "memory_compact_started":
+        if "trigger" in payload:
+            _memory_compact_trigger(payload["trigger"])
+        for field_name in (
+            "configured_threshold",
+            "effective_threshold",
+            "microcompact_threshold",
+            "model_context_window",
+            "model_max_output_tokens",
+            "reserved_output_tokens",
+            "autocompact_buffer_tokens",
+        ):
+            if field_name in payload:
+                if field_name == "model_max_output_tokens":
+                    _optional_stream_counter(payload[field_name], field_name)
+                else:
+                    _memory_compact_counter(payload[field_name], field_name)
+        if "reserved_output_source" in payload:
+            _reserved_output_source(payload["reserved_output_source"])
+    if payload["type"] == "memory_compact_completed":
+        if "mode" in payload:
+            _memory_compact_mode(payload["mode"])
+        if "changed" in payload:
+            _memory_compact_changed(payload["changed"])
     if payload["type"] in {"assistant_delta", "reasoning_delta"}:
         _stream_delta(payload.get("delta"))
     typed_stream_events = {
@@ -2442,6 +2634,18 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         return MemoryCompactStarted(
             message_count=message_count if isinstance(message_count, int) else 0,
             estimated_tokens=estimated_tokens if isinstance(estimated_tokens, int) else None,
+            trigger=payload.get("trigger", _MISSING_MEMORY_COMPACTION_FIELD),
+            configured_threshold=payload.get("configured_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
+            effective_threshold=payload.get("effective_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
+            microcompact_threshold=payload.get("microcompact_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
+            model_context_window=payload.get("model_context_window", _MISSING_MEMORY_COMPACTION_FIELD),
+            model_max_output_tokens=payload.get("model_max_output_tokens", _MISSING_MEMORY_COMPACTION_FIELD),
+            reserved_output_tokens=payload.get("reserved_output_tokens", _MISSING_MEMORY_COMPACTION_FIELD),
+            reserved_output_source=payload.get("reserved_output_source", _MISSING_MEMORY_COMPACTION_FIELD),
+            autocompact_buffer_tokens=payload.get(
+                "autocompact_buffer_tokens",
+                _MISSING_MEMORY_COMPACTION_FIELD,
+            ),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "memory_compact_completed":
@@ -2452,6 +2656,8 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             before_count=before_count if isinstance(before_count, int) else 0,
             after_count=after_count if isinstance(after_count, int) else 0,
             summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
+            mode=payload.get("mode", _MISSING_MEMORY_COMPACTION_FIELD),
+            changed=payload.get("changed", _MISSING_MEMORY_COMPACTION_FIELD),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "assistant_delta":
@@ -2868,6 +3074,18 @@ def event_from_runtime_log(
             cycle_index=cycle_index,
             message_count=message_count if isinstance(message_count, int) else 0,
             estimated_tokens=estimated_tokens if isinstance(estimated_tokens, int) else None,
+            trigger=payload.get("trigger", _MISSING_MEMORY_COMPACTION_FIELD),
+            configured_threshold=payload.get("configured_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
+            effective_threshold=payload.get("effective_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
+            microcompact_threshold=payload.get("microcompact_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
+            model_context_window=payload.get("model_context_window", _MISSING_MEMORY_COMPACTION_FIELD),
+            model_max_output_tokens=payload.get("model_max_output_tokens", _MISSING_MEMORY_COMPACTION_FIELD),
+            reserved_output_tokens=payload.get("reserved_output_tokens", _MISSING_MEMORY_COMPACTION_FIELD),
+            reserved_output_source=payload.get("reserved_output_source", _MISSING_MEMORY_COMPACTION_FIELD),
+            autocompact_buffer_tokens=payload.get(
+                "autocompact_buffer_tokens",
+                _MISSING_MEMORY_COMPACTION_FIELD,
+            ),
             metadata=dict(payload),
         )
     if event == "memory_compact_completed":
@@ -2883,6 +3101,8 @@ def event_from_runtime_log(
             before_count=before_count if isinstance(before_count, int) else 0,
             after_count=after_count if isinstance(after_count, int) else 0,
             summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
+            mode=payload.get("mode", _MISSING_MEMORY_COMPACTION_FIELD),
+            changed=payload.get("changed", _MISSING_MEMORY_COMPACTION_FIELD),
             metadata=dict(payload),
         )
     if event == "tool_call_planned":

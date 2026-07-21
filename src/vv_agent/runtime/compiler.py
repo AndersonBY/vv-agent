@@ -74,7 +74,7 @@ class AgentCompiler:
         if resolved.context_length is not None:
             metadata.setdefault("model_context_window", resolved.context_length)
         if resolved.max_output_tokens is not None:
-            metadata.setdefault("reserved_output_tokens", resolved.max_output_tokens)
+            metadata.setdefault("model_max_output_tokens", resolved.max_output_tokens)
         no_tool_policy = run_config.no_tool_policy or agent.no_tool_policy or "continue"
         metadata["_vv_agent_tool_use_behavior"] = agent.tool_use_behavior
         if agent.stop_at_tool_names:
@@ -196,7 +196,7 @@ class AgentCompiler:
         if resolved.context_length is not None:
             metadata.setdefault("model_context_window", resolved.context_length)
         if resolved.max_output_tokens is not None:
-            metadata.setdefault("reserved_output_tokens", resolved.max_output_tokens)
+            metadata.setdefault("model_max_output_tokens", resolved.max_output_tokens)
         metadata["_vv_agent_tool_use_behavior"] = controls["tool_use_behavior"]
         if controls["stop_at_tool_names"]:
             metadata["_vv_agent_stop_at_tool_names"] = list(controls["stop_at_tool_names"])

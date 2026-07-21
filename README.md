@@ -607,19 +607,35 @@ workspace model, storage backend, and UI workflow outside the framework.
 
 ## Memory Compaction
 
-`MemoryManager` now measures context size in tokens and compacts history when a model-derived auto-compaction threshold is exceeded.
+`MemoryManager` measures context size in tokens and compacts history when the
+resolved auto-compaction threshold is exceeded.
 
 - Task-level knobs:
-  - `memory_compact_threshold` (default `128000`, legacy fallback only when token counting is unavailable)
+  - `memory_compact_threshold` (default `250000`; configured ceiling for full compaction)
   - `memory_threshold_percentage` (warning threshold percentage, default `90`)
 - Compile mapping:
   - `AgentCompiler` forwards stable agent/run metadata into `RuntimeTask`.
+  - Resolved model limits are recorded as `model_context_window` and
+    `model_max_output_tokens`; output capability is not copied into
+    `reserved_output_tokens`.
+  - Existing durable task/checkpoint records keep their stored threshold and
+    metadata when decoded or resumed.
   - Runtime-only compaction knobs remain metadata-backed until promoted into
     stable public fields.
 - Token budget model:
-  - `effective_context_window = model_context_window - reserved_output_tokens`
-  - `autocompact_threshold = effective_context_window - autocompact_buffer_tokens`
-  - Defaults come from `vv-llm` model metadata when available, otherwise fall back to `200000 / 16000 / 13000`
+  - Context precedence is explicit `model_context_window`, resolved model
+    capability, then the `200000` fallback.
+  - Output reserve precedence is effective `ModelSettings.max_tokens`, explicit
+    `reserved_output_tokens`, then the `16000` framework fallback.
+  - Only the framework fallback reserve may be capped downward by a smaller
+    `model_max_output_tokens`; capability never overrides an explicit request or
+    host reserve.
+  - `derived_prompt_capacity = max(model_context_window - reserved_output_tokens - autocompact_buffer_tokens, 0)`
+  - `autocompact_threshold = min(memory_compact_threshold, derived_prompt_capacity)`;
+    a configured threshold of zero selects the derived capacity, and a known
+    derived capacity of zero stays zero.
+  - The default autocompact buffer is `13000`; the default microcompact trigger
+    is 75% of the effective full threshold.
 - Effective-length strategy (backend-aligned):
   - If previous cycle token usage exists:
     - `effective_length = previous_prompt_tokens + token_count(recent_tool_messages)`
@@ -633,6 +649,14 @@ workspace model, storage backend, and UI workflow outside the framework.
   4. If still over threshold, generate a compressed memory summary that preserves original user messages, file operations, current work state, and resolved errors
   5. If the provider still returns prompt-too-long, retry with forced compaction once, then progressively stronger emergency tail-dropping
   6. After full compaction, re-inject relevant workspace files into `<Post-Compaction File Context>` under a bounded token budget
+- Compaction events:
+  - New `memory_compact_started` producers include the typed trigger and the
+    complete resolved capacity snapshot.
+  - New `memory_compact_completed` producers include the strongest actual mode
+    (`none`, `micro`, `structural`, `summary`, or `emergency`) and a
+    content-aware `changed` flag.
+  - Legacy events may omit these additive fields; present fields use strict
+    types and closed enum values.
 - Session Memory behavior:
   - Stored in `workspace/.memory/session/<session-or-task-scope>/session_memory.json` by default
   - Scoped to the current session when `metadata.session_id` is present; otherwise scoped to the current `task_id`
@@ -649,6 +673,7 @@ them into `RuntimeTask.metadata`:
 
 - `memory_keep_recent_messages`
 - `model_context_window`
+- `model_max_output_tokens` (resolved model capability; not an implicit request limit)
 - `reserved_output_tokens`
 - `autocompact_buffer_tokens`
 - `microcompact_trigger_ratio`

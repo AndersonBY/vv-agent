@@ -116,7 +116,7 @@ def test_agent_task_from_dict_uses_public_dict_defaults_for_sparse_payload() -> 
     assert task.to_dict() == {
         **_agent_task_values(),
         "max_cycles": 8,
-        "memory_compact_threshold": 128_000,
+        "memory_compact_threshold": 250_000,
         "memory_threshold_percentage": 90,
         "no_tool_policy": "continue",
         "allow_interruption": True,

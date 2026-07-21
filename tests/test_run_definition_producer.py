@@ -67,6 +67,7 @@ def test_minimal_run_definition_matches_canonical_golden_vector() -> None:
     fixture = _strict_json_loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     golden = next(case for case in fixture["golden_cases"] if case["name"] == "minimal")
     agent, config, resolved, task = _minimal_inputs()
+    task.memory_compact_threshold = golden["definition"]["runtime_controls"]["memory_compact_threshold"]
 
     definition, digest = build_run_definition(
         agent=agent,

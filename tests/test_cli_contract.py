@@ -15,7 +15,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.types import AgentResult, AgentStatus
 
 CONTRACT_PATH = Path(__file__).with_name("test_cli_contract_v1.json")
-CONTRACT_SHA256 = "029e2357351d7029932907bd84448dda92b0dc220eac5f215acd7eb69dee6d09"
+CONTRACT_SHA256 = "7fa3ce692deea100e77d52e4167fdd123bb18f9ff0adadeefd10609b519d2561"
 
 
 def _contract() -> dict[str, Any]:
@@ -114,6 +114,7 @@ def test_multiword_prompt_model_settings_and_resolved_limits_project_to_task() -
     assert task.native_multimodal is resolved_projection["native_multimodal"]
     for key, value in resolved_projection["metadata"].items():
         assert task.metadata[key] == value
+    assert "reserved_output_tokens" not in task.metadata
 
 
 @pytest.mark.parametrize(

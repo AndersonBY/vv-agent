@@ -63,6 +63,19 @@ These invariants are applied after public `ModelSettings` are merged so
 provider-specific `extra_body` values cannot override them. Unrelated
 `extra_body` fields continue to pass through.
 
+## Capacity Metadata
+
+Resolved `context_length` and `max_output_tokens` are model capabilities. The
+compiler projects them to task metadata as `model_context_window` and
+`model_max_output_tokens`. In particular, `model_max_output_tokens` is not a
+request default and is not copied to `reserved_output_tokens`.
+
+Memory capacity reserves effective per-request `ModelSettings.max_tokens`
+first, then explicit task metadata `reserved_output_tokens`, then `16000` as a
+framework fallback. A smaller `model_max_output_tokens` may cap only that
+fallback. This keeps model catalog capability separate from a caller-selected
+request limit.
+
 For multi-turn and tool-call requests, every assistant message retains its
 complete `reasoning_content`; streamed reasoning deltas are collected through
 the end of the provider stream before that message is stored.
