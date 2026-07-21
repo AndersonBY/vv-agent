@@ -146,7 +146,7 @@ class InteractiveAgentDefinition:
     backend: str | None = None
     language: str = "zh-CN"
     max_cycles: int = 10
-    memory_compact_threshold: int = 128_000
+    memory_compact_threshold: int = 250_000
     memory_threshold_percentage: int = 90
     no_tool_policy: NoToolPolicy = "continue"
     allow_interruption: bool = True
@@ -907,6 +907,8 @@ class InteractiveAgentClient:
         *,
         prompt: str,
         resolved_model_id: str,
+        resolved_context_length: int | None = None,
+        resolved_max_output_tokens: int | None = None,
         agent: InteractiveAgentDefinition,
         task_name: str | None = None,
         workspace: str | Path | None = None,
@@ -928,6 +930,10 @@ class InteractiveAgentClient:
             metadata.setdefault("bash_env", dict(definition.bash_env))
         if definition.sub_agents:
             metadata.setdefault("sub_agent_names", sorted(definition.sub_agents.keys()))
+        if resolved_context_length is not None:
+            metadata.setdefault("model_context_window", resolved_context_length)
+        if resolved_max_output_tokens is not None:
+            metadata.setdefault("model_max_output_tokens", resolved_max_output_tokens)
 
         available_skills: list[dict[str, Any] | str] | None = None
         if isinstance(metadata.get("available_skills"), list):
@@ -971,9 +977,9 @@ class InteractiveAgentClient:
             system_prompt=system_prompt,
             user_prompt=prompt,
             max_cycles=max(definition.max_cycles, 1),
-            memory_compact_threshold=self._to_positive_int(
+            memory_compact_threshold=self._to_non_negative_int(
                 definition.memory_compact_threshold,
-                default=128_000,
+                default=250_000,
             ),
             memory_threshold_percentage=self._to_percentage_int(
                 definition.memory_threshold_percentage,
@@ -1046,6 +1052,8 @@ class InteractiveAgentClient:
         task = self.prepare_task(
             prompt=prompt,
             resolved_model_id=resolved.model_id,
+            resolved_context_length=resolved.context_length,
+            resolved_max_output_tokens=resolved.max_output_tokens,
             agent=definition,
             task_name=run_name,
             workspace=effective_workspace,
@@ -1264,6 +1272,14 @@ class InteractiveAgentClient:
         except (TypeError, ValueError):
             parsed = default
         return max(parsed, 1)
+
+    @staticmethod
+    def _to_non_negative_int(value: Any, *, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(parsed, 0)
 
     @staticmethod
     def _to_percentage_int(value: Any, *, default: int) -> int:

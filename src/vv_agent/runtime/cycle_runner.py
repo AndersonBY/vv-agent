@@ -6,9 +6,10 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from vv_agent.events import RunEvent
+from vv_agent.events import MemoryCompactTrigger, RunEvent
 from vv_agent.llm.base import LLMClient, LlmRequest, complete_llm_request
 from vv_agent.memory import CompactionExhaustedError, MemoryManager
+from vv_agent.memory.manager import CompactionMode
 from vv_agent.memory.provider import MemoryCompactCompleted, MemoryCompactStarted, MemoryProvider, MemoryProviderResult
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.model_settings import ModelSettings
@@ -67,7 +68,9 @@ class CycleRunner:
             shared_state=shared,
         )
         pre_compact_messages = memory_manager.apply_session_memory_context(pre_compact_messages)
+        lifecycle_before_messages = pre_compact_messages
         preemptively_microcompacted = False
+        preemptive_mode: CompactionMode = "none"
         compact_total_tokens = previous_prompt_tokens
         estimated_compact_tokens = self._estimate_compact_tokens(
             pre_compact_messages,
@@ -80,15 +83,18 @@ class CycleRunner:
             recent_tool_call_ids=recent_tool_call_ids,
         )
         compact_lifecycle_started = False
-        if should_preemptive_microcompact or self._should_full_compact(
+        should_full_compact = self._should_full_compact(
             estimated_compact_tokens,
             memory_manager=memory_manager,
-        ):
+        )
+        if should_preemptive_microcompact or should_full_compact:
             self._emit_memory_compact_started(
                 ctx=ctx,
                 cycle_index=cycle_index,
                 messages=pre_compact_messages,
                 estimated_tokens=estimated_compact_tokens,
+                trigger="full_threshold" if should_full_compact else "micro_threshold",
+                memory_manager=memory_manager,
             )
             compact_lifecycle_started = True
         if should_preemptive_microcompact:
@@ -98,21 +104,29 @@ class CycleRunner:
             )
             if cleared > 0:
                 preemptively_microcompacted = True
+                preemptive_mode = "micro"
                 compact_total_tokens = None
-        compacted_messages, memory_compacted = memory_manager.compact(
+        compaction_result = memory_manager.compact_with_result(
             pre_compact_messages,
             cycle_index=cycle_index,
             total_tokens=compact_total_tokens,
             recent_tool_call_ids=recent_tool_call_ids,
         )
-        memory_compacted = memory_compacted or preemptively_microcompacted
+        compacted_messages = compaction_result.messages
+        memory_compacted = compaction_result.changed or preemptively_microcompacted
         if compact_lifecycle_started:
+            changed = lifecycle_before_messages != compacted_messages
+            mode = self._strongest_compaction_mode(preemptive_mode, compaction_result.mode)
+            if not changed:
+                mode = "none"
             self._emit_memory_compact_completed(
                 ctx=ctx,
                 cycle_index=cycle_index,
-                before_messages=pre_compact_messages,
+                before_messages=lifecycle_before_messages,
                 after_messages=compacted_messages,
                 memory_manager=memory_manager,
+                mode=mode,
+                changed=changed,
             )
         ptl_retries = 0
         request_messages = compacted_messages
@@ -183,20 +197,25 @@ class CycleRunner:
                             memory_manager=memory_manager,
                             total_tokens=None,
                         ),
+                        trigger="prompt_too_long",
+                        memory_manager=memory_manager,
                     )
-                    compacted_messages, _ = memory_manager.compact(
+                    forced_result = memory_manager.compact_with_result(
                         compacted_messages,
                         cycle_index=cycle_index,
                         total_tokens=None,
                         recent_tool_call_ids=recent_tool_call_ids,
                         force=True,
                     )
+                    compacted_messages = forced_result.messages
                     self._emit_memory_compact_completed(
                         ctx=ctx,
                         cycle_index=cycle_index,
                         before_messages=before_retry_compact,
                         after_messages=compacted_messages,
                         memory_manager=memory_manager,
+                        mode=forced_result.mode,
+                        changed=before_retry_compact != compacted_messages,
                     )
                 else:
                     before_retry_compact = compacted_messages
@@ -209,6 +228,8 @@ class CycleRunner:
                             memory_manager=memory_manager,
                             total_tokens=None,
                         ),
+                        trigger="prompt_too_long",
+                        memory_manager=memory_manager,
                     )
                     compacted_messages = memory_manager.emergency_compact(
                         compacted_messages,
@@ -221,6 +242,8 @@ class CycleRunner:
                         before_messages=before_retry_compact,
                         after_messages=compacted_messages,
                         memory_manager=memory_manager,
+                        mode=("emergency" if before_retry_compact != compacted_messages else "none"),
+                        changed=before_retry_compact != compacted_messages,
                     )
                 memory_compacted = True
 
@@ -314,9 +337,7 @@ class CycleRunner:
             metadata=metadata,
             model_settings=model_settings,
         )
-        checkpoint_controller = (
-            ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
-        )
+        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
 
         def invoke() -> LLMResponse:
             return complete_llm_request(
@@ -366,6 +387,11 @@ class CycleRunner:
     ) -> bool:
         return estimated_tokens is not None and estimated_tokens > memory_manager.autocompact_threshold
 
+    @staticmethod
+    def _strongest_compaction_mode(*modes: CompactionMode) -> CompactionMode:
+        rank = {"none": 0, "micro": 1, "structural": 2, "summary": 3, "emergency": 4}
+        return max(modes, key=rank.__getitem__, default="none")
+
     def _emit_memory_compact_started(
         self,
         *,
@@ -373,6 +399,8 @@ class CycleRunner:
         cycle_index: int,
         messages: list[Message],
         estimated_tokens: int | None,
+        trigger: MemoryCompactTrigger,
+        memory_manager: MemoryManager,
     ) -> None:
         providers = self._memory_providers_from_context(ctx)
         emit_event = self._event_emitter_from_context(ctx)
@@ -383,12 +411,30 @@ class CycleRunner:
             cycle_index=cycle_index,
             message_count=len(messages),
             estimated_tokens=estimated_tokens,
+            trigger=trigger,
+            configured_threshold=memory_manager.compact_threshold,
+            effective_threshold=memory_manager.autocompact_threshold,
+            microcompact_threshold=memory_manager.microcompact_trigger_threshold,
+            model_context_window=memory_manager.model_context_window,
+            model_max_output_tokens=memory_manager.model_max_output_tokens,
+            reserved_output_tokens=memory_manager.reserved_output_tokens,
+            reserved_output_source=memory_manager.reserved_output_source,
+            autocompact_buffer_tokens=memory_manager.autocompact_buffer_tokens,
         )
         provider_event = MemoryCompactStarted(
             **self._memory_event_context(ctx),
             cycle_index=cycle_index,
             message_count=len(messages),
             estimated_tokens=estimated_tokens,
+            trigger=trigger,
+            configured_threshold=memory_manager.compact_threshold,
+            effective_threshold=memory_manager.autocompact_threshold,
+            microcompact_threshold=memory_manager.microcompact_trigger_threshold,
+            model_context_window=memory_manager.model_context_window,
+            model_max_output_tokens=memory_manager.model_max_output_tokens,
+            reserved_output_tokens=memory_manager.reserved_output_tokens,
+            reserved_output_source=memory_manager.reserved_output_source,
+            autocompact_buffer_tokens=memory_manager.autocompact_buffer_tokens,
             event_id=event.event_id,
             created_at=event.created_at,
             metadata={"messages": list(messages)},
@@ -400,6 +446,15 @@ class CycleRunner:
                 cycle_index=cycle_index,
                 message_count=len(messages),
                 estimated_tokens=estimated_tokens,
+                trigger=trigger,
+                configured_threshold=memory_manager.compact_threshold,
+                effective_threshold=memory_manager.autocompact_threshold,
+                microcompact_threshold=memory_manager.microcompact_trigger_threshold,
+                model_context_window=memory_manager.model_context_window,
+                model_max_output_tokens=memory_manager.model_max_output_tokens,
+                reserved_output_tokens=memory_manager.reserved_output_tokens,
+                reserved_output_source=memory_manager.reserved_output_source,
+                autocompact_buffer_tokens=memory_manager.autocompact_buffer_tokens,
                 event_id=event.event_id,
                 created_at=event.created_at,
                 metadata=metadata,
@@ -415,6 +470,8 @@ class CycleRunner:
         before_messages: list[Message],
         after_messages: list[Message],
         memory_manager: MemoryManager,
+        mode: CompactionMode,
+        changed: bool,
     ) -> None:
         providers = self._memory_providers_from_context(ctx)
         emit_event = self._event_emitter_from_context(ctx)
@@ -430,6 +487,8 @@ class CycleRunner:
                 memory_manager=memory_manager,
                 total_tokens=None,
             ),
+            mode=mode,
+            changed=changed,
         )
         metadata = self._call_after_memory_providers(providers, event)
         if metadata:
@@ -439,6 +498,8 @@ class CycleRunner:
                 before_count=len(before_messages),
                 after_count=len(after_messages),
                 summary_tokens=event.summary_tokens,
+                mode=mode,
+                changed=changed,
                 event_id=event.event_id,
                 created_at=event.created_at,
                 metadata=metadata,

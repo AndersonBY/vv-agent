@@ -31,6 +31,15 @@ def test_memory_compact_events_are_serializable() -> None:
         cycle_index=3,
         message_count=12,
         estimated_tokens=9000,
+        trigger="full_threshold",
+        configured_threshold=250_000,
+        effective_threshold=250_000,
+        microcompact_threshold=187_500,
+        model_context_window=1_000_000,
+        model_max_output_tokens=384_000,
+        reserved_output_tokens=16_000,
+        reserved_output_source="framework_fallback",
+        autocompact_buffer_tokens=13_000,
     )
     completed = MemoryCompactCompleted(
         run_id="run_1",
@@ -40,10 +49,14 @@ def test_memory_compact_events_are_serializable() -> None:
         before_count=12,
         after_count=5,
         summary_tokens=500,
+        mode="summary",
+        changed=True,
     )
 
     assert started.to_dict()["estimated_tokens"] == 9000
+    assert started.to_dict()["model_max_output_tokens"] == 384_000
     assert completed.to_dict()["after_count"] == 5
+    assert completed.to_dict()["mode"] == "summary"
     assert isinstance(event_from_dict(started.to_dict()), MemoryCompactStarted)
     assert isinstance(event_from_dict(completed.to_dict()), MemoryCompactCompleted)
 
@@ -106,7 +119,9 @@ def _build_memory_manager() -> MemoryManager:
     return MemoryManager(
         model="gpt-5.4",
         model_context_window=60,
+        model_max_output_tokens=32,
         reserved_output_tokens=10,
+        reserved_output_source="task_metadata",
         autocompact_buffer_tokens=10,
         summary_callback=lambda _prompt, _backend, _model: (
             '{"summary_version":"2.0","original_user_messages":["original"],'
@@ -158,8 +173,19 @@ def test_cycle_runner_calls_memory_providers_and_emits_compact_events() -> None:
     assert provider.started[0].to_dict()["estimated_tokens"] == 160
     assert provider.started[0].message_count == 4
     assert provider.started[0].metadata["messages"][1].content == "u" * 80
+    assert provider.started[0].trigger == "full_threshold"
+    assert provider.started[0].configured_threshold == 250_000
+    assert provider.started[0].effective_threshold == 40
+    assert provider.started[0].microcompact_threshold == 30
+    assert provider.started[0].model_context_window == 60
+    assert provider.started[0].model_max_output_tokens == 32
+    assert provider.started[0].reserved_output_tokens == 10
+    assert provider.started[0].reserved_output_source == "task_metadata"
+    assert provider.started[0].autocompact_buffer_tokens == 10
     assert provider.completed[0].before_count == 4
     assert provider.completed[0].after_count < 4
+    assert provider.completed[0].mode == "summary"
+    assert provider.completed[0].changed is True
     assert [event.type for event in emitted] == ["memory_compact_started", "memory_compact_completed"]
     assert "messages" not in emitted[0].metadata
     assert emitted[0].metadata["memory_provider_results"]["RecordingMemoryProvider"]["phase"] == "before"

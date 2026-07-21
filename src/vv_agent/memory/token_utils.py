@@ -85,11 +85,9 @@ def compute_compaction_threshold(
         effective_window = max(context_window - reserved, 0)
         derived = max(effective_window - buffer_tokens, 0)
 
-    if configured > 0 and derived > 0:
-        return min(configured, derived)
-    if configured > 0:
-        return configured
-    return derived
+    if context_window > 0:
+        return min(configured, derived) if configured > 0 else derived
+    return configured
 
 
 @lru_cache(maxsize=256)

@@ -10,6 +10,7 @@ import pytest
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import (
+    CLEARED_MARKER,
     MemoryManager,
     MemoryProviderResult,
     MemorySaveResult,
@@ -17,6 +18,7 @@ from vv_agent.memory import (
     SessionMemoryConfig,
     SessionMemoryEntry,
 )
+from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
@@ -44,6 +46,88 @@ def _summary_payload() -> str:
         },
         ensure_ascii=False,
     )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _CONTRACT["capacity_contract"]["cases"],
+    ids=[case["name"] for case in _CONTRACT["capacity_contract"]["cases"]],
+)
+def test_runtime_resolves_memory_capacity_from_contract_cases(
+    case: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capacity = _CONTRACT["capacity_contract"]
+    inputs = case["input"]
+    expected = case["expected"]
+    monkeypatch.setattr(
+        "vv_agent.runtime.engine.resolve_model_token_limits",
+        lambda _model: (None, None),
+    )
+    metadata: dict[str, Any] = {
+        "model_context_window": inputs["model_context_window"],
+        "model_max_output_tokens": inputs["model_max_output_tokens"],
+        "autocompact_buffer_tokens": inputs["autocompact_buffer_tokens"],
+        "session_memory_enabled": False,
+    }
+    if inputs["task_metadata_reserved_output_tokens"] is not None:
+        metadata["reserved_output_tokens"] = inputs["task_metadata_reserved_output_tokens"]
+    settings = (
+        ModelSettings(max_tokens=inputs["effective_model_max_tokens"])
+        if inputs["effective_model_max_tokens"] is not None
+        else None
+    )
+    task = AgentTask(
+        task_id=case["name"],
+        model="capacity-model",
+        system_prompt="system",
+        user_prompt="run",
+        memory_compact_threshold=inputs["configured_threshold"],
+        model_settings=settings,
+        metadata=metadata,
+    )
+    ctx = ExecutionContext(
+        metadata={"_vv_agent_model_settings": settings} if settings is not None else {}
+    )
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path, ctx=ctx)
+
+    assert manager.compact_threshold == inputs["configured_threshold"]
+    assert manager.model_context_window == inputs["model_context_window"]
+    assert manager.model_max_output_tokens == inputs["model_max_output_tokens"]
+    assert manager.reserved_output_tokens == expected["reserved_output_tokens"]
+    assert manager.reserved_output_source == expected["reserved_output_source"]
+    assert manager.autocompact_buffer_tokens == capacity["autocompact_buffer_tokens_default"]
+    assert manager.autocompact_threshold == expected["effective_threshold"]
+    assert manager.microcompact_trigger_threshold == expected["microcompact_threshold"]
+
+
+def test_omitted_memory_compact_threshold_defaults_match_contract() -> None:
+    expected = _CONTRACT["capacity_contract"]["configured_default_threshold"]
+    task = AgentTask(
+        task_id="default-capacity",
+        model="capacity-model",
+        system_prompt="system",
+        user_prompt="run",
+    )
+    restored = AgentTask.from_dict(
+        {
+            "task_id": "restored-default-capacity",
+            "model": "capacity-model",
+            "system_prompt": "system",
+            "user_prompt": "run",
+        }
+    )
+
+    assert task.memory_compact_threshold == expected
+    assert restored.memory_compact_threshold == expected
+    assert MemoryManager().compact_threshold == expected
 
 
 def test_runtime_routes_summary_through_configured_backend_model_pair(tmp_path: Path) -> None:
@@ -302,6 +386,99 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
     ]
     assert emitted[0].metadata["memory_provider_results"]["RecordingMemoryProvider"] == contract["result_metadata"]
     assert emergency_drop_ratios == [contract["strategies"][1]["drop_ratio"]]
+    assert [event.trigger for event in provider.started] == ["prompt_too_long", "prompt_too_long"]
+    assert [event.mode for event in provider.completed] == ["summary", "none"]
+    assert [event.changed for event in provider.completed] == [True, False]
+
+
+def _microcompact_messages() -> list[Message]:
+    return [
+        Message(role="system", content="system"),
+        Message(role="user", content="start"),
+        Message(
+            role="assistant",
+            content="old tool call",
+            tool_calls=[
+                {
+                    "id": "call_old",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        ),
+        Message(role="tool", content="x" * 800, tool_call_id="call_old"),
+        Message(role="assistant", content="cycle two"),
+        Message(role="user", content="continue"),
+        Message(
+            role="assistant",
+            content="recent tool call",
+            tool_calls=[
+                {
+                    "id": "call_recent",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        ),
+        Message(role="tool", content="y" * 800, tool_call_id="call_recent"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("messages", "expected_mode", "expected_changed"),
+    [
+        (_microcompact_messages(), "micro", True),
+        (
+            [
+                Message(role="system", content="system"),
+                Message(role="user", content="continue"),
+            ],
+            "none",
+            False,
+        ),
+    ],
+    ids=["same-count-content-change", "trigger-without-change"],
+)
+def test_preemptive_compaction_producer_reports_content_aware_outcome(
+    messages: list[Message],
+    expected_mode: str,
+    expected_changed: bool,
+) -> None:
+    emitted: list[Any] = []
+    manager = MemoryManager(
+        compact_threshold=4_000,
+        model="main-model",
+        model_context_window=4_000,
+        model_max_output_tokens=1_000,
+        reserved_output_tokens=0,
+        reserved_output_source="task_metadata",
+        autocompact_buffer_tokens=0,
+        microcompact_keep_recent_cycles=1,
+        microcompact_min_result_length=500,
+    )
+    runner = CycleRunner(
+        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
+        tool_registry=build_default_registry(),
+    )
+
+    next_messages, _ = runner.run_cycle(
+        task=_ptl_task(),
+        messages=messages,
+        cycle_index=4,
+        memory_manager=manager,
+        previous_prompt_tokens=3_500,
+        ctx=ExecutionContext(metadata={"_vv_agent_emit_event": emitted.append}),
+    )
+
+    started, completed = emitted
+    assert started.trigger == "micro_threshold"
+    assert started.effective_threshold == 4_000
+    assert started.microcompact_threshold == 3_000
+    assert completed.mode == expected_mode
+    assert completed.changed is expected_changed
+    assert completed.before_count == completed.after_count
+    if expected_changed:
+        assert any(message.content == CLEARED_MARKER for message in next_messages)
 
 
 def test_memory_provider_attempt_errors_are_fail_open() -> None:

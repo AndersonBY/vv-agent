@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 from vv_agent.constants import READ_FILE_TOOL_NAME
 from vv_agent.memory.microcompact import MicrocompactConfig, is_microcompacted_tool_content, microcompact
@@ -122,15 +123,31 @@ JSON Schema:
 
 
 SummaryCallback = Callable[[str, str | None, str | None], str | None]
+CompactionMode = Literal["none", "micro", "structural", "summary", "emergency"]
+ReservedOutputSource = Literal[
+    "model_settings",
+    "task_metadata",
+    "framework_fallback",
+    "framework_fallback_capped_by_model_capability",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCompactionResult:
+    messages: list[Message]
+    mode: CompactionMode
+    changed: bool
 
 
 @dataclass(slots=True)
 class MemoryManager:
-    compact_threshold: int = 128_000
+    compact_threshold: int = 250_000
     keep_recent_messages: int = 10
     model: str = ""
     model_context_window: int = 200_000
+    model_max_output_tokens: int | None = None
     reserved_output_tokens: int = 16_000
+    reserved_output_source: ReservedOutputSource = "framework_fallback"
     autocompact_buffer_tokens: int = 13_000
     language: str = "zh-CN"
     warning_threshold_percentage: int = 90
@@ -194,12 +211,33 @@ class MemoryManager:
         recent_tool_call_ids: set[str] | None = None,
         force: bool = False,
     ) -> tuple[list[Message], bool]:
+        result = self.compact_with_result(
+            messages,
+            cycle_index=cycle_index,
+            total_tokens=total_tokens,
+            recent_tool_call_ids=recent_tool_call_ids,
+            force=force,
+        )
+        return result.messages, result.changed
+
+    def compact_with_result(
+        self,
+        messages: list[Message],
+        *,
+        cycle_index: int | None = None,
+        total_tokens: int | None = None,
+        recent_tool_call_ids: set[str] | None = None,
+        force: bool = False,
+    ) -> MemoryCompactionResult:
+        original_messages = list(messages)
+        strongest_mode: CompactionMode = "none"
         if not messages:
-            return messages, False
+            return MemoryCompactionResult(messages=messages, mode="none", changed=False)
 
         cleaned = [msg for msg in messages if not (msg.role == "system" and msg.name == _MEMORY_SUMMARY_NAME)]
         summary_removed = len(cleaned) != len(messages)
         sanitized_messages, sanitized = self._sanitize_empty_assistant_messages(cleaned)
+        legacy_changed = summary_removed or sanitized
         working_messages = self.apply_session_memory_context(sanitized_messages)
 
         message_length = self._calculate_effective_length(
@@ -224,7 +262,12 @@ class MemoryManager:
                 working_messages,
                 message_length=message_length,
             )
-            return maybe_warned_messages, summary_removed or sanitized or warning_inserted
+            return self._compaction_result(
+                original_messages,
+                maybe_warned_messages,
+                strongest_mode,
+                legacy_changed or warning_inserted,
+            )
 
         microcompacted_messages = working_messages
         microcompacted = False
@@ -235,30 +278,67 @@ class MemoryManager:
             )
             microcompacted = cleared > 0
             if microcompacted:
+                strongest_mode = "micro"
+                legacy_changed = True
                 message_length = self._calculate_effective_length(
                     microcompacted_messages,
                     total_tokens=None,
                     recent_tool_call_ids=None,
                 )
                 if message_length <= self.autocompact_threshold:
-                    return microcompacted_messages, summary_removed or sanitized or microcompacted
+                    return self._compaction_result(
+                        original_messages,
+                        microcompacted_messages,
+                        strongest_mode,
+                        legacy_changed,
+                    )
 
         compacted_messages, compacted = self._compact_messages(microcompacted_messages, cycle_index=cycle_index)
+        if compacted:
+            strongest_mode = "structural"
+            legacy_changed = True
         message_length = self._calculate_effective_length(
             compacted_messages,
             total_tokens=None,
             recent_tool_call_ids=recent_tool_call_ids,
         )
         if not force and message_length <= self.autocompact_threshold:
-            return compacted_messages, summary_removed or compacted or sanitized or microcompacted
+            return self._compaction_result(
+                original_messages,
+                compacted_messages,
+                strongest_mode,
+                legacy_changed,
+            )
 
         summarized_messages, summarized = self.compress_memory(compacted_messages, cycle_index=cycle_index)
+        if summarized:
+            strongest_mode = "summary"
+            legacy_changed = True
         if summarized and self.session_memory is not None:
             post_compaction_messages = self.apply_session_memory_context(summarized_messages)
             self.session_memory.on_compaction(
                 current_tokens=self._calculate_message_length(post_compaction_messages),
             )
-        return summarized_messages, summary_removed or compacted or sanitized or microcompacted or summarized
+        return self._compaction_result(
+            original_messages,
+            summarized_messages,
+            strongest_mode,
+            legacy_changed,
+        )
+
+    @staticmethod
+    def _compaction_result(
+        before_messages: list[Message],
+        after_messages: list[Message],
+        mode: CompactionMode,
+        changed: bool,
+    ) -> MemoryCompactionResult:
+        content_changed = before_messages != after_messages
+        if not content_changed:
+            mode = "none"
+        elif mode == "none":
+            mode = "structural"
+        return MemoryCompactionResult(messages=after_messages, mode=mode, changed=changed)
 
     def emergency_compact(
         self,
@@ -309,9 +389,7 @@ class MemoryManager:
         artifacts = self._collect_compacted_artifacts(compacted_messages, tool_call_id_to_info)
 
         prompt = self._build_compress_memory_prompt(compacted_messages)
-        compressed_memory = self._normalize_summary_output(
-            self._generate_summary(prompt, compacted_messages, artifacts)
-        )
+        compressed_memory = self._normalize_summary_output(self._generate_summary(prompt, compacted_messages, artifacts))
         summary_data = self._parse_summary_payload(compressed_memory)
         restored_context = restore_key_files(
             summary_data,
@@ -327,9 +405,7 @@ class MemoryManager:
             for artifact in artifacts:
                 tool_name = artifact.get("tool", "unknown")
                 tool_args = artifact.get("arguments", "")
-                artifact_section.append(
-                    f"- {artifact['path']} (tool: {tool_name}, arguments: {tool_args})"
-                )
+                artifact_section.append(f"- {artifact['path']} (tool: {tool_name}, arguments: {tool_args})")
             artifact_section.append("</Persisted Artifacts>")
             compressed_memory = f"{compressed_memory}\n\n" + "\n".join(artifact_section)
 
@@ -894,9 +970,7 @@ class MemoryManager:
     def _build_local_summary(self, messages: list[Message], artifacts: list[dict[str, str]]) -> str:
         events = self._build_summary_events(messages[2:])
         artifact_facts = [
-            f"{item.get('path', '')} (tool={item.get('tool', 'unknown')})"
-            for item in artifacts
-            if item.get("path")
+            f"{item.get('path', '')} (tool={item.get('tool', 'unknown')})" for item in artifacts if item.get("path")
         ]
         payload = {
             "summary_version": "2.0",

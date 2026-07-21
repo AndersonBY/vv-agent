@@ -214,6 +214,8 @@ def test_interactive_client_prepare_task_maps_definition_to_runtime_task(tmp_pat
     task = client.prepare_task(
         prompt="open browser",
         resolved_model_id="kimi-k2.6",
+        resolved_context_length=1_048_576,
+        resolved_max_output_tokens=1_048_576,
         agent=definition,
         task_name="desktop",
         workspace=tmp_path,
@@ -234,6 +236,52 @@ def test_interactive_client_prepare_task_maps_definition_to_runtime_task(tmp_pat
     assert task.metadata["bash_shell"] == "/bin/bash"
     assert task.metadata["windows_shell_priority"] == ["pwsh", "powershell"]
     assert task.metadata["bash_env"] == {"VCLAW_SESSION_ID": "sid-1"}
+    assert task.metadata["model_context_window"] == 1_048_576
+    assert task.metadata["model_max_output_tokens"] == 1_048_576
+    assert "reserved_output_tokens" not in task.metadata
+
+
+def test_interactive_definition_uses_contract_memory_threshold_default(tmp_path: Path) -> None:
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="moonshot",
+            workspace=tmp_path,
+        )
+    )
+    definition = InteractiveAgentDefinition(description="Use the computer.", model="kimi-k3")
+
+    task = client.prepare_task(
+        prompt="inspect",
+        resolved_model_id="kimi-k3",
+        agent=definition,
+    )
+
+    assert definition.memory_compact_threshold == 250_000
+    assert task.memory_compact_threshold == 250_000
+
+
+def test_interactive_definition_preserves_explicit_zero_memory_threshold(tmp_path: Path) -> None:
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="moonshot",
+            workspace=tmp_path,
+        )
+    )
+    definition = InteractiveAgentDefinition(
+        description="Use the computer.",
+        model="kimi-k3",
+        memory_compact_threshold=0,
+    )
+
+    task = client.prepare_task(
+        prompt="inspect",
+        resolved_model_id="kimi-k3",
+        agent=definition,
+    )
+
+    assert task.memory_compact_threshold == 0
 
 
 def test_interactive_client_create_session_preserves_caller_session_id(tmp_path: Path) -> None:

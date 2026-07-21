@@ -10,7 +10,7 @@ import pytest
 from vv_agent import CompletionReason, event_from_dict
 
 FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_events_v1_invalid.json"
-FIXTURE_SHA256 = "bd677d8c678655af4e6a5f0dd6d7a5193c43006ed871b575e53b022abe4dcf95"
+FIXTURE_SHA256 = "819cd6b0c9908c3ae6dc864d872c97f71627f3e6216ab7ab6e3e61e62626d4c2"
 
 
 def _contract() -> dict[str, Any]:
@@ -138,4 +138,59 @@ def test_tool_completion_duration_rejects_non_json_safe_values(duration_ms: Any)
     }
 
     with pytest.raises(ValueError, match="duration_ms"):
+        event_from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("trigger", 1),
+        ("configured_threshold", None),
+        ("configured_threshold", True),
+        ("effective_threshold", -1),
+        ("microcompact_threshold", 1.5),
+        ("model_context_window", 9_007_199_254_740_992),
+        ("model_max_output_tokens", "8192"),
+        ("reserved_output_tokens", []),
+        ("reserved_output_source", None),
+        ("autocompact_buffer_tokens", {}),
+    ],
+)
+def test_memory_compact_started_rejects_known_fields_with_wrong_types(
+    field_name: str,
+    value: Any,
+) -> None:
+    payload = {
+        "version": "v1",
+        "type": "memory_compact_started",
+        "event_id": "evt_invalid_memory_started",
+        "run_id": "run_invalid_memory",
+        "trace_id": "trace_invalid_memory",
+        "created_at": 1.0,
+        "message_count": 3,
+        field_name: value,
+    }
+
+    with pytest.raises(ValueError, match=r".+"):
+        event_from_dict(payload)
+
+
+@pytest.mark.parametrize(("field_name", "value"), [("mode", 1), ("changed", 1)])
+def test_memory_compact_completed_rejects_known_fields_with_wrong_types(
+    field_name: str,
+    value: Any,
+) -> None:
+    payload = {
+        "version": "v1",
+        "type": "memory_compact_completed",
+        "event_id": "evt_invalid_memory_completed",
+        "run_id": "run_invalid_memory",
+        "trace_id": "trace_invalid_memory",
+        "created_at": 1.0,
+        "before_count": 3,
+        "after_count": 2,
+        field_name: value,
+    }
+
+    with pytest.raises(ValueError, match=r".+"):
         event_from_dict(payload)

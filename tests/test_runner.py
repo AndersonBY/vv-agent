@@ -505,7 +505,9 @@ def test_runner_prefers_resolved_catalog_token_limits_for_memory(tmp_path: Path,
 
     assert result.status == AgentStatus.COMPLETED
     assert manager_kwargs[0]["model_context_window"] == 64_000
+    assert manager_kwargs[0]["model_max_output_tokens"] == 8_000
     assert manager_kwargs[0]["reserved_output_tokens"] == 8_000
+    assert manager_kwargs[0]["reserved_output_source"] == "framework_fallback_capped_by_model_capability"
 
 
 def test_runner_requires_llm_complete_to_accept_model_settings(tmp_path: Path) -> None:

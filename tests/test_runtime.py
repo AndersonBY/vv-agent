@@ -284,7 +284,9 @@ def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, mo
 
     assert manager.model == "demo-model"
     assert manager.model_context_window == 64_000
+    assert manager.model_max_output_tokens == 8_000
     assert manager.reserved_output_tokens == 8_000
+    assert manager.reserved_output_source == "framework_fallback_capped_by_model_capability"
     assert manager.autocompact_buffer_tokens == 13_000
     assert manager.autocompact_threshold == 43_000
     assert manager.session_memory is not None
@@ -322,7 +324,9 @@ def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_
     manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
 
     assert manager.model_context_window == 32_000
+    assert manager.model_max_output_tokens == 8_000
     assert manager.reserved_output_tokens == 4_000
+    assert manager.reserved_output_source == "task_metadata"
     assert manager.autocompact_buffer_tokens == 2_000
     assert manager.microcompact_trigger_ratio == 0.5
     assert manager.microcompact_keep_recent_cycles == 5

@@ -730,7 +730,7 @@ class AgentTask:
     system_prompt: str
     user_prompt: str
     max_cycles: int = 8
-    memory_compact_threshold: int = 128_000
+    memory_compact_threshold: int = 250_000
     memory_threshold_percentage: int = 90
     no_tool_policy: NoToolPolicy = "continue"
     allow_interruption: bool = True
@@ -789,7 +789,7 @@ class AgentTask:
             memory_compact_threshold=_agent_task_integer(
                 data,
                 "memory_compact_threshold",
-                default=128_000,
+                default=250_000,
                 maximum=_MAX_U64,
             ),
             memory_threshold_percentage=_agent_task_integer(
