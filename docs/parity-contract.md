@@ -19,12 +19,13 @@ offline and reproducible tests, but it is not an editable source of truth.
 
 The current lock selects contract `0.10.1` at revision
 `9e6f356eb20ed81e0e1a66f87ef07445d2324b4b`. The central support matrix records
-contract `0.10.1` and both implementations as `pending-adoption`; contract
-`0.9.0` remains the verified baseline, backed by cross-repository conformance
-run [`29769410376`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29769410376).
-This document maps the Python producers; the central matrix remains the
-authoritative verification record and must not move to `verified` until both
-implementations and cross-repository CI satisfy the central workflow.
+contract `0.10.1` and both implementations as `verified`, backed by recording
+cross-repository conformance run
+[`29825576929`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29825576929).
+The verified Python revision is
+`d428cd5877ebea015bf4eb21c621a871ac827bb1`; the matching Rust revision is
+`ff86efe4e5f60e1b0a5d81a4156df35538726f47`. This document maps the Python
+producers; the central matrix remains the authoritative verification record.
 
 ## Required Reading
 
