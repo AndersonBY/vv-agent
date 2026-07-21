@@ -61,9 +61,7 @@ _MEMORY_COMPACT_COMPLETED_ADDITIVE_FIELDS = ("mode", "changed")
 _JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
 _TOOL_STATUS_VALUES = frozenset({"success", "error", "wait_response", "running", "pending_compress"})
 _TOOL_DIRECTIVE_VALUES = frozenset({"continue", "finish", "wait_user"})
-_TOOL_COMPLETED_ADDITIVE_FIELDS = frozenset(
-    {"directive", "error_code", "execution_started", "duration_ms"}
-)
+_TOOL_COMPLETED_ADDITIVE_FIELDS = frozenset({"directive", "error_code", "execution_started", "duration_ms"})
 
 
 class _MissingToolLifecycleField:
@@ -613,9 +611,7 @@ class MemoryCompactStarted(RunEvent):
             "autocompact_buffer_tokens": autocompact_buffer_tokens,
         }
         present_fields = {
-            field_name
-            for field_name, value in values.items()
-            if not isinstance(value, _MissingMemoryCompactionField)
+            field_name for field_name, value in values.items() if not isinstance(value, _MissingMemoryCompactionField)
         }
         trigger_value = None if isinstance(trigger, _MissingMemoryCompactionField) else _memory_compact_trigger(trigger)
         source_value = (
@@ -2476,9 +2472,7 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             if not isinstance(payload["tool_metadata"], dict):
                 raise ValueError("Run event tool_metadata must be an object")
             _event_tool_metadata(payload["tool_metadata"])
-    if payload["type"] in {"tool_call_planned", "tool_call_started"} and not isinstance(
-        payload.get("arguments"), dict
-    ):
+    if payload["type"] in {"tool_call_planned", "tool_call_started"} and not isinstance(payload.get("arguments"), dict):
         raise ValueError("Run event tool arguments must be an object")
     if payload["type"] == "tool_call_completed":
         _wire_tool_status(payload.get("status"))
@@ -2695,9 +2689,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         )
     if event_type == "tool_call_completed":
         additive_fields = {
-            field_name: payload[field_name]
-            for field_name in _TOOL_COMPLETED_ADDITIVE_FIELDS
-            if field_name in payload
+            field_name: payload[field_name] for field_name in _TOOL_COMPLETED_ADDITIVE_FIELDS if field_name in payload
         }
         return ToolCallCompletedEvent(
             tool_name=payload["tool_name"],
@@ -2986,6 +2978,16 @@ def _runtime_session_id(payload: dict[str, Any], fallback: str | None) -> str | 
     return fallback
 
 
+def _runtime_event_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    event_id = payload.get("event_id")
+    if not isinstance(event_id, str) or not event_id.strip():
+        event_id = None
+    created_at = payload.get("created_at")
+    if isinstance(created_at, bool) or not isinstance(created_at, int | float) or not isfinite(created_at) or created_at < 0:
+        created_at = None
+    return {"event_id": event_id, "created_at": created_at}
+
+
 def event_from_runtime_log(
     event: str,
     payload: dict[str, Any],
@@ -2997,7 +2999,9 @@ def event_from_runtime_log(
     session_id: str | None = None,
 ) -> RunEvent | None:
     cycle_index = payload.get("cycle")
-    if not isinstance(cycle_index, int):
+    if isinstance(cycle_index, bool) or not isinstance(cycle_index, int):
+        cycle_index = payload.get("cycle_index")
+    if isinstance(cycle_index, bool) or not isinstance(cycle_index, int):
         cycle_index = None
     session_id = _runtime_session_id(payload, session_id)
 
@@ -3086,6 +3090,7 @@ def event_from_runtime_log(
                 "autocompact_buffer_tokens",
                 _MISSING_MEMORY_COMPACTION_FIELD,
             ),
+            **_runtime_event_identity(payload),
             metadata=dict(payload),
         )
     if event == "memory_compact_completed":
@@ -3103,6 +3108,7 @@ def event_from_runtime_log(
             summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
             mode=payload.get("mode", _MISSING_MEMORY_COMPACTION_FIELD),
             changed=payload.get("changed", _MISSING_MEMORY_COMPACTION_FIELD),
+            **_runtime_event_identity(payload),
             metadata=dict(payload),
         )
     if event == "tool_call_planned":
@@ -3146,9 +3152,7 @@ def event_from_runtime_log(
                 metadata=dict(metadata),
             )
         additive_fields = {
-            field_name: payload[field_name]
-            for field_name in _TOOL_COMPLETED_ADDITIVE_FIELDS
-            if field_name in payload
+            field_name: payload[field_name] for field_name in _TOOL_COMPLETED_ADDITIVE_FIELDS if field_name in payload
         }
         return ToolCallCompletedEvent(
             run_id=run_id,

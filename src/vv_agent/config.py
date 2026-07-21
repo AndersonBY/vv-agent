@@ -46,6 +46,25 @@ class ResolvedModelConfig:
         return self.endpoint_options[0].endpoint
 
 
+def project_resolved_model_limits(
+    metadata: dict[str, Any],
+    *,
+    context_length: int | None,
+    max_output_tokens: int | None,
+) -> None:
+    current_context = metadata.get("model_context_window")
+    has_positive_context = not isinstance(current_context, bool) and isinstance(current_context, int) and current_context > 0
+    if (
+        not has_positive_context
+        and not isinstance(context_length, bool)
+        and isinstance(context_length, int)
+        and context_length > 0
+    ):
+        metadata["model_context_window"] = context_length
+    if max_output_tokens is not None:
+        metadata.setdefault("model_max_output_tokens", max_output_tokens)
+
+
 class ConfigError(RuntimeError):
     pass
 
@@ -138,11 +157,7 @@ def resolve_model_endpoint(settings: dict[str, Any], backend: str, model: str) -
     if not isinstance(endpoint_candidates, list) or not endpoint_candidates:
         raise ConfigError(f"Model {selected_model!r} has no endpoint candidates")
 
-    endpoint_map = {
-        str(item.get("id")): item
-        for item in endpoints
-        if isinstance(item, dict) and item.get("id")
-    }
+    endpoint_map = {str(item.get("id")): item for item in endpoints if isinstance(item, dict) and item.get("id")}
     if not endpoint_map:
         raise ConfigError("No valid endpoints found in LLM_SETTINGS")
 

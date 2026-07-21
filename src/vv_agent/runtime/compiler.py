@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from vv_agent.agent import Agent, RunContext
 from vv_agent.checkpoint import CheckpointError
-from vv_agent.config import ResolvedModelConfig
+from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
 from vv_agent.constants import WORKSPACE_TOOLS
 from vv_agent.context_providers import (
     ContextFragment,
@@ -71,10 +71,11 @@ class AgentCompiler:
         metadata.update(run_config.metadata)
         _apply_tool_policy_metadata(metadata, run_config.tool_policy)
         metadata.setdefault("trace_id", trace_id)
-        if resolved.context_length is not None:
-            metadata.setdefault("model_context_window", resolved.context_length)
-        if resolved.max_output_tokens is not None:
-            metadata.setdefault("model_max_output_tokens", resolved.max_output_tokens)
+        project_resolved_model_limits(
+            metadata,
+            context_length=resolved.context_length,
+            max_output_tokens=resolved.max_output_tokens,
+        )
         no_tool_policy = run_config.no_tool_policy or agent.no_tool_policy or "continue"
         metadata["_vv_agent_tool_use_behavior"] = agent.tool_use_behavior
         if agent.stop_at_tool_names:
@@ -192,11 +193,15 @@ class AgentCompiler:
         self._validate_frozen_static_prompt(agent, definition, system_metadata)
 
         metadata = dict(system_metadata)
+        run_metadata = definition.get("run_metadata")
+        if isinstance(run_metadata, dict):
+            metadata.update(deepcopy(run_metadata))
         metadata["trace_id"] = trace_id
-        if resolved.context_length is not None:
-            metadata.setdefault("model_context_window", resolved.context_length)
-        if resolved.max_output_tokens is not None:
-            metadata.setdefault("model_max_output_tokens", resolved.max_output_tokens)
+        project_resolved_model_limits(
+            metadata,
+            context_length=resolved.context_length,
+            max_output_tokens=resolved.max_output_tokens,
+        )
         metadata["_vv_agent_tool_use_behavior"] = controls["tool_use_behavior"]
         if controls["stop_at_tool_names"]:
             metadata["_vv_agent_stop_at_tool_names"] = list(controls["stop_at_tool_names"])

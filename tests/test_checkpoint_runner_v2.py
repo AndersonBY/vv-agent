@@ -329,6 +329,82 @@ def test_runner_recovery_exposes_ambiguous_non_idempotent_tool_without_retry() -
     assert retained.claim_token is None
 
 
+def test_runner_resume_restores_frozen_metadata_when_system_metadata_is_empty() -> None:
+    store = InMemoryStateStore()
+    metadata_snapshots: list[dict[str, Any]] = []
+
+    @function_tool(name="retryable_metadata_write", idempotency=ToolIdempotency.SUPPORTED)
+    def retryable_metadata_write(context: ToolContext) -> str:
+        metadata_snapshots.append(dict(context.task_metadata))
+        if len(metadata_snapshots) == 1:
+            raise SystemExit("crash after retryable metadata write")
+        return "written"
+
+    def scripted() -> ScriptedLLM:
+        return ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-metadata-1",
+                            name="retryable_metadata_write",
+                            arguments={},
+                        )
+                    ],
+                )
+            ]
+        )
+
+    agent = Agent(
+        name="checkpoint-metadata-agent",
+        instructions="Write once.",
+        model="test-model",
+        tools=[retryable_metadata_write],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    config = RunConfig(
+        model_provider=_provider(scripted),
+        max_cycles=1,
+        metadata={
+            "reserved_output_tokens": 4_096,
+            "host_request_id": "request-42",
+        },
+        checkpoint_config=CheckpointConfig(
+            key="frozen-run-metadata",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            ambiguous_tool_policy=AmbiguousToolPolicy.RETRY_IDEMPOTENT_ONLY,
+            store=store,
+            capability_refs={
+                "behavior_affecting_run_metadata": {
+                    "id": "metadata.request-42",
+                    "version": "1",
+                },
+            },
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="crash after retryable metadata write"):
+        Runner.run_sync(agent, "write with frozen metadata", run_config=config)
+
+    with store._lock:
+        crashed = store._store_v2["frozen-run-metadata"]
+        assert crashed.messages[0].role == "system"
+        crashed.messages[0].metadata = {}
+        crashed.lease_expires_at_ms = 1
+
+    config.metadata = {
+        "reserved_output_tokens": 1_024,
+        "host_request_id": "stale-request",
+    }
+    resumed = Runner.run_sync(agent, "write with frozen metadata", run_config=config)
+
+    assert resumed.status is AgentStatus.COMPLETED
+    assert len(metadata_snapshots) == 2
+    assert metadata_snapshots[1]["reserved_output_tokens"] == 4_096
+    assert metadata_snapshots[1]["host_request_id"] == "request-42"
+
+
 def test_runner_resume_freezes_prompt_session_and_identity_without_reinvoking_callbacks() -> None:
     store = InMemoryStateStore()
     session = MemorySession("checkpoint-session")

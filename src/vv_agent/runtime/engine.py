@@ -21,7 +21,13 @@ from vv_agent.budget import (
     RunBudgetLimits,
 )
 from vv_agent.checkpoint import utf16_sort_key
-from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig, build_openai_llm_from_local_settings
+from vv_agent.config import (
+    EndpointConfig,
+    EndpointOption,
+    ResolvedModelConfig,
+    build_openai_llm_from_local_settings,
+    project_resolved_model_limits,
+)
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import (
     BudgetExhaustedEvent,
@@ -181,11 +187,7 @@ def _canonicalize_sub_agent_stream_event(
     if not isinstance(event_name, str) or event_name not in _SUB_AGENT_STREAM_PRODUCER_FIELDS:
         return None
     canonical = _CanonicalSubAgentStreamPayload(
-        {
-            key: value
-            for key, value in payload.items()
-            if key in _SUB_AGENT_STREAM_PRODUCER_FIELDS[event_name]
-        }
+        {key: value for key, value in payload.items() if key in _SUB_AGENT_STREAM_PRODUCER_FIELDS[event_name]}
     )
     canonical.update(
         {
@@ -471,9 +473,7 @@ class AgentRuntime:
         self.tool_registry_factory = tool_registry_factory
         self.sub_agent_timeout_seconds = max(sub_agent_timeout_seconds, 1.0)
         self.hook_manager = RuntimeHookManager(hooks=list(hooks or []))
-        self.after_cycle_hook_manager = AfterCycleHookManager(
-            hooks=list(after_cycle_hooks or [])
-        )
+        self.after_cycle_hook_manager = AfterCycleHookManager(hooks=list(after_cycle_hooks or []))
         self.execution_backend: ExecutionBackend = execution_backend or InlineBackend()
         self._workspace_backend = workspace_backend
         self._memory_summary_clients: dict[tuple[str, str], LLMClient] = {}
@@ -482,6 +482,7 @@ class AgentRuntime:
             llm_client=llm_client,
             tool_registry=tool_registry,
             hook_manager=self.hook_manager,
+            runtime_event_handler=self._emit_runtime_event,
         )
         self.tool_call_runner = ToolCallRunner(
             tool_registry=tool_registry,
@@ -508,9 +509,7 @@ class AgentRuntime:
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
         had_configured_disallowed_tools = "_vv_agent_disallowed_tools" in task.metadata
-        configured_disallowed_tools = deepcopy(
-            task.metadata.get("_vv_agent_disallowed_tools")
-        )
+        configured_disallowed_tools = deepcopy(task.metadata.get("_vv_agent_disallowed_tools"))
         effective_shared_state = shared_state if shared_state is not None else task.initial_shared_state
         shared = dict(effective_shared_state)
         shared.setdefault("todo_list", [])
@@ -525,11 +524,7 @@ class AgentRuntime:
             if prepared_initial_messages is not None
             else self._build_initial_messages(
                 task=task,
-                initial_messages=(
-                    initial_messages
-                    if initial_messages is not None
-                    else (list(task.initial_messages) or None)
-                ),
+                initial_messages=(initial_messages if initial_messages is not None else (list(task.initial_messages) or None)),
                 user_message=user_message,
             )
         )
@@ -583,9 +578,7 @@ class AgentRuntime:
 
         result: AgentResult | None = None
         if budget_controller is not None:
-            cancelled = bool(
-                runtime_ctx.cancellation_token is not None and runtime_ctx.cancellation_token.cancelled
-            )
+            cancelled = bool(runtime_ctx.cancellation_token is not None and runtime_ctx.cancellation_token.cancelled)
             if cancelled:
                 result = AgentResult(
                     status=AgentStatus.FAILED,
@@ -673,10 +666,7 @@ class AgentRuntime:
                 result.status == AgentStatus.FAILED
                 and result.completion_reason not in {CompletionReason.BUDGET_EXHAUSTED, CompletionReason.CANCELLED}
             )
-            if (
-                budget_controller.exhaustion is None
-                and result.status is not AgentStatus.RECONCILIATION_REQUIRED
-            ):
+            if budget_controller.exhaustion is None and result.status is not AgentStatus.RECONCILIATION_REQUIRED:
                 exhaustion = budget_controller.terminal(
                     suppress_exhaustion=cancelled or operation_failed,
                 )
@@ -1062,10 +1052,7 @@ class AgentRuntime:
                 )
                 if after_cycle_result is not None:
                     return after_cycle_result
-                if (
-                    after_cycle_decision is not None
-                    and after_cycle_decision.action is AfterCycleAction.STEER
-                ):
+                if after_cycle_decision is not None and after_cycle_decision.action is AfterCycleAction.STEER:
                     return None
 
                 if tool_result and tool_result.directive == ToolDirective.WAIT_USER:
@@ -1149,10 +1136,7 @@ class AgentRuntime:
             )
             if after_cycle_result is not None:
                 return after_cycle_result
-            if (
-                after_cycle_decision is not None
-                and after_cycle_decision.action is AfterCycleAction.STEER
-            ):
+            if after_cycle_decision is not None and after_cycle_decision.action is AfterCycleAction.STEER:
                 return None
 
             if task.no_tool_policy == "finish":
@@ -1220,8 +1204,7 @@ class AgentRuntime:
             available_tool_names = [
                 name
                 for name in plan_tool_names(task)
-                if self.tool_registry.has_tool(name)
-                and self.tool_registry.has_schema(name)
+                if self.tool_registry.has_tool(name) and self.tool_registry.has_schema(name)
             ]
             snapshot = AfterCycleSnapshot.capture(
                 task_id=task.task_id,
@@ -1307,10 +1290,7 @@ class AgentRuntime:
                     error=f"{code}: after-cycle steering is unavailable at this boundary",
                     budget_controller=budget_controller,
                 )
-            messages.extend(
-                Message(role="user", content=content)
-                for content in decision.steering_messages
-            )
+            messages.extend(Message(role="user", content=content) for content in decision.steering_messages)
             self._emit_log(
                 "after_cycle_steered",
                 cycle=cycle_record.index,
@@ -1344,11 +1324,7 @@ class AgentRuntime:
             error=error,
             shared_state=shared_state,
             token_usage=summarize_task_token_usage(cycles),
-            budget_usage=(
-                budget_controller.snapshot
-                if budget_controller is not None
-                else None
-            ),
+            budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
         )
 
     @staticmethod
@@ -1358,11 +1334,7 @@ class AgentRuntime:
         shared_state: dict[str, Any],
     ) -> list[str]:
         configured = task.metadata.get("_vv_agent_disallowed_tools")
-        configured_values = (
-            [value for value in configured if isinstance(value, str)]
-            if isinstance(configured, list)
-            else []
-        )
+        configured_values = [value for value in configured if isinstance(value, str)] if isinstance(configured, list) else []
         persisted = read_after_cycle_disallowed_tools(shared_state)
         return sorted(
             set([*configured_values, *persisted]),
@@ -1433,6 +1405,11 @@ class AgentRuntime:
         if self.log_handler is None:
             return
         self.log_handler(event, payload)
+
+    def _emit_runtime_event(self, event: RunEvent) -> None:
+        payload = event.to_dict()
+        payload.pop("type", None)
+        self._emit_log(event.type, **payload)
 
     @staticmethod
     def _event_emitter_from_context(ctx: ExecutionContext | None) -> RunEventHandler | None:
@@ -1563,9 +1540,7 @@ class AgentRuntime:
         session_memory_extraction_backend = (
             self._read_optional_str(metadata, "session_memory_extraction_backend") or summary_backend
         )
-        session_memory_extraction_model = (
-            self._read_optional_str(metadata, "session_memory_extraction_model") or summary_model
-        )
+        session_memory_extraction_model = self._read_optional_str(metadata, "session_memory_extraction_model") or summary_model
         session_memory_enabled = self._read_session_memory_enabled(metadata)
         model_context_window = self._metadata_token_limit(
             metadata,
@@ -1590,11 +1565,7 @@ class AgentRuntime:
             runtime_model_settings = ctx.metadata.get("_vv_agent_model_settings")
             if isinstance(runtime_model_settings, ModelSettings):
                 effective_model_settings = runtime_model_settings
-        request_max_tokens = (
-            effective_model_settings.max_tokens
-            if effective_model_settings is not None
-            else None
-        )
+        request_max_tokens = effective_model_settings.max_tokens if effective_model_settings is not None else None
         task_reserved_output_tokens = self._metadata_token_limit(
             metadata,
             "reserved_output_tokens",
@@ -1609,10 +1580,7 @@ class AgentRuntime:
         else:
             reserved_output_tokens = 16_000
             reserved_output_source = "framework_fallback"
-            if (
-                model_max_output_tokens is not None
-                and model_max_output_tokens < reserved_output_tokens
-            ):
+            if model_max_output_tokens is not None and model_max_output_tokens < reserved_output_tokens:
                 reserved_output_tokens = model_max_output_tokens
                 reserved_output_source = "framework_fallback_capped_by_model_capability"
         session_memory: SessionMemory | None = None
@@ -1786,12 +1754,8 @@ class AgentRuntime:
                 }
             },
         )
-        checkpoint_controller = (
-            ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
-        )
-        cycle_index = (
-            ctx.metadata.get("_vv_agent_active_cycle_index") if ctx is not None else None
-        )
+        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
+        cycle_index = ctx.metadata.get("_vv_agent_active_cycle_index") if ctx is not None else None
 
         def invoke() -> Any:
             return complete_llm_request(client, request)
@@ -1801,9 +1765,7 @@ class AgentRuntime:
             int,
         ):
             assert ctx is not None
-            summary_index = int(
-                ctx.metadata.get("_vv_agent_checkpoint_memory_summary_index", 0)
-            ) + 1
+            summary_index = int(ctx.metadata.get("_vv_agent_checkpoint_memory_summary_index", 0)) + 1
             ctx.metadata["_vv_agent_checkpoint_memory_summary_index"] = summary_index
             response = checkpoint_controller.complete_model(
                 cycle_index=cycle_index,
@@ -2342,9 +2304,7 @@ class AgentRuntime:
                                 try:
                                     parent_stream_callback(canonical)
                                 except BaseException:
-                                    logging.getLogger(__name__).exception(
-                                        "Configured sub-agent stream observer failed"
-                                    )
+                                    logging.getLogger(__name__).exception("Configured sub-agent stream observer failed")
 
                         if child_ctx is None:
                             child_ctx = ExecutionContext(stream_callback=_sub_stream_callback)
@@ -2647,8 +2607,7 @@ class AgentRuntime:
         if not isinstance(sub_agent.model, str) or not _trim_portable_whitespace(sub_agent.model):
             raise _SubTaskContractError(_INVALID_SUB_AGENT_MODEL_CODE, _INVALID_SUB_AGENT_MODEL_MESSAGE)
         if sub_agent.system_prompt is not None and (
-            not isinstance(sub_agent.system_prompt, str)
-            or not _trim_portable_whitespace(sub_agent.system_prompt)
+            not isinstance(sub_agent.system_prompt, str) or not _trim_portable_whitespace(sub_agent.system_prompt)
         ):
             raise _SubTaskContractError(
                 _INVALID_SUB_AGENT_SYSTEM_PROMPT_CODE,
@@ -2762,15 +2721,10 @@ class AgentRuntime:
         )
         projected: dict[str, Any] = {}
         if denied_side_effects:
-            projected["_vv_agent_denied_side_effects"] = [
-                item.value for item in denied_side_effects
-            ]
+            projected["_vv_agent_denied_side_effects"] = [item.value for item in denied_side_effects]
         if denied_capability_tags:
             projected["_vv_agent_denied_capability_tags"] = denied_capability_tags
-        if (
-            parent_policy_metadata.get("_vv_agent_deny_terminal_tools") is True
-            or sub_agent.deny_terminal_tools
-        ):
+        if parent_policy_metadata.get("_vv_agent_deny_terminal_tools") is True or sub_agent.deny_terminal_tools:
             projected["_vv_agent_deny_terminal_tools"] = True
         if denied_cost_dimensions:
             projected["_vv_agent_denied_cost_dimensions"] = denied_cost_dimensions
@@ -2892,10 +2846,11 @@ class AgentRuntime:
                 sub_agent,
             )
         )
-        if resolved_context_length is not None:
-            metadata.setdefault("model_context_window", resolved_context_length)
-        if resolved_max_output_tokens is not None:
-            metadata.setdefault("model_max_output_tokens", resolved_max_output_tokens)
+        project_resolved_model_limits(
+            metadata,
+            context_length=resolved_context_length,
+            max_output_tokens=resolved_max_output_tokens,
+        )
         if generated_sections:
             metadata.setdefault("system_prompt_sections", generated_sections)
         metadata.update(
@@ -2937,9 +2892,7 @@ class AgentRuntime:
             ),
             extra_tool_names=list(parent_task.extra_tool_names),
             exclude_tools=sorted(excluded_tools),
-            model_settings=(
-                parent_task.model_settings if effective_model_settings is None else effective_model_settings
-            ),
+            model_settings=(parent_task.model_settings if effective_model_settings is None else effective_model_settings),
             metadata=metadata,
         )
 

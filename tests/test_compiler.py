@@ -84,12 +84,31 @@ def test_agent_compiler_records_model_output_capability_without_fabricating_rese
     assert "reserved_output_tokens" not in task.metadata
 
 
+def test_agent_compiler_treats_non_positive_context_metadata_as_absent() -> None:
+    task = AgentCompiler().compile(
+        agent=Agent(
+            name="assistant",
+            instructions="Answer.",
+            model="model-id",
+            metadata={"model_context_window": 0},
+        ),
+        input="go",
+        run_config=RunConfig(),
+        resolved=_resolved(context_length=64_000, max_output_tokens=8_192),
+        trace_id="trace-positive-context",
+    )
+
+    assert task.metadata["model_context_window"] == 64_000
+    assert task.metadata["model_max_output_tokens"] == 8_192
+
+
 def test_frozen_checkpoint_keeps_legacy_threshold_and_metadata_without_rewriting_record() -> None:
     definition = {
         "compiled_prompt": "Answer.",
         "root_input": "go",
         "initial_messages": [],
         "initial_shared_state": {},
+        "run_metadata": {},
         "model": {"model_id": "model-id"},
         "agent": {"type": None},
         "tools": [],
@@ -131,3 +150,79 @@ def test_frozen_checkpoint_keeps_legacy_threshold_and_metadata_without_rewriting
     assert task.metadata["reserved_output_tokens"] == 4_096
     assert definition == original_definition
     assert system_message.metadata == original_metadata
+
+
+def test_frozen_checkpoint_restores_run_metadata_when_system_metadata_is_empty() -> None:
+    definition = {
+        "compiled_prompt": "Answer.",
+        "root_input": "go",
+        "initial_messages": [],
+        "initial_shared_state": {},
+        "run_metadata": {
+            "reserved_output_tokens": 4_096,
+            "host_request_id": "request-42",
+            "model_context_window": 48_000,
+        },
+        "model": {"model_id": "model-id"},
+        "agent": {"type": None},
+        "tools": [],
+        "runtime_controls": {
+            "max_cycles": 8,
+            "memory_compact_threshold": 128_000,
+            "memory_threshold_percentage": 90,
+            "no_tool_policy": "continue",
+            "allow_interruption": True,
+            "native_multimodal": False,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": [],
+        },
+    }
+    system_message = Message(role="system", content="Answer.", metadata={})
+    checkpoint = SimpleNamespace(
+        run_definition=definition,
+        messages=[system_message],
+        task_id="frozen-metadata-task",
+    )
+    original_definition = deepcopy(definition)
+
+    task = AgentCompiler().compile_frozen_checkpoint(
+        agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
+        run_config=RunConfig(),
+        resolved=_resolved(context_length=32_000, max_output_tokens=8_192),
+        checkpoint=checkpoint,
+        trace_id="trace-frozen-metadata",
+    )
+
+    assert task.metadata["reserved_output_tokens"] == 4_096
+    assert task.metadata["host_request_id"] == "request-42"
+    assert task.metadata["model_context_window"] == 48_000
+    assert task.metadata["model_max_output_tokens"] == 8_192
+    assert task.metadata["trace_id"] == "trace-frozen-metadata"
+    assert definition == original_definition
+    assert system_message.metadata == {}
+
+    stale_system_message = Message(
+        role="system",
+        content="Answer.",
+        metadata={
+            "reserved_output_tokens": 1_024,
+            "host_request_id": "stale-request",
+            "model_context_window": 16_000,
+        },
+    )
+    precedence_task = AgentCompiler().compile_frozen_checkpoint(
+        agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
+        run_config=RunConfig(),
+        resolved=_resolved(context_length=32_000, max_output_tokens=8_192),
+        checkpoint=SimpleNamespace(
+            run_definition=definition,
+            messages=[stale_system_message],
+            task_id="frozen-metadata-precedence-task",
+        ),
+        trace_id="trace-frozen-metadata-precedence",
+    )
+
+    assert precedence_task.metadata["reserved_output_tokens"] == 4_096
+    assert precedence_task.metadata["host_request_id"] == "request-42"
+    assert precedence_task.metadata["model_context_window"] == 48_000
+    assert stale_system_message.metadata["host_request_id"] == "stale-request"

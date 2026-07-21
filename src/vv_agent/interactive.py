@@ -14,7 +14,11 @@ from typing import Any, Protocol, cast, overload
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider
-from vv_agent.config import ResolvedModelConfig, build_openai_llm_from_local_settings
+from vv_agent.config import (
+    ResolvedModelConfig,
+    build_openai_llm_from_local_settings,
+    project_resolved_model_limits,
+)
 from vv_agent.context_providers import (
     ContextFragment,
     ContextProvider,
@@ -308,9 +312,13 @@ class AgentSession:
         self.agent_name = agent_name
         self.agent = agent
         self.definition = definition
-        self._agent_source: Agent | InteractiveAgentDefinition = agent if agent is not None else cast(
-            InteractiveAgentDefinition,
-            definition,
+        self._agent_source: Agent | InteractiveAgentDefinition = (
+            agent
+            if agent is not None
+            else cast(
+                InteractiveAgentDefinition,
+                definition,
+            )
         )
         self.workspace = Path(workspace).resolve()
         self._messages = list(self._session.get_items())
@@ -930,10 +938,11 @@ class InteractiveAgentClient:
             metadata.setdefault("bash_env", dict(definition.bash_env))
         if definition.sub_agents:
             metadata.setdefault("sub_agent_names", sorted(definition.sub_agents.keys()))
-        if resolved_context_length is not None:
-            metadata.setdefault("model_context_window", resolved_context_length)
-        if resolved_max_output_tokens is not None:
-            metadata.setdefault("model_max_output_tokens", resolved_max_output_tokens)
+        project_resolved_model_limits(
+            metadata,
+            context_length=resolved_context_length,
+            max_output_tokens=resolved_max_output_tokens,
+        )
 
         available_skills: list[dict[str, Any] | str] | None = None
         if isinstance(metadata.get("available_skills"), list):

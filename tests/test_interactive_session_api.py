@@ -261,6 +261,34 @@ def test_interactive_definition_uses_contract_memory_threshold_default(tmp_path:
     assert task.memory_compact_threshold == 250_000
 
 
+def test_interactive_task_uses_resolved_context_when_metadata_is_non_positive(
+    tmp_path: Path,
+) -> None:
+    client = InteractiveAgentClient(
+        options=AgentSessionOptions(
+            settings_file=tmp_path / "settings.py",
+            default_backend="moonshot",
+            workspace=tmp_path,
+        )
+    )
+    definition = InteractiveAgentDefinition(
+        description="Use the computer.",
+        model="capacity-model",
+        metadata={"model_context_window": 0},
+    )
+
+    task = client.prepare_task(
+        prompt="inspect",
+        resolved_model_id="capacity-model",
+        resolved_context_length=64_000,
+        resolved_max_output_tokens=8_192,
+        agent=definition,
+    )
+
+    assert task.metadata["model_context_window"] == 64_000
+    assert task.metadata["model_max_output_tokens"] == 8_192
+
+
 def test_interactive_definition_preserves_explicit_zero_memory_threshold(tmp_path: Path) -> None:
     client = InteractiveAgentClient(
         options=AgentSessionOptions(

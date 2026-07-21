@@ -17,9 +17,9 @@ The normative behavior and change workflow no longer live in this repository.
 `tests/fixtures/parity/` is generated from that release. It is committed for
 offline and reproducible tests, but it is not an editable source of truth.
 
-The current lock selects contract `0.10.0` at revision
-`4d721573c1b1e0a8bc4a277f0366c52c1a63b4b4`. The central support matrix records
-contract `0.10.0` and both implementations as `pending-adoption`; contract
+The current lock selects contract `0.10.1` at revision
+`9e6f356eb20ed81e0e1a66f87ef07445d2324b4b`. The central support matrix records
+contract `0.10.1` and both implementations as `pending-adoption`; contract
 `0.9.0` remains the verified baseline, backed by cross-repository conformance
 run [`29769410376`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29769410376).
 This document maps the Python producers; the central matrix remains the
@@ -109,16 +109,24 @@ implicit request limit and is never copied into `reserved_output_tokens`.
 Runtime reserve resolution uses effective `ModelSettings.max_tokens`, then
 explicit task metadata, then the `16000` framework fallback. Only that fallback
 may be capped downward by a smaller model output capability. Context resolution
-uses explicit task metadata, resolved capability, then `200000`; the derived
-prompt capacity subtracts the reserve and `13000` autocompact buffer. A known
-derived capacity of zero remains zero.
+uses positive explicit task metadata, resolved capability, then `200000`;
+non-positive metadata is absent. The derived prompt capacity subtracts the
+reserve and `13000` autocompact buffer. A known derived capacity of zero from a
+positive context remains zero.
 
-`CycleRunner` emits the typed trigger and resolved capacity snapshot on every
-new `memory_compact_started` event. It emits the strongest applied mode and a
-message-content comparison on `memory_compact_completed`. The v1 decoder keeps
+`CycleRunner` microcompacts eligible old tool results before evaluating the
+optional warning against recalculated usage. It emits the typed trigger and
+resolved capacity snapshot on every new `memory_compact_started` event, then
+the strongest applied mode and a message-content comparison on
+`memory_compact_completed`. Provider callbacks, runtime payloads, and Runner
+journal events reuse the same `event_id` and `created_at`. The v1 decoder keeps
 all additive fields absent when reading legacy events, while rejecting known
 fields with invalid types or unknown enum values. This resolution is mechanical
 and does not inspect task category, answer semantics, or semantic progress.
+
+Checkpoint resume rebuilds execution from the frozen run definition's
+`run_metadata`; current caller metadata or an empty system-message metadata map
+does not erase behavior-affecting values captured before the checkpoint.
 
 ## Tool Metadata And Telemetry Mapping
 
