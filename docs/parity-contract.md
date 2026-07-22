@@ -9,8 +9,12 @@ that repository.
 
 `contract.lock.json` selects contract `2.0.0` at revision
 `8ef7153e9b1f26b90a9fad85bbfcb4642d6462fa`. The central support matrix is
-`in-progress`; it must not become `verified` until Python, Rust, and the central
-cross-repository workflow all pass against final implementation revisions.
+`verified`. Recording run
+[`29934473634`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29934473634)
+passed against Python revision
+`64743760634fa70c76bf523bf4b51601713ccfb0` and Rust revision
+`91a53cd1be9ad560f99c93c4437bc2d830271a09`. The central matrix remains the
+authoritative current verification record.
 
 The lock records the exact release artifact, artifact digest, vendored fixture
 path, and canonical fixture-manifest digest. `tests/fixtures/parity/` is a
