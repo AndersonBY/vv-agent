@@ -2,10 +2,8 @@
   "contract": "run_events_v1_invalid",
   "rules": {
     "version": "v1",
-    "unknown_top_level_fields": "ignore",
+    "unknown_top_level_fields": "reject",
     "unknown_event_types": "reject",
-    "legacy_created_at_ms": "read_and_canonicalize",
-    "legacy_approved": "read_and_derive_action",
     "completion_fields": {
       "completion_reason": {
         "type": "string_or_null",
@@ -69,7 +67,7 @@
       ],
       "capacity_counters": "non_negative_json_safe_integer_or_null",
       "changed": "boolean",
-      "legacy_missing_additive_fields": "accept_without_fabricating_values"
+      "missing_required_fields": "reject"
     },
     "tool_lifecycle_fields": {
       "event_types": [
@@ -96,112 +94,9 @@
       "completed_error_code": "string_or_null",
       "completed_execution_started": "boolean",
       "completed_duration_ms": "non_negative_json_safe_integer_or_null",
-      "legacy_missing_additive_completed_fields": "accept_without_fabricating_values"
+      "missing_required_completed_fields": "reject"
     }
   },
-  "canonicalize": [
-    {
-      "id": "unknown_top_level_field_is_ignored",
-      "input": {
-        "version": "v1",
-        "type": "run_started",
-        "event_id": "evt_forward",
-        "run_id": "run_forward",
-        "trace_id": "trace_forward",
-        "created_at": 123.456789,
-        "input": "hello",
-        "future_field": {
-          "ignored": true
-        }
-      },
-      "output": {
-        "version": "v1",
-        "type": "run_started",
-        "event_id": "evt_forward",
-        "run_id": "run_forward",
-        "trace_id": "trace_forward",
-        "created_at": 123.456789,
-        "input": "hello"
-      }
-    },
-    {
-      "id": "legacy_created_at_ms_is_seconds",
-      "input": {
-        "version": "v1",
-        "type": "run_started",
-        "event_id": "evt_legacy_time",
-        "run_id": "run_legacy_time",
-        "trace_id": "trace_legacy_time",
-        "created_at_ms": 123456.789,
-        "input": "hello"
-      },
-      "output": {
-        "version": "v1",
-        "type": "run_started",
-        "event_id": "evt_legacy_time",
-        "run_id": "run_legacy_time",
-        "trace_id": "trace_legacy_time",
-        "created_at": 123.456789,
-        "input": "hello"
-      }
-    },
-    {
-      "id": "legacy_approval_true_derives_allow",
-      "input": {
-        "version": "v1",
-        "type": "approval_resolved",
-        "event_id": "evt_legacy_approval",
-        "run_id": "run_legacy_approval",
-        "trace_id": "trace_legacy_approval",
-        "created_at": 123.456789,
-        "request_id": "approval_legacy",
-        "tool_name": "shell",
-        "tool_call_id": "call_legacy",
-        "approved": true
-      },
-      "output": {
-        "version": "v1",
-        "type": "approval_resolved",
-        "event_id": "evt_legacy_approval",
-        "run_id": "run_legacy_approval",
-        "trace_id": "trace_legacy_approval",
-        "created_at": 123.456789,
-        "request_id": "approval_legacy",
-        "tool_name": "shell",
-        "tool_call_id": "call_legacy",
-        "action": "allow",
-        "approved": true
-      }
-    },
-    {
-      "id": "legacy_approval_false_derives_deny",
-      "input": {
-        "version": "v1",
-        "type": "approval_resolved",
-        "event_id": "evt_legacy_denial",
-        "run_id": "run_legacy_denial",
-        "trace_id": "trace_legacy_denial",
-        "created_at": 123.456789,
-        "request_id": "approval_legacy_denial",
-        "tool_name": "shell",
-        "tool_call_id": "call_legacy_denial",
-        "approved": false
-      },
-      "output": {
-        "version": "v1",
-        "type": "approval_resolved",
-        "event_id": "evt_legacy_denial",
-        "run_id": "run_legacy_denial",
-        "trace_id": "trace_legacy_denial",
-        "created_at": 123.456789,
-        "request_id": "approval_legacy_denial",
-        "tool_name": "shell",
-        "tool_call_id": "call_legacy_denial",
-        "action": "deny",
-        "approved": false
-      }
-    }
-  ],
   "reject": [
     {
       "id": "missing_version",
@@ -235,6 +130,32 @@
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
         "created_at": 1
+      }
+    },
+    {
+      "id": "unknown_top_level_field",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello",
+        "future_field": true
+      }
+    },
+    {
+      "id": "superseded_created_at_ms_field",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "created_at_ms": 1000,
+        "input": "hello"
       }
     },
     {
@@ -359,7 +280,7 @@
       }
     },
     {
-      "id": "approval_action_conflicts_with_approved",
+      "id": "approval_approved_field_is_rejected",
       "input": {
         "version": "v1",
         "type": "approval_resolved",
@@ -370,8 +291,53 @@
         "request_id": "approval_invalid",
         "tool_name": "shell",
         "tool_call_id": "call_invalid",
-        "action": "timeout",
+        "action": "allow",
         "approved": true
+      }
+    },
+    {
+      "id": "approval_preview_field_is_rejected",
+      "input": {
+        "version": "v1",
+        "type": "approval_requested",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "request_id": "approval_invalid",
+        "tool_name": "shell",
+        "tool_call_id": "call_invalid",
+        "message": "Allow command?",
+        "preview": "Allow command?"
+      }
+    },
+    {
+      "id": "approval_action_is_missing",
+      "input": {
+        "version": "v1",
+        "type": "approval_resolved",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "request_id": "approval_invalid",
+        "tool_name": "shell",
+        "tool_call_id": "call_invalid"
+      }
+    },
+    {
+      "id": "approval_action_is_unknown",
+      "input": {
+        "version": "v1",
+        "type": "approval_resolved",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "request_id": "approval_invalid",
+        "tool_name": "shell",
+        "tool_call_id": "call_invalid",
+        "action": "maybe"
       }
     },
     {

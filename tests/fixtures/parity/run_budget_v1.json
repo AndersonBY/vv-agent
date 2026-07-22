@@ -114,7 +114,7 @@
   },
   "runner_cases": [
     {
-      "name": "no_limits_preserve_legacy_terminal",
+      "name": "no_limits_uses_normal_terminal_flow",
       "limits": null,
       "no_tool_policy": "finish",
       "pre_cancelled": false,
@@ -462,7 +462,7 @@
             },
             {
               "id": "call-search-v2",
-              "name": "search_v2",
+              "name": "search",
               "arguments": {}
             }
           ]

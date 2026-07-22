@@ -116,77 +116,6 @@
       }
     }
   ],
-  "legacy_cases": [
-    {
-      "name": "legacy_system",
-      "input": {
-        "type": "system",
-        "content": "legacy system"
-      },
-      "canonical": {
-        "role": "system",
-        "content": "legacy system"
-      }
-    },
-    {
-      "name": "legacy_tool",
-      "input": {
-        "type": "tool",
-        "content": "legacy result",
-        "tool_call_id": "call_legacy"
-      },
-      "canonical": {
-        "role": "tool",
-        "content": "legacy result",
-        "tool_call_id": "call_legacy"
-      }
-    },
-    {
-      "name": "legacy_rich_message",
-      "input": {
-        "type": "message",
-        "message": {
-          "role": "assistant",
-          "content": "",
-          "name": "planner",
-          "tool_calls": [
-            {
-              "id": "call_legacy_message",
-              "type": "function",
-              "function": {
-                "name": "lookup",
-                "arguments": {
-                  "z": 1,
-                  "a": 2
-                }
-              }
-            }
-          ],
-          "metadata": {
-            "source": "legacy"
-          }
-        }
-      },
-      "canonical": {
-        "role": "assistant",
-        "content": "",
-        "name": "planner",
-        "tool_calls": [
-          {
-            "id": "call_legacy_message",
-            "type": "function",
-            "function": {
-              "name": "lookup",
-              "arguments": "{\"a\":2,\"z\":1}"
-            }
-          }
-        ],
-        "metadata": {
-          "source": "legacy"
-        }
-      }
-    }
-  ],
   "invalid_cases": [
     {
       "name": "message_must_be_object",
@@ -227,6 +156,13 @@
             }
           }
         ]
+      }
+    },
+    {
+      "name": "superseded_tagged_item_is_rejected",
+      "input": {
+        "type": "user",
+        "content": "old tagged wire"
       }
     }
   ]

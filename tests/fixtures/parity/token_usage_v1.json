@@ -1,6 +1,39 @@
 {
-  "contract": "token_usage_v1",
-  "schema_version": 1,
+  "contract": "token_usage",
+  "schema_version": "vv-agent.token-usage-contract.v1",
+  "wire": {
+    "token_usage_schema": "vv-agent.token-usage.v1",
+    "task_token_usage_schema": "vv-agent.task-token-usage.v1",
+    "objects_are_closed": true,
+    "missing_or_unknown_schema_is_rejected": true,
+    "unknown_counts_are_null_not_zero": true,
+    "cycle_shape": {
+      "cycle_index": 1,
+      "usage": {
+        "schema_version": "vv-agent.token-usage.v1",
+        "input_tokens": 1000,
+        "output_tokens": 120,
+        "total_tokens": 1120,
+        "reasoning_tokens": null,
+        "usage_source": "provider_reported",
+        "cache_usage": {
+          "status": "provider_reported",
+          "read_input_tokens": 640,
+          "write_input_tokens": null,
+          "uncached_input_tokens": 360,
+          "source": "provider_usage"
+        },
+        "provider_usage": {
+          "prompt_tokens": 1000,
+          "completion_tokens": 120,
+          "total_tokens": 1120,
+          "prompt_tokens_details": {
+            "cached_tokens": 640
+          }
+        }
+      }
+    }
+  },
   "usage_sources": [
     "provider_reported",
     "estimated",
@@ -27,23 +60,20 @@
         "cache_status_hint": null
       },
       "expected": {
-        "prompt_tokens": 1000,
-        "completion_tokens": 120,
-        "total_tokens": 1120,
-        "cached_tokens": 640,
-        "reasoning_tokens": 0,
+        "schema_version": "vv-agent.token-usage.v1",
         "input_tokens": 1000,
         "output_tokens": 120,
-        "cache_creation_tokens": 0,
+        "total_tokens": 1120,
+        "reasoning_tokens": null,
         "usage_source": "provider_reported",
         "cache_usage": {
           "status": "provider_reported",
-          "read_tokens": 640,
-          "write_tokens": null,
+          "read_input_tokens": 640,
+          "write_input_tokens": null,
           "uncached_input_tokens": 360,
           "source": "provider_usage"
         },
-        "raw": {
+        "provider_usage": {
           "prompt_tokens": 1000,
           "completion_tokens": 120,
           "total_tokens": 1120,
@@ -68,23 +98,20 @@
         "cache_status_hint": null
       },
       "expected": {
-        "prompt_tokens": 1000,
-        "completion_tokens": 100,
-        "total_tokens": 1100,
-        "cached_tokens": 0,
-        "reasoning_tokens": 0,
+        "schema_version": "vv-agent.token-usage.v1",
         "input_tokens": 1000,
         "output_tokens": 100,
-        "cache_creation_tokens": 0,
+        "total_tokens": 1100,
+        "reasoning_tokens": null,
         "usage_source": "provider_reported",
         "cache_usage": {
           "status": "provider_reported",
-          "read_tokens": 0,
-          "write_tokens": null,
+          "read_input_tokens": 0,
+          "write_input_tokens": null,
           "uncached_input_tokens": 1000,
           "source": "provider_usage"
         },
-        "raw": {
+        "provider_usage": {
           "prompt_tokens": 1000,
           "completion_tokens": 100,
           "total_tokens": 1100,
@@ -107,23 +134,20 @@
         "cache_status_hint": null
       },
       "expected": {
-        "prompt_tokens": 300,
-        "completion_tokens": 50,
-        "total_tokens": 350,
-        "cached_tokens": 600,
-        "reasoning_tokens": 0,
-        "input_tokens": 300,
+        "schema_version": "vv-agent.token-usage.v1",
+        "input_tokens": 1000,
         "output_tokens": 50,
-        "cache_creation_tokens": 100,
+        "total_tokens": 1050,
+        "reasoning_tokens": null,
         "usage_source": "provider_reported",
         "cache_usage": {
           "status": "provider_reported",
-          "read_tokens": 600,
-          "write_tokens": 100,
-          "uncached_input_tokens": 300,
+          "read_input_tokens": 600,
+          "write_input_tokens": 100,
+          "uncached_input_tokens": 400,
           "source": "provider_usage"
         },
-        "raw": {
+        "provider_usage": {
           "input_tokens": 300,
           "output_tokens": 50,
           "cache_read_input_tokens": 600,
@@ -135,39 +159,36 @@
       "name": "provider_normalized_cache_fields",
       "input": {
         "raw_usage": {
-          "prompt_tokens": 900,
-          "completion_tokens": 75,
+          "input_tokens": 900,
+          "output_tokens": 75,
           "total_tokens": 975,
-          "cache_read_tokens": 500,
-          "cache_creation_tokens": 100,
+          "cache_read_input_tokens": 500,
+          "cache_write_input_tokens": 100,
           "uncached_input_tokens": 300
         },
         "usage_source_hint": "provider_reported",
         "cache_status_hint": null
       },
       "expected": {
-        "prompt_tokens": 900,
-        "completion_tokens": 75,
-        "total_tokens": 975,
-        "cached_tokens": 500,
-        "reasoning_tokens": 0,
+        "schema_version": "vv-agent.token-usage.v1",
         "input_tokens": 900,
         "output_tokens": 75,
-        "cache_creation_tokens": 100,
+        "total_tokens": 975,
+        "reasoning_tokens": null,
         "usage_source": "provider_reported",
         "cache_usage": {
           "status": "provider_reported",
-          "read_tokens": 500,
-          "write_tokens": 100,
+          "read_input_tokens": 500,
+          "write_input_tokens": 100,
           "uncached_input_tokens": 300,
           "source": "provider_usage"
         },
-        "raw": {
-          "prompt_tokens": 900,
-          "completion_tokens": 75,
+        "provider_usage": {
+          "input_tokens": 900,
+          "output_tokens": 75,
           "total_tokens": 975,
-          "cache_read_tokens": 500,
-          "cache_creation_tokens": 100,
+          "cache_read_input_tokens": 500,
+          "cache_write_input_tokens": 100,
           "uncached_input_tokens": 300
         }
       }
@@ -176,33 +197,30 @@
       "name": "estimated_usage",
       "input": {
         "raw_usage": {
-          "prompt_tokens": 80,
-          "completion_tokens": 20,
+          "input_tokens": 80,
+          "output_tokens": 20,
           "total_tokens": 100
         },
         "usage_source_hint": "estimated",
         "cache_status_hint": null
       },
       "expected": {
-        "prompt_tokens": 80,
-        "completion_tokens": 20,
-        "total_tokens": 100,
-        "cached_tokens": 0,
-        "reasoning_tokens": 0,
+        "schema_version": "vv-agent.token-usage.v1",
         "input_tokens": 80,
         "output_tokens": 20,
-        "cache_creation_tokens": 0,
+        "total_tokens": 100,
+        "reasoning_tokens": null,
         "usage_source": "estimated",
         "cache_usage": {
           "status": "accounting_missing",
-          "read_tokens": null,
-          "write_tokens": null,
+          "read_input_tokens": null,
+          "write_input_tokens": null,
           "uncached_input_tokens": null,
           "source": null
         },
-        "raw": {
-          "prompt_tokens": 80,
-          "completion_tokens": 20,
+        "provider_usage": {
+          "input_tokens": 80,
+          "output_tokens": 20,
           "total_tokens": 100
         }
       }
@@ -211,33 +229,30 @@
       "name": "provider_usage_without_cache_details",
       "input": {
         "raw_usage": {
-          "prompt_tokens": 80,
-          "completion_tokens": 20,
+          "input_tokens": 80,
+          "output_tokens": 20,
           "total_tokens": 100
         },
         "usage_source_hint": "provider_reported",
         "cache_status_hint": null
       },
       "expected": {
-        "prompt_tokens": 80,
-        "completion_tokens": 20,
-        "total_tokens": 100,
-        "cached_tokens": 0,
-        "reasoning_tokens": 0,
+        "schema_version": "vv-agent.token-usage.v1",
         "input_tokens": 80,
         "output_tokens": 20,
-        "cache_creation_tokens": 0,
+        "total_tokens": 100,
+        "reasoning_tokens": null,
         "usage_source": "provider_reported",
         "cache_usage": {
           "status": "accounting_missing",
-          "read_tokens": null,
-          "write_tokens": null,
+          "read_input_tokens": null,
+          "write_input_tokens": null,
           "uncached_input_tokens": null,
           "source": null
         },
-        "raw": {
-          "prompt_tokens": 80,
-          "completion_tokens": 20,
+        "provider_usage": {
+          "input_tokens": 80,
+          "output_tokens": 20,
           "total_tokens": 100
         }
       }
@@ -246,33 +261,30 @@
       "name": "adapter_declares_cache_unsupported",
       "input": {
         "raw_usage": {
-          "prompt_tokens": 80,
-          "completion_tokens": 20,
+          "input_tokens": 80,
+          "output_tokens": 20,
           "total_tokens": 100
         },
         "usage_source_hint": "provider_reported",
         "cache_status_hint": "unsupported"
       },
       "expected": {
-        "prompt_tokens": 80,
-        "completion_tokens": 20,
-        "total_tokens": 100,
-        "cached_tokens": 0,
-        "reasoning_tokens": 0,
+        "schema_version": "vv-agent.token-usage.v1",
         "input_tokens": 80,
         "output_tokens": 20,
-        "cache_creation_tokens": 0,
+        "total_tokens": 100,
+        "reasoning_tokens": null,
         "usage_source": "provider_reported",
         "cache_usage": {
           "status": "unsupported",
-          "read_tokens": null,
-          "write_tokens": null,
+          "read_input_tokens": null,
+          "write_input_tokens": null,
           "uncached_input_tokens": null,
           "source": "adapter_capability"
         },
-        "raw": {
-          "prompt_tokens": 80,
-          "completion_tokens": 20,
+        "provider_usage": {
+          "input_tokens": 80,
+          "output_tokens": 20,
           "total_tokens": 100
         }
       }
@@ -285,62 +297,56 @@
         "cache_status_hint": null
       },
       "expected": {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-        "cached_tokens": 0,
-        "reasoning_tokens": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cache_creation_tokens": 0,
+        "schema_version": "vv-agent.token-usage.v1",
+        "input_tokens": null,
+        "output_tokens": null,
+        "total_tokens": null,
+        "reasoning_tokens": null,
         "usage_source": "accounting_missing",
         "cache_usage": {
           "status": "accounting_missing",
-          "read_tokens": null,
-          "write_tokens": null,
+          "read_input_tokens": null,
+          "write_input_tokens": null,
           "uncached_input_tokens": null,
           "source": null
         },
-        "raw": {}
+        "provider_usage": {}
       }
     },
     {
       "name": "invalid_cache_numbers_are_not_zero",
       "input": {
         "raw_usage": {
-          "prompt_tokens": 80,
-          "completion_tokens": 20,
+          "input_tokens": 80,
+          "output_tokens": 20,
           "total_tokens": 100,
-          "cache_read_tokens": "not-a-number",
-          "cache_creation_tokens": -1,
+          "cache_read_input_tokens": "not-a-number",
+          "cache_write_input_tokens": -1,
           "uncached_input_tokens": 12.5
         },
         "usage_source_hint": "provider_reported",
         "cache_status_hint": null
       },
       "expected": {
-        "prompt_tokens": 80,
-        "completion_tokens": 20,
-        "total_tokens": 100,
-        "cached_tokens": 0,
-        "reasoning_tokens": 0,
+        "schema_version": "vv-agent.token-usage.v1",
         "input_tokens": 80,
         "output_tokens": 20,
-        "cache_creation_tokens": 0,
+        "total_tokens": 100,
+        "reasoning_tokens": null,
         "usage_source": "provider_reported",
         "cache_usage": {
           "status": "accounting_missing",
-          "read_tokens": null,
-          "write_tokens": null,
+          "read_input_tokens": null,
+          "write_input_tokens": null,
           "uncached_input_tokens": null,
           "source": null
         },
-        "raw": {
-          "prompt_tokens": 80,
-          "completion_tokens": 20,
+        "provider_usage": {
+          "input_tokens": 80,
+          "output_tokens": 20,
           "total_tokens": 100,
-          "cache_read_tokens": "not-a-number",
-          "cache_creation_tokens": -1,
+          "cache_read_input_tokens": "not-a-number",
+          "cache_write_input_tokens": -1,
           "uncached_input_tokens": 12.5
         }
       }
@@ -352,23 +358,23 @@
       "cycles": [
         {
           "status": "provider_reported",
-          "read_tokens": 640,
-          "write_tokens": null,
+          "read_input_tokens": 640,
+          "write_input_tokens": 0,
           "uncached_input_tokens": 360,
           "source": "provider_usage"
         },
         {
           "status": "provider_reported",
-          "read_tokens": 0,
-          "write_tokens": null,
+          "read_input_tokens": 0,
+          "write_input_tokens": 0,
           "uncached_input_tokens": 1000,
           "source": "provider_usage"
         }
       ],
       "expected": {
         "status": "provider_reported",
-        "read_tokens": 640,
-        "write_tokens": null,
+        "read_input_tokens": 640,
+        "write_input_tokens": 0,
         "uncached_input_tokens": 1360,
         "source": "aggregate"
       }
@@ -378,23 +384,23 @@
       "cycles": [
         {
           "status": "provider_reported",
-          "read_tokens": 640,
-          "write_tokens": null,
+          "read_input_tokens": 640,
+          "write_input_tokens": null,
           "uncached_input_tokens": 360,
           "source": "provider_usage"
         },
         {
           "status": "accounting_missing",
-          "read_tokens": null,
-          "write_tokens": null,
+          "read_input_tokens": null,
+          "write_input_tokens": null,
           "uncached_input_tokens": null,
           "source": null
         }
       ],
       "expected": {
         "status": "accounting_missing",
-        "read_tokens": null,
-        "write_tokens": null,
+        "read_input_tokens": null,
+        "write_input_tokens": null,
         "uncached_input_tokens": null,
         "source": "aggregate"
       }
@@ -404,25 +410,49 @@
       "cycles": [
         {
           "status": "unsupported",
-          "read_tokens": null,
-          "write_tokens": null,
+          "read_input_tokens": null,
+          "write_input_tokens": null,
           "uncached_input_tokens": null,
           "source": "adapter_capability"
         },
         {
           "status": "unsupported",
-          "read_tokens": null,
-          "write_tokens": null,
+          "read_input_tokens": null,
+          "write_input_tokens": null,
           "uncached_input_tokens": null,
           "source": "adapter_capability"
         }
       ],
       "expected": {
         "status": "unsupported",
-        "read_tokens": null,
-        "write_tokens": null,
+        "read_input_tokens": null,
+        "write_input_tokens": null,
         "uncached_input_tokens": null,
         "source": "aggregate"
+      }
+    }
+  ],
+  "invalid_wire_cases": [
+    {
+      "name": "missing_schema_version",
+      "remove": "schema_version"
+    },
+    {
+      "name": "stale_schema_version",
+      "replace": {
+        "schema_version": "vv-agent.token-usage.v0"
+      }
+    },
+    {
+      "name": "unknown_field",
+      "add": {
+        "prompt_tokens": 1000
+      }
+    },
+    {
+      "name": "negative_input",
+      "replace": {
+        "input_tokens": -1
       }
     }
   ]

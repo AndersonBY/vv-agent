@@ -372,28 +372,6 @@
           }
         }
       ]
-    },
-    "legacyCompleted": {
-      "inputHasAdditiveFields": false,
-      "notification": {
-        "jsonrpc": "2.0",
-        "method": "item/completed",
-        "params": {
-          "itemId": "item_evt_tool_legacy",
-          "threadId": "thread-tool",
-          "turnId": "turn-tool",
-          "type": "toolCall",
-          "status": "completed",
-          "payload": {
-            "toolName": "lookup",
-            "toolCallId": "call_legacy",
-            "status": "success"
-          },
-          "createdAt": 99,
-          "updatedAt": 99
-        }
-      },
-      "fabricatedFields": []
     }
   },
   "durableResume": {

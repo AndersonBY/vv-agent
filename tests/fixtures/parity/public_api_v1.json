@@ -776,31 +776,6 @@
           "rust": "vv_agent::RuntimeRecipe"
         },
         {
-          "id": "runtime_backend.state_store",
-          "python": "vv_agent.runtime.state.StateStore",
-          "rust": "vv_agent::StateStore"
-        },
-        {
-          "id": "runtime_backend.in_memory_state_store",
-          "python": "vv_agent.runtime.state.InMemoryStateStore",
-          "rust": "vv_agent::InMemoryStateStore"
-        },
-        {
-          "id": "runtime_backend.sqlite_state_store",
-          "python": "vv_agent.runtime.stores.sqlite.SqliteStateStore",
-          "rust": "vv_agent::SqliteStateStore"
-        },
-        {
-          "id": "runtime_backend.redis_state_store",
-          "python": "vv_agent.runtime.stores.redis.RedisStateStore",
-          "rust": "vv_agent::RedisStateStore"
-        },
-        {
-          "id": "runtime_backend.checkpoint",
-          "python": "vv_agent.runtime.Checkpoint",
-          "rust": "vv_agent::Checkpoint"
-        },
-        {
           "id": "runtime_backend.agent_runtime",
           "python": "vv_agent.runtime.AgentRuntime",
           "rust": "vv_agent::AgentRuntime"
@@ -816,14 +791,29 @@
           "rust": "vv_agent::ToolCallRunner"
         },
         {
-          "id": "runtime_backend.checkpoint_v2",
-          "python": "vv_agent.runtime.CheckpointV2",
-          "rust": "vv_agent::CheckpointV2"
+          "id": "runtime_backend.checkpoint",
+          "python": "vv_agent.runtime.Checkpoint",
+          "rust": "vv_agent::Checkpoint"
         },
         {
-          "id": "runtime_backend.checkpoint_store_v2",
-          "python": "vv_agent.runtime.CheckpointStoreV2",
-          "rust": "vv_agent::CheckpointStoreV2"
+          "id": "runtime_backend.checkpoint_store",
+          "python": "vv_agent.runtime.CheckpointStore",
+          "rust": "vv_agent::CheckpointStore"
+        },
+        {
+          "id": "runtime_backend.in_memory_checkpoint_store",
+          "python": "vv_agent.runtime.InMemoryCheckpointStore",
+          "rust": "vv_agent::InMemoryCheckpointStore"
+        },
+        {
+          "id": "runtime_backend.sqlite_checkpoint_store",
+          "python": "vv_agent.runtime.stores.sqlite.SqliteCheckpointStore",
+          "rust": "vv_agent::SqliteCheckpointStore"
+        },
+        {
+          "id": "runtime_backend.redis_checkpoint_store",
+          "python": "vv_agent.runtime.stores.redis.RedisCheckpointStore",
+          "rust": "vv_agent::RedisCheckpointStore"
         },
         {
           "id": "runtime_backend.idempotent_event_store",
@@ -1999,34 +1989,6 @@
             "declaration": "dataclass_field",
             "kind": "field",
             "name": "default_backend"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "model_provider"
-          }
-        },
-        {
-          "adaptation": "Python supports a legacy builder callback; Rust uses the ModelProvider interface.",
-          "id": "llm_builder",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "llm_builder"
-          },
-          "rust": {
-            "kind": "field",
-            "name": "model_provider"
-          }
-        },
-        {
-          "adaptation": "Python's legacy settings adapter carries timeout; Rust's provider/client owns transport timeout.",
-          "id": "timeout_seconds",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "timeout_seconds"
           },
           "rust": {
             "kind": "field",
@@ -4197,19 +4159,6 @@
             "kind": "method",
             "name": "metadata",
             "target": "vv_agent::ToolExecutor"
-          }
-        },
-        {
-          "id": "idempotency",
-          "kind": "field",
-          "python": {
-            "declaration": "dataclass_field",
-            "kind": "field",
-            "name": "idempotency"
-          },
-          "rust": {
-            "kind": "method",
-            "name": "idempotency"
           }
         },
         {

@@ -2,15 +2,66 @@
   "contract": "checkpoint_codec_v2",
   "version": 2,
   "discriminator": {
-    "v1_when_field_absent": true,
-    "v2_value": "vv-agent.checkpoint.v2",
-    "unknown_present_value_error": "checkpoint_schema_unsupported",
-    "v1_writer_unchanged": true
+    "required_value": "vv-agent.checkpoint.v2",
+    "missing_or_unknown_error": "checkpoint_schema_unsupported"
   },
   "canonical_checkpoint": {
     "schema_version": "vv-agent.checkpoint.v2",
     "run_definition_schema": "vv-agent.run-definition.v1",
-    "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+    "run_definition": {
+      "schema_version": "vv-agent.run-definition.v1",
+      "agent": {
+        "name": "checkpoint-agent",
+        "type": null
+      },
+      "root_input": "Summarize the status.",
+      "compiled_prompt": "You are a careful assistant.",
+      "initial_messages": [],
+      "initial_shared_state": {},
+      "run_metadata": {},
+      "context_ref": null,
+      "model": {
+        "backend": "test",
+        "model_id": "test-model",
+        "transport_timeout_seconds": 90,
+        "settings": {}
+      },
+      "credential_slots": [],
+      "runtime_controls": {
+        "max_cycles": 10,
+        "max_handoffs": 10,
+        "no_tool_policy": "continue",
+        "memory_compact_threshold": 128000,
+        "memory_threshold_percentage": 90,
+        "allow_interruption": true,
+        "native_multimodal": false,
+        "tool_use_behavior": "run_llm_again",
+        "stop_at_tool_names": []
+      },
+      "tools": [],
+      "tool_policy": {
+        "allowed_tools": null,
+        "disallowed_tools": [],
+        "approval": "default",
+        "predicate_ref": null,
+        "approval_timeout_seconds": null,
+        "denied_side_effects": [],
+        "denied_capability_tags": [],
+        "deny_terminal_tools": false,
+        "denied_cost_dimensions": []
+      },
+      "checkpoint_policy": {
+        "ambiguous_model_policy": "require_reconciliation",
+        "ambiguous_tool_policy": "require_reconciliation",
+        "max_extension_state_bytes": 262144
+      },
+      "budget_limits": null,
+      "output_schema": null,
+      "workspace_ref": null,
+      "session_ref": null,
+      "extensions": [],
+      "capability_refs": {}
+    },
     "checkpoint_key": "tenant-7/run-42",
     "task_id": "research_8a4c21fe",
     "root_run_id": "run_01JZCHECKPOINT",
@@ -41,21 +92,23 @@
         "tool_results": [],
         "memory_compacted": false,
         "token_usage": {
-          "prompt_tokens": 12,
-          "completion_tokens": 8,
+          "schema_version": "vv-agent.token-usage.v1",
+          "input_tokens": 12,
+          "output_tokens": 8,
           "total_tokens": 20,
-          "cached_tokens": 0,
-          "reasoning_tokens": 0,
-          "input_tokens": 0,
-          "output_tokens": 0,
-          "cache_creation_tokens": 0,
+          "reasoning_tokens": null,
           "usage_source": "provider_reported",
           "cache_usage": {
             "status": "accounting_missing",
-            "read_tokens": null,
-            "write_tokens": null,
+            "read_input_tokens": null,
+            "write_input_tokens": null,
             "uncached_input_tokens": null,
             "source": null
+          },
+          "provider_usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "total_tokens": 20
           }
         }
       }
@@ -73,14 +126,14 @@
       "elapsed_ms": 125,
       "host_cost": null,
       "unavailable_dimensions": [
-      {
-        "dimension": "uncached_input_tokens",
-        "reason": "usage_missing",
-        "expected_unit": "tokens",
-        "observed_unit": null,
-        "expected_currency": null,
-        "observed_currency": null
-      }
+        {
+          "dimension": "uncached_input_tokens",
+          "reason": "usage_missing",
+          "expected_unit": "tokens",
+          "observed_unit": null,
+          "expected_currency": null,
+          "observed_currency": null
+        }
       ]
     },
     "event_cursor": {
@@ -168,10 +221,7 @@
     "claimed_cycle": 2,
     "lease_expires_at_ms": 2000000000000,
     "terminal_result": null,
-    "terminal_acknowledged": false,
-    "vendor_future": {
-      "preserve": true
-    }
+    "terminal_acknowledged": false
   },
   "required_fields": [
     "schema_version",
@@ -253,31 +303,23 @@
     }
   ],
   "run_definition_schema_rules": {
-    "writer_value": "vv-agent.run-definition.v1",
-    "required_for_0_5_1_writer": true,
-    "missing_0_5_0_value": "checkpoint_definition_schema_unsupported",
-    "unknown_value": "checkpoint_definition_schema_unsupported",
-    "failure_boundary": "before_claim_model_or_tool",
-    "explicit_host_migration_required": true
+    "required_value": "vv-agent.run-definition.v1",
+    "missing_or_unknown_error": "checkpoint_definition_schema_unsupported",
+    "failure_boundary": "before_claim_model_or_tool"
   },
   "run_definition_rules": {
     "embedded_credential_redacted_definition_required": true,
     "digest_must_equal_rfc8785_sha256_of_embedded_definition": true,
     "resume_uses_embedded_initial_messages_shared_state_prompt_and_metadata": true,
     "current_capability_ids_and_versions_must_match_embedded_references": true,
-    "legacy_additive_defaults_are_applied_to_comparison_copy_only": true,
-    "legacy_definition_and_digest_are_never_rewritten": true,
     "mismatch_error": "checkpoint_definition_mismatch"
   },
   "run_definition_schema_cases": [
     {
-      "name": "missing_schema_from_0_5_0_requires_migration",
+      "name": "missing_definition_schema_fails_closed",
       "base_valid_case": "minimal_running",
       "mutation": {
-        "remove": [
-          "run_definition_schema",
-          "run_definition"
-        ]
+        "remove": "run_definition_schema"
       },
       "expected_error_code": "checkpoint_definition_schema_unsupported",
       "expected": {
@@ -329,47 +371,66 @@
       "error_code": "checkpoint_definition_mismatch"
     }
   ],
-  "legacy_additive_reader_cases": [
-    {
-      "name": "0_7_1_minimal_definition_uses_policy_defaults",
-      "source_fixture": "run_definition_legacy_v1.json#minimal",
-      "stored_digest": "a630a668985d2157f7f8570a1871b320a1df229d40807d019682a0caf3bda1b3",
-      "current_writer_fixture": "run_definition_v1.json#minimal",
-      "current_writer_digest": "317014f812ca868f02939f292b2c545886400e29fdb33c82ee2550bae2be78ca",
-      "expected": {
-        "readable": true,
-        "comparison_copy_matches_current_writer": true,
-        "stored_definition_unchanged": true,
-        "stored_digest_unchanged": true,
-        "claim_count_before_validation": 0,
-        "model_calls_before_validation": 0,
-        "tool_calls_before_validation": 0
-      }
-    },
-    {
-      "name": "0_7_1_full_definition_uses_tool_and_policy_defaults",
-      "source_fixture": "run_definition_legacy_v1.json#full_unicode_float_and_capabilities",
-      "stored_digest": "fafb6b3d5429f0451278c647eb46f4eef594e5302adcdd7040ba0895014ba40f",
-      "current_writer_fixture": "run_definition_v1.json#full_legacy_shape_with_additive_defaults",
-      "current_writer_digest": "cf3c211df70a723908d48c937d9097df01511d00981bb4d70a1bb7fa710e7828",
-      "expected": {
-        "readable": true,
-        "comparison_copy_matches_current_writer": true,
-        "stored_definition_unchanged": true,
-        "stored_digest_unchanged": true,
-        "claim_count_before_validation": 0,
-        "model_calls_before_validation": 0,
-        "tool_calls_before_validation": 0
-      }
-    }
-  ],
   "valid_cases": [
     {
       "name": "minimal_running",
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -400,7 +461,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "needs-reconciliation",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -450,7 +564,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "tenant-7/run-42",
         "task_id": "research_8a4c21fe",
         "root_run_id": "run_01JZCHECKPOINT",
@@ -481,21 +648,23 @@
             "tool_results": [],
             "memory_compacted": false,
             "token_usage": {
-              "prompt_tokens": 12,
-              "completion_tokens": 8,
+              "schema_version": "vv-agent.token-usage.v1",
+              "input_tokens": 12,
+              "output_tokens": 8,
               "total_tokens": 20,
-              "cached_tokens": 0,
-              "reasoning_tokens": 0,
-              "input_tokens": 0,
-              "output_tokens": 0,
-              "cache_creation_tokens": 0,
+              "reasoning_tokens": null,
               "usage_source": "provider_reported",
               "cache_usage": {
                 "status": "accounting_missing",
-                "read_tokens": null,
-                "write_tokens": null,
+                "read_input_tokens": null,
+                "write_input_tokens": null,
                 "uncached_input_tokens": null,
                 "source": null
+              },
+              "provider_usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 8,
+                "total_tokens": 20
               }
             }
           }
@@ -615,7 +784,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "terminal",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -654,21 +876,17 @@
           "error": null,
           "shared_state": {},
           "token_usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "cached_tokens": 0,
-            "reasoning_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_tokens": 0,
-            "usage_source": "accounting_missing",
+            "schema_version": "vv-agent.task-token-usage.v1",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "reasoning_tokens": null,
             "cache_usage": {
               "status": "accounting_missing",
-              "read_tokens": null,
-              "write_tokens": null,
+              "read_input_tokens": null,
+              "write_input_tokens": null,
               "uncached_input_tokens": null,
-              "source": null
+              "source": "aggregate"
             },
             "cycles": []
           },
@@ -681,45 +899,64 @@
       }
     },
     {
-      "name": "unknown_top_level_is_preserved",
-      "payload": {
-        "schema_version": "vv-agent.checkpoint.v2",
-        "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
-        "checkpoint_key": "fresh",
-        "task_id": "task-1",
-        "root_run_id": "run-1",
-        "trace_id": "trace-1",
-        "run_definition_digest": "317014f812ca868f02939f292b2c545886400e29fdb33c82ee2550bae2be78ca",
-        "resume_attempt": 1,
-        "cycle_index": 0,
-        "status": "running",
-        "messages": [],
-        "cycles": [],
-        "shared_state": {},
-        "budget_usage": null,
-        "event_cursor": null,
-        "event_outbox": [],
-        "extension_state": {},
-        "model_call_journal": [],
-        "tool_journal": [],
-        "revision": 0,
-        "claim_token": null,
-        "claimed_cycle": null,
-        "lease_expires_at_ms": null,
-        "terminal_result": null,
-        "terminal_acknowledged": false,
-        "vendor_future": {
-          "preserve": true
-        }
-      }
-    },
-    {
       "name": "unknown_optional_extension_is_preserved",
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -790,7 +1027,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": " ",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -822,7 +1112,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -854,7 +1197,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -886,7 +1282,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -918,7 +1367,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -950,7 +1452,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "terminal",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -989,21 +1544,17 @@
           "error": null,
           "shared_state": {},
           "token_usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "cached_tokens": 0,
-            "reasoning_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_tokens": 0,
-            "usage_source": "accounting_missing",
+            "schema_version": "vv-agent.task-token-usage.v1",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "reasoning_tokens": null,
             "cache_usage": {
               "status": "accounting_missing",
-              "read_tokens": null,
-              "write_tokens": null,
+              "read_input_tokens": null,
+              "write_input_tokens": null,
               "uncached_input_tokens": null,
-              "source": null
+              "source": "aggregate"
             },
             "cycles": []
           },
@@ -1021,7 +1572,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -1065,7 +1669,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -1106,7 +1763,60 @@
       "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
         "run_definition_schema": "vv-agent.run-definition.v1",
-        "run_definition": {"agent":{"name":"checkpoint-agent","type":null},"budget_limits":null,"capability_refs":{},"checkpoint_policy":{"ambiguous_model_policy":"require_reconciliation","ambiguous_tool_policy":"require_reconciliation","max_extension_state_bytes":262144},"compiled_prompt":"You are a careful assistant.","context_ref":null,"credential_slots":[],"extensions":[],"initial_messages":[],"initial_shared_state":{},"model":{"backend":"test","model_id":"test-model","settings":{},"transport_timeout_seconds":90},"output_schema":null,"root_input":"Summarize the status.","run_metadata":{},"runtime_controls":{"allow_interruption":true,"max_cycles":10,"max_handoffs":10,"memory_compact_threshold":128000,"memory_threshold_percentage":90,"native_multimodal":false,"no_tool_policy":"continue","stop_at_tool_names":[],"tool_use_behavior":"run_llm_again"},"schema_version":"vv-agent.run-definition.v1","session_ref":null,"tool_policy":{"allowed_tools":null,"approval":"default","approval_timeout_seconds":null,"denied_capability_tags":[],"denied_cost_dimensions":[],"denied_side_effects":[],"deny_terminal_tools":false,"disallowed_tools":[],"predicate_ref":null},"tools":[],"workspace_ref":null},
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
@@ -1138,21 +1848,71 @@
         "terminal_acknowledged": false
       },
       "error": "checkpoint_extension_namespace_invalid"
-    }
-  ],
-  "migration_cases": [
+    },
     {
-      "name": "checkpoint_0_5_0_v2_requires_explicit_definition_migration",
-      "source_contract_version": "0.5.0",
-      "source_contract_revision": "173bd578afdff612ef4a0e48f4e63c1f248a5764",
-      "source_fixture": "v0.5.0:fixtures/checkpoint_codec_v2.json#minimal_running",
-      "source_payload": {
+      "name": "unknown_top_level_is_rejected",
+      "payload": {
         "schema_version": "vv-agent.checkpoint.v2",
+        "run_definition_schema": "vv-agent.run-definition.v1",
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v1",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "compiled_prompt": "You are a careful assistant.",
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "memory_compact_threshold": 128000,
+            "memory_threshold_percentage": 90,
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "run_definition_digest": "317014f812ca868f02939f292b2c545886400e29fdb33c82ee2550bae2be78ca",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1170,199 +1930,12 @@
         "claimed_cycle": null,
         "lease_expires_at_ms": null,
         "terminal_result": null,
-        "terminal_acknowledged": false
-      },
-      "automatic_resume": {
-        "allowed": false,
-        "error_code": "checkpoint_definition_schema_unsupported",
-        "capability_resolution_count": 0,
-        "claim_count": 0,
-        "model_calls": 0,
-        "tool_calls": 0
-      },
-      "explicit_host_migration": {
-        "requires_no_live_claim": true,
-        "requires_complete_journal_validation": true,
-        "requires_host_attestation_of_logical_definition": true,
-        "target_run_definition_schema": "vv-agent.run-definition.v1",
-        "target_run_definition_fixture": "run_definition_v1.json#minimal",
-        "target_run_definition_digest": "317014f812ca868f02939f292b2c545886400e29fdb33c82ee2550bae2be78ca",
-        "atomic_fields": [
-          "run_definition_schema",
-          "run_definition",
-          "run_definition_digest",
-          "revision"
-        ],
-        "implicit_guess_of_0_5_0_digest_algorithm": false
-      }
-    },
-    {
-      "name": "absent_discriminator_reads_v1",
-      "source": {
-        "task_id": "legacy-terminal",
-        "cycle_index": 1,
-        "status": "completed",
-        "messages": [
-          {
-            "role": "assistant",
-            "content": "legacy done"
-          }
-        ],
-        "cycles": [],
-        "shared_state": {},
-        "revision": 4,
-        "terminal_result": {
-          "status": "completed",
-          "completion_reason": "no_tool_finish",
-          "completion_tool_name": null,
-          "partial_output": null,
-          "messages": [
-            {
-              "role": "assistant",
-              "content": "done"
-            }
-          ],
-          "cycles": [],
-          "final_answer": "done",
-          "wait_reason": null,
-          "error": null,
-          "shared_state": {},
-          "token_usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "cached_tokens": 0,
-            "reasoning_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_tokens": 0,
-            "usage_source": "accounting_missing",
-            "cache_usage": {
-              "status": "accounting_missing",
-              "read_tokens": null,
-              "write_tokens": null,
-              "uncached_input_tokens": null,
-              "source": null
-            },
-            "cycles": []
-          },
-          "budget_usage": null,
-          "budget_exhaustion": null
+        "terminal_acknowledged": false,
+        "vendor_future": {
+          "preserve": true
         }
       },
-      "expected_decoder": "v1",
-      "automatic_v2_migration": false
-    },
-    {
-      "name": "terminal_v1_explicit_migration",
-      "source": {
-        "task_id": "legacy-terminal",
-        "cycle_index": 1,
-        "status": "completed",
-        "messages": [
-          {
-            "role": "assistant",
-            "content": "legacy done"
-          }
-        ],
-        "cycles": [],
-        "shared_state": {},
-        "revision": 4,
-        "terminal_result": {
-          "status": "completed",
-          "completion_reason": "no_tool_finish",
-          "completion_tool_name": null,
-          "partial_output": null,
-          "messages": [
-            {
-              "role": "assistant",
-              "content": "done"
-            }
-          ],
-          "cycles": [],
-          "final_answer": "done",
-          "wait_reason": null,
-          "error": null,
-          "shared_state": {},
-          "token_usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "cached_tokens": 0,
-            "reasoning_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_tokens": 0,
-            "usage_source": "accounting_missing",
-            "cache_usage": {
-              "status": "accounting_missing",
-              "read_tokens": null,
-              "write_tokens": null,
-              "uncached_input_tokens": null,
-              "source": null
-            },
-            "cycles": []
-          },
-          "budget_usage": null,
-          "budget_exhaustion": null
-        }
-      },
-      "target_key": "migrated-terminal",
-      "expected": {
-        "allowed": true,
-        "status": "completed",
-        "terminal_replayed": true,
-        "model_calls": 0,
-        "tool_calls": 0
-      }
-    },
-    {
-      "name": "running_v1_requires_reconciliation",
-      "source": {
-        "task_id": "legacy-terminal",
-        "cycle_index": 1,
-        "status": "running",
-        "messages": [
-          {
-            "role": "assistant",
-            "content": "legacy done"
-          }
-        ],
-        "cycles": [],
-        "shared_state": {},
-        "revision": 4,
-        "terminal_result": null
-      },
-      "expected": {
-        "allowed": false,
-        "status": "reconciliation_required",
-        "reason": "legacy_non_terminal_unjournaled_operations"
-      }
-    },
-    {
-      "name": "active_v1_claim_cannot_migrate",
-      "source": {
-        "task_id": "legacy-terminal",
-        "cycle_index": 1,
-        "status": "running",
-        "messages": [
-          {
-            "role": "assistant",
-            "content": "legacy done"
-          }
-        ],
-        "cycles": [],
-        "shared_state": {},
-        "revision": 4,
-        "terminal_result": null,
-        "claim_token": "legacy-claim",
-        "claimed_cycle": 2,
-        "lease_expires_at_ms": 99
-      },
-      "expected": {
-        "allowed": false,
-        "error": "checkpoint_migration_active_claim"
-      }
+      "error": "checkpoint_unknown_field"
     }
   ],
   "extension_limits": {
@@ -1384,9 +1957,9 @@
             "astral": "😀",
             "escaped": "quote\" slash\\ newline\n",
             "numbers": {
-              "one": 1.0,
+              "one": 1,
               "small": 1e-7,
-              "negative_zero": -0.0
+              "negative_zero": 0
             },
             "array": [
               true,
@@ -1499,7 +2072,7 @@
     ]
   },
   "unknown_field_policy": {
-    "top_level_whole_object_store": "preserve",
+    "top_level_whole_object_store": "reject",
     "extension_optional": "preserve_without_restore",
     "extension_required": "block_resume"
   }

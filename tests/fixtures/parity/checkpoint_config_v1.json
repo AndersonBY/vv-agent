@@ -309,11 +309,11 @@
     "agent_as_tool_child_inherits_parent_checkpoint_config": false,
     "background_agent_child_inherits_parent_checkpoint_config": false,
     "child_may_use_an_explicit_distinct_checkpoint_key": true,
-    "handoff_with_checkpoint_v2": "fail_before_external_operations_until_the_complete_handoff_graph_and_active_agent_state_are_contractual",
+    "handoff_with_checkpoint": "fail_before_external_operations_until_the_complete_handoff_graph_and_active_agent_state_are_contractual",
     "handoff_error_code": "checkpoint_handoff_unsupported",
     "approval_resume_reenters_operation_journal": true,
     "approval_resume_reuses_source_checkpoint_key": false,
-    "approval_resume_requires_distinct_key_when_checkpoint_v2_enabled": true
+    "approval_resume_requires_distinct_key_when_checkpoint_enabled": true
   },
   "resume_attempt_rules": {
     "created_record": 1,
@@ -331,7 +331,7 @@
       "run_config": null,
       "existing": null,
       "expected": {
-        "checkpoint_v2_enabled": false,
+        "checkpoint_enabled": false,
         "model_calls": 1,
         "tool_calls": 0,
         "checkpoint_events": []
@@ -461,7 +461,7 @@
       },
       "expected": {
         "parent_checkpoint_key": "parent-run",
-        "child_checkpoint_v2_enabled": false,
+        "child_checkpoint_enabled": false,
         "child_checkpoint_key": null
       }
     },

@@ -40,7 +40,7 @@
       "deny_terminal_tools_non_boolean": 1,
       "denied_cost_dimensions_non_array": "workflow.credit"
     },
-    "unknown_top_level_fields": "ignore"
+    "unknown_top_level_fields": "reject"
   },
   "model_resolution": {
     "blank_backend_input": "  ",
@@ -58,11 +58,10 @@
     "same_model_reuses_parent_client_only_without_explicit_backend": true,
     "same_model_parent_client_inherits_token_limits": true,
     "resolved_token_limits": {
-      "context_length": 32000,
-      "max_output_tokens": 4096,
+      "context_length": 1000000,
+      "max_output_tokens": null,
       "task_metadata": {
-        "model_context_window": 32000,
-        "model_max_output_tokens": 4096
+        "model_context_window": 1000000
       },
       "explicit_child_metadata_wins": true
     }
@@ -183,7 +182,7 @@
       "event_sink",
       "memory_providers",
       "model_provider",
-      "state_store",
+      "checkpoint_store",
       "stream_sink",
       "trace_context"
     ],
@@ -575,7 +574,7 @@
     "failure_error_code_in_metadata": true,
     "failure_error_code_fallback": "sub_task_failed",
     "omit_token_usage_when_unavailable": true,
-    "preserve_successful_zero_token_usage": true,
+    "preserve_successful_missing_token_usage": true,
     "preserve_failed_usage_after_completed_cycle": true,
     "panic_or_exception_cleanup": {
       "active_state_cleared": true,

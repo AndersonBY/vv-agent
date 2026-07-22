@@ -1,14 +1,8 @@
 {
   "schema_version": "vv-agent.distributed-run.v2",
-  "compatibility": {
-    "v1_fixture": "distributed_run_envelope_v1.json",
-    "v1_bytes_must_remain_unchanged": true,
-    "decoder": "discriminator_dispatch",
-    "enabled_v2_never_writes_v1_namespace": true
-  },
   "run_definition_schema_rules": {
     "writer_value": "vv-agent.run-definition.v1",
-    "complete_definition_source": "embedded_run_definition_in_checkpoint_v2",
+    "complete_definition_source": "embedded_run_definition_in_checkpoint",
     "envelope_digest_must_match_checkpoint_digest": true,
     "missing_or_unknown_error": "checkpoint_definition_schema_unsupported",
     "failure_boundary": "before_capability_resolution_or_claim"
@@ -84,10 +78,6 @@
       "workspace": "/srv/workspace",
       "timeout_seconds": 120,
       "log_preview_chars": 256,
-      "state_store": {
-        "kind": "redis",
-        "location": "redis://state/0"
-      },
       "capabilities": {
         "toolset_ref": {
           "id": "vv-agent.builtin-tools",
@@ -259,7 +249,7 @@
         "checkpoint_config"
       ],
       "value": null,
-      "error": "distributed v2 requires checkpoint_config"
+      "error": "distributed run requires checkpoint_config"
     },
     {
       "name": "missing_checkpoint_store_ref",
@@ -269,7 +259,7 @@
         "checkpoint_store_ref"
       ],
       "value": null,
-      "error": "distributed v2 requires checkpoint_store_ref"
+      "error": "distributed run requires checkpoint_store_ref"
     },
     {
       "name": "missing_required_extension_ref",
@@ -374,6 +364,20 @@
         "model_calls": 0,
         "tool_calls": 0
       }
+    },
+    {
+      "name": "unknown_capability_fails_before_claim",
+      "kind": "hook",
+      "reference": {
+        "id": "hook.missing",
+        "version": "1"
+      },
+      "expected": {
+        "error": "unknown distributed capability hook hook.missing@1",
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
     }
   ],
   "worker_rules": {
@@ -442,5 +446,140 @@
         "external_calls": 0
       }
     }
-  ]
+  ],
+  "lease_lifecycle": {
+    "rules": {
+      "initial_expiry_capped_by_deadline": true,
+      "renewed_expiry_capped_by_deadline": true,
+      "initial_renewal_required_before_cycle": true,
+      "initial_renewal_failure_starts_cycle": false,
+      "heartbeat_active_through_commit": true,
+      "operation_unwind_stops_heartbeat": true,
+      "expired_owner_can_renew": false,
+      "expired_claim_can_be_reclaimed": true,
+      "heartbeat_interval_less_than_positive_lease": true,
+      "successful_commit_precedes_concurrent_renewal_error": true
+    },
+    "expiry_cases": [
+      {
+        "name": "deadline_clamps_before_u64_addition",
+        "now_ms": 1000,
+        "lease_duration_ms": 18446744073709551615,
+        "deadline_unix_ms": 1050,
+        "expected_expiry_ms": 1050,
+        "expected_error": null
+      },
+      {
+        "name": "unbounded_u64_addition_overflows",
+        "now_ms": 1000,
+        "lease_duration_ms": 18446744073709551615,
+        "deadline_unix_ms": null,
+        "expected_expiry_ms": null,
+        "expected_error": "checkpoint lease overflow"
+      }
+    ],
+    "interval_lease_ms_cases": [
+      1,
+      2,
+      10,
+      30,
+      3000,
+      18446744073709551615
+    ],
+    "claim_boundary_case": {
+      "claim_now_ms": 100,
+      "lease_expires_at_ms": 200,
+      "boundary_now_ms": 200,
+      "owner_renewed": false,
+      "contender_reclaimed": true
+    },
+    "worker_cases": [
+      {
+        "name": "initial_renewal_precedes_operation",
+        "driver": {
+          "initial_renewal": "success",
+          "operation": "return",
+          "commit": "success"
+        },
+        "expected": {
+          "event_order": [
+            "claim",
+            "renew",
+            "operation_start",
+            "commit",
+            "heartbeat_stop"
+          ],
+          "operation_calls": 1,
+          "commit_calls": 1,
+          "outcome": "success"
+        }
+      },
+      {
+        "name": "initial_renewal_failure_has_no_side_effects",
+        "driver": {
+          "initial_renewal": "claim_lost",
+          "operation": "not_called",
+          "commit": "not_called"
+        },
+        "expected": {
+          "event_order": [
+            "claim",
+            "renew_failed"
+          ],
+          "cycle_calls": 0,
+          "model_calls": 0,
+          "tool_calls": 0,
+          "commit_calls": 0,
+          "outcome": "checkpoint lease heartbeat failed: claim is no longer active"
+        }
+      },
+      {
+        "name": "operation_unwind_stops_heartbeat",
+        "driver": {
+          "initial_renewal": "success",
+          "operation": "unwind",
+          "commit": "not_called"
+        },
+        "expected": {
+          "event_order": [
+            "claim",
+            "renew",
+            "operation_start",
+            "operation_unwind",
+            "heartbeat_stop"
+          ],
+          "renewals_after_stop": 0,
+          "commit_calls": 0,
+          "outcome": "unwind"
+        }
+      },
+      {
+        "name": "commit_barrier_keeps_heartbeat_active",
+        "driver": {
+          "initial_renewal": "success",
+          "operation": "return",
+          "commit": "blocked_then_success"
+        },
+        "expected": {
+          "periodic_renewals_during_commit_min": 1,
+          "contender_claimed": false,
+          "commit_calls": 1,
+          "outcome": "success"
+        }
+      },
+      {
+        "name": "successful_commit_beats_inflight_renewal_rejection",
+        "driver": {
+          "initial_renewal": "success",
+          "operation": "return",
+          "commit": "success_then_renew_rejected"
+        },
+        "expected": {
+          "durable_commit": true,
+          "heartbeat_error_suppressed": true,
+          "outcome": "success"
+        }
+      }
+    ]
+  }
 }

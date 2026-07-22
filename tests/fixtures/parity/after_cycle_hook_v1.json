@@ -125,7 +125,7 @@
       "disallowed_tools"
     ],
     "created_only_after_non_empty_permission_narrowing": true,
-    "survives_checkpoint_v1_and_v2": true,
+    "survives_current_checkpoint_round_trip": true,
     "applies_to_next_model_tool_schema_and_tool_dispatch": true,
     "cannot_remove_agent_runner_or_run_level_denials": true
   },

@@ -248,7 +248,7 @@
       "event_id",
       "created_at"
     ],
-    "legacy_missing_additive_fields_are_accepted": true,
+    "missing_or_unknown_fields_are_rejected": true,
     "unknown_enum_values_are_rejected": true,
     "task_semantics_are_not_inspected": true
   },

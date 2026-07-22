@@ -11,7 +11,7 @@
   },
   "runner_cases": [
     {
-      "name": "disabled_preserves_v1_behavior",
+      "name": "disabled_uses_non_durable_flow",
       "run": {
         "agent": {
           "name": "checkpoint-agent",
@@ -642,7 +642,7 @@
   ],
   "session_persistence": {
     "schema_version": "vv-agent.session-commit.v1",
-    "checkpoint_v2_with_session_requires_add_items_once": true,
+    "checkpoint_with_session_requires_add_items_once": true,
     "unsupported_error_code": "checkpoint_session_idempotency_unsupported",
     "identity_conflict_error_code": "session_commit_identity_conflict",
     "commit_id_prefix": "vv-agent:checkpoint-v2:session:",

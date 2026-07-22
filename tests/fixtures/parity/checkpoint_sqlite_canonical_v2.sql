@@ -1,6 +1,6 @@
 PRAGMA journal_mode=WAL;
 
-CREATE TABLE IF NOT EXISTS checkpoints_v2 (
+CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
     schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v2'),
     run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v1'),
@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS checkpoints_v2 (
     extension_state TEXT NOT NULL,
     model_call_journal TEXT NOT NULL,
     tool_journal TEXT NOT NULL,
-    unknown_fields TEXT NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     claim_token TEXT,
     claimed_cycle INTEGER,
@@ -37,5 +36,5 @@ CREATE TABLE IF NOT EXISTS checkpoints_v2 (
     CHECK (terminal_result IS NULL OR claim_token IS NULL)
 );
 
-CREATE INDEX IF NOT EXISTS checkpoints_v2_status_idx
-    ON checkpoints_v2(status);
+CREATE INDEX IF NOT EXISTS checkpoints_status_idx
+    ON checkpoints(status);
