@@ -6,7 +6,7 @@ from pathlib import Path
 from vv_agent import constants as constants_module
 from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.tools import ToolContext, build_default_registry
-from vv_agent.types import ToolCall, ToolDirective
+from vv_agent.types import ToolCall, ToolDirective, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
 
 TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
@@ -14,8 +14,10 @@ TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_
 
 def _context(tmp_path: Path) -> ToolContext:
     return ToolContext(
-        workspace=tmp_path, shared_state={"todo_list": []},
-        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+        workspace=tmp_path,
+        shared_state={"todo_list": []},
+        cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
 
@@ -38,7 +40,7 @@ def test_todo_write_enforces_single_in_progress(tmp_path: Path) -> None:
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert payload["error_code"] == "multiple_in_progress_todos"
 
 
@@ -90,7 +92,7 @@ def test_task_finish_blocks_when_todo_incomplete(tmp_path: Path) -> None:
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert payload["error_code"] == "todo_incomplete"
 
 

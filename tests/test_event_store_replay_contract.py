@@ -6,7 +6,7 @@ import pytest
 
 from vv_agent import EventStoreError, JsonlRunEventStore, RunEventReplayQuery, RunStartedEvent
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "event_store_replay_v1.jsonl"
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "event_store_replay.jsonl"
 
 
 def test_replay_query_includes_children_by_default_and_can_exclude_them(tmp_path: Path) -> None:

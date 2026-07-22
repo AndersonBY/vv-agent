@@ -6,8 +6,8 @@ from types import SimpleNamespace
 from vv_agent import Agent, RunConfig, ToolPolicy, function_tool, handoff
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
-from vv_agent.runtime.compiler import AgentCompiler, RuntimeTask
-from vv_agent.types import Message
+from vv_agent.runtime.compiler import AgentCompiler
+from vv_agent.types import AgentTask, Message
 
 
 def _resolved(
@@ -56,7 +56,7 @@ def test_agent_compiler_builds_runtime_task_from_public_contract() -> None:
         trace_id="trace-1",
     )
 
-    assert isinstance(task, RuntimeTask)
+    assert isinstance(task, AgentTask)
     assert task.task_id.startswith("ops_")
     assert task.model == "model-id"
     assert task.system_prompt == "Check facts."
@@ -102,7 +102,7 @@ def test_agent_compiler_treats_non_positive_context_metadata_as_absent() -> None
     assert task.metadata["model_max_output_tokens"] == 8_192
 
 
-def test_frozen_checkpoint_keeps_legacy_threshold_and_metadata_without_rewriting_record() -> None:
+def test_frozen_checkpoint_uses_current_threshold_and_metadata_without_rewriting_record() -> None:
     definition = {
         "compiled_prompt": "Answer.",
         "root_input": "go",
@@ -131,7 +131,7 @@ def test_frozen_checkpoint_keeps_legacy_threshold_and_metadata_without_rewriting
     checkpoint = SimpleNamespace(
         run_definition=definition,
         messages=[system_message],
-        task_id="legacy-checkpoint-task",
+        task_id="checkpoint-task",
     )
     original_definition = deepcopy(definition)
     original_metadata = dict(system_message.metadata)

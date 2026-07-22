@@ -13,31 +13,30 @@ from vv_agent.budget import RunBudgetLimits
 from vv_agent.checkpoint import (
     MAX_CHECKPOINT_KEY_BYTES,
     MAX_WIRE_INTEGER,
-    RUN_DEFINITION_V1_SCHEMA,
+    RUN_DEFINITION_SCHEMA,
     AmbiguousModelPolicy,
     AmbiguousToolPolicy,
     CheckpointConfig,
     ResumePolicy,
+    canonical_json_bytes,
     utf16_sort_key,
     validate_extension_namespace,
 )
+from vv_agent.model_settings import ModelSettings
 from vv_agent.run_config import ToolPolicy
-from vv_agent.runtime.state import StateStoreSpec
 from vv_agent.tools import ToolRegistry, build_default_registry
 from vv_agent.tools.metadata import (
     ToolSideEffect,
     normalize_denied_side_effects,
     normalize_metadata_labels,
 )
-from vv_agent.types import AgentTask
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, SubAgentConfig
 
-DISTRIBUTED_RUN_SCHEMA_VERSION_V1 = "vv-agent.distributed-run.v1"
-DISTRIBUTED_RUN_SCHEMA_VERSION_V2 = "vv-agent.distributed-run.v2"
-# Keep the historical public constant and default pinned to v1.
-DISTRIBUTED_RUN_SCHEMA_VERSION = DISTRIBUTED_RUN_SCHEMA_VERSION_V1
+DISTRIBUTED_RUN_SCHEMA_VERSION = "vv-agent.distributed-run.v2"
+DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION = "vv-agent.distributed-worker-response.v1"
 DEFAULT_TOOLSET_ID = "vv-agent.builtin-tools"
 DEFAULT_TOOLSET_VERSION = "1"
-DEFAULT_TOOLSET_SCHEMA_DIGEST = "f85422117d41d28ffa3cdfcfd9a42892854de624808fadc2124f4ebe7a452b61"
+DEFAULT_TOOLSET_SCHEMA_DIGEST = "24d8f7bde18b11374820f742cfa244c83666626a315e09d4b6e1b69e899a70aa"
 DEFAULT_CYCLE_NAME = "vv_agent.distributed.run_single_cycle"
 DEFAULT_LEASE_DURATION_MS = 5 * 60 * 1000
 _MAX_U64 = (1 << 64) - 1
@@ -63,9 +62,183 @@ CapabilityKind = Literal[
     "reconciliation_provider",
 ]
 ClaimMode = Literal["continue", "recovery"]
+DistributedWorkerResponseType = Literal[
+    "pending",
+    "committed",
+    "terminal_candidate",
+    "terminal_replay",
+]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _JSON_POINTER_ESCAPE_RE = re.compile(r"~(?:0|1)")
+
+_ENVELOPE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "job_id",
+        "run_id",
+        "task",
+        "budget_limits",
+        "recipe",
+        "cycle_name",
+        "cycle_index",
+        "idempotency_key",
+        "deadline_unix_ms",
+        "lease_duration_ms",
+        "root_run_id",
+        "trace_id",
+        "run_definition_schema",
+        "run_definition_digest",
+        "claim_mode",
+        "resume_attempt",
+        "checkpoint_config",
+    }
+)
+_TASK_FIELDS = frozenset(
+    {
+        "task_id",
+        "model",
+        "system_prompt",
+        "user_prompt",
+        "max_cycles",
+        "memory_compact_threshold",
+        "memory_threshold_percentage",
+        "no_tool_policy",
+        "allow_interruption",
+        "use_workspace",
+        "agent_type",
+        "native_multimodal",
+        "sub_agents",
+        "extra_tool_names",
+        "exclude_tools",
+        "model_settings",
+        "initial_messages",
+        "initial_shared_state",
+        "metadata",
+    }
+)
+_SUB_AGENT_FIELDS = frozenset(
+    {
+        "model",
+        "description",
+        "backend",
+        "system_prompt",
+        "max_cycles",
+        "exclude_tools",
+        "denied_side_effects",
+        "denied_capability_tags",
+        "deny_terminal_tools",
+        "denied_cost_dimensions",
+        "metadata",
+    }
+)
+_MODEL_SETTINGS_FIELDS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "response_format",
+        "timeout_seconds",
+        "retry",
+        "extra_headers",
+        "extra_body",
+        "extra_args",
+    }
+)
+_TOOL_CHOICE_FIELDS = frozenset({"type", "function"})
+_TOOL_CHOICE_FUNCTION_FIELDS = frozenset({"name"})
+_RESPONSE_FORMAT_JSON_SCHEMA_FIELDS = frozenset({"type", "json_schema"})
+_MESSAGE_FIELDS = frozenset(
+    {
+        "role",
+        "content",
+        "name",
+        "tool_call_id",
+        "tool_calls",
+        "reasoning_content",
+        "image_url",
+        "metadata",
+    }
+)
+_TOOL_CALL_FIELDS = frozenset({"id", "type", "function", "extra_content"})
+_TOOL_CALL_REQUIRED_FIELDS = frozenset({"id", "type", "function"})
+_TOOL_FUNCTION_FIELDS = frozenset({"name", "arguments"})
+_BUDGET_FIELDS = frozenset(
+    {
+        "max_total_tokens",
+        "max_uncached_input_tokens",
+        "max_tool_calls",
+        "max_tool_calls_by_name",
+        "max_wall_time_ms",
+        "max_host_cost",
+        "unavailable_metric_policy",
+    }
+)
+_HOST_COST_FIELDS = frozenset({"unit", "currency", "amount_microunits"})
+_RECIPE_FIELDS = frozenset(
+    {
+        "settings_file",
+        "backend",
+        "model",
+        "workspace",
+        "timeout_seconds",
+        "log_preview_chars",
+        "capabilities",
+    }
+)
+_CAPABILITY_FIELDS = frozenset(
+    {
+        "toolset_ref",
+        "tool_policy",
+        "llm_client_ref",
+        "workspace_backend_ref",
+        "approval_provider_ref",
+        "approval_broker_ref",
+        "approval_timeout_seconds",
+        "cancellation_ref",
+        "event_sink_ref",
+        "host_cost_meter_ref",
+        "app_state_ref",
+        "sub_task_manager_ref",
+        "memory_provider_refs",
+        "hook_refs",
+        "after_cycle_hook_refs",
+        "observer_refs",
+        "checkpoint_store_ref",
+        "checkpoint_event_store_ref",
+        "checkpoint_extension_refs",
+        "reconciliation_provider_ref",
+    }
+)
+_TOOLSET_REF_FIELDS = frozenset({"id", "version", "schema_digest"})
+_TOOL_POLICY_FIELDS = frozenset(
+    {
+        "allowed_tools",
+        "disallowed_tools",
+        "approval",
+        "predicate_ref",
+        "denied_side_effects",
+        "denied_capability_tags",
+        "deny_terminal_tools",
+        "denied_cost_dimensions",
+    }
+)
+_CAPABILITY_REF_FIELDS = frozenset({"id", "version"})
+_CHECKPOINT_EXTENSION_REF_FIELDS = frozenset({"namespace", "reference", "required"})
+_CHECKPOINT_CONFIG_FIELDS = frozenset(
+    {
+        "key",
+        "resume_policy",
+        "ambiguous_model_policy",
+        "ambiguous_tool_policy",
+        "required_extension_namespaces",
+        "max_extension_state_bytes",
+        "credential_slots",
+    }
+)
 
 
 class DistributedContractError(ValueError):
@@ -74,6 +247,454 @@ class DistributedContractError(ValueError):
 
 class DistributedCapabilityError(RuntimeError):
     """A worker cannot resolve a declared distributed capability."""
+
+
+def _require_exact_fields(
+    payload: Mapping[str, Any],
+    expected: set[str] | frozenset[str],
+    label: str,
+) -> None:
+    if not all(isinstance(key, str) for key in payload):
+        raise DistributedContractError(f"{label} must use string field names")
+    actual = set(payload)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unknown = sorted(actual - expected)
+        raise DistributedContractError(f"{label} fields do not match the current schema: missing={missing}, unknown={unknown}")
+
+
+def _require_closed_fields(
+    payload: Mapping[str, Any],
+    allowed: set[str] | frozenset[str],
+    label: str,
+    *,
+    required: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    if not all(isinstance(key, str) for key in payload):
+        raise DistributedContractError(f"{label} must use string field names")
+    actual = set(payload)
+    missing = set(required) - actual
+    unknown = actual - set(allowed)
+    if missing or unknown:
+        raise DistributedContractError(
+            f"{label} fields do not match the current schema: missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+
+
+def _required_object(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise DistributedContractError(f"{label} must be an object")
+    if not all(isinstance(key, str) for key in value):
+        raise DistributedContractError(f"{label} must use string field names")
+    return value
+
+
+def _required_array(value: Any, label: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise DistributedContractError(f"{label} must be an array")
+    return value
+
+
+def _worker_response_integer(value: Any, field_name: str, *, positive: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_WIRE_INTEGER:
+        raise DistributedContractError(f"{field_name} must be a JSON-safe unsigned integer")
+    if positive and value == 0:
+        raise DistributedContractError(f"{field_name} must be a positive JSON-safe integer")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class DistributedWorkerResponse:
+    response_type: DistributedWorkerResponseType
+    checkpoint_revision: int | None = None
+    committed_cycle: int | None = None
+    result: AgentResult | None = None
+
+    def __post_init__(self) -> None:
+        if self.response_type == "pending":
+            if any(value is not None for value in (self.checkpoint_revision, self.committed_cycle, self.result)):
+                raise DistributedContractError("distributed worker response fields do not match type pending")
+            return
+        if self.response_type == "committed":
+            _worker_response_integer(self.checkpoint_revision, "checkpoint_revision")
+            _worker_response_integer(self.committed_cycle, "committed_cycle", positive=True)
+            if self.result is not None:
+                raise DistributedContractError("distributed worker response fields do not match type committed")
+            return
+        if self.response_type not in {"terminal_candidate", "terminal_replay"}:
+            raise DistributedContractError("unsupported distributed worker response type")
+        _worker_response_integer(self.checkpoint_revision, "checkpoint_revision")
+        if self.committed_cycle is not None or not isinstance(self.result, AgentResult):
+            raise DistributedContractError(f"distributed worker response fields do not match type {self.response_type}")
+        accepted_statuses = {
+            "terminal_candidate": {
+                AgentStatus.RECONCILIATION_REQUIRED,
+                AgentStatus.WAIT_USER,
+                AgentStatus.COMPLETED,
+                AgentStatus.FAILED,
+                AgentStatus.MAX_CYCLES,
+            },
+            "terminal_replay": {
+                AgentStatus.WAIT_USER,
+                AgentStatus.COMPLETED,
+                AgentStatus.FAILED,
+                AgentStatus.MAX_CYCLES,
+            },
+        }[self.response_type]
+        if self.result.status not in accepted_statuses:
+            raise DistributedContractError("distributed worker response result must be a complete current AgentResult")
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.response_type in {"terminal_candidate", "terminal_replay"}
+
+    @classmethod
+    def pending(cls) -> DistributedWorkerResponse:
+        return cls(response_type="pending")
+
+    @classmethod
+    def committed(
+        cls,
+        *,
+        checkpoint_revision: int,
+        committed_cycle: int,
+    ) -> DistributedWorkerResponse:
+        return cls(
+            response_type="committed",
+            checkpoint_revision=checkpoint_revision,
+            committed_cycle=committed_cycle,
+        )
+
+    @classmethod
+    def terminal_candidate(
+        cls,
+        *,
+        checkpoint_revision: int,
+        result: AgentResult,
+    ) -> DistributedWorkerResponse:
+        return cls(
+            response_type="terminal_candidate",
+            checkpoint_revision=checkpoint_revision,
+            result=result,
+        )
+
+    @classmethod
+    def terminal_replay(
+        cls,
+        *,
+        checkpoint_revision: int,
+        result: AgentResult,
+    ) -> DistributedWorkerResponse:
+        return cls(
+            response_type="terminal_replay",
+            checkpoint_revision=checkpoint_revision,
+            result=result,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION,
+            "type": self.response_type,
+        }
+        if self.response_type == "committed":
+            payload["checkpoint_revision"] = self.checkpoint_revision
+            payload["committed_cycle"] = self.committed_cycle
+        elif self.is_terminal:
+            assert self.result is not None
+            payload["checkpoint_revision"] = self.checkpoint_revision
+            payload["result"] = self.result.to_dict()
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> DistributedWorkerResponse:
+        if not isinstance(payload, Mapping):
+            raise DistributedContractError("distributed worker response must be an object")
+        if payload.get("schema_version") != DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION:
+            raise DistributedContractError("unsupported distributed worker response schema_version")
+        response_type = payload.get("type")
+        if response_type not in {
+            "pending",
+            "committed",
+            "terminal_candidate",
+            "terminal_replay",
+        }:
+            raise DistributedContractError("unsupported distributed worker response type")
+        expected_fields = {
+            "pending": {"schema_version", "type"},
+            "committed": {
+                "schema_version",
+                "type",
+                "checkpoint_revision",
+                "committed_cycle",
+            },
+            "terminal_candidate": {
+                "schema_version",
+                "type",
+                "checkpoint_revision",
+                "result",
+            },
+            "terminal_replay": {
+                "schema_version",
+                "type",
+                "checkpoint_revision",
+                "result",
+            },
+        }[response_type]
+        if not all(isinstance(key, str) for key in payload) or set(payload) != expected_fields:
+            raise DistributedContractError(f"distributed worker response fields do not match type {response_type}")
+        if response_type == "pending":
+            return cls.pending()
+        checkpoint_revision = _worker_response_integer(
+            payload["checkpoint_revision"],
+            "checkpoint_revision",
+        )
+        if response_type == "committed":
+            return cls.committed(
+                checkpoint_revision=checkpoint_revision,
+                committed_cycle=_worker_response_integer(
+                    payload["committed_cycle"],
+                    "committed_cycle",
+                    positive=True,
+                ),
+            )
+        raw_result = payload["result"]
+        if not isinstance(raw_result, dict):
+            raise DistributedContractError("distributed worker response result must be a complete current AgentResult")
+        try:
+            result = AgentResult.from_dict(raw_result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DistributedContractError("distributed worker response result must be a complete current AgentResult") from exc
+        if result.to_dict() != raw_result:
+            raise DistributedContractError("distributed worker response result must be a complete current AgentResult")
+        factory = cls.terminal_candidate if response_type == "terminal_candidate" else cls.terminal_replay
+        return factory(
+            checkpoint_revision=checkpoint_revision,
+            result=result,
+        )
+
+
+def _validate_open_json(value: Any, label: str) -> None:
+    def validate_wire_value(candidate: Any, path: str) -> None:
+        if candidate is None or isinstance(candidate, (str, bool, int, float)):
+            return
+        if isinstance(candidate, list):
+            for index, item in enumerate(candidate):
+                validate_wire_value(item, f"{path}[{index}]")
+            return
+        if isinstance(candidate, Mapping):
+            if not all(isinstance(key, str) for key in candidate):
+                raise DistributedContractError(f"{path} must use string field names")
+            for key, item in candidate.items():
+                validate_wire_value(item, f"{path}[{key!r}]")
+            return
+        raise DistributedContractError(f"{path} contains non-JSON wire value {type(candidate).__name__}")
+
+    validate_wire_value(value, label)
+    try:
+        canonical_json_bytes(value, label)
+    except ValueError as exc:
+        raise DistributedContractError(str(exc)) from exc
+
+
+def _reject_json_constant(constant: str) -> Any:
+    raise ValueError(f"unsupported JSON constant {constant}")
+
+
+def _validate_message_wire(value: Any, *, index: int) -> None:
+    label = f"task.initial_messages[{index}]"
+    message = _required_object(value, label)
+    _require_closed_fields(
+        message,
+        _MESSAGE_FIELDS,
+        label,
+        required={"role", "content"},
+    )
+    role = message["role"]
+    if role not in {"system", "user", "assistant", "tool"}:
+        raise DistributedContractError(f"{label}.role is invalid")
+    if not isinstance(message["content"], str):
+        raise DistributedContractError(f"{label}.content must be a string")
+    for field_name in ("name", "tool_call_id", "reasoning_content", "image_url"):
+        if field_name in message and not isinstance(message[field_name], str):
+            raise DistributedContractError(f"{label}.{field_name} must be a string")
+    if "metadata" in message:
+        metadata = _required_object(message["metadata"], f"{label}.metadata")
+        _validate_open_json(metadata, f"{label}.metadata")
+    if "tool_calls" not in message:
+        return
+    tool_calls = _required_array(message["tool_calls"], f"{label}.tool_calls")
+    for call_index, value in enumerate(tool_calls):
+        call_label = f"{label}.tool_calls[{call_index}]"
+        call = _required_object(value, call_label)
+        _require_closed_fields(
+            call,
+            _TOOL_CALL_FIELDS,
+            call_label,
+            required=_TOOL_CALL_REQUIRED_FIELDS,
+        )
+        call_id = call["id"]
+        if not isinstance(call_id, str) or not call_id:
+            raise DistributedContractError(f"{call_label}.id must be a non-empty string")
+        if call["type"] != "function":
+            raise DistributedContractError(f"{call_label}.type must be function")
+        function = _required_object(call["function"], f"{call_label}.function")
+        _require_exact_fields(function, _TOOL_FUNCTION_FIELDS, f"{call_label}.function")
+        function_name = function["name"]
+        if not isinstance(function_name, str) or not function_name:
+            raise DistributedContractError(f"{call_label}.function.name must be a non-empty string")
+        arguments = function["arguments"]
+        if not isinstance(arguments, str):
+            raise DistributedContractError(f"{call_label}.function.arguments must be a string")
+        try:
+            decoded_arguments = json.loads(
+                arguments,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise DistributedContractError(f"{call_label}.function.arguments must contain a JSON object") from exc
+        if not isinstance(decoded_arguments, dict):
+            raise DistributedContractError(f"{call_label}.function.arguments must contain a JSON object")
+        _validate_open_json(decoded_arguments, f"{call_label}.function.arguments")
+        if "extra_content" in call:
+            extra_content = _required_object(call["extra_content"], f"{call_label}.extra_content")
+            _validate_open_json(extra_content, f"{call_label}.extra_content")
+
+
+def _validate_model_settings_wire(value: Any) -> None:
+    if value is None:
+        return
+    settings = _required_object(value, "task.model_settings")
+    _require_closed_fields(settings, _MODEL_SETTINGS_FIELDS, "task.model_settings")
+    retry = settings.get("retry")
+    if retry is not None:
+        retry_payload = _required_object(retry, "task.model_settings.retry")
+        _require_exact_fields(
+            retry_payload,
+            {"max_attempts", "backoff_seconds"},
+            "task.model_settings.retry",
+        )
+    tool_choice = settings.get("tool_choice")
+    if isinstance(tool_choice, Mapping):
+        _require_exact_fields(
+            tool_choice,
+            _TOOL_CHOICE_FIELDS,
+            "task.model_settings.tool_choice",
+        )
+        if tool_choice["type"] != "function":
+            raise DistributedContractError("task.model_settings.tool_choice.type must be function")
+        function = _required_object(
+            tool_choice["function"],
+            "task.model_settings.tool_choice.function",
+        )
+        _require_exact_fields(
+            function,
+            _TOOL_CHOICE_FUNCTION_FIELDS,
+            "task.model_settings.tool_choice.function",
+        )
+    response_format = settings.get("response_format")
+    if response_format is not None:
+        response = _required_object(
+            response_format,
+            "task.model_settings.response_format",
+        )
+        response_type = response.get("type")
+        if response_type in {"text", "json_object"}:
+            _require_exact_fields(
+                response,
+                {"type"},
+                "task.model_settings.response_format",
+            )
+        elif response_type == "json_schema":
+            _require_exact_fields(
+                response,
+                _RESPONSE_FORMAT_JSON_SCHEMA_FIELDS,
+                "task.model_settings.response_format",
+            )
+            schema = _required_object(
+                response["json_schema"],
+                "task.model_settings.response_format.json_schema",
+            )
+            _validate_open_json(
+                schema,
+                "task.model_settings.response_format.json_schema",
+            )
+        else:
+            raise DistributedContractError("task.model_settings.response_format.type is invalid")
+    for field_name in ("reasoning", "extra_headers", "extra_body", "extra_args"):
+        if field_name in settings:
+            extension_map = _required_object(
+                settings[field_name],
+                f"task.model_settings.{field_name}",
+            )
+            _validate_open_json(extension_map, f"task.model_settings.{field_name}")
+    _validate_open_json(settings, "task.model_settings")
+    try:
+        decoded = ModelSettings.from_dict(dict(settings))
+    except (TypeError, ValueError) as exc:
+        raise DistributedContractError(f"task.model_settings is invalid: {exc}") from exc
+    if decoded.to_dict() != dict(settings):
+        raise DistributedContractError("task.model_settings must use the complete canonical current wire shape")
+
+
+def _decode_agent_task(value: Any) -> AgentTask:
+    task = _required_object(value, "task")
+    _require_exact_fields(task, _TASK_FIELDS, "task")
+    sub_agents = _required_object(task["sub_agents"], "task.sub_agents")
+    for name, sub_agent_value in sub_agents.items():
+        if not name.strip():
+            raise DistributedContractError("task.sub_agents keys must be non-empty strings")
+        label = f"task.sub_agents[{name!r}]"
+        sub_agent = _required_object(sub_agent_value, label)
+        _require_exact_fields(sub_agent, _SUB_AGENT_FIELDS, label)
+        metadata = _required_object(sub_agent["metadata"], f"{label}.metadata")
+        _validate_open_json(metadata, f"{label}.metadata")
+        try:
+            decoded_sub_agent = SubAgentConfig.from_dict(dict(sub_agent))
+        except (TypeError, ValueError) as exc:
+            raise DistributedContractError(f"{label} is invalid: {exc}") from exc
+        if decoded_sub_agent.to_dict() != dict(sub_agent):
+            raise DistributedContractError(f"{label} must use the complete canonical current wire shape")
+    _validate_model_settings_wire(task["model_settings"])
+    messages = _required_array(task["initial_messages"], "task.initial_messages")
+    for index, message in enumerate(messages):
+        _validate_message_wire(message, index=index)
+    for field_name in ("initial_shared_state", "metadata"):
+        state = _required_object(task[field_name], f"task.{field_name}")
+        _validate_open_json(state, f"task.{field_name}")
+    try:
+        decoded = AgentTask.from_dict(dict(task))
+    except (TypeError, ValueError, KeyError) as exc:
+        raise DistributedContractError(f"task is invalid: {exc}") from exc
+    if decoded.to_dict() != dict(task):
+        raise DistributedContractError("task must use the complete canonical current wire shape")
+    return decoded
+
+
+def _decode_budget_limits(value: Any) -> RunBudgetLimits | None:
+    if value is None:
+        return None
+    budget = _required_object(value, "budget_limits")
+    _require_exact_fields(budget, _BUDGET_FIELDS, "budget_limits")
+    named_limits = _required_object(
+        budget["max_tool_calls_by_name"],
+        "budget_limits.max_tool_calls_by_name",
+    )
+    host_cost = budget["max_host_cost"]
+    if host_cost is not None:
+        host_cost_payload = _required_object(host_cost, "budget_limits.max_host_cost")
+        _require_exact_fields(
+            host_cost_payload,
+            _HOST_COST_FIELDS,
+            "budget_limits.max_host_cost",
+        )
+    try:
+        decoded = RunBudgetLimits.from_dict(budget)
+    except (TypeError, ValueError) as exc:
+        raise DistributedContractError(f"budget_limits is invalid: {exc}") from exc
+    if decoded.to_dict() != dict(budget):
+        raise DistributedContractError("budget_limits must use the complete canonical current wire shape")
+    _validate_open_json(named_limits, "budget_limits.max_tool_calls_by_name")
+    return decoded
 
 
 def _required_string(payload: Mapping[str, Any], key: str) -> str:
@@ -126,6 +747,7 @@ class CapabilityRef:
     def from_dict(cls, payload: Any, *, field_name: str = "capability_ref") -> CapabilityRef:
         if not isinstance(payload, Mapping):
             raise DistributedContractError(f"{field_name} must be an object")
+        _require_exact_fields(payload, _CAPABILITY_REF_FIELDS, field_name)
         identifier = payload.get("id")
         version = payload.get("version")
         if not isinstance(identifier, str) or not identifier.strip():
@@ -164,6 +786,7 @@ class CheckpointExtensionRef:
         field_name = f"checkpoint_extension_refs[{index}]"
         if not isinstance(payload, Mapping):
             raise DistributedContractError(f"{field_name} must be an object")
+        _require_exact_fields(payload, _CHECKPOINT_EXTENSION_REF_FIELDS, field_name)
         namespace = payload.get("namespace")
         if not isinstance(namespace, str):
             raise DistributedContractError(f"{field_name}.namespace must be a string")
@@ -268,7 +891,7 @@ class DistributedCheckpointConfig:
         require_existing: bool = True,
     ) -> DistributedCheckpointConfig:
         if config.key is None:
-            raise DistributedContractError("distributed v2 requires an explicit checkpoint key")
+            raise DistributedContractError("distributed run requires an explicit checkpoint key")
         return cls(
             key=config.key,
             resume_policy=(ResumePolicy.REQUIRE_EXISTING if require_existing else config.resume_policy),
@@ -282,7 +905,8 @@ class DistributedCheckpointConfig:
     @classmethod
     def from_dict(cls, payload: Any) -> DistributedCheckpointConfig:
         if not isinstance(payload, Mapping):
-            raise DistributedContractError("distributed v2 requires checkpoint_config")
+            raise DistributedContractError("distributed run requires checkpoint_config")
+        _require_exact_fields(payload, _CHECKPOINT_CONFIG_FIELDS, "checkpoint_config")
 
         namespaces = payload.get("required_extension_namespaces", [])
         credential_slots = payload.get("credential_slots", [])
@@ -290,7 +914,7 @@ class DistributedCheckpointConfig:
             raise DistributedContractError("checkpoint_config.required_extension_namespaces must be an array")
         if not isinstance(credential_slots, list):
             raise DistributedContractError("checkpoint_config.credential_slots must be an array")
-        return cls(
+        decoded = cls(
             key=_required_string(payload, "key"),
             resume_policy=payload.get("resume_policy"),
             ambiguous_model_policy=payload.get("ambiguous_model_policy"),
@@ -299,6 +923,9 @@ class DistributedCheckpointConfig:
             max_extension_state_bytes=payload.get("max_extension_state_bytes", 262_144),
             credential_slots=tuple(credential_slots),
         )
+        if decoded.to_dict() != dict(payload):
+            raise DistributedContractError("checkpoint_config must use the complete canonical current wire shape")
+        return decoded
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,13 +954,15 @@ class ToolsetRef:
     def from_dict(cls, payload: Any) -> ToolsetRef:
         if not isinstance(payload, Mapping):
             raise DistributedContractError("toolset_ref must be an object")
-        reference = CapabilityRef.from_dict(payload, field_name="toolset_ref")
+        _require_exact_fields(payload, _TOOLSET_REF_FIELDS, "toolset_ref")
+        identifier = _required_string(payload, "id")
+        version = _required_string(payload, "version")
         schema_digest = payload.get("schema_digest")
         if not isinstance(schema_digest, str) or not schema_digest.strip():
             raise DistributedContractError("toolset_ref.schema_digest must be a non-empty string")
         return cls(
-            id=reference.id,
-            version=reference.version,
+            id=identifier,
+            version=version,
             schema_digest=schema_digest,
         )
 
@@ -356,8 +985,16 @@ class DistributedToolPolicy:
             ("tool_policy.allowed_tools", self.allowed_tools),
             ("tool_policy.disallowed_tools", self.disallowed_tools),
         ):
-            if values is not None and any(not isinstance(value, str) or not value.strip() for value in values):
+            if values is None:
+                if field_name == "tool_policy.disallowed_tools":
+                    raise DistributedContractError("tool_policy.disallowed_tools must be an array")
+                continue
+            if isinstance(values, (str, bytes)) or not isinstance(values, (list, tuple)):
+                raise DistributedContractError(f"{field_name} must be an array")
+            if any(not isinstance(value, str) or not value.strip() for value in values):
                 raise DistributedContractError(f"{field_name} must contain non-empty strings")
+        allowed_tools = None if self.allowed_tools is None else tuple(sorted(set(self.allowed_tools), key=utf16_sort_key))
+        disallowed_tools = tuple(sorted(set(self.disallowed_tools), key=utf16_sort_key))
         try:
             denied_side_effects = tuple(value.value for value in normalize_denied_side_effects(self.denied_side_effects))
             denied_capability_tags = tuple(
@@ -376,6 +1013,8 @@ class DistributedToolPolicy:
             raise DistributedContractError(str(exc)) from exc
         if not isinstance(self.deny_terminal_tools, bool):
             raise DistributedContractError("tool_policy.deny_terminal_tools must be a boolean")
+        object.__setattr__(self, "allowed_tools", allowed_tools)
+        object.__setattr__(self, "disallowed_tools", disallowed_tools)
         object.__setattr__(self, "denied_side_effects", denied_side_effects)
         object.__setattr__(
             self,
@@ -388,37 +1027,32 @@ class DistributedToolPolicy:
             denied_cost_dimensions,
         )
 
-    def to_dict(self, *, include_metadata_denials: bool = True) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        return {
             "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
             "disallowed_tools": list(self.disallowed_tools),
             "approval": self.approval,
             "predicate_ref": self.predicate_ref.to_dict() if self.predicate_ref is not None else None,
+            "denied_side_effects": list(self.denied_side_effects),
+            "denied_capability_tags": list(self.denied_capability_tags),
+            "deny_terminal_tools": self.deny_terminal_tools,
+            "denied_cost_dimensions": list(self.denied_cost_dimensions),
         }
-        if include_metadata_denials:
-            payload.update(
-                {
-                    "denied_side_effects": list(self.denied_side_effects),
-                    "denied_capability_tags": list(self.denied_capability_tags),
-                    "deny_terminal_tools": self.deny_terminal_tools,
-                    "denied_cost_dimensions": list(self.denied_cost_dimensions),
-                }
-            )
-        return payload
 
     @classmethod
     def from_dict(cls, payload: Any) -> DistributedToolPolicy:
         if not isinstance(payload, Mapping):
             raise DistributedContractError("tool_policy must be an object")
+        _require_exact_fields(payload, _TOOL_POLICY_FIELDS, "tool_policy")
         allowed = payload.get("allowed_tools")
-        disallowed = payload.get("disallowed_tools", [])
+        disallowed = payload.get("disallowed_tools")
         if allowed is not None and not isinstance(allowed, list):
             raise DistributedContractError("tool_policy.allowed_tools must be an array or null")
         if not isinstance(disallowed, list):
             raise DistributedContractError("tool_policy.disallowed_tools must be an array")
-        denied_side_effects = payload.get("denied_side_effects", [])
-        denied_capability_tags = payload.get("denied_capability_tags", [])
-        denied_cost_dimensions = payload.get("denied_cost_dimensions", [])
+        denied_side_effects = payload.get("denied_side_effects")
+        denied_capability_tags = payload.get("denied_capability_tags")
+        denied_cost_dimensions = payload.get("denied_cost_dimensions")
         for field_name, values in (
             ("denied_side_effects", denied_side_effects),
             ("denied_capability_tags", denied_capability_tags),
@@ -426,11 +1060,11 @@ class DistributedToolPolicy:
         ):
             if not isinstance(values, list):
                 raise DistributedContractError(f"tool_policy.{field_name} must be an array")
-        approval = payload.get("approval", "default")
+        approval = payload.get("approval")
         if not isinstance(approval, str):
             raise DistributedContractError("tool_policy.approval must be a string")
         predicate = payload.get("predicate_ref")
-        return cls(
+        decoded = cls(
             allowed_tools=tuple(allowed) if allowed is not None else None,
             disallowed_tools=tuple(disallowed),
             approval=approval,  # type: ignore[arg-type]
@@ -439,9 +1073,12 @@ class DistributedToolPolicy:
             ),
             denied_side_effects=tuple(denied_side_effects),
             denied_capability_tags=tuple(denied_capability_tags),
-            deny_terminal_tools=payload.get("deny_terminal_tools", False),
+            deny_terminal_tools=payload.get("deny_terminal_tools"),
             denied_cost_dimensions=tuple(denied_cost_dimensions),
         )
+        if decoded.to_dict() != dict(payload):
+            raise DistributedContractError("tool_policy must use the complete canonical current wire shape")
+        return decoded
 
     def resolve(self, registry: DistributedCapabilityRegistry) -> ToolPolicy:
         predicate = None
@@ -514,23 +1151,6 @@ def _recipe_with_task_metadata_denials(
     return replace(recipe, capabilities=capabilities)
 
 
-def _task_with_policy_metadata_denials(
-    task: AgentTask,
-    policy: DistributedToolPolicy,
-) -> AgentTask:
-    effective_policy = _policy_with_task_metadata_denials(policy, task)
-    metadata = dict(task.metadata)
-    if effective_policy.denied_side_effects:
-        metadata["_vv_agent_denied_side_effects"] = list(effective_policy.denied_side_effects)
-    if effective_policy.denied_capability_tags:
-        metadata["_vv_agent_denied_capability_tags"] = list(effective_policy.denied_capability_tags)
-    if effective_policy.deny_terminal_tools:
-        metadata["_vv_agent_deny_terminal_tools"] = True
-    if effective_policy.denied_cost_dimensions:
-        metadata["_vv_agent_denied_cost_dimensions"] = list(effective_policy.denied_cost_dimensions)
-    return replace(task, metadata=metadata)
-
-
 @dataclass(frozen=True, slots=True)
 class DistributedCapabilities:
     toolset_ref: ToolsetRef = field(default_factory=ToolsetRef)
@@ -568,18 +1188,10 @@ class DistributedCapabilities:
         if namespaces != tuple(sorted(set(namespaces), key=utf16_sort_key)):
             raise DistributedContractError("checkpoint_extension_refs must be sorted by unique namespace")
 
-    def to_dict(self, *, include_checkpoint: bool | None = None) -> dict[str, Any]:
-        if include_checkpoint is None:
-            include_checkpoint = bool(
-                self.checkpoint_store_ref is not None
-                or self.checkpoint_event_store_ref is not None
-                or self.checkpoint_extension_refs
-                or self.reconciliation_provider_ref is not None
-                or self.after_cycle_hook_refs
-            )
-        payload = {
+    def to_dict(self) -> dict[str, Any]:
+        return {
             "toolset_ref": self.toolset_ref.to_dict(),
-            "tool_policy": self.tool_policy.to_dict(include_metadata_denials=include_checkpoint),
+            "tool_policy": self.tool_policy.to_dict(),
             "llm_client_ref": self.llm_client_ref.to_dict() if self.llm_client_ref else None,
             "workspace_backend_ref": self.workspace_backend_ref.to_dict() if self.workspace_backend_ref else None,
             "approval_provider_ref": self.approval_provider_ref.to_dict() if self.approval_provider_ref else None,
@@ -592,30 +1204,23 @@ class DistributedCapabilities:
             "sub_task_manager_ref": self.sub_task_manager_ref.to_dict() if self.sub_task_manager_ref else None,
             "memory_provider_refs": [reference.to_dict() for reference in self.memory_provider_refs],
             "hook_refs": [reference.to_dict() for reference in self.hook_refs],
+            "after_cycle_hook_refs": [reference.to_dict() for reference in self.after_cycle_hook_refs],
             "observer_refs": [reference.to_dict() for reference in self.observer_refs],
+            "checkpoint_store_ref": (self.checkpoint_store_ref.to_dict() if self.checkpoint_store_ref is not None else None),
+            "checkpoint_event_store_ref": (
+                self.checkpoint_event_store_ref.to_dict() if self.checkpoint_event_store_ref is not None else None
+            ),
+            "checkpoint_extension_refs": [reference.to_dict() for reference in self.checkpoint_extension_refs],
+            "reconciliation_provider_ref": (
+                self.reconciliation_provider_ref.to_dict() if self.reconciliation_provider_ref is not None else None
+            ),
         }
-        if include_checkpoint:
-            payload.update(
-                {
-                    "checkpoint_store_ref": (
-                        self.checkpoint_store_ref.to_dict() if self.checkpoint_store_ref is not None else None
-                    ),
-                    "checkpoint_event_store_ref": (
-                        self.checkpoint_event_store_ref.to_dict() if self.checkpoint_event_store_ref is not None else None
-                    ),
-                    "checkpoint_extension_refs": [reference.to_dict() for reference in self.checkpoint_extension_refs],
-                    "after_cycle_hook_refs": [reference.to_dict() for reference in self.after_cycle_hook_refs],
-                    "reconciliation_provider_ref": (
-                        self.reconciliation_provider_ref.to_dict() if self.reconciliation_provider_ref is not None else None
-                    ),
-                }
-            )
-        return payload
 
     @classmethod
     def from_dict(cls, payload: Any) -> DistributedCapabilities:
         if not isinstance(payload, Mapping):
             raise DistributedContractError("capabilities must be an object")
+        _require_exact_fields(payload, _CAPABILITY_FIELDS, "capabilities")
 
         def refs(key: str) -> tuple[CapabilityRef, ...]:
             values = payload.get(key, [])
@@ -629,7 +1234,7 @@ class DistributedCapabilities:
         if not isinstance(checkpoint_extension_values, list):
             raise DistributedContractError("capabilities.checkpoint_extension_refs must be an array")
 
-        return cls(
+        decoded = cls(
             toolset_ref=ToolsetRef.from_dict(payload.get("toolset_ref")),
             tool_policy=DistributedToolPolicy.from_dict(payload.get("tool_policy")),
             llm_client_ref=_optional_ref(payload, "llm_client_ref"),
@@ -653,6 +1258,9 @@ class DistributedCapabilities:
             ),
             reconciliation_provider_ref=_optional_ref(payload, "reconciliation_provider_ref"),
         )
+        if decoded.to_dict() != dict(payload):
+            raise DistributedContractError("capabilities must use the complete canonical current wire shape")
+        return decoded
 
 
 @dataclass(slots=True)
@@ -663,7 +1271,6 @@ class RuntimeRecipe:
     workspace: str
     timeout_seconds: float = 90.0
     log_preview_chars: int | None = None
-    state_store: StateStoreSpec | None = None
     capabilities: DistributedCapabilities = field(default_factory=DistributedCapabilities)
 
     def __post_init__(self) -> None:
@@ -680,7 +1287,7 @@ class RuntimeRecipe:
         ):
             raise DistributedContractError("runtime_recipe.log_preview_chars must be a non-negative integer or null")
 
-    def to_dict(self, *, include_checkpoint_capabilities: bool | None = None) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "settings_file": self.settings_file,
             "backend": self.backend,
@@ -688,26 +1295,49 @@ class RuntimeRecipe:
             "workspace": self.workspace,
             "timeout_seconds": float(self.timeout_seconds),
             "log_preview_chars": self.log_preview_chars,
-            "state_store": self.state_store.to_dict() if self.state_store is not None else None,
-            "capabilities": self.capabilities.to_dict(include_checkpoint=include_checkpoint_capabilities),
+            "capabilities": self.capabilities.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, payload: Any) -> RuntimeRecipe:
         if not isinstance(payload, Mapping):
             raise DistributedContractError("runtime_recipe must be an object")
-        timeout = payload.get("timeout_seconds", 90.0)
+        _require_exact_fields(payload, _RECIPE_FIELDS, "runtime_recipe")
+        timeout = payload.get("timeout_seconds")
         log_preview_chars = payload.get("log_preview_chars")
-        return cls(
+        decoded = cls(
             settings_file=_required_string(payload, "settings_file"),
             backend=_required_string(payload, "backend"),
             model=_required_string(payload, "model"),
             workspace=_required_string(payload, "workspace"),
             timeout_seconds=timeout,
             log_preview_chars=log_preview_chars,
-            state_store=(StateStoreSpec.from_dict(payload["state_store"]) if payload.get("state_store") is not None else None),
             capabilities=DistributedCapabilities.from_dict(payload.get("capabilities")),
         )
+        if decoded.to_dict() != dict(payload):
+            raise DistributedContractError("runtime_recipe must use the complete canonical current wire shape")
+        return decoded
+
+
+def _decode_current_envelope_components(
+    payload: Any,
+) -> tuple[AgentTask, RunBudgetLimits | None, RuntimeRecipe, DistributedCheckpointConfig]:
+    if not isinstance(payload, Mapping):
+        raise DistributedContractError("distributed envelope must be an object")
+    schema_version = payload.get("schema_version")
+    if not isinstance(schema_version, str):
+        raise DistributedContractError("distributed envelope schema_version must be a string")
+    if schema_version != DISTRIBUTED_RUN_SCHEMA_VERSION:
+        raise DistributedContractError(f"unsupported distributed schema_version: {schema_version}")
+    if payload.get("run_definition_schema") != RUN_DEFINITION_SCHEMA:
+        raise DistributedContractError("checkpoint_definition_schema_unsupported")
+    _require_exact_fields(payload, _ENVELOPE_FIELDS, "distributed envelope")
+    return (
+        _decode_agent_task(payload["task"]),
+        _decode_budget_limits(payload["budget_limits"]),
+        RuntimeRecipe.from_dict(payload["recipe"]),
+        DistributedCheckpointConfig.from_dict(payload["checkpoint_config"]),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,22 +1350,19 @@ class DistributedRunEnvelope:
     cycle_index: int
     idempotency_key: str
     deadline_unix_ms: int | None
+    root_run_id: str
+    trace_id: str
+    run_definition_digest: str
+    claim_mode: ClaimMode
+    resume_attempt: int
+    checkpoint_config: DistributedCheckpointConfig
     budget_limits: RunBudgetLimits | None = None
     lease_duration_ms: int = DEFAULT_LEASE_DURATION_MS
     schema_version: str = DISTRIBUTED_RUN_SCHEMA_VERSION
-    root_run_id: str | None = None
-    trace_id: str | None = None
-    run_definition_schema: str | None = None
-    run_definition_digest: str | None = None
-    claim_mode: ClaimMode | None = None
-    resume_attempt: int | None = None
-    checkpoint_config: DistributedCheckpointConfig | None = None
+    run_definition_schema: str = RUN_DEFINITION_SCHEMA
 
     def __post_init__(self) -> None:
-        if self.schema_version not in {
-            DISTRIBUTED_RUN_SCHEMA_VERSION_V1,
-            DISTRIBUTED_RUN_SCHEMA_VERSION_V2,
-        }:
+        if self.schema_version != DISTRIBUTED_RUN_SCHEMA_VERSION:
             raise DistributedContractError(f"unsupported distributed schema_version: {self.schema_version}")
         for field_name in ("job_id", "run_id", "cycle_name", "idempotency_key"):
             value = getattr(self, field_name)
@@ -759,37 +1386,16 @@ class DistributedRunEnvelope:
             raise DistributedContractError("distributed envelope lease_duration_ms must be a positive integer")
         if self.budget_limits is not None and not isinstance(self.budget_limits, RunBudgetLimits):
             raise DistributedContractError("distributed envelope budget_limits must be an object or null")
-        if self.schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION_V1:
-            capabilities = self.recipe.capabilities
-            if (
-                capabilities.checkpoint_store_ref is not None
-                or capabilities.checkpoint_event_store_ref is not None
-                or capabilities.checkpoint_extension_refs
-                or capabilities.reconciliation_provider_ref is not None
-                or capabilities.after_cycle_hook_refs
-            ):
-                raise DistributedContractError("distributed v1 envelope cannot contain checkpoint v2 capability refs")
-            if any(
-                value is not None
-                for value in (
-                    self.root_run_id,
-                    self.trace_id,
-                    self.run_definition_schema,
-                    self.run_definition_digest,
-                    self.claim_mode,
-                    self.resume_attempt,
-                    self.checkpoint_config,
-                )
-            ):
-                raise DistributedContractError("distributed v1 envelope cannot contain checkpoint v2 fields")
-            return
-
-        if self.run_definition_schema != RUN_DEFINITION_V1_SCHEMA:
+        if not isinstance(self.task, AgentTask):
+            raise DistributedContractError("distributed envelope task must be an AgentTask")
+        if not isinstance(self.recipe, RuntimeRecipe):
+            raise DistributedContractError("distributed envelope recipe must be a RuntimeRecipe")
+        if self.run_definition_schema != RUN_DEFINITION_SCHEMA:
             raise DistributedContractError("checkpoint_definition_schema_unsupported")
         for field_name in ("root_run_id", "trace_id"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
-                raise DistributedContractError(f"distributed v2 {field_name} must be a non-empty string")
+                raise DistributedContractError(f"distributed {field_name} must be a non-empty string")
         _validate_sha256(self.run_definition_digest, "run_definition_digest")
         if self.claim_mode not in {"continue", "recovery"}:
             raise DistributedContractError("checkpoint_claim_mode_invalid")
@@ -800,10 +1406,10 @@ class DistributedRunEnvelope:
         ):
             raise DistributedContractError(f"resume_attempt must be between 1 and {MAX_WIRE_INTEGER}")
         if not isinstance(self.checkpoint_config, DistributedCheckpointConfig):
-            raise DistributedContractError("distributed v2 requires checkpoint_config")
+            raise DistributedContractError("distributed run requires checkpoint_config")
         capabilities = self.recipe.capabilities
         if capabilities.checkpoint_store_ref is None:
-            raise DistributedContractError("distributed v2 requires checkpoint_store_ref")
+            raise DistributedContractError("distributed run requires checkpoint_store_ref")
         extensions_by_namespace = {reference.namespace: reference for reference in capabilities.checkpoint_extension_refs}
         for namespace in self.checkpoint_config.required_extension_namespaces:
             reference = extensions_by_namespace.get(namespace)
@@ -812,34 +1418,6 @@ class DistributedRunEnvelope:
 
     @classmethod
     def for_cycle(
-        cls,
-        *,
-        task: AgentTask,
-        recipe: RuntimeRecipe,
-        cycle_index: int,
-        cycle_name: str = DEFAULT_CYCLE_NAME,
-        run_id: str | None = None,
-        deadline_unix_ms: int | None = None,
-        lease_duration_ms: int = DEFAULT_LEASE_DURATION_MS,
-        budget_limits: RunBudgetLimits | None = None,
-    ) -> DistributedRunEnvelope:
-        effective_run_id = run_id or str(task.metadata.get("_vv_agent_run_id") or task.task_id)
-        idempotency_key = f"{effective_run_id}:cycle:{cycle_index}"
-        return cls(
-            job_id=idempotency_key,
-            run_id=effective_run_id,
-            task=task,
-            budget_limits=budget_limits,
-            recipe=recipe,
-            cycle_name=cycle_name,
-            cycle_index=cycle_index,
-            idempotency_key=idempotency_key,
-            deadline_unix_ms=deadline_unix_ms,
-            lease_duration_ms=lease_duration_ms,
-        )
-
-    @classmethod
-    def for_checkpoint_cycle(
         cls,
         *,
         task: AgentTask,
@@ -861,7 +1439,6 @@ class DistributedRunEnvelope:
         effective_run_id = run_id or str(task.metadata.get("_vv_agent_run_id") or root_run_id)
         idempotency_key = f"{effective_run_id}:cycle:{cycle_index}"
         return cls(
-            schema_version=DISTRIBUTED_RUN_SCHEMA_VERSION_V2,
             job_id=idempotency_key,
             run_id=effective_run_id,
             task=task,
@@ -874,16 +1451,12 @@ class DistributedRunEnvelope:
             lease_duration_ms=lease_duration_ms,
             root_run_id=root_run_id,
             trace_id=trace_id,
-            run_definition_schema=RUN_DEFINITION_V1_SCHEMA,
+            run_definition_schema=RUN_DEFINITION_SCHEMA,
             run_definition_digest=run_definition_digest,
             claim_mode=claim_mode,
             resume_attempt=resume_attempt,
             checkpoint_config=checkpoint_config,
         )
-
-    @property
-    def is_checkpoint_v2(self) -> bool:
-        return self.schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION_V2
 
     def remaining_seconds(self, *, now_ms: int | None = None) -> float | None:
         if self.deadline_unix_ms is None:
@@ -897,96 +1470,56 @@ class DistributedRunEnvelope:
             raise DistributedContractError(f"distributed job {self.job_id} deadline has expired")
 
     def to_dict(self) -> dict[str, Any]:
-        serialized_task = self.task
-        if not self.is_checkpoint_v2:
-            serialized_task = _task_with_policy_metadata_denials(
-                self.task,
-                self.recipe.capabilities.tool_policy,
-            )
         payload = {
             "schema_version": self.schema_version,
             "job_id": self.job_id,
             "run_id": self.run_id,
-            "task": serialized_task.to_dict(),
+            "task": self.task.to_dict(),
             "budget_limits": self.budget_limits.to_dict() if self.budget_limits is not None else None,
-            "recipe": self.recipe.to_dict(include_checkpoint_capabilities=self.is_checkpoint_v2),
+            "recipe": self.recipe.to_dict(),
             "cycle_name": self.cycle_name,
             "cycle_index": self.cycle_index,
             "idempotency_key": self.idempotency_key,
             "deadline_unix_ms": self.deadline_unix_ms,
             "lease_duration_ms": self.lease_duration_ms,
+            "root_run_id": self.root_run_id,
+            "trace_id": self.trace_id,
+            "run_definition_schema": self.run_definition_schema,
+            "run_definition_digest": self.run_definition_digest,
+            "claim_mode": self.claim_mode,
+            "resume_attempt": self.resume_attempt,
+            "checkpoint_config": self.checkpoint_config.to_dict(),
         }
-        if self.is_checkpoint_v2:
-            assert self.checkpoint_config is not None
-            payload.update(
-                {
-                    "root_run_id": self.root_run_id,
-                    "trace_id": self.trace_id,
-                    "run_definition_schema": self.run_definition_schema,
-                    "run_definition_digest": self.run_definition_digest,
-                    "claim_mode": self.claim_mode,
-                    "resume_attempt": self.resume_attempt,
-                    "checkpoint_config": self.checkpoint_config.to_dict(),
-                }
-            )
+        _decode_current_envelope_components(payload)
         return payload
 
     @classmethod
     def from_dict(cls, payload: Any) -> DistributedRunEnvelope:
-        if not isinstance(payload, Mapping):
-            raise DistributedContractError("distributed envelope must be an object")
-        schema_version = payload.get("schema_version")
-        if not isinstance(schema_version, str):
-            raise DistributedContractError("distributed envelope schema_version must be a string")
-        if schema_version not in {
-            DISTRIBUTED_RUN_SCHEMA_VERSION_V1,
-            DISTRIBUTED_RUN_SCHEMA_VERSION_V2,
-        }:
-            raise DistributedContractError(f"unsupported distributed schema_version: {schema_version}")
-        task_payload = payload.get("task")
-        if not isinstance(task_payload, Mapping):
-            raise DistributedContractError("distributed envelope task must be an object")
-        budget_limits = None
-        if payload.get("budget_limits") is not None:
-            try:
-                budget_limits = RunBudgetLimits.from_dict(payload["budget_limits"])
-            except (TypeError, ValueError) as exc:
-                raise DistributedContractError(
-                    f"distributed envelope budget limit must be between 0 and 9007199254740991: {exc}"
-                ) from exc
-        return cls(
-            schema_version=schema_version,
+        task, budget_limits, recipe, checkpoint_config = _decode_current_envelope_components(payload)
+        assert isinstance(payload, Mapping)
+        decoded = cls(
+            schema_version=DISTRIBUTED_RUN_SCHEMA_VERSION,
             job_id=_required_string(payload, "job_id"),
             run_id=_required_string(payload, "run_id"),
-            task=AgentTask.from_dict(dict(task_payload)),
+            task=task,
             budget_limits=budget_limits,
-            recipe=RuntimeRecipe.from_dict(payload.get("recipe")),
+            recipe=recipe,
             cycle_name=_required_string(payload, "cycle_name"),
             cycle_index=payload.get("cycle_index"),
             idempotency_key=_required_string(payload, "idempotency_key"),
             deadline_unix_ms=payload.get("deadline_unix_ms"),
-            lease_duration_ms=payload.get("lease_duration_ms", DEFAULT_LEASE_DURATION_MS),
+            lease_duration_ms=payload.get("lease_duration_ms"),
             root_run_id=payload.get("root_run_id"),
             trace_id=payload.get("trace_id"),
             run_definition_schema=payload.get("run_definition_schema"),
             run_definition_digest=payload.get("run_definition_digest"),
             claim_mode=payload.get("claim_mode"),
             resume_attempt=payload.get("resume_attempt"),
-            checkpoint_config=(
-                DistributedCheckpointConfig.from_dict(payload.get("checkpoint_config"))
-                if schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION_V2
-                else None
-            ),
+            checkpoint_config=checkpoint_config,
         )
-
-    @classmethod
-    def from_v1_dict(cls, payload: Any) -> DistributedRunEnvelope:
-        """Decode only the immutable v1 wire surface."""
-        if not isinstance(payload, Mapping):
-            raise DistributedContractError("distributed envelope must be an object")
-        if payload.get("schema_version") != DISTRIBUTED_RUN_SCHEMA_VERSION_V1:
-            raise DistributedContractError(f"unsupported distributed schema_version: {payload.get('schema_version')}")
-        return cls.from_dict(payload)
+        if decoded.to_dict() != dict(payload):
+            raise DistributedContractError("distributed envelope must use the complete canonical current wire shape")
+        return decoded
 
 
 def toolset_schema_digest(registry: ToolRegistry) -> str:
@@ -1041,8 +1574,6 @@ class DistributedCapabilityRegistry:
     def validate(
         self,
         capabilities: DistributedCapabilities,
-        *,
-        require_checkpoint_v2: bool = False,
     ) -> None:
         self.resolve_toolset(capabilities.toolset_ref)
         capabilities.tool_policy.resolve(self)
@@ -1072,5 +1603,5 @@ class DistributedCapabilityRegistry:
                 self.resolve(kind, reference)  # type: ignore[arg-type]
         for extension in capabilities.checkpoint_extension_refs:
             self.resolve("checkpoint_extension", extension.reference)
-        if require_checkpoint_v2 and capabilities.checkpoint_store_ref is None:
-            raise DistributedCapabilityError("distributed v2 requires checkpoint_store_ref")
+        if capabilities.checkpoint_store_ref is None:
+            raise DistributedCapabilityError("distributed run requires checkpoint_store_ref")

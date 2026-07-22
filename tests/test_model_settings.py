@@ -62,7 +62,7 @@ def test_model_settings_resolve_accepts_none_override() -> None:
     assert settings.resolve(None) == settings
 
 
-def test_model_settings_compact_wire_round_trip_and_legacy_max_tokens_alias() -> None:
+def test_model_settings_compact_wire_round_trip() -> None:
     settings = ModelSettings(
         temperature=0.25,
         top_p=0.8,
@@ -93,12 +93,12 @@ def test_model_settings_compact_wire_round_trip_and_legacy_max_tokens_alias() ->
         "extra_args": {"request_option": "value"},
     }
     assert ModelSettings.from_dict(payload) == settings
-    assert ModelSettings.from_dict({"max_output_tokens": 256}).max_tokens == 256
 
 
 def test_model_settings_rejects_unknown_fields_and_invalid_ranges() -> None:
     for payload in (
         {"unknown": True},
+        {"max_output_tokens": 256},
         {"retry": {"unknown": True}},
         {"max_tokens": 0},
         {"timeout_seconds": 0},

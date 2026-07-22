@@ -11,12 +11,12 @@ from vv_agent.types import Message
 
 
 def _configured_sub_agent_contract() -> dict[str, Any]:
-    path = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
+    path = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _assistant_reasoning_contract() -> dict[str, Any]:
-    path = Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history_v1.json"
+    path = Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -163,10 +163,7 @@ def test_sanitize_for_resume_matches_tool_call_ids_after_trimming() -> None:
 
 
 def test_sanitize_for_resume_does_not_reuse_an_earlier_result_for_a_later_call() -> None:
-    assert (
-        _configured_sub_agent_contract()["continuation"]["tool_result_pairing"]
-        == "immediately_following_assistant_turn"
-    )
+    assert _configured_sub_agent_contract()["continuation"]["tool_result_pairing"] == "immediately_following_assistant_turn"
     completed_assistant = Message(
         role="assistant",
         content="first",
@@ -194,10 +191,7 @@ def test_sanitize_for_resume_does_not_reuse_an_earlier_result_for_a_later_call()
 
 
 def test_sanitize_for_resume_drops_ambiguous_duplicate_ids_and_results() -> None:
-    assert (
-        _configured_sub_agent_contract()["continuation"]["duplicate_tool_call_id_policy"]
-        == "drop_ambiguous_call_and_results"
-    )
+    assert _configured_sub_agent_contract()["continuation"]["duplicate_tool_call_id_policy"] == "drop_ambiguous_call_and_results"
     messages = [
         Message(role="user", content="before"),
         Message(
@@ -219,10 +213,7 @@ def test_sanitize_for_resume_drops_ambiguous_duplicate_ids_and_results() -> None
 
 
 def test_sanitize_for_resume_drops_out_of_order_results_and_unresolved_calls() -> None:
-    assert (
-        _configured_sub_agent_contract()["continuation"]["out_of_order_tool_result_policy"]
-        == "drop_orphan_result"
-    )
+    assert _configured_sub_agent_contract()["continuation"]["out_of_order_tool_result_policy"] == "drop_orphan_result"
     messages = [
         Message(role="tool", content="too early", tool_call_id="late"),
         Message(role="user", content="boundary"),
@@ -300,15 +291,9 @@ def test_sanitize_for_resume_does_not_skip_ambiguity_to_keep_a_later_pair(
         Message(
             role="assistant",
             content="Working",
-            tool_calls=[
-                {"id": call_id, "name": "read_file", "arguments": {"path": f"{call_id}.md"}}
-                for call_id in call_ids
-            ],
+            tool_calls=[{"id": call_id, "name": "read_file", "arguments": {"path": f"{call_id}.md"}} for call_id in call_ids],
         ),
-        *[
-            Message(role="tool", content=f"result for {result_id}", tool_call_id=result_id)
-            for result_id in result_ids
-        ],
+        *[Message(role="tool", content=f"result for {result_id}", tool_call_id=result_id) for result_id in result_ids],
     ]
 
     sanitized = sanitize_for_resume(messages)

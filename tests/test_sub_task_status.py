@@ -13,9 +13,7 @@ from vv_agent.tools.handlers.sub_task_status import sub_task_status
 from vv_agent.types import AgentResult, AgentStatus, Message, SubTaskOutcome, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
 
-ASSISTANT_REASONING_FIXTURE_PATH = (
-    Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history_v1.json"
-)
+ASSISTANT_REASONING_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history.json"
 
 
 def _assistant_reasoning_case(name: str) -> dict[str, Any]:

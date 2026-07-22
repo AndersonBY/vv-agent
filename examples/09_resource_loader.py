@@ -19,11 +19,11 @@ def load_agent(path: Path, profile: str) -> Agent:
                 {
                     "researcher": {
                         "instructions": "Collect facts and finish with task_finish.",
-                        "model": "kimi-k2.6",
+                        "model": "kimi-k3",
                     },
                     "writer": {
                         "instructions": "Write a concise final answer and finish with task_finish.",
-                        "model": "kimi-k2.6",
+                        "model": "kimi-k3",
                     },
                 },
                 ensure_ascii=False,
@@ -37,17 +37,17 @@ def load_agent(path: Path, profile: str) -> Agent:
 
 
 def main() -> None:
-    workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace"))
-    profile = os.getenv("V_AGENT_EXAMPLE_PROFILE", "researcher")
+    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace"))
+    profile = os.getenv("VV_AGENT_EXAMPLE_PROFILE", "researcher")
     agent = load_agent(workspace / "agent_profiles.json", profile)
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
         workspace=workspace,
     )
     result = Runner.run_sync(
         agent,
-        os.getenv("V_AGENT_EXAMPLE_PROMPT", "Explain why resource-backed profiles are useful."),
+        os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain why resource-backed profiles are useful."),
         run_config=config,
     )
     print(result.final_output)

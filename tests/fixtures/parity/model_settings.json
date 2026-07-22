@@ -1,0 +1,102 @@
+{
+  "schema_version": "vv-agent.model-settings.v1",
+  "file_contract": {
+    "extensions": [
+      ".py",
+      ".json",
+      ".toml"
+    ],
+    "python_assignment": "LLM_SETTINGS",
+    "direct_root": true,
+    "parser_retry": false
+  },
+  "root_contract": {
+    "version_field": "VERSION",
+    "version_value": "2",
+    "backends_field": "backends",
+    "backends_type": "object",
+    "endpoints_field": "endpoints",
+    "endpoints_type": "array",
+    "default_synthesis": false
+  },
+  "canonical_settings": {
+    "VERSION": "2",
+    "backends": {
+      "openai": {
+        "models": {
+          "contract-model": {
+            "id": "contract-model",
+            "endpoints": [
+              {
+                "endpoint_id": "contract-endpoint",
+                "model_id": "contract-model"
+              }
+            ],
+            "context_length": 1000000,
+            "max_output_tokens": 100000
+          }
+        }
+      }
+    },
+    "endpoints": [
+      {
+        "id": "contract-endpoint",
+        "api_base": "https://example.invalid/v1",
+        "api_key": "test-key-value"
+      }
+    ]
+  },
+  "invalid_settings": [
+    {
+      "name": "missing_version",
+      "settings": {
+        "backends": {},
+        "endpoints": []
+      }
+    },
+    {
+      "name": "wrong_version",
+      "settings": {
+        "VERSION": "3",
+        "backends": {},
+        "endpoints": []
+      }
+    },
+    {
+      "name": "missing_backends",
+      "settings": {
+        "VERSION": "2",
+        "endpoints": []
+      }
+    },
+    {
+      "name": "missing_endpoints",
+      "settings": {
+        "VERSION": "2",
+        "backends": {}
+      }
+    },
+    {
+      "name": "backends_wrong_type",
+      "settings": {
+        "VERSION": "2",
+        "backends": [],
+        "endpoints": []
+      }
+    },
+    {
+      "name": "endpoints_wrong_type",
+      "settings": {
+        "VERSION": "2",
+        "backends": {},
+        "endpoints": {}
+      }
+    }
+  ],
+  "resolution_contract": {
+    "exact_backend_key": true,
+    "exact_model_key": true,
+    "missing_key_is_error": true,
+    "implicit_output_limit": false
+  }
+}

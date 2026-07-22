@@ -40,10 +40,9 @@ from vv_agent.events import (
     event_from_dict,
 )
 from vv_agent.llm.base import LlmRequest
-from vv_agent.runtime.checkpoint_codec_v2 import run_definition_comparison_copy
-from vv_agent.runtime.state_v2 import (
-    CheckpointStoreV2,
-    CheckpointV2,
+from vv_agent.runtime.state import (
+    Checkpoint,
+    CheckpointStore,
     ClaimMode,
     EventOutboxEntry,
     ExtensionStateEntry,
@@ -107,7 +106,7 @@ class CheckpointResumeController:
         event_sink: Callable[[RunEvent], None],
         event_store: RunEventStore | None = None,
         lease_duration_ms: int = DEFAULT_CHECKPOINT_LEASE_MS,
-        preloaded_checkpoint: CheckpointV2 | None = None,
+        preloaded_checkpoint: Checkpoint | None = None,
     ) -> None:
         if config.store is None:
             raise CheckpointError(
@@ -115,7 +114,7 @@ class CheckpointResumeController:
                 code="checkpoint_store_unavailable",
             )
         self.config = replace(config)
-        self.store: CheckpointStoreV2 = config.store
+        self.store: CheckpointStore = config.store
         self.task_id = task_id
         self.run_id = run_id
         self.trace_id = trace_id
@@ -130,7 +129,7 @@ class CheckpointResumeController:
         self.event_store = event_store
         self.lease_duration_ms = lease_duration_ms
         self.preloaded_checkpoint = deepcopy(preloaded_checkpoint)
-        self.checkpoint: CheckpointV2 | None = None
+        self.checkpoint: Checkpoint | None = None
         self.terminal_replay: AgentResult | None = None
         self._created = False
         self._first_claim_is_recovery = False
@@ -194,10 +193,10 @@ class CheckpointResumeController:
         self._assert_heartbeat()
 
     @staticmethod
-    def preload(config: CheckpointConfig | None) -> CheckpointV2 | None:
+    def preload(config: CheckpointConfig | None) -> Checkpoint | None:
         if config is None or config.key is None or config.store is None:
             return None
-        checkpoint = config.store.load_checkpoint_v2(config.key)
+        checkpoint = config.store.load_checkpoint(config.key)
         return deepcopy(checkpoint)
 
     def admit(self) -> AgentResult | None:
@@ -213,7 +212,7 @@ class CheckpointResumeController:
                 code="checkpoint_key_conflict",
             )
         if existing is None:
-            existing = self.store.load_checkpoint_v2(key)
+            existing = self.store.load_checkpoint(key)
         if self.config.resume_policy is ResumePolicy.NEW:
             if existing is not None:
                 raise CheckpointError(
@@ -222,7 +221,7 @@ class CheckpointResumeController:
                 )
             checkpoint = self._new_checkpoint(key)
             self._queue_initial_event(checkpoint, self._checkpoint_created_event(key))
-            if not self.store.create_checkpoint_v2(checkpoint):
+            if not self.store.create_checkpoint(checkpoint):
                 raise CheckpointError(
                     f"checkpoint key {key!r} was created concurrently",
                     code="checkpoint_key_conflict",
@@ -240,8 +239,8 @@ class CheckpointResumeController:
                 )
             checkpoint = self._new_checkpoint(key)
             self._queue_initial_event(checkpoint, self._checkpoint_created_event(key))
-            if not self.store.create_checkpoint_v2(checkpoint):
-                existing = self.store.load_checkpoint_v2(key)
+            if not self.store.create_checkpoint(checkpoint):
+                existing = self.store.load_checkpoint(key)
                 if existing is None:
                     raise CheckpointError(
                         f"checkpoint key {key!r} disappeared after create conflict",
@@ -434,7 +433,6 @@ class CheckpointResumeController:
                 replay_result=ToolExecutionResult(
                     tool_call_id=call.id,
                     content=error.message,
-                    status="error",
                     status_code=ToolResultStatus.ERROR,
                     error_code=error.code,
                 ),
@@ -543,7 +541,7 @@ class CheckpointResumeController:
         checkpoint.event_outbox = [entry for entry in checkpoint.event_outbox if entry.state == "pending"]
         revision = checkpoint.revision
         claim_token = checkpoint.claim_token
-        if not self.store.commit_checkpoint_v2(
+        if not self.store.commit_checkpoint(
             checkpoint,
             claim_token=claim_token,
             expected_revision=revision,
@@ -566,7 +564,7 @@ class CheckpointResumeController:
         if result.status is AgentStatus.RECONCILIATION_REQUIRED:
             result.checkpoint_key = self.checkpoint_key
             return result
-        checkpoint = self.store.load_checkpoint_v2(self.checkpoint_key)
+        checkpoint = self.store.load_checkpoint(self.checkpoint_key)
         if checkpoint is None:
             raise CheckpointError(
                 "checkpoint disappeared before terminal finalization",
@@ -609,18 +607,18 @@ class CheckpointResumeController:
         revision = checkpoint.revision
         claim_token = checkpoint.claim_token
         if claim_token is None:
-            finalized = self.store.finalize_checkpoint_v2(
+            finalized = self.store.finalize_checkpoint(
                 checkpoint,
                 expected_revision=revision,
             )
         else:
-            finalized = self.store.finalize_claimed_checkpoint_v2(
+            finalized = self.store.finalize_claimed_checkpoint(
                 checkpoint,
                 claim_token=claim_token,
                 expected_revision=revision,
             )
         if not finalized:
-            authoritative = self.store.load_checkpoint_v2(checkpoint.checkpoint_key)
+            authoritative = self.store.load_checkpoint(checkpoint.checkpoint_key)
             if authoritative is not None and authoritative.terminal_result is not None:
                 self.checkpoint = authoritative
                 self._deliver_pending_outbox()
@@ -631,7 +629,7 @@ class CheckpointResumeController:
                 code="checkpoint_store_conflict",
             )
         self._stop_heartbeat()
-        authoritative = self.store.load_checkpoint_v2(checkpoint.checkpoint_key)
+        authoritative = self.store.load_checkpoint(checkpoint.checkpoint_key)
         if authoritative is None or authoritative.terminal_result is None:
             raise CheckpointError(
                 "checkpoint terminal finalization was not retained",
@@ -646,7 +644,7 @@ class CheckpointResumeController:
     def prepare_terminal(self, result: AgentResult) -> AgentResult:
         if result.status is AgentStatus.RECONCILIATION_REQUIRED or self._is_operator_abort_result(result):
             return result
-        checkpoint = self.store.load_checkpoint_v2(self.checkpoint_key)
+        checkpoint = self.store.load_checkpoint(self.checkpoint_key)
         if checkpoint is None:
             raise CheckpointError(
                 "checkpoint disappeared before terminal preparation",
@@ -674,7 +672,7 @@ class CheckpointResumeController:
         self._emit(event_from_dict(payload))
 
     @staticmethod
-    def _unresolved_operation(checkpoint: CheckpointV2) -> OperationJournalEntry | None:
+    def _unresolved_operation(checkpoint: Checkpoint) -> OperationJournalEntry | None:
         unresolved = next(
             (
                 entry
@@ -693,8 +691,8 @@ class CheckpointResumeController:
             and result.resume_observation is not None
         )
 
-    def _new_checkpoint(self, key: str) -> CheckpointV2:
-        checkpoint = CheckpointV2(
+    def _new_checkpoint(self, key: str) -> Checkpoint:
+        checkpoint = Checkpoint(
             checkpoint_key=key,
             task_id=self.task_id,
             root_run_id=self.run_id,
@@ -726,7 +724,7 @@ class CheckpointResumeController:
         claim_mode = "recovery" if self._first_claim_is_recovery else "continue"
         claim_token = f"claim_{uuid.uuid4().hex}"
         try:
-            claimed = self.store.claim_checkpoint_v2(
+            claimed = self.store.claim_checkpoint(
                 checkpoint.checkpoint_key,
                 cycle_index,
                 claim_token=claim_token,
@@ -895,7 +893,7 @@ class CheckpointResumeController:
         checkpoint.status = AgentStatus.RECONCILIATION_REQUIRED
         revision = checkpoint.revision
         claim_token = checkpoint.claim_token
-        if claim_token is None or not self.store.suspend_checkpoint_v2(
+        if claim_token is None or not self.store.suspend_checkpoint(
             checkpoint,
             claim_token=claim_token,
             expected_revision=revision,
@@ -958,7 +956,7 @@ class CheckpointResumeController:
         # Only a completed cycle may advance durable messages and cycle records.
         self._refresh_snapshot(include_runtime_transcript=False)
         revision = checkpoint.revision
-        if not self.store.progress_checkpoint_v2(
+        if not self.store.progress_checkpoint(
             checkpoint,
             claim_token=claim_token,
             expected_revision=revision,
@@ -991,7 +989,7 @@ class CheckpointResumeController:
             checkpoint.budget_usage = deepcopy(self._budget_snapshot_provider())
         self._snapshot_extensions(checkpoint)
 
-    def _snapshot_extensions(self, checkpoint: CheckpointV2) -> None:
+    def _snapshot_extensions(self, checkpoint: Checkpoint) -> None:
         snapshot: dict[str, ExtensionStateEntry] = {}
         for namespace, extension in self.extensions.items():
             snapshot[namespace] = ExtensionStateEntry(
@@ -1004,7 +1002,7 @@ class CheckpointResumeController:
                 snapshot[namespace] = deepcopy(entry)
         checkpoint.extension_state = snapshot
 
-    def _restore_extensions(self, checkpoint: CheckpointV2) -> None:
+    def _restore_extensions(self, checkpoint: Checkpoint) -> None:
         for namespace, entry in checkpoint.extension_state.items():
             extension = self.extensions.get(namespace)
             if extension is None:
@@ -1027,7 +1025,7 @@ class CheckpointResumeController:
                     code="checkpoint_extension_missing",
                 )
 
-    def _validate_existing_definition(self, checkpoint: CheckpointV2) -> None:
+    def _validate_existing_definition(self, checkpoint: Checkpoint) -> None:
         stored_digest = compute_run_definition_digest(checkpoint.run_definition)
         if checkpoint.run_definition_digest != stored_digest:
             raise CheckpointError(
@@ -1040,9 +1038,7 @@ class CheckpointResumeController:
                 "current run definition digest does not match its definition",
                 code="checkpoint_definition_mismatch",
             )
-        stored_comparison = run_definition_comparison_copy(checkpoint.run_definition)
-        current_comparison = run_definition_comparison_copy(self.run_definition)
-        if stored_comparison != current_comparison:
+        if checkpoint.run_definition != self.run_definition:
             raise CheckpointError(
                 "checkpoint embedded run definition does not match this run",
                 code="checkpoint_definition_mismatch",
@@ -1183,11 +1179,11 @@ class CheckpointResumeController:
         self._progress()
         self._deliver_pending_outbox()
 
-    def _queue_initial_event(self, checkpoint: CheckpointV2, event: RunEvent) -> None:
+    def _queue_initial_event(self, checkpoint: Checkpoint, event: RunEvent) -> None:
         self._queue_outbox_event(checkpoint, event)
 
     @staticmethod
-    def _queue_outbox_event(checkpoint: CheckpointV2, event: RunEvent) -> None:
+    def _queue_outbox_event(checkpoint: Checkpoint, event: RunEvent) -> None:
         candidate = EventOutboxEntry.pending(event.event_id, event.to_dict())
         existing = next(
             (entry for entry in checkpoint.event_outbox if entry.event_id == event.event_id),
@@ -1210,7 +1206,7 @@ class CheckpointResumeController:
             event = event_from_dict(pending.event)
             cursor = self._deliver_event(pending, event)
             expected_revision = checkpoint.revision
-            recorded = self.store.record_event_delivery_v2(
+            recorded = self.store.record_event_delivery(
                 checkpoint.checkpoint_key,
                 event_id=pending.event_id,
                 payload_digest=pending.payload_digest,
@@ -1225,7 +1221,7 @@ class CheckpointResumeController:
                 checkpoint.revision = expected_revision + 1
                 continue
             else:
-                authoritative = self.store.load_checkpoint_v2(checkpoint.checkpoint_key)
+                authoritative = self.store.load_checkpoint(checkpoint.checkpoint_key)
                 if authoritative is None:
                     raise CheckpointError(
                         "checkpoint disappeared while recording event delivery",
@@ -1303,17 +1299,17 @@ class CheckpointResumeController:
         if any(entry.state == "pending" for entry in checkpoint.event_outbox):
             return
         revision = checkpoint.revision
-        if not self.store.acknowledge_terminal_v2(
+        if not self.store.acknowledge_terminal(
             checkpoint.checkpoint_key,
             expected_revision=revision,
         ):
-            authoritative = self.store.load_checkpoint_v2(checkpoint.checkpoint_key)
+            authoritative = self.store.load_checkpoint(checkpoint.checkpoint_key)
             if authoritative is None or not authoritative.terminal_acknowledged:
                 raise CheckpointError(
                     "checkpoint terminal acknowledgement lost its revision",
                     code="checkpoint_store_conflict",
                 )
-        authoritative = self.store.load_checkpoint_v2(checkpoint.checkpoint_key)
+        authoritative = self.store.load_checkpoint(checkpoint.checkpoint_key)
         if authoritative is not None:
             self.checkpoint = authoritative
 
@@ -1331,7 +1327,7 @@ class CheckpointResumeController:
             while not self._heartbeat_stop.wait(interval_seconds):
                 now_ms = self._now_ms()
                 try:
-                    renewed = self.store.renew_checkpoint_claim_v2(
+                    renewed = self.store.renew_checkpoint_claim(
                         checkpoint.checkpoint_key,
                         claim_token=claim_token,
                         lease_expires_at_ms=now_ms + self.lease_duration_ms,
@@ -1375,7 +1371,7 @@ class CheckpointResumeController:
             )
         now_ms = self._now_ms()
         try:
-            renewed = self.store.renew_checkpoint_claim_v2(
+            renewed = self.store.renew_checkpoint_claim(
                 checkpoint.checkpoint_key,
                 claim_token=claim_token,
                 lease_expires_at_ms=now_ms + self.lease_duration_ms,
@@ -1447,7 +1443,7 @@ class CheckpointResumeController:
     def _now_ms() -> int:
         return time.time_ns() // 1_000_000
 
-    def _require_checkpoint(self) -> CheckpointV2:
+    def _require_checkpoint(self) -> Checkpoint:
         if self.checkpoint is None:
             raise RuntimeError("checkpoint controller has not been admitted")
         return self.checkpoint

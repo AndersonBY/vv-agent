@@ -206,7 +206,6 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             payload["shell"] = shell
         return ToolExecutionResult(
             tool_call_id="",
-            status="success",
             status_code=ToolResultStatus.RUNNING,
             content=to_json(payload),
             metadata=select_metadata(payload, "status", "session_id", "shell"),
@@ -264,7 +263,6 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             payload["shell"] = shell
         return ToolExecutionResult(
             tool_call_id="",
-            status="success",
             status_code=ToolResultStatus.RUNNING,
             content=to_json(payload),
             metadata=select_metadata(
@@ -309,7 +307,6 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
         status_code=ToolResultStatus.SUCCESS,
         content=to_json(payload),
         metadata=metadata,

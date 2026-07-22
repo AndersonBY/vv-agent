@@ -4,7 +4,7 @@ from typing import Any
 
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import builtin_error, to_json
-from vv_agent.types import ToolExecutionResult
+from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 
 def compress_memory(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -28,7 +28,7 @@ def compress_memory(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json({"ok": True, "saved_notes": len(notes)}),
         metadata={"saved_notes": len(notes)},
     )

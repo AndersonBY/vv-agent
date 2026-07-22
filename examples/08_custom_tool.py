@@ -19,15 +19,15 @@ def main() -> None:
     agent = Agent(
         name="support",
         instructions="Create tickets when the user reports work. Finish with task_finish.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[create_ticket],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
     )
-    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "Create a high priority ticket for login failures.")
+    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Create a high priority ticket for login failures.")
     result = Runner.run_sync(agent, prompt, run_config=config)
     print(result.final_output)
 

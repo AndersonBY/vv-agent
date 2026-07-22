@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import Agent, AgentStatus, RunConfig, Runner, ToolPolicy, function_tool
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalRequest
@@ -21,8 +21,7 @@ from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
 from vv_agent.workspace import LocalWorkspaceBackend
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "approval_tool_policy_v1.json"
-_FIXTURE_SHA256 = "6cb90bc1417a46c134202a7ba0240b5af11bc314e5bda9fb323140cc4e7c9d0b"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "approval_tool_policy.json"
 _CONTRACT: dict[str, Any] = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 _ExecutionPath = Literal["runner", "orchestrator"]
 
@@ -106,16 +105,12 @@ def _runner_tool_result(
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Use the requested tool.", model="m", tools=[tool]),
         "go",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             max_cycles=1,
             tool_policy=tool_policy,
             approval_provider=approval_provider,
@@ -140,13 +135,13 @@ def _orchestrator_tool_result(
         cycle_index=0,
         workspace_backend=LocalWorkspaceBackend(tmp_path),
         ctx=ExecutionContext(
+            event_handler=events.append,
             metadata={
                 "_vv_agent_run_id": "run-contract",
                 "_vv_agent_trace_id": "trace-contract",
                 "_vv_agent_agent_name": "assistant",
-                "_vv_agent_emit_event": events.append,
                 **runtime_metadata,
-            }
+            },
         ),
     )
     result = ToolOrchestrator.from_tools([tool.to_executor()]).run_one(
@@ -159,7 +154,7 @@ def _orchestrator_tool_result(
 
 def _assert_result_shape(result: ToolExecutionResult, shape: dict[str, Any]) -> dict[str, Any]:
     payload = json.loads(result.content)
-    assert result.status == shape["status"]
+    assert result.status_code.value == shape["status_code"]
     assert result.directive.value == shape["directive"]
     assert set(payload) == set(shape["content_keys"])
     assert set(result.metadata) == set(shape["metadata_keys"])
@@ -168,8 +163,7 @@ def _assert_result_shape(result: ToolExecutionResult, shape: dict[str, Any]) -> 
 
 
 def test_approval_tool_policy_fixture_is_canonical() -> None:
-    assert hashlib.sha256(_FIXTURE_PATH.read_bytes()).hexdigest() == _FIXTURE_SHA256
-    assert _CONTRACT["contract"] == "approval_tool_policy_v1"
+    assert _CONTRACT["contract"] == "approval_tool_policy"
     assert _CONTRACT["policy"]["precedence"] == [
         "allowed_tools",
         "disallowed_tools",
@@ -239,7 +233,6 @@ def test_approval_decision_contract(
     assert resolved_events[0].action == decision_case["action"]
     assert set(resolved_events[0].metadata) == set(_CONTRACT["approval"]["resolved_event_metadata_keys"])
     assert resolved_events[0].metadata == {
-        "action": decision_case["action"],
         "reason": decision_case["reason"],
         "decision_metadata": decision_case["metadata"],
     }
@@ -280,16 +273,12 @@ def test_approval_provider_failure_contract(tmp_path: Path) -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Use the requested tool.", model="m", tools=[tool]),
         "go",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             max_cycles=1,
             approval_provider=provider,
             approval_broker=broker,
@@ -302,9 +291,7 @@ def test_approval_provider_failure_contract(tmp_path: Path) -> None:
     assert provider.request_id
     assert (broker.pending_request(provider.request_id) is not None) is failure["broker_retains_request"]
     assert [
-        event.type
-        for event in result.events
-        if event.type in {"approval_requested", "approval_resolved", "run_failed"}
+        event.type for event in result.events if event.type in {"approval_requested", "approval_resolved", "run_failed"}
     ] == failure["events"]
 
 

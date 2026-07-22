@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import ast
-import base64
 import json
-import os
 import tomllib
 from copy import deepcopy
 from dataclasses import dataclass
@@ -75,16 +73,20 @@ def load_llm_settings_from_file(path: str | Path) -> dict[str, Any]:
         raise ConfigError(f"Settings file not found: {source_path}")
 
     source = source_path.read_text(encoding="utf-8")
-    if source_path.suffix.lower() == ".json":
+    suffix = source_path.suffix.lower()
+    if suffix == ".json":
         try:
-            return _normalize_loaded_settings(json.loads(source), source_path)
+            return _require_settings_mapping(json.loads(source), source_path)
         except json.JSONDecodeError as exc:
             raise ConfigError(f"Invalid JSON settings file: {source_path}") from exc
-    if source_path.suffix.lower() in {".toml", ".tml"}:
+    if suffix == ".toml":
         try:
-            return _normalize_loaded_settings(tomllib.loads(source), source_path)
+            return _require_settings_mapping(tomllib.loads(source), source_path)
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"Invalid TOML settings file: {source_path}") from exc
+
+    if suffix != ".py":
+        raise ConfigError(f"Unsupported settings file extension: {source_path.suffix or '<none>'}")
 
     module = ast.parse(source, filename=str(source_path))
     llm_value: ast.expr | None = None
@@ -109,29 +111,27 @@ def load_llm_settings_from_file(path: str | Path) -> dict[str, Any]:
     except (ValueError, SyntaxError) as exc:
         raise ConfigError(f"LLM_SETTINGS is not a literal mapping in {source_path}") from exc
 
-    return _normalize_loaded_settings(settings, source_path)
+    return _require_settings_mapping(settings, source_path)
 
 
-def _normalize_loaded_settings(settings: Any, source_path: Path) -> dict[str, Any]:
+def _require_settings_mapping(settings: Any, source_path: Path | str) -> dict[str, Any]:
     if not isinstance(settings, dict):
         raise ConfigError(f"LLM_SETTINGS must be an object in {source_path}")
-
-    # Compatibility: some settings files wrap the actual schema under
-    # `{"LLM_SETTINGS": {...}}`.
-    nested = settings.get("LLM_SETTINGS")
-    if isinstance(nested, dict):
-        nested_providers = _get_providers(nested)
-        if isinstance(nested_providers, dict) and isinstance(nested.get("endpoints"), list):
-            return nested
-
+    if settings.get("VERSION") != "2":
+        raise ConfigError(f"LLM_SETTINGS.VERSION must be '2' in {source_path}")
+    if not isinstance(settings.get("backends"), dict):
+        raise ConfigError(f"LLM_SETTINGS.backends must be an object in {source_path}")
+    if not isinstance(settings.get("endpoints"), list):
+        raise ConfigError(f"LLM_SETTINGS.endpoints must be an array in {source_path}")
     return settings
 
 
 def resolve_model_endpoint(settings: dict[str, Any], backend: str, model: str) -> ResolvedModelConfig:
-    providers = _get_providers(settings)
+    settings = _require_settings_mapping(settings, "runtime settings")
+    providers = settings["backends"]
     endpoints = settings.get("endpoints")
-    if not isinstance(providers, dict) or not isinstance(endpoints, list):
-        raise ConfigError("Invalid LLM_SETTINGS format: missing providers/backends or endpoints")
+    assert isinstance(providers, dict)
+    assert isinstance(endpoints, list)
 
     provider_config = providers.get(backend)
     if not isinstance(provider_config, dict):
@@ -194,7 +194,7 @@ def resolve_model_endpoint(settings: dict[str, Any], backend: str, model: str) -
 
         endpoint = EndpointConfig(
             endpoint_id=endpoint_id,
-            api_key=decode_api_key(api_key),
+            api_key=api_key,
             api_base=api_base,
             endpoint_type=endpoint_type,
         )
@@ -217,23 +217,19 @@ def resolve_model_endpoint(settings: dict[str, Any], backend: str, model: str) -
     )
 
 
-def build_openai_llm_from_local_settings(
+def build_vv_llm_from_local_settings(
     settings_path: str | Path,
     *,
     backend: str,
     model: str,
     timeout_seconds: float = 90.0,
 ):
-    from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
+    from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 
     settings = load_llm_settings_from_file(settings_path)
     resolved = resolve_model_endpoint(settings, backend=backend, model=model)
-    vv_settings = build_vv_llm_settings(
-        settings=settings,
-        backend=backend,
-        resolved=resolved,
-    )
-    llm = VVLlmClient(
+    vv_settings = _build_vv_llm_settings(settings)
+    llm = VvLlmClient(
         backend=backend,
         selected_model=resolved.selected_model,
         settings=vv_settings,
@@ -252,62 +248,10 @@ def build_openai_llm_from_local_settings(
     return llm, resolved
 
 
-def build_vv_llm_settings(
-    *,
-    settings: dict[str, Any],
-    backend: str,
-    resolved: ResolvedModelConfig,
-) -> Settings:
+def _build_vv_llm_settings(settings: dict[str, Any]) -> Settings:
     from vv_llm.settings import Settings
 
-    normalized = deepcopy(settings)
-    providers = normalized.pop("providers", None)
-    if "backends" not in normalized and isinstance(providers, dict):
-        normalized["backends"] = providers
-
-    if "VERSION" not in normalized:
-        normalized["VERSION"] = "2"
-
-    endpoints = normalized.get("endpoints")
-    if not isinstance(endpoints, list):
-        raise ConfigError("Invalid LLM_SETTINGS format: missing endpoints list")
-
-    for endpoint in endpoints:
-        if not isinstance(endpoint, dict):
-            continue
-        raw_key = endpoint.get("api_key")
-        if isinstance(raw_key, str):
-            endpoint["api_key"] = decode_api_key(raw_key)
-
-    backends = normalized.get("backends")
-    if not isinstance(backends, dict):
-        raise ConfigError("Invalid LLM_SETTINGS format: missing backends mapping")
-
-    backend_config = backends.setdefault(backend, {})
-    if not isinstance(backend_config, dict):
-        raise ConfigError(f"Backend {backend!r} config is not a mapping")
-
-    models = backend_config.setdefault("models", {})
-    if not isinstance(models, dict):
-        raise ConfigError(f"Backend {backend!r} models is not a mapping")
-
-    model_config = models.get(resolved.selected_model)
-    if not isinstance(model_config, dict):
-        model_config = {}
-        models[resolved.selected_model] = model_config
-
-    model_config["id"] = str(model_config.get("id", resolved.model_id))
-    model_config["endpoints"] = [
-        {
-            "endpoint_id": option.endpoint.endpoint_id,
-            "model_id": option.model_id,
-        }
-        for option in resolved.endpoint_options
-    ]
-
-    default_endpoint = backend_config.get("default_endpoint")
-    if not isinstance(default_endpoint, str) or not default_endpoint:
-        backend_config["default_endpoint"] = resolved.endpoint.endpoint_id
+    normalized = deepcopy(_require_settings_mapping(settings, "runtime settings"))
 
     try:
         return Settings(**normalized)
@@ -315,71 +259,7 @@ def build_vv_llm_settings(
         raise ConfigError(f"Failed to build vv-llm Settings: {exc}") from exc
 
 
-def decode_api_key(raw_value: str) -> str:
-    raw = raw_value.strip()
-    if not raw:
-        return raw
-
-    direct = _extract_suffix_key(raw)
-    if direct:
-        return direct
-
-    if os.getenv("V_AGENT_ENABLE_BASE64_KEY_DECODE") == "1":
-        decoded = _maybe_base64_decode(raw)
-        if decoded:
-            from_decoded = _extract_suffix_key(decoded)
-            if from_decoded:
-                return from_decoded
-            if _looks_like_api_key(decoded):
-                return decoded
-
-    return raw
-
-
-def _get_providers(settings: dict[str, Any]) -> dict[str, Any] | None:
-    providers = settings.get("providers")
-    if isinstance(providers, dict):
-        return providers
-    backends = settings.get("backends")
-    if isinstance(backends, dict):
-        return backends
-    return None
-
-
 def _read_positive_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value if value > 0 else None
-
-
-def _extract_suffix_key(value: str) -> str | None:
-    if ":" not in value:
-        return None
-    _, suffix = value.split(":", 1)
-    suffix = suffix.strip()
-    if _looks_like_api_key(suffix):
-        return suffix
-    return None
-
-
-def _maybe_base64_decode(value: str) -> str | None:
-    padded = value + "=" * ((4 - len(value) % 4) % 4)
-    try:
-        decoded = base64.b64decode(padded, validate=True)
-    except Exception:
-        return None
-    try:
-        return decoded.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-
-
-def _looks_like_api_key(value: str) -> bool:
-    if not value:
-        return False
-    if any(ch.isspace() for ch in value):
-        return False
-    return len(value) >= 10
-
-
-build_vv_llm_from_local_settings = build_openai_llm_from_local_settings

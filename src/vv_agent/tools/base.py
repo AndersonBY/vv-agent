@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vv_agent.checkpoint import ToolIdempotency
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
 from vv_agent.types import SubTaskOutcome, SubTaskRequest, ToolExecutionResult
 
@@ -16,22 +15,6 @@ if TYPE_CHECKING:
 
 ToolHandler = Callable[["ToolContext", dict[str, Any]], ToolExecutionResult]
 SubTaskRunner = Callable[[SubTaskRequest], SubTaskOutcome]
-
-
-def _parse_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        if value in (0, 1):
-            return bool(value)
-        return None
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return None
 
 
 @dataclass(slots=True)
@@ -84,26 +67,19 @@ class ToolContext:
             sources.append(runtime_metadata)
 
         for source in sources:
-            for key in (
-                "allow_outside_workspace_paths",
-                "allow_outside_workspace",
-                "workspace_allow_outside_main",
-                "workspace_allow_outside",
-            ):
-                parsed = _parse_bool(source.get(key))
-                if parsed is not None:
-                    return parsed
+            if "allow_outside_workspace_paths" not in source:
+                continue
+            value = source["allow_outside_workspace_paths"]
+            if not isinstance(value, bool):
+                raise ValueError("allow_outside_workspace_paths must be a boolean")
+            return value
         return False
 
     def resolve_workspace_path(self, raw_path: str) -> Path:
         base = self.workspace.resolve()
         candidate = Path(raw_path).expanduser()
         target = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
-        if (
-            not self.allow_outside_workspace_paths()
-            and target != base
-            and base not in target.parents
-        ):
+        if not self.allow_outside_workspace_paths() and target != base and base not in target.parents:
             raise ValueError(f"Path escapes workspace: {raw_path}")
         return target
 
@@ -124,14 +100,7 @@ def is_tool_call_preapproved(context: ToolContext, *, tool_call_id: str, tool_na
 class ToolSpec:
     name: str
     handler: ToolHandler
-    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
     tool_metadata: ToolMetadata | None = None
 
     def __post_init__(self) -> None:
-        self.tool_metadata, self.idempotency = normalize_tool_metadata(
-            self.tool_metadata,
-            legacy_idempotency=self.idempotency,
-        )
-
-
-ToolCallContext = ToolContext
+        self.tool_metadata = normalize_tool_metadata(self.tool_metadata)

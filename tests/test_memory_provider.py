@@ -151,14 +151,14 @@ def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any])
         memory_manager=_build_memory_manager(),
         previous_prompt_tokens=160,
         ctx=ExecutionContext(
+            event_handler=emitted.append,
             metadata={
                 "_vv_agent_memory_providers": [provider],
-                "_vv_agent_emit_event": emitted.append,
                 "_vv_agent_run_id": "run_1",
                 "_vv_agent_trace_id": "trace_1",
                 "_vv_agent_agent_name": "assistant",
                 "_vv_agent_session_id": "session_1",
-            }
+            },
         ),
     )
 

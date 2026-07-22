@@ -17,7 +17,7 @@ The first transport is JSONL over stdio:
 uv run vv-agent app-server --listen stdio \
   --settings local_settings.py \
   --backend moonshot \
-  --model kimi-k2.6 \
+  --model kimi-k3 \
   --timeout-seconds 90
 ```
 
@@ -46,9 +46,10 @@ capabilities:
 
 Requests other than `initialize` are rejected until the connection has been
 initialized. After receiving the initialize response, clients send
-`{"jsonrpc":"2.0","method":"initialized"}` to complete the shared client handshake. Python v1
-compatibility is preserved: the server may emit asynchronous notifications as
-soon as the initialize response has been sent.
+`{"jsonrpc":"2.0","method":"initialized"}` as the client-side handshake
+confirmation. The initialize response marks the connection ready, so runtime
+notifications may follow that response; the confirmation notification is
+idempotent.
 
 Malformed JSONL input returns error code `-32700` with a null id, and the stdio
 server continues reading later lines. A valid JSON value that is not a request,
@@ -146,8 +147,8 @@ from steering or interrupting a stale turn.
 ## Items
 
 Items are UI-ready projections of typed `RunEvent` objects. Hosts should render
-timelines from `item/*` notifications and from replayed snapshot `items`, not
-from raw runtime logs.
+timelines from `item/*` notifications and from replayed snapshot `items`. App
+Server has no untyped runtime event input.
 
 Current item types include:
 
@@ -187,9 +188,8 @@ Newly produced completed events add `directive`, `errorCode`,
 `executionStarted`, and `durationMs` to the tool-call payload, plus
 `toolMetadata` when declared. A policy or approval short-circuit has only a
 failed or in-progress completed item and never receives a fabricated started
-item. A legacy completed event without the additive event fields keeps its
-legacy payload; the mapper does not invent values. Older clients may ignore
-all additive payload keys.
+item. Completed events missing any required current field are rejected before
+App Server projection.
 
 When a run budget is configured, `turn/completed` may also contain
 `budgetUsage` and `budgetExhaustion`. A budget stop projects as `status:
@@ -271,8 +271,6 @@ Generate JSON Schema files for client bindings and drift checks:
 uv run vv-agent app-server schema --out ./app-server-schema
 uv run vv-agent app-server generate-ts --out ./app-server-schema/typescript
 ```
-
-`generate-json-schema` remains available as a compatibility alias.
 
 The command writes:
 

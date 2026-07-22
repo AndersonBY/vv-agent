@@ -10,7 +10,7 @@ from pathlib import Path
 from types import NoneType
 from typing import TYPE_CHECKING, Any, Protocol, Union, get_args, get_origin, get_type_hints, overload
 
-from vv_agent.checkpoint import ToolIdempotency
+from vv_agent.tools.argument_validation import assert_valid_tool_schema, close_object_schemas
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.executor import ToolExposure
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
@@ -31,7 +31,6 @@ class Tool(Protocol):
     strict_json_schema: bool
     is_enabled: bool | Callable[[Any, Any], bool]
     needs_approval: bool | ApprovalPredicate
-    idempotency: ToolIdempotency
     tool_metadata: ToolMetadata | None
 
     def invoke(self, context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput: ...
@@ -49,17 +48,15 @@ class FunctionTool:
     timeout_seconds: float | None = None
     exposure: ToolExposure = ToolExposure.DIRECT
     failure_error_function: ToolErrorFormatter | None = None
-    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
     tool_metadata: ToolMetadata | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
-        self.tool_metadata, self.idempotency = normalize_tool_metadata(
-            self.tool_metadata,
-            legacy_idempotency=self.idempotency,
-        )
+        self.params_json_schema = close_object_schemas(self.params_json_schema)
+        assert_valid_tool_schema(self.params_json_schema)
+        self.tool_metadata = normalize_tool_metadata(self.tool_metadata)
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -143,7 +140,6 @@ class FunctionTool:
             }
             return ToolExecutionResult(
                 tool_call_id=tool_call_id,
-                status="error",
                 status_code=ToolResultStatus.ERROR,
                 error_code=output.error_code,
                 content=json.dumps(
@@ -177,7 +173,6 @@ def function_tool(
     timeout_seconds: float | None = None,
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
-    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
     tool_metadata: ToolMetadata | dict[str, Any] | None = None,
 ) -> FunctionTool: ...
 
@@ -195,7 +190,6 @@ def function_tool(
     timeout_seconds: float | None = None,
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
-    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
     tool_metadata: ToolMetadata | dict[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 
@@ -212,7 +206,6 @@ def function_tool(
     timeout_seconds: float | None = None,
     exposure: ToolExposure = ToolExposure.DIRECT,
     failure_error_function: ToolErrorFormatter | None = None,
-    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
     tool_metadata: ToolMetadata | dict[str, Any] | None = None,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     current_frame = inspect.currentframe()
@@ -238,10 +231,7 @@ def function_tool(
             result = target(context, *positional, **keyword) if pass_context else target(*positional, **keyword)
             return _coerce_tool_output(result)
 
-        normalized_tool_metadata, normalized_idempotency = normalize_tool_metadata(
-            tool_metadata,
-            legacy_idempotency=idempotency,
-        )
+        normalized_tool_metadata = normalize_tool_metadata(tool_metadata)
         return FunctionTool(
             name=tool_name,
             description=tool_description,
@@ -253,7 +243,6 @@ def function_tool(
             timeout_seconds=timeout_seconds,
             exposure=exposure,
             failure_error_function=failure_error_function,
-            idempotency=normalized_idempotency,
             tool_metadata=normalized_tool_metadata,
         )
 
@@ -310,7 +299,6 @@ def adapt_tool(tool: Tool) -> FunctionTool:
         timeout_seconds=getattr(tool, "timeout_seconds", None),
         exposure=exposure,
         failure_error_function=getattr(tool, "failure_error_function", None),
-        idempotency=getattr(tool, "idempotency", ToolIdempotency.UNKNOWN),
         tool_metadata=getattr(tool, "tool_metadata", None),
         metadata=dict(metadata),
     )
@@ -447,7 +435,7 @@ def _schema_from_typed_dict(cls: type[Any], *, localns: dict[str, Any] | None = 
 
 
 def _schema_for_type(annotation: Any) -> dict[str, Any]:
-    if annotation is inspect.Parameter.empty or annotation is Any:
+    if annotation is inspect.Parameter.empty or annotation is Any or annotation is object:
         return {}
     origin = get_origin(annotation)
     args = get_args(annotation)
@@ -467,7 +455,11 @@ def _schema_for_type(annotation: Any) -> dict[str, Any]:
         item_type = args[0] if args else Any
         return {"type": "array", "items": _schema_for_type(item_type)}
     if origin is dict:
-        return {"type": "object"}
+        value_type = args[1] if len(args) > 1 else Any
+        return {
+            "type": "object",
+            "additionalProperties": _schema_for_type(value_type),
+        }
     if _is_dataclass_type(annotation):
         return _schema_from_dataclass(annotation)
     return {"type": "string"}

@@ -1,0 +1,736 @@
+{
+  "contract": "vv-agent-builtin-tools-v1",
+  "schema_version": 1,
+  "tools": [
+    {
+      "approval": "not_required",
+      "description": "When task goals are fully complete, call this tool to end the task and return final message.\n\nFinish the current task and return the final response.\n\nWhen to use:\n- Only call this when the user's requested work is genuinely complete, verified, and no unfinished TODO remains.\n- Use it after implementation, review, test output, and any required artifact paths are ready to report.\n- Use `exposed_files` to list concrete deliverables the user should inspect.\n\nCompletion protocol:\n- Do not call this tool if work is partially complete, blocked, waiting for user input, or still needs verification.\n- If `todo_write` has pending or in-progress work, the runtime rejects premature finish by default.\n- `require_all_todos_completed=false` can bypass the TODO guard only when the user explicitly accepts unfinished TODOs or the remaining items are intentionally deferred.\n- The message should include concise outcome, important verification evidence, and any remaining caveats.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "task_finish",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "exposed_files": {
+            "description": "Optional workspace-relative paths for created or modified deliverables the user should inspect. Include concrete artifact paths, not transient logs, prose descriptions, or unrelated files.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "description": "Final response shown to user. Include the result, important verification evidence, and any remaining caveats.",
+            "type": "string"
+          },
+          "require_all_todos_completed": {
+            "description": "Default true. When true, finish is rejected while TODO items remain pending or in_progress. Set false only when intentionally finishing with remaining TODOs, such as when the user explicitly accepts deferred work.",
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Pause execution and ask the user for required clarification or decision.\n\nWhen to use:\n- The task cannot be completed safely because a real user preference, permission, credential, destructive action, or ambiguous scope decision is missing.\n- A reasonable default would risk doing the wrong work or violating the user's stated constraints.\n- Multiple clear options exist and user choice changes the implementation or operational outcome.\n\nDo not use this for facts you can discover with available tools, files, command output, documentation, or local configuration. This blocks the runtime until the user responds, so keep the question concrete, include 2-3 options when possible, and ask only for the decision needed to proceed.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "ask_user",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_custom_options": {
+            "description": "Whether users can add custom options. Set true when preset options may be incomplete or the user may need to provide a custom path, credential label, or preference.",
+            "type": "boolean"
+          },
+          "options": {
+            "description": "Optional answer options shown to the user. Prefer 2-3 concise, mutually exclusive choices when the decision has clear outcomes.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "question": {
+            "description": "Question text to ask the user. Ask the smallest decision needed to unblock progress, include relevant context, and avoid bundling unrelated questions.",
+            "type": "string"
+          },
+          "selection_type": {
+            "description": "Single or multi-choice mode when options are provided. Use `multi` only when several choices may validly apply at the same time.",
+            "enum": [
+              "single",
+              "multi"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Activate a skill from the current task's available skill list.\n\nWhen to use:\n- A listed skill directly applies to the current task, workflow, domain, or required process discipline.\n- The skill may contain repository-specific instructions, validation steps, tool constraints, or templates that should guide the next action.\n\nProtocol:\n- Use this tool only for skills explicitly listed in <available_skills>.\n- Do not invent skill names or activate unrelated skills.\n- Read the returned SKILL.md instructions before acting, then follow any mandatory workflow.\n\nThe skill metadata follows the Agent Skills specification (https://github.com/agentskills/agentskills): name/description are exposed in <available_skills>, and skill instructions are loaded from SKILL.md when location is provided.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "activate_skill",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "Optional reason for activating this skill. Explain briefly why this skill applies before acting.",
+            "type": "string"
+          },
+          "skill_name": {
+            "description": "Skill identifier from available skill list. The exact `name` from the available skill list. Do not pass a path, title, or inferred alias.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Create and manage structured TODO list for multi-step execution.\n\nProtocol:\n- Send the complete `todos` array each time.\n- The payload is a replacement payload, not a patch.\n- Existing items with matching `id` are updated.\n- Matching items keep their original `created_at`.\n- Items omitted from the new array are removed.\n- Missing `id` values are generated automatically as short stable ids.\n- Each item must include `title`, `status`, and `priority`.\n- Only one item may have `status=in_progress`.\n\nWhen to use:\n- Track multi-step implementation, verification, review, release, or incident recovery work.\n- Make progress state explicit before delegating, running long commands, or switching from investigation to edits.\n\nReturns:\n- The current TODO list with generated ids, timestamps, and validation errors when statuses conflict.\n\nUse this tool to keep task planning explicit and machine-readable.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "todo_write",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "todos": {
+            "description": "Complete TODO list replacement payload. Send every item that should remain; omitted existing ids are removed.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "description": "Existing TODO id for update; omit for new item. When omitted, a generated 8-character id is assigned.",
+                  "type": "string"
+                },
+                "priority": {
+                  "description": "TODO priority: `high` for blockers or user-critical work, `medium` for normal required work, `low` for cleanup or optional follow-up.",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high"
+                  ],
+                  "type": "string"
+                },
+                "status": {
+                  "description": "TODO status: `pending` for not started, `in_progress` for the single active item, or `completed` after verification.",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ],
+                  "type": "string"
+                },
+                "title": {
+                  "description": "TODO title. Make it actionable and observable, so progress can be verified without reading hidden context.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "title",
+                "status",
+                "priority"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "todos"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Store key summary notes to reduce future context load.\n\nStore a durable memory note that should survive future compaction.\n\nWhen to use:\n- Preserve stable decisions, constraints, file paths, API names, test evidence, user preferences, or implementation facts that would be expensive or risky to rediscover.\n- Capture facts needed by later turns after a long investigation, a live incident, or a multi-step implementation.\n- Use this before context compaction when losing a detail would make the Agent repeat work or make an unsafe assumption.\n\nGood memory notes:\n- Include concrete names, paths, commands, identifiers, model names, error text, and final decisions.\n- State whether the information is verified current state or only an inference.\n- Keep it short enough to be useful but specific enough to resume work.\n\nDo not store transient chatter, obvious facts already present in the latest messages, speculation without labels, secrets, or disposable command output.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "compress_memory",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "core_information": {
+            "description": "Key information that should be preserved after compression. Include concrete names, paths, commands, and decisions when relevant.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "core_information"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Find files in workspace with optional path and glob filtering.\n\nLarge results are truncated, and common dependency/cache directories\n(like node_modules/.venv) are summarized by default when listing from workspace root.\n\nWhen to use:\n- Discover repository structure, find candidate files before reading them, or inspect generated output locations.\n- Use `path` to narrow the search root and `glob` to narrow file names before broad scans.\n- Set `include_hidden=true` or `include_ignored=true` only when the task specifically needs those normally skipped paths.\n- Set `include_sensitive=true` only when the task explicitly needs files that look like secrets, credentials, keys, tokens, or private config.\n\nNarrow first:\n- Common dependency/cache directories such as node_modules, .venv, target, and build outputs are summarized from workspace-root listings by default.\n- Large results are truncated; use the returned `truncated`, `returned_count`, `max_results`, `remaining_count`, and `ignored_roots` fields to choose a smaller follow-up query.\n- When a backend scan limit is reached, the response can include `count_is_estimate=true`.\n- Use `offset` for pagination and `sort` to choose `modified_desc` or `path_asc`.\n\nReturns:\n- A structured list of normalized file paths plus counts, truncation metadata, ignored root summaries, and scan-limit hints.\n- Errors for invalid paths or paths outside the permitted workspace.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "find_files",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "glob": {
+            "description": "Optional glob filter such as `**/*.rs` or `src/**/*.md`. Use it to narrow by filename, directory, or extensions before listing broad trees. Default **/*.",
+            "type": "string"
+          },
+          "include_hidden": {
+            "description": "Whether hidden files and dotfiles are included. Default false; set true only when the task explicitly needs paths such as .env.example, .github, or other hidden project files.",
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "description": "When listing workspace root, include files under common dependency/cache directories. Default false; set true only when explicitly inspecting generated, dependency, cache, or build-output paths.",
+            "type": "boolean"
+          },
+          "include_sensitive": {
+            "description": "Include files whose paths look like secrets, credentials, keys, tokens, or private config. Default false.",
+            "type": "boolean"
+          },
+          "max_results": {
+            "description": "Maximum number of file paths returned in one call. Default 100; larger values are capped. If truncated, use returned counts to run a narrower follow-up query.",
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Number of matching file paths to skip before returning results. Default 0.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Optional search root path. Use workspace-relative path by default; absolute path is allowed when outside-workspace access is enabled. Default '.'.",
+            "type": "string"
+          },
+          "scan_limit": {
+            "description": "Maximum files scanned before stopping early to keep listing fast. If reached, response includes `count_is_estimate=true`.",
+            "type": "integer"
+          },
+          "sort": {
+            "description": "Sort order. `modified_desc` uses local file modification time when available; non-local backends may fall back to `path_asc`. Default modified_desc.",
+            "enum": [
+              "modified_desc",
+              "path_asc"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Read file metadata in workspace, including size, modified time and type.\n\nInspect file metadata in workspace without loading full contents.\n\nWhen to use:\n- Use before reading large or binary files.\n- Use before deciding read ranges, or before editing a path whose size/type is unknown.\n- Check whether a path is a file or directory and whether it has a suffix that suggests text, image, archive, or binary content.\n- Estimate whether `read_file`, `read_image`, or a narrower grep/search is the right next tool.\n\nReturns:\n- Normalized path, file/dir flags, byte size, modified time, suffix, and line count when it can be determined safely.\n- Structured errors for missing paths or paths outside the permitted workspace.\n\nSafety:\n- This is a metadata probe; it should be preferred over reading a whole unknown file just to decide what to do next.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "file_info",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Target file path (workspace-relative by default; absolute path allowed when outside-workspace access is enabled).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Read file contents from workspace.\n\nWhen to use:\n- Inspect source files, configs, logs, docs, generated artifacts, or exact snippets without shelling out to cat/head/tail.\n- Read large files in chunks after using `file_info` or after a truncated response suggests a narrower line range.\n- Use `show_line_numbers=true` when you need to quote lines, plan precise edits, or coordinate with `edit_file`.\n\nSupported behavior:\n- Reads plain UTF-8 text files and returns a content slice.\n- Uses 1-based line numbers for `start_line` and `end_line`.\n- Can prepend line numbers with `show_line_numbers=true`.\n- Enforces read limits per request: max 2000 lines or 50000 characters.\n- Large reads return file info payload instead of full content.\n\nGuidance:\n- Prefer this tool instead of shell commands like cat/head/tail.\n- For large files, read in chunks by line range.\n- By default, paths are workspace-relative.\n- If runtime metadata enables outside-workspace access, absolute local paths are allowed.\n\nReturns:\n- A UTF-8 text slice with path metadata, requested line range, actual returned range, and optional line numbers.\n- If the request exceeds safe limits, a file-info style payload with file statistics and suggested smaller ranges instead of flooding the LLM context.\n\nSafety and limits:\n- Uses 1-based inclusive line numbers for `start_line` and `end_line`.\n- Enforces max 2000 lines or 50000 characters per request.\n- Prefer `file_info` before reading unknown large or binary-looking paths.\n- Paths are workspace-relative by default; absolute local paths require explicit outside-workspace runtime permission.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "read_file",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "end_line": {
+            "description": "Optional ending line number (1-based, inclusive). Pair with `start_line` to keep large-file reads bounded.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Target file path (workspace-relative by default; absolute path allowed when outside-workspace access is enabled).",
+            "type": "string"
+          },
+          "show_line_numbers": {
+            "description": "When true, prefixes each output line with its source line number. Enable when you need to quote precise lines, plan edits, or compare snippets.",
+            "type": "boolean"
+          },
+          "start_line": {
+            "description": "Optional starting line number (1-based). Use with `end_line` to read a chunk from a large file instead of loading the whole file.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Write content to a file in workspace.\n\nMODES:\n- Overwrite (default): Replaces entire file content.\n- Append: Adds to existing content (`append=true`).\n\nWARNING:\n- By default, this OVERWRITES the entire file.\n- Use `append=true` to add content instead.\n\nPARAMETERS:\n- `path` (required): Workspace-relative path by default. Absolute path is allowed when outside-workspace access is enabled.\n- `content` (required): Content to write.\n- `append` (optional): Set true to append instead of overwrite.\n- `leading_newline`/`trailing_newline` (optional): Add newlines when appending.\n\nWhen to use:\n- Create a new file, replace an entire generated artifact, or append a clearly bounded section to an existing file.\n- Use `append=true` only when preserving all existing content is intentional and the appended block boundary is clear.\n- Prefer `edit_file` for small or surgical edits to existing files.\n\nDo not use this for surgical edits to existing source files; prefer `edit_file` when current read context is known through `read_file`, a full `write_file`, or a previous successful `edit_file`.\nAppending to an unknown existing file does not create a full edit baseline; call `read_file` before editing after that case.\n\nReturns:\n- Structured write metadata including normalized path, append mode, character count, and newline flags.\n- Errors when the path escapes the workspace or the backend refuses the write.\n\nSafety and behavior:\n- Overwrite is the default and replaces the whole file.\n- This can create parent directories when the workspace backend supports it.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "write_file",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "append": {
+            "description": "Set true to append instead of overwrite. Default is false (overwrite). Use append only when existing content must be preserved.",
+            "type": "boolean"
+          },
+          "content": {
+            "description": "The complete file body for overwrite mode, or the exact block to append when `append=true`. When overwriting, preserve existing content yourself; use `append=true` only when the existing file should remain intact.",
+            "type": "string"
+          },
+          "leading_newline": {
+            "description": "Add a leading newline when appending. Default is false. Use as a separator from existing content when needed.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Target file path (workspace-relative by default; absolute path allowed when outside-workspace access is enabled).",
+            "type": "string"
+          },
+          "trailing_newline": {
+            "description": "Add a trailing newline when appending. Default is false. Use to preserve a line boundary before the next append or shell read.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Safely edit an existing workspace file by replacing exact text.\n\nUse exact `old_string` matching.\n\nWorkflow:\n- Call `read_file` first unless the file was just fully written with `write_file` or updated by a previous successful `edit_file`/`write_file` operation that preserved current context.\n- A focused line-range read is enough when your `old_string` comes from that current read state; use a full read for broad or uncertain edits.\n- Use this for focused edits where a precise old/new string is safer than rewriting a whole file.\n- Include enough context in `old_string` to make the target unique; never guess whitespace or punctuation from memory.\n- Appending to an unknown existing file does not create a current edit baseline; call `read_file` before editing after that case.\n- The operation fails if `old_string` is not found, if it matches multiple locations, or if the file changed since it was read.\n- By default `old_string` must match exactly one location; use `replace_all=true` only after confirming every match should change.\n\nReturns:\n- Short JSON content with replacement count.\n- Structured edit metadata including changed files, bounded diff, additions, deletions, operation, and line ending.\n- Clear failure details when the target string is missing, ambiguous, outside the workspace, or rejected by the backend.\n\nPrefer this over shell-based sed/perl for repository edits because it is exact, structured, and safer for Agent-driven changes.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "edit_file",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "new_string": {
+            "description": "Replacement text. May be empty; preserve intended indentation, line endings, and surrounding whitespace.",
+            "type": "string"
+          },
+          "old_string": {
+            "description": "Exact source text to replace. Must be non-empty and unique unless replace_all=true.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Target file path (workspace-relative by default; absolute path allowed when outside-workspace access is enabled).",
+            "type": "string"
+          },
+          "replace_all": {
+            "description": "Replace all matches when true after confirming every match is intended. Default false to keep focused edits narrow.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Search workspace file contents with regex or literal text.\n\nWhen to use:\n- Find symbols, text, config keys, error strings, TODOs, or call sites before deciding which files to read or edit.\n- Prefer this tool over ad-hoc shell grep for direct content search.\n- Narrow broad searches with `path`, `glob`, or `type` so results stay useful and fast.\n\nOUTPUT MODES:\n- `files_with_matches` (default): show only matching file paths.\n- `content`: show matching lines with optional context and line numbers.\n- `count`: show per-file match counts.\n\nFILTERS:\n- `path` + `glob`: scope the search root and file pattern.\n- A single file path searches that file directly, even if it is hidden or under an ignored root.\n- `type`: language/file-type shortcut (py/js/ts/md/json/...).\n- default matching uses smart-case: all-lowercase patterns search case-insensitively and patterns containing uppercase stay case-sensitive.\n- `case_sensitive`: explicitly override smart-case behavior.\n- `multiline`: let `.` match newlines and allow multi-line patterns.\n- `literal`: search for exact text instead of regex.\n- `include_hidden`: include hidden files/directories.\n- `include_ignored`: include common dependency/cache roots at workspace root.\n- `include_sensitive`: include paths that look like secrets or credentials. Default false.\n\nCONTENT OPTIONS (only for `content` mode):\n- `b`: lines before each match.\n- `a`: lines after each match.\n- `c`: lines before+after and overrides b/a.\n- `n`: include line numbers.\n\nLIMITING:\n- `offset`: skip the first N result rows/entries.\n- `head_limit`: return only first N output rows/entries. Default 250; 0 means unlimited subject to hard caps.\n\nReturns:\n- Matching content rows, file paths, or counts according to `output_mode`.\n- Truncation metadata such as `content_truncated`, `structured_truncated`, `structured_item_limit`, and `structured_char_limit` when output is capped.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "search_files",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "a": {
+            "description": "Lines after each match. Only used in content mode. Use when each match needs following context, such as a function body, config value, stack trace continuation, or adjacent TODO detail.",
+            "type": "integer"
+          },
+          "b": {
+            "description": "Lines before each match. Only used in content mode. Use when each match needs leading context, such as a function signature, heading, import block, or preceding error line.",
+            "type": "integer"
+          },
+          "c": {
+            "description": "Context lines before and after each match. Overrides b/a. Use this instead of separate b/a values when symmetric context is enough to decide the next read or edit.",
+            "type": "integer"
+          },
+          "case_sensitive": {
+            "description": "Explicitly override smart-case behavior. Set true when literal casing matters, false when you need forced case-insensitive matching.",
+            "type": "boolean"
+          },
+          "glob": {
+            "description": "Optional file glob filter such as `**/*.rs` or `docs/**/*.md`. Use it to narrow by filename, path segment, or extension before running broad regex searches. Default **/*.",
+            "type": "string"
+          },
+          "head_limit": {
+            "description": "Cap output to the first N rows or entries. Default 250. Use 0 for unlimited output subject to hard caps. Use this for broad searches, then run a narrower follow-up query if matches are truncated.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "include_hidden": {
+            "description": "Whether hidden files and dotfiles are included. Default false; set true only when explicitly searching hidden project files such as .env.example, .github, or dot-directories.",
+            "type": "boolean"
+          },
+          "include_ignored": {
+            "description": "When searching workspace root, include files under common dependency/cache directories. Default false; set true only when explicitly inspecting generated, dependency, cache, or build-output paths.",
+            "type": "boolean"
+          },
+          "include_sensitive": {
+            "description": "Include files whose paths look like secrets, credentials, keys, tokens, or private config. Default false.",
+            "type": "boolean"
+          },
+          "literal": {
+            "description": "Search for the exact pattern text instead of interpreting it as a regex. Default false.",
+            "type": "boolean"
+          },
+          "multiline": {
+            "description": "Enable multiline regex mode. Use for patterns that intentionally span line breaks, such as adjacent JSON fields, multi-line imports, or repeated prompt blocks.",
+            "type": "boolean"
+          },
+          "n": {
+            "description": "Whether to include line numbers in content output. Default true.",
+            "type": "boolean"
+          },
+          "offset": {
+            "description": "Number of result rows or entries to skip before returning results. Default 0.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_mode": {
+            "description": "Search output mode. `files_with_matches` returns matching paths for a follow-up read/search, `content` returns matching lines for inspection, and `count` returns per-file match counts. Default is 'files_with_matches'.",
+            "enum": [
+              "files_with_matches",
+              "content",
+              "count"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "description": "Optional search root or single file path. Use workspace-relative path by default; absolute path is allowed when outside-workspace access is enabled. Default '.'. A single file path searches that file directly, even if it is hidden or under an ignored root.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Regex pattern to search for, or exact text when `literal=true`. Escape regex metacharacters when `literal=false` and searching for literal dots, brackets, or file extensions.",
+            "type": "string"
+          },
+          "type": {
+            "description": "File type shortcut (e.g. py/js/ts/md/json). Unsupported or unknown shortcuts return a structured error listing supported values.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Execute bash command in workspace.\n\nShell selection:\n- By default commands run through a POSIX-style shell (`bash -lc` on Unix-like hosts, `cmd /C` on Windows).\n- runtime metadata can override this with `bash_shell` (and Windows shell priority where available).\n- runtime metadata `bash_env` can provide extra environment variables for foreground and background commands.\n- Returned payloads include the selected shell name so later polling/debugging can match the actual execution environment.\n\nGuidelines:\n- Prefer specialized read/write/search/edit tools when possible.\n- Use this tool for command execution, package install, scripts, and piped workflows.\n- For commands that may prompt for confirmation, pass `auto_confirm=true` or provide explicit `stdin`.\n- Use `run_in_background=true` for long-running commands and poll with check tool.\n- If a foreground command hits its timeout, it is automatically moved to a background\n  session and returns a `session_id` for polling.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "bash",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_confirm": {
+            "description": "Pipe yes to the command for non-interactive confirmation prompts. Use carefully: do not enable for destructive operations unless the user has already authorized the action and the command target is explicit.",
+            "type": "boolean"
+          },
+          "command": {
+            "description": "Bash command string. The runtime executes it through the configured shell.",
+            "type": "string"
+          },
+          "exec_dir": {
+            "description": "Execution directory (workspace-relative by default; absolute path allowed when outside-workspace access is enabled).",
+            "type": "string"
+          },
+          "run_in_background": {
+            "description": "Run a long-running command in background and return a `session_id`; poll it later with `check_background_command` instead of blocking the Agent loop.",
+            "type": "boolean"
+          },
+          "stdin": {
+            "description": "Optional stdin content for interactive prompts, confirmation text, heredoc-style input, or commands that read from standard input. Prefer explicit stdin over embedding secrets or fragile echo pipelines in the command string.",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Foreground timeout seconds, default 300, max 600. For long-running commands, prefer `run_in_background=true`; if a foreground command times out it is moved to a background session.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Check status/output for command launched in background mode, including sessions auto-detached after foreground timeout.\n\nWhen to use:\n- After `bash` returns a `session_id` from `run_in_background=true`.\n- After a foreground command times out and the runtime auto-detaches it into a background session.\n- When a long build, test, server, release, or watcher needs progress checks without blocking the main Agent loop.\n\nPolling protocol:\n- Poll until the response is terminal: `completed` or an error such as `background_command_failed`.\n- A `running` response can include recent captured stdout/stderr; use that output to decide whether to wait, stop asking for status, or report a blocker.\n- Stop polling once a terminal status is returned; repeated polling after completion should not be used as a substitute for reading the final payload.\n\nReturns:\n- Current session status, recent output while running, and final exit/output metadata on completion.\n- Structured errors for unknown sessions, failed commands, and runtime-managed background failures.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "check_background_command",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "description": "Background session identifier. It is returned by `bash` when `run_in_background=true` or when a foreground command times out.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Create sub-tasks for a configured sub-agent.\n\nModes:\n- Single task: provide `task_description` (+ optional `output_requirements`) for one self-contained objective.\n- Batch task: provide `tasks` array for multiple independent tasks of the same sub-agent. Use this for parallel work that can be split into independent investigations, file reads, reviews, or implementation checks.\n\nDelegation rules:\n- Use the exact sub-agent id from the configured `sub_agents` mapping.\n- Give the child concrete scope, relevant files or commands, constraints, and expected evidence.\n- Do not use batch mode for ordered edits, shared mutable state, dependent tasks, or work where one child result changes what the next child should do.\n- Keep `include_main_summary=false` for independent tasks; enable it only when the child truly needs parent context.\n- `exclude_files_pattern` is a discovery filter over normalized workspace-relative paths. It hides matches from child file listing, search, and status snapshots, but direct known-path access, shell commands, and custom tools remain available. It is not an access-control boundary or sandbox.\n\nExecution:\n- `wait_for_completion=true` (default): wait for result(s) and return final payload. Batch mode may run requests through the runtime execution backend in parallel and returns a summary plus one result per task.\n- `wait_for_completion=false`: start background sub-task(s) and return `task_id` / `task_ids` for later polling.\n- After a schema-valid batch is accepted, individual child executions or background submissions can still fail; inspect each runtime result before deciding whether the parent task can continue.\n\nResult handling:\n- For synchronous runs, read every returned result and error entry before using the child output.\n- Treat runtime partial failures as unresolved work unless the failed child was optional or its failure is itself the required evidence.\n- For background runs, preserve the returned task ids and use `sub_task_status` later to inspect progress, fetch results, or send follow-up messages.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "create_sub_task",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "description": "Exact sub-agent identifier from the configured `sub_agents` mapping. Do not pass a display name, model name, or inferred label.",
+            "type": "string"
+          },
+          "exclude_files_pattern": {
+            "description": "Optional portable regex applied to normalized workspace-relative paths for child discovery only. Matching paths are hidden from file listing, search, and status snapshots. Direct known-path access, shell commands, and custom tools remain available, so this is not an access-control boundary or sandbox. Blank values are treated as absent; lookaround, backreferences, Unicode property escapes, engine-specific anchors/escapes, possessive quantifiers, and character-class set operations are rejected.",
+            "type": "string"
+          },
+          "include_main_summary": {
+            "description": "Whether to include parent-task summary context. Default false. Use when the child needs parent context; keep false for independent tasks.",
+            "type": "boolean"
+          },
+          "output_requirements": {
+            "description": "Optional output constraints for single-task mode. State success criteria, expected format, concrete deliverables, and verification evidence the parent Agent needs.",
+            "type": "string"
+          },
+          "task_description": {
+            "description": "Single-task description for one self-contained objective. Mutually exclusive with `tasks`; give a concrete objective, constraints, relevant files or commands, and the evidence or deliverable expected by the parent Agent.",
+            "type": "string"
+          },
+          "tasks": {
+            "description": "Batch mode: multiple independent tasks for the same sub-agent. Use when parallel work can be safely delegated without shared mutable state or ordering dependencies.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "output_requirements": {
+                  "description": "Optional output constraints for one sub-task. State success criteria, expected format, concrete deliverables, and verification evidence.",
+                  "type": "string"
+                },
+                "task_description": {
+                  "description": "Task description for one independent sub-task. Give a concrete objective, relevant constraints, files or commands, and the evidence or deliverable expected by the parent Agent.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task_description"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "wait_for_completion": {
+            "description": "Whether to wait for completion. Default true; false starts background execution. When false, returned task ids can be polled with `sub_task_status`.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Inspect sub-task status and optionally interact with a sub-task.\n\nCapabilities:\n- Query one or more sub-task ids.\n- Return lightweight snapshot progress (`detail_level=snapshot`).\n- Send `message` to the first task id to steer a running task or continue a completed one.\n- Wait for long-running background sub-task completion without repeated polling (`wait_for_completion=true`).\n- Optionally wait for the follow-up response with `wait_for_response=true`.\n\nWaiting:\n- Use `wait_for_completion=true` when the parent Agent has no useful work until the background sub-task result is available.\n- The runtime waits inside this tool call and returns when queried task(s) finish or `max_wait_seconds` is reached.\n- Use `check_interval_seconds` as the suggested future re-check interval if the wait reaches its limit.\n\nContinuation rules:\n- When `message` is provided, only the first task id is targeted.\n- Running tasks receive the message as queued steering input.\n- Completed tasks are continued in the same sub-agent session unless they stopped at `max_cycles`.\n- Do not continue a child task stopped at `max_cycles`; create a new task with clearer scope or report the child as blocked.\n- Use `wait_for_response=true` only when the parent Agent needs the follow-up result before continuing.\n\nSnapshot use:\n- Use `detail_level=snapshot` when deciding whether to wait, send a follow-up, or summarize child work.\n- Keep `workspace_file_limit` low when file lists add noise; raise it only when files are needed to assess progress.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "sub_task_status",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "check_interval_seconds": {
+            "default": 300,
+            "description": "Optional. Used with wait_for_completion=true. Suggested re-check interval in seconds if max_wait_seconds is reached while tasks are still running. Default 300.",
+            "maximum": 1800,
+            "minimum": 30,
+            "type": "integer"
+          },
+          "detail_level": {
+            "description": "Status response detail level. `snapshot` includes recent activity, latest tool call, and workspace files.",
+            "enum": [
+              "basic",
+              "snapshot"
+            ],
+            "type": "string"
+          },
+          "max_wait_seconds": {
+            "default": null,
+            "description": "Optional. Used with wait_for_completion=true. The maximum total wait time before returning the current still-running status to the Agent. Null or omitted uses the system default.",
+            "maximum": 86400,
+            "minimum": 60,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message": {
+            "description": "Optional follow-up or steering message for the first task id. Can steer a running task or continue a completed one.",
+            "type": "string"
+          },
+          "task_ids": {
+            "description": "Sub-task ids to query. Use the ids returned by `create_sub_task`; duplicate ids are deduplicated. When `message` is provided, only the first id is used as the target.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "wait_for_completion": {
+            "default": false,
+            "description": "Optional. If true and any queried sub-task is still running, wait inside this tool call until the task finishes or max_wait_seconds is reached. Use this for long-running background sub-tasks when the parent Agent needs the result before continuing.",
+            "type": "boolean"
+          },
+          "wait_for_response": {
+            "description": "When `message` is provided, wait until the task finishes processing that message. Use true after sending `message` when the parent Agent needs the follow-up result before continuing; keep false for lightweight steering of a still-running child.",
+            "type": "boolean"
+          },
+          "workspace_file_limit": {
+            "description": "Maximum number of workspace files returned per task in snapshot mode. Default 20. Lower this when file lists add noise; raise it only when files are needed to assess progress.",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "task_ids"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    },
+    {
+      "approval": "not_required",
+      "description": "Read image from workspace path or HTTP URL, then attach the image payload to the next LLM turn as multimodal content.\n\nWhen to use:\n- Use this before reasoning about image content such as UI screenshots, diagrams, visual errors, generated assets, or visual regression evidence.\n- Use this when text tools can only tell you that an image exists, but the Agent needs to inspect what is actually visible.\n- Prefer workspace-relative paths for local artifacts unless outside-workspace access is explicitly enabled.\n\nSupported inputs:\n- Supported formats for workspace files: PNG, JPEG, WEBP, and BMP.\n- Inline local image transport is limited to 5 MiB to protect the LLM request size.\n- HTTP URLs are passed through as image URLs without downloading.\n\nReturns:\n- A multimodal attachment for the next model turn plus normalized source metadata.\n- Structured errors for unsupported file types, oversized local images, missing paths, or paths outside the permitted workspace.",
+      "exposure": "direct",
+      "kind": "function",
+      "metadata": {},
+      "model_visible": true,
+      "name": "read_image",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Image path or URL to attach. Workspace files may be PNG, JPEG, WEBP, or BMP; workspace-relative paths are preferred unless outside-workspace access is enabled. HTTP URLs are passed through without downloading.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "timeout_seconds": null,
+      "type": "function"
+    }
+  ]
+}

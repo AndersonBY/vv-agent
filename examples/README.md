@@ -18,13 +18,13 @@ typed events plus cancellation or approval control through `RunHandle`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `V_AGENT_LOCAL_SETTINGS` | `local_settings.py` | LLM backend settings file |
-| `V_AGENT_EXAMPLE_WORKSPACE` | `./workspace` | Workspace directory |
-| `V_AGENT_EXAMPLE_BACKEND` | `moonshot` | LLM backend |
-| `V_AGENT_EXAMPLE_MODEL` | `kimi-k2.6` | Model name |
-| `V_AGENT_EXAMPLE_PROMPT` | example-specific | Prompt override |
-| `V_AGENT_EXAMPLE_TOKEN_BUDGET` | `4000` | Total token limit for example 07 |
-| `V_AGENT_EXAMPLE_TOOL_BUDGET` | `12` | Total tool-call limit for example 07 |
+| `VV_AGENT_LOCAL_SETTINGS` | `local_settings.py` | LLM backend settings file |
+| `VV_AGENT_EXAMPLE_WORKSPACE` | `./workspace` | Workspace directory |
+| `VV_AGENT_EXAMPLE_BACKEND` | `moonshot` | LLM backend |
+| `VV_AGENT_EXAMPLE_MODEL` | `kimi-k3` | Model name |
+| `VV_AGENT_EXAMPLE_PROMPT` | example-specific | Prompt override |
+| `VV_AGENT_EXAMPLE_TOKEN_BUDGET` | `4000` | Total token limit for example 07 |
+| `VV_AGENT_EXAMPLE_TOOL_BUDGET` | `12` | Total tool-call limit for example 07 |
 
 ## Public SDK
 
@@ -50,8 +50,8 @@ typed events plus cancellation or approval control through `RunHandle`.
 
 ```bash
 uv run python examples/01_quick_start.py
-V_AGENT_EXAMPLE_PROFILE=translator uv run python examples/02_agent_profiles.py
-V_AGENT_EXAMPLE_SESSION_ID=demo uv run python examples/04_session_api.py
+VV_AGENT_EXAMPLE_PROFILE=translator uv run python examples/02_agent_profiles.py
+VV_AGENT_EXAMPLE_SESSION_ID=demo uv run python examples/04_session_api.py
 uv run python examples/08_custom_tool.py
 uv run python examples/11_sub_agent_pipeline.py
 uv run python examples/17_error_recovery.py
@@ -79,10 +79,10 @@ threaded execution, checkpointing, Celery dispatch, and workspace backends.
 | 25 | `25_temporary_tool_injection.py` | Run-scoped tool enablement |
 
 ```bash
-V_AGENT_EXAMPLE_TIMEOUT=10 uv run python examples/18_cancellation.py
+VV_AGENT_EXAMPLE_TIMEOUT=10 uv run python examples/18_cancellation.py
 uv run python examples/19_streaming.py
 uv run python examples/20_thread_backend.py
-V_AGENT_EXAMPLE_DB=./workspace/agent.db uv run python examples/21_state_checkpoint.py
+VV_AGENT_EXAMPLE_DB=./workspace/agent.db uv run python examples/21_state_checkpoint.py
 uv run python examples/22_sdk_advanced.py
 uv run python examples/24_workspace_backends.py
 ```
@@ -92,7 +92,7 @@ uv run python examples/24_workspace_backends.py
 These examples use the JSON-RPC App Server boundary for product hosts,
 subprocess clients, lifecycle replay, notification filtering, schema export,
 and overload handling. Examples 26-28 call a real configured model through
-`local_settings.py` and `V_AGENT_EXAMPLE_*` environment variables. Example 29
+`local_settings.py` and `VV_AGENT_EXAMPLE_*` environment variables. Example 29
 is a local protocol/schema/backpressure example and does not call a model.
 
 | # | File | Shows |

@@ -15,6 +15,7 @@ from vv_agent.events import (
     ToolCallPlannedEvent,
     ToolCallStartedEvent,
 )
+from vv_agent.tools.argument_validation import invalid_tool_arguments_result
 from vv_agent.tools.base import ToolContext, is_tool_call_preapproved
 from vv_agent.tools.dispatcher import _needs_tool_call_id, _parse_arguments
 from vv_agent.tools.executor import (
@@ -119,26 +120,34 @@ class ToolOrchestrator:
                 )
         else:
             try:
-                policy_result = self._policy_denial_result(
-                    executor,
-                    call=normalized_call,
-                    context=call_context,
-                    allowed_tool_names=allowed_tool_names,
+                validation_result = invalid_tool_arguments_result(
+                    tool_call_id=normalized_call.id,
+                    schema=executor.params_json_schema,
+                    arguments=normalized_call.arguments,
                 )
-                if policy_result is not None:
-                    result = policy_result
+                if validation_result is not None:
+                    result = validation_result
                 else:
-                    approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
-                    if approval_result is not None:
-                        result = approval_result
+                    policy_result = self._policy_denial_result(
+                        executor,
+                        call=normalized_call,
+                        context=call_context,
+                        allowed_tool_names=allowed_tool_names,
+                    )
+                    if policy_result is not None:
+                        result = policy_result
                     else:
-                        if not executor.metadata.get("policy_managed_by_handler"):
-                            mark_external_tool_execution_started(
-                                normalized_call,
-                                context=call_context,
-                                event_sink=event_sink,
-                            )
-                        result = executor.execute(normalized_call, call_context)
+                        approval_result = self._approval_result(executor, call=normalized_call, context=call_context)
+                        if approval_result is not None:
+                            result = approval_result
+                        else:
+                            if not executor.metadata.get("policy_managed_by_handler"):
+                                mark_external_tool_execution_started(
+                                    normalized_call,
+                                    context=call_context,
+                                    event_sink=event_sink,
+                                )
+                            result = executor.execute(normalized_call, call_context)
             except ApprovalError:
                 raise
             except Exception as exc:
@@ -198,7 +207,6 @@ class ToolOrchestrator:
             name=spec.name,
             handler=spec.handler,
             schema=schema,
-            idempotency=spec.idempotency,
             tool_metadata=spec.tool_metadata,
         )
 
@@ -253,8 +261,8 @@ class ToolOrchestrator:
                 timeout=metadata.get("_vv_agent_approval_timeout_seconds"),
             )
         message = f"Approval required for tool {executor.name}."
-        event_sink = metadata.get("_vv_agent_emit_event")
-        if callable(event_sink):
+        event_sink = _runtime_event_sink(context)
+        if event_sink is not None:
             event_sink(
                 ApprovalRequestedEvent(
                     run_id=request.run_id,
@@ -341,7 +349,6 @@ class ToolOrchestrator:
                 },
                 ensure_ascii=False,
             ),
-            status="error",
             status_code=ToolResultStatus.ERROR,
             error_code="tool_not_allowed",
             metadata={
@@ -414,7 +421,6 @@ class ToolOrchestrator:
             call=call,
             context=context,
             request=request,
-            approved=approved,
             action=decision.action,
             reason=decision.reason,
             decision_metadata=dict(decision.metadata),
@@ -461,7 +467,6 @@ class ToolOrchestrator:
                 },
                 ensure_ascii=False,
             ),
-            status="error",
             status_code=ToolResultStatus.ERROR,
             error_code=error_code,
             metadata={
@@ -483,8 +488,8 @@ class ToolOrchestrator:
         request: ApprovalRequest,
         message: str,
     ) -> None:
-        event_sink = _runtime_metadata(context).get("_vv_agent_emit_event")
-        if not callable(event_sink):
+        event_sink = _runtime_event_sink(context)
+        if event_sink is None:
             return
         event_sink(
             ApprovalRequestedEvent(
@@ -507,13 +512,12 @@ class ToolOrchestrator:
         call: ToolCall,
         context: ToolContext,
         request: ApprovalRequest,
-        approved: bool,
         action: str,
         reason: str,
         decision_metadata: dict[str, Any],
     ) -> None:
-        event_sink = _runtime_metadata(context).get("_vv_agent_emit_event")
-        if not callable(event_sink):
+        event_sink = _runtime_event_sink(context)
+        if event_sink is None:
             return
         event_sink(
             ApprovalResolvedEvent(
@@ -524,9 +528,8 @@ class ToolOrchestrator:
                 request_id=request.request_id,
                 tool_name=executor.name,
                 tool_call_id=call.id,
-                approved=approved,
+                action=action,
                 metadata={
-                    "action": action,
                     "reason": reason,
                     "decision_metadata": decision_metadata,
                 },
@@ -537,7 +540,6 @@ class ToolOrchestrator:
     def _error_result(tool_call_id: str, message: str, *, error_code: str | None = None) -> ToolExecutionResult:
         return ToolExecutionResult(
             tool_call_id=tool_call_id,
-            status="error",
             status_code=ToolResultStatus.ERROR,
             error_code=error_code,
             content=json.dumps({"ok": False, "error": message, "error_code": error_code}, ensure_ascii=False),
@@ -624,7 +626,7 @@ class ToolOrchestrator:
                 cycle_index=context.cycle_index,
                 tool_name=call.name,
                 tool_call_id=result.tool_call_id,
-                status=result.status_code.value if result.status_code else str(result.status or ""),
+                status=result.status_code.value.lower(),
                 directive=result.directive.value,
                 error_code=result.error_code,
                 execution_started=execution_started,
@@ -634,7 +636,7 @@ class ToolOrchestrator:
                     "tool_name": call.name,
                     "tool_call_id": result.tool_call_id,
                     "tool_arguments": dict(call.arguments),
-                    "status": result.status_code.value if result.status_code else str(result.status or ""),
+                    "status": result.status_code.value.lower(),
                     "directive": result.directive.value,
                     "error_code": result.error_code,
                     "content": result.content,
@@ -653,6 +655,12 @@ def _runtime_metadata(context: ToolContext) -> dict[str, Any]:
     return metadata
 
 
+def _runtime_event_sink(context: ToolContext) -> ToolEventSink | None:
+    if context.ctx is None:
+        return None
+    return context.ctx.event_handler
+
+
 def mark_external_tool_execution_started(
     call: ToolCall,
     *,
@@ -669,8 +677,7 @@ def mark_external_tool_execution_started(
     if callable(callback):
         callback(call)
     if event_sink is None:
-        runtime_event_sink = _runtime_metadata(context).get("_vv_agent_emit_event")
-        event_sink = runtime_event_sink if callable(runtime_event_sink) else None
+        event_sink = _runtime_event_sink(context)
     ToolOrchestrator._emit_started(call, context=context, event_sink=event_sink)
 
 

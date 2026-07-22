@@ -11,6 +11,7 @@ import pytest
 import vv_agent.interactive as interactive_module
 from vv_agent import AgentSessionRun, AgentStatus, InteractiveAgentDefinition, Message, create_agent_session
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.events import DiagnosticEvent
 from vv_agent.interactive import AgentSessionEventGapError, AgentSessionEventStreamClosed
 from vv_agent.types import AgentResult
 
@@ -47,6 +48,20 @@ def _session(tmp_path: Path, execute_run=None):
         agent_name="inline",
         definition=InteractiveAgentDefinition(description="assistant", model="test-model"),
         workspace=tmp_path,
+    )
+
+
+def _background_started_event(session_id: str) -> DiagnosticEvent:
+    return DiagnosticEvent(
+        run_id="run-background",
+        trace_id="trace-background",
+        level="debug",
+        code="tool_result",
+        details={
+            "tool_name": "bash",
+            "status": "running",
+            "metadata": {"status": "running", "session_id": session_id},
+        },
     )
 
 
@@ -130,14 +145,7 @@ def test_background_completion_emits_idle_notification_for_host_resume(monkeypat
     session = _session(tmp_path, execute_run)
     events: list[tuple[str, dict[str, Any]]] = []
     session.subscribe(lambda event, payload: events.append((event, payload)))
-    session._session_log_handler(
-        "tool_result",
-        {
-            "tool_name": "bash",
-            "status": "running",
-            "metadata": {"status": "running", "session_id": "bg_contract"},
-        },
-    )
+    session._session_event_handler(_background_started_event("bg_contract"))
 
     manager.finish("bg_contract")
 
@@ -151,9 +159,7 @@ def test_background_completion_emits_idle_notification_for_host_resume(monkeypat
     session.prompt(terminal["notification_message"], auto_follow_up=False)
 
     assert prompts == [
-        "System notification: background command bg_contract completed.\n"
-        "Command: printf bridge-ready\n"
-        "Summary: bridge-ready"
+        "System notification: background command bg_contract completed.\nCommand: printf bridge-ready\nSummary: bridge-ready"
     ]
     assert session.state().pending_steering == 0
 
@@ -219,14 +225,7 @@ def test_dropping_session_unsubscribes_background_completion_listener(monkeypatc
     manager = _BackgroundManager()
     monkeypatch.setattr(interactive_module, "background_session_manager", manager)
     session = _session(tmp_path)
-    session._session_log_handler(
-        "tool_result",
-        {
-            "tool_name": "bash",
-            "status": "running",
-            "metadata": {"status": "running", "session_id": "bg_drop"},
-        },
-    )
+    session._session_event_handler(_background_started_event("bg_drop"))
     reference = weakref.ref(session)
 
     del session

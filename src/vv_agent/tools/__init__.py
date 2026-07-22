@@ -1,4 +1,4 @@
-from vv_agent.tools.base import ToolCallContext, ToolContext, ToolHandler, ToolSpec
+from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
 from vv_agent.tools.dispatcher import dispatch_tool_call
 from vv_agent.tools.executor import FunctionToolExecutor, RegistryToolExecutor, ToolExecutor, ToolExposure
 from vv_agent.tools.function import FunctionTool, Tool, function_tool
@@ -20,12 +20,12 @@ def build_default_registry() -> ToolRegistry:
 
     return _build_default_registry()
 
+
 __all__ = [
     "FunctionTool",
     "FunctionToolExecutor",
     "RegistryToolExecutor",
     "Tool",
-    "ToolCallContext",
     "ToolContext",
     "ToolExecutor",
     "ToolExposure",

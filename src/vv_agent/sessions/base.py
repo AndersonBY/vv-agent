@@ -12,6 +12,20 @@ from vv_agent.types import Message, Role
 SESSION_COMMIT_SCHEMA = "vv-agent.session-commit.v1"
 SESSION_COMMIT_ID_PREFIX = "vv-agent:checkpoint-v2:session:"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SESSION_MESSAGE_FIELDS = frozenset(
+    {
+        "role",
+        "content",
+        "name",
+        "tool_call_id",
+        "tool_calls",
+        "reasoning_content",
+        "image_url",
+        "metadata",
+    }
+)
+_TOOL_CALL_FIELDS = frozenset({"id", "type", "function", "extra_content"})
+_TOOL_FUNCTION_FIELDS = frozenset({"name", "arguments"})
 
 
 class SessionCommitError(RuntimeError):
@@ -23,33 +37,26 @@ class SessionCommitError(RuntimeError):
 class Session(Protocol):
     session_id: str
 
-    def get_items(self, limit: int | None = None) -> list[Message]:
-        ...
+    def get_items(self, limit: int | None = None) -> list[Message]: ...
 
-    def add_items(self, items: list[Message]) -> None:
-        ...
+    def add_items(self, items: list[Message]) -> None: ...
 
     def add_items_once(
         self,
         commit_id: str,
         payload_digest: str,
         items: list[Message],
-    ) -> str:
-        ...
+    ) -> str: ...
 
-    def pop_item(self) -> Message | None:
-        ...
+    def pop_item(self) -> Message | None: ...
 
-    def clear(self) -> None:
-        ...
+    def clear(self) -> None: ...
 
-    def clear_session(self) -> None:
-        ...
+    def clear_session(self) -> None: ...
 
 
 class SessionStore(Protocol):
-    def session(self, session_id: str) -> Session:
-        ...
+    def session(self, session_id: str) -> Session: ...
 
 
 def session_store_conformance(store: SessionStore, *, session_id: str = "conformance-thread") -> None:
@@ -161,9 +168,7 @@ def session_commit_payload(items: list[Message]) -> dict[str, Any]:
 
 
 def session_commit_payload_digest(items: list[Message]) -> str:
-    return hashlib.sha256(
-        canonical_json_bytes(session_commit_payload(items), "session commit payload")
-    ).hexdigest()
+    return hashlib.sha256(canonical_json_bytes(session_commit_payload(items), "session commit payload")).hexdigest()
 
 
 def validate_session_commit(
@@ -219,53 +224,31 @@ def _normalize_message(message: Message) -> Message:
 
 
 def _decode_session_item(value: Any) -> Message:
-    data = _expect_object(value, "Message")
-    if "type" not in data:
-        return _decode_canonical_message(data)
-
-    item_type = data.get("type")
-    if not isinstance(item_type, str):
-        raise ValueError('missing required string field "type"')
-    if item_type in {"system", "user", "assistant"}:
-        return _decode_canonical_message(
-            {
-                "role": item_type,
-                "content": _required_string(data, "content"),
-            }
-        )
-    if item_type == "tool":
-        return _decode_canonical_message(
-            {
-                "role": "tool",
-                "content": _required_string(data, "content"),
-                "tool_call_id": _required_string(data, "tool_call_id"),
-            }
-        )
-    if item_type == "message":
-        return _decode_canonical_message(_expect_object(data.get("message"), "Message"))
-    raise ValueError(f"unknown session item type: {item_type}")
+    return _decode_canonical_message(_expect_object(value, "Message"))
 
 
 def _decode_canonical_message(data: dict[str, Any]) -> Message:
+    _reject_unknown_fields(data, _SESSION_MESSAGE_FIELDS, "Message")
     role = _required_string(data, "role")
     if role not in {"system", "user", "assistant", "tool"}:
         raise ValueError(f"unknown message role: {role}")
-    raw_content = data.get("content")
-    content = raw_content if isinstance(raw_content, str) else ""
+    content = _required_string(data, "content")
 
-    raw_tool_calls = data.get("tool_calls")
-    tool_calls = (
-        [_canonical_tool_call(value) for value in raw_tool_calls]
-        if isinstance(raw_tool_calls, list)
-        else []
-    )
-    raw_metadata = data.get("metadata")
-    if raw_metadata is None:
-        metadata: dict[str, Any] = {}
-    elif isinstance(raw_metadata, dict):
-        metadata = cast(dict[str, Any], _canonical_json(raw_metadata, field_name="metadata"))
+    if "tool_calls" not in data:
+        tool_calls: list[dict[str, Any]] = []
     else:
-        raise ValueError('"metadata" must be an object')
+        raw_tool_calls = data["tool_calls"]
+        if not isinstance(raw_tool_calls, list):
+            raise ValueError('"tool_calls" must be an array')
+        tool_calls = [_canonical_tool_call(value) for value in raw_tool_calls]
+
+    if "metadata" not in data:
+        metadata: dict[str, Any] = {}
+    else:
+        raw_metadata = data["metadata"]
+        if not isinstance(raw_metadata, dict):
+            raise ValueError('"metadata" must be an object')
+        metadata = cast(dict[str, Any], _canonical_json(raw_metadata, field_name="metadata"))
 
     return Message(
         role=cast(Role, role),
@@ -281,24 +264,15 @@ def _decode_canonical_message(data: dict[str, Any]) -> Message:
 
 def _canonical_tool_call(value: Any) -> dict[str, Any]:
     data = _expect_object(value, "ToolCall")
-    function = data.get("function")
-    if isinstance(function, dict):
-        tool_call_id = _required_string(data, "id")
-        name = _required_string(function, "name")
-        arguments = _canonical_tool_arguments(function.get("arguments", "{}"))
-    else:
-        tool_call_id = _required_string(data, "id")
-        name = _required_string(data, "name")
-        raw_arguments = data.get("arguments")
-        if raw_arguments is None:
-            arguments = {}
-        elif isinstance(raw_arguments, dict):
-            arguments = cast(
-                dict[str, Any],
-                _canonical_json(raw_arguments, field_name="arguments"),
-            )
-        else:
-            raise ValueError('"arguments" must be an object')
+    _reject_unknown_fields(data, _TOOL_CALL_FIELDS, "ToolCall")
+    tool_call_id = _required_non_empty_string(data, "id")
+    tool_call_type = _required_string(data, "type")
+    if tool_call_type != "function":
+        raise ValueError(f"unknown tool call type: {tool_call_type}")
+    function = _expect_object(data.get("function"), "ToolCall.function")
+    _reject_unknown_fields(function, _TOOL_FUNCTION_FIELDS, "ToolCall.function")
+    name = _required_non_empty_string(function, "name")
+    arguments = _canonical_tool_arguments(_required_string(function, "arguments"))
 
     canonical: dict[str, Any] = {
         "id": tool_call_id,
@@ -313,8 +287,10 @@ def _canonical_tool_call(value: Any) -> dict[str, Any]:
             ),
         },
     }
-    extra_content = data.get("extra_content")
-    if isinstance(extra_content, dict):
+    if "extra_content" in data:
+        extra_content = data["extra_content"]
+        if not isinstance(extra_content, dict):
+            raise ValueError('"extra_content" must be an object')
         canonical["extra_content"] = _canonical_json(
             extra_content,
             field_name="extra_content",
@@ -322,22 +298,14 @@ def _canonical_tool_call(value: Any) -> dict[str, Any]:
     return canonical
 
 
-def _canonical_tool_arguments(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return cast(dict[str, Any], _canonical_json(value, field_name="arguments"))
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return {}
-        try:
-            decoded = json.loads(stripped)
-        except json.JSONDecodeError:
-            return {}
-        if isinstance(decoded, dict):
-            return cast(dict[str, Any], _canonical_json(decoded, field_name="arguments"))
-    return {}
+def _canonical_tool_arguments(value: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError('"arguments" must contain a JSON object') from exc
+    if not isinstance(decoded, dict):
+        raise ValueError('"arguments" must contain a JSON object')
+    return cast(dict[str, Any], _canonical_json(decoded, field_name="arguments"))
 
 
 def _canonical_json(value: Any, *, field_name: str) -> Any:
@@ -356,10 +324,7 @@ def _canonical_json(value: Any, *, field_name: str) -> Any:
     if isinstance(value, dict):
         if not all(isinstance(key, str) for key in value):
             raise ValueError(f'"{field_name}" object keys must be strings')
-        return {
-            key: _canonical_json(value[key], field_name=field_name)
-            for key in sorted(value)
-        }
+        return {key: _canonical_json(value[key], field_name=field_name) for key in sorted(value)}
     raise ValueError(f'"{field_name}" contains a non-JSON value')
 
 
@@ -370,12 +335,31 @@ def _expect_object(value: Any, type_name: str) -> dict[str, Any]:
 
 
 def _required_string(data: dict[str, Any], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str):
+    if key not in data:
         raise ValueError(f'missing required string field "{key}"')
+    value = data[key]
+    if not isinstance(value, str):
+        raise ValueError(f'field "{key}" must be a string')
+    return value
+
+
+def _required_non_empty_string(data: dict[str, Any], key: str) -> str:
+    value = _required_string(data, key)
+    if not value:
+        raise ValueError(f'field "{key}" must be a non-empty string')
     return value
 
 
 def _optional_string(data: dict[str, Any], key: str) -> str | None:
-    value = data.get(key)
-    return value if isinstance(value, str) else None
+    if key not in data:
+        return None
+    value = data[key]
+    if not isinstance(value, str):
+        raise ValueError(f'field "{key}" must be a string')
+    return value
+
+
+def _reject_unknown_fields(data: dict[str, Any], allowed: frozenset[str], type_name: str) -> None:
+    unknown = sorted(set(data).difference(allowed))
+    if unknown:
+        raise ValueError(f"{type_name} contains unknown fields: {unknown!r}")

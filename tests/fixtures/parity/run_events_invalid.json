@@ -1,0 +1,833 @@
+{
+  "contract": "run_events_invalid",
+  "rules": {
+    "version": "v1",
+    "unknown_top_level_fields": "reject",
+    "unknown_event_types": "reject",
+    "completion_fields": {
+      "completion_reason": {
+        "type": "string_or_null",
+        "values": [
+          "tool_finish",
+          "no_tool_finish",
+          "stop_on_first_tool",
+          "stop_at_tool_name",
+          "wait_user",
+          "max_cycles",
+          "cancelled",
+          "failed",
+          "budget_exhausted"
+        ],
+        "unknown_values": "reject"
+      },
+      "completion_tool_name": {
+        "type": "string_or_null"
+      },
+      "partial_output": {
+        "type": "string_or_null"
+      }
+    },
+    "budget_fields": {
+      "budget_usage": "object_or_null",
+      "budget_exhaustion": "object_or_null",
+      "enforcement_boundary_values": [
+        "run_start",
+        "cycle_start",
+        "llm_complete",
+        "tool_batch_preflight",
+        "tool_batch_complete",
+        "terminal"
+      ],
+      "wire_integer_maximum": 9007199254740991
+    },
+    "stream_fields": {
+      "delta": "string",
+      "tool_call_id": "non_empty_string",
+      "tool_name": "non_empty_string",
+      "optional_counters": "non_negative_json_safe_integer"
+    },
+    "compaction_fields": {
+      "started_trigger_values": [
+        "micro_threshold",
+        "full_threshold",
+        "prompt_too_long"
+      ],
+      "completed_mode_values": [
+        "none",
+        "micro",
+        "structural",
+        "summary",
+        "emergency"
+      ],
+      "reserved_output_source_values": [
+        "model_settings",
+        "task_metadata",
+        "framework_fallback",
+        "framework_fallback_capped_by_model_capability"
+      ],
+      "capacity_counters": "non_negative_json_safe_integer_or_null",
+      "changed": "boolean",
+      "missing_required_fields": "reject"
+    },
+    "tool_lifecycle_fields": {
+      "event_types": [
+        "tool_call_planned",
+        "tool_call_started",
+        "tool_call_completed"
+      ],
+      "tool_call_id": "non_empty_string",
+      "tool_name": "non_empty_string",
+      "planned_and_started_arguments": "object",
+      "tool_metadata": "omitted_or_closed_tool_metadata_object",
+      "completed_status_values": [
+        "success",
+        "error",
+        "wait_response",
+        "running",
+        "pending_compress"
+      ],
+      "completed_directive_values": [
+        "continue",
+        "finish",
+        "wait_user"
+      ],
+      "completed_error_code": "string_or_null",
+      "completed_execution_started": "boolean",
+      "completed_duration_ms": "non_negative_json_safe_integer_or_null",
+      "missing_required_completed_fields": "reject"
+    }
+  },
+  "reject": [
+    {
+      "id": "missing_version",
+      "input": {
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello"
+      }
+    },
+    {
+      "id": "unsupported_version",
+      "input": {
+        "version": "v2",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello"
+      }
+    },
+    {
+      "id": "unknown_event_type",
+      "input": {
+        "version": "v1",
+        "type": "mystery",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1
+      }
+    },
+    {
+      "id": "unknown_top_level_field",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello",
+        "future_field": true
+      }
+    },
+    {
+      "id": "missing_event_id",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello"
+      }
+    },
+    {
+      "id": "empty_event_id",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello"
+      }
+    },
+    {
+      "id": "non_string_run_id",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": 7,
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello"
+      }
+    },
+    {
+      "id": "empty_trace_id",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "",
+        "created_at": 1,
+        "input": "hello"
+      }
+    },
+    {
+      "id": "missing_created_at",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "input": "hello"
+      }
+    },
+    {
+      "id": "negative_created_at",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": -1,
+        "input": "hello"
+      }
+    },
+    {
+      "id": "boolean_cycle_index",
+      "input": {
+        "version": "v1",
+        "type": "cycle_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": true
+      }
+    },
+    {
+      "id": "negative_cycle_index",
+      "input": {
+        "version": "v1",
+        "type": "cycle_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": -1
+      }
+    },
+    {
+      "id": "metadata_is_not_an_object",
+      "input": {
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello",
+        "metadata": []
+      }
+    },
+    {
+      "id": "tool_arguments_are_not_an_object",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_name": "search",
+        "tool_call_id": "call_invalid",
+        "arguments": 7
+      }
+    },
+    {
+      "id": "approval_approved_field_is_rejected",
+      "input": {
+        "version": "v1",
+        "type": "approval_resolved",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "request_id": "approval_invalid",
+        "tool_name": "shell",
+        "tool_call_id": "call_invalid",
+        "action": "allow",
+        "approved": true
+      }
+    },
+    {
+      "id": "approval_preview_field_is_rejected",
+      "input": {
+        "version": "v1",
+        "type": "approval_requested",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "request_id": "approval_invalid",
+        "tool_name": "shell",
+        "tool_call_id": "call_invalid",
+        "message": "Allow command?",
+        "preview": "Allow command?"
+      }
+    },
+    {
+      "id": "approval_action_is_missing",
+      "input": {
+        "version": "v1",
+        "type": "approval_resolved",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "request_id": "approval_invalid",
+        "tool_name": "shell",
+        "tool_call_id": "call_invalid"
+      }
+    },
+    {
+      "id": "approval_action_is_unknown",
+      "input": {
+        "version": "v1",
+        "type": "approval_resolved",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "request_id": "approval_invalid",
+        "tool_name": "shell",
+        "tool_call_id": "call_invalid",
+        "action": "maybe"
+      }
+    },
+    {
+      "id": "unknown_completion_reason",
+      "input": {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_invalid_completion_reason",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "status": "completed",
+        "final_output": "done",
+        "completion_reason": "future_reason"
+      }
+    },
+    {
+      "id": "completion_reason_is_not_a_string_or_null",
+      "input": {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_invalid_completion_reason_type",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "status": "completed",
+        "final_output": "done",
+        "completion_reason": 7
+      }
+    },
+    {
+      "id": "completion_tool_name_is_not_a_string_or_null",
+      "input": {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_invalid_completion_tool_name_type",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "status": "completed",
+        "final_output": "done",
+        "completion_tool_name": false
+      }
+    },
+    {
+      "id": "partial_output_is_not_a_string_or_null",
+      "input": {
+        "version": "v1",
+        "type": "run_completed",
+        "event_id": "evt_invalid_partial_output_type",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "status": "completed",
+        "final_output": "done",
+        "partial_output": {
+          "text": "draft"
+        }
+      }
+    },
+    {
+      "id": "budget_usage_is_not_an_object_or_null",
+      "input": {
+        "version": "v1",
+        "type": "run_failed",
+        "event_id": "evt_invalid_budget_usage",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "error": "failed",
+        "budget_usage": []
+      }
+    },
+    {
+      "id": "budget_exhaustion_unknown_dimension",
+      "input": {
+        "version": "v1",
+        "type": "budget_exhausted",
+        "event_id": "evt_invalid_budget_dimension",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "enforcement_boundary": "llm_complete",
+        "budget_usage": {
+          "cycles": 1,
+          "total_tokens": 12,
+          "uncached_input_tokens": 12,
+          "tool_calls": 0,
+          "tool_calls_by_name": {},
+          "elapsed_ms": 1,
+          "host_cost": null,
+          "unavailable_dimensions": []
+        },
+        "budget_exhaustion": {
+          "dimension": "future_dimension",
+          "tool_name": null,
+          "reason": "limit_exceeded",
+          "limit": 10,
+          "observed": 12,
+          "attempted_increment": null,
+          "overshoot": 2,
+          "unit": "tokens",
+          "currency": null,
+          "enforcement_boundary": "llm_complete",
+          "unavailable_reason": null
+        }
+      }
+    },
+    {
+      "id": "checkpoint_key_is_not_a_string",
+      "input": {
+        "version": "v1",
+        "event_id": "evt_invalid_resume",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "checkpoint_key": 7,
+        "operation_id": "op-1",
+        "operation_kind": "tool",
+        "type": "checkpoint_created",
+        "resume_attempt": 1
+      }
+    },
+    {
+      "id": "resume_attempt_is_not_positive",
+      "input": {
+        "version": "v1",
+        "event_id": "evt_invalid_resume",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "checkpoint_key": "key",
+        "operation_id": "op-1",
+        "operation_kind": "tool",
+        "type": "checkpoint_resumed",
+        "resume_attempt": 0
+      }
+    },
+    {
+      "id": "unknown_operation_kind",
+      "input": {
+        "version": "v1",
+        "event_id": "evt_invalid_resume",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "checkpoint_key": "key",
+        "operation_id": "op-1",
+        "operation_kind": "network",
+        "type": "operation_ambiguous",
+        "risk": "unknown_tool_side_effect",
+        "idempotency_support": "unknown"
+      }
+    },
+    {
+      "id": "invalid_resume_observation_state",
+      "input": {
+        "version": "v1",
+        "event_id": "evt_invalid_resume",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "checkpoint_key": "key",
+        "operation_id": "op-1",
+        "operation_kind": "tool",
+        "type": "reconciliation_required",
+        "interruption_reason": "resume_requires_reconciliation",
+        "resume_observation": {
+          "operation_id": "op-1",
+          "operation_kind": "tool",
+          "cycle_index": 1,
+          "state": "started",
+          "risk": "unknown_tool_side_effect",
+          "idempotency_support": "unknown"
+        }
+      }
+    },
+    {
+      "id": "planned_arguments_are_not_an_object",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_planned",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "arguments": []
+      }
+    },
+    {
+      "id": "planned_tool_name_is_empty",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_planned",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "",
+        "arguments": {}
+      }
+    },
+    {
+      "id": "tool_metadata_has_unknown_field",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_started",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "arguments": {},
+        "tool_metadata": {
+          "task_type": "research"
+        }
+      }
+    },
+    {
+      "id": "tool_completed_status_is_unknown",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_completed",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "status": "done",
+        "directive": "continue",
+        "error_code": null,
+        "execution_started": true,
+        "duration_ms": 1
+      }
+    },
+    {
+      "id": "tool_completed_directive_is_unknown",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_completed",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "status": "success",
+        "directive": "stop",
+        "error_code": null,
+        "execution_started": true,
+        "duration_ms": 1
+      }
+    },
+    {
+      "id": "tool_completed_execution_started_is_not_boolean",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_completed",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "status": "success",
+        "directive": "continue",
+        "error_code": null,
+        "execution_started": 1,
+        "duration_ms": 1
+      }
+    },
+    {
+      "id": "tool_completed_duration_is_negative",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_completed",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "status": "success",
+        "directive": "continue",
+        "error_code": null,
+        "execution_started": true,
+        "duration_ms": -1
+      }
+    },
+    {
+      "id": "tool_completed_not_started_cannot_have_duration",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_completed",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "status": "error",
+        "directive": "continue",
+        "error_code": "tool_not_allowed",
+        "execution_started": false,
+        "duration_ms": 1
+      }
+    },
+    {
+      "id": "tool_completed_error_code_is_not_string_or_null",
+      "input": {
+        "version": "v1",
+        "type": "tool_call_completed",
+        "event_id": "evt_invalid_tool",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "status": "error",
+        "directive": "continue",
+        "error_code": 7,
+        "execution_started": false,
+        "duration_ms": null
+      }
+    },
+    {
+      "id": "reasoning_delta_is_not_a_string",
+      "input": {
+        "version": "v1",
+        "type": "reasoning_delta",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "delta": 7
+      }
+    },
+    {
+      "id": "model_tool_call_id_is_empty",
+      "input": {
+        "version": "v1",
+        "type": "model_tool_call_started",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "",
+        "tool_name": "search"
+      }
+    },
+    {
+      "id": "model_tool_name_is_empty",
+      "input": {
+        "version": "v1",
+        "type": "model_tool_call_progress",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": ""
+      }
+    },
+    {
+      "id": "stream_counter_is_negative",
+      "input": {
+        "version": "v1",
+        "type": "model_tool_call_progress",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "tool_call_id": "call_invalid",
+        "tool_name": "search",
+        "arguments_chars": -1
+      }
+    },
+    {
+      "id": "stream_counter_exceeds_json_safe_maximum",
+      "input": {
+        "version": "v1",
+        "type": "assistant_delta",
+        "event_id": "evt_invalid_stream",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "delta": "x",
+        "content_chars": 9007199254740992
+      }
+    },
+    {
+      "id": "diagnostic_level_is_unknown",
+      "input": {
+        "version": "v1",
+        "type": "diagnostic",
+        "event_id": "evt_invalid_diagnostic",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "level": "notice",
+        "code": "cycle_observation",
+        "details": {}
+      }
+    },
+    {
+      "id": "diagnostic_code_is_empty",
+      "input": {
+        "version": "v1",
+        "type": "diagnostic",
+        "event_id": "evt_invalid_diagnostic",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "level": "info",
+        "code": "",
+        "details": {}
+      }
+    },
+    {
+      "id": "diagnostic_details_is_not_an_object",
+      "input": {
+        "version": "v1",
+        "type": "diagnostic",
+        "event_id": "evt_invalid_diagnostic",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "level": "info",
+        "code": "cycle_observation",
+        "details": []
+      }
+    },
+    {
+      "id": "memory_compact_trigger_is_unknown",
+      "input": {
+        "version": "v1",
+        "type": "memory_compact_started",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "message_count": 3,
+        "trigger": "semantic_progress"
+      }
+    },
+    {
+      "id": "memory_compact_capacity_is_negative",
+      "input": {
+        "version": "v1",
+        "type": "memory_compact_started",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "message_count": 3,
+        "effective_threshold": -1
+      }
+    },
+    {
+      "id": "memory_compact_reserved_output_source_is_unknown",
+      "input": {
+        "version": "v1",
+        "type": "memory_compact_started",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "message_count": 3,
+        "reserved_output_source": "model_capability"
+      }
+    },
+    {
+      "id": "memory_compact_mode_is_unknown",
+      "input": {
+        "version": "v1",
+        "type": "memory_compact_completed",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "before_count": 3,
+        "after_count": 2,
+        "mode": "domain_summary"
+      }
+    },
+    {
+      "id": "memory_compact_changed_is_not_boolean",
+      "input": {
+        "version": "v1",
+        "type": "memory_compact_completed",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "before_count": 3,
+        "after_count": 2,
+        "changed": 1
+      }
+    }
+  ]
+}

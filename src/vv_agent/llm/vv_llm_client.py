@@ -6,7 +6,7 @@ import random
 import re
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -24,8 +24,9 @@ from vv_agent.llm.anthropic_prompt_cache import (
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.model_settings import ModelSettings, ResponseFormat, ToolChoice
 from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash_tool_payload
-from vv_agent.runtime.context import StreamCallback
 from vv_agent.types import LLMResponse, Message, ToolCall
+
+StreamCallback = Callable[[dict[str, Any]], None]
 
 _REASONING_CHAIN_PROVIDERS = {
     "deepseek",
@@ -104,7 +105,7 @@ class EndpointTarget:
 
 
 @dataclass(slots=True)
-class VVLlmClient(LLMClient):
+class VvLlmClient(LLMClient):
     endpoint_targets: list[EndpointTarget]
     backend: str = "openai"
     selected_model: str | None = None
@@ -137,8 +138,7 @@ class VVLlmClient(LLMClient):
             )
         if model_settings is not None and model_settings.extra_args:
             raise ValueError(
-                "ModelSettings.extra_args is not supported by the vv-llm adapter; "
-                "use extra_body or a custom model client instead"
+                "ModelSettings.extra_args is not supported by the vv-llm adapter; use extra_body or a custom model client instead"
             )
 
         backend_type = self._resolve_backend_type(self.backend)
@@ -255,7 +255,7 @@ class VVLlmClient(LLMClient):
                 except APIStatusError as exc:
                     last_error = exc
                     status = exc.status_code
-                    detail = getattr(exc, 'message', '') or str(getattr(exc, 'body', ''))
+                    detail = getattr(exc, "message", "") or str(getattr(exc, "body", ""))
                     errors.append(f"{target.endpoint_id}: status {status} - {detail} (attempt {attempt})")
                     if status in {429, 500, 502, 503, 504, 408} and attempt < request_options.max_attempts:
                         self._sleep_backoff(attempt, request_options.backoff_seconds)
@@ -338,9 +338,7 @@ class VVLlmClient(LLMClient):
 
         payload: list[ChatCompletionMessageParam] = []
         for index, message in enumerate(messages):
-            include_reasoning = message.role == "assistant" and (
-                preserve_reasoning_chain or index == last_assistant_index
-            )
+            include_reasoning = message.role == "assistant" and (preserve_reasoning_chain or index == last_assistant_index)
             item = message.to_openai_message(include_reasoning_content=include_reasoning)
             if preserve_reasoning_chain and message.role == "assistant" and "reasoning_content" not in item:
                 # Moonshot/DeepSeek/MiniMax reasoning tool-call flows require this field.
@@ -564,7 +562,6 @@ class VVLlmClient(LLMClient):
             normalized_model = resolved_model.lower()
             thinking = {"type": "enabled", "budget_tokens": 16000}
             temperature = 1.0
-            max_tokens = 20000
 
         if normalized_model in ("o3-mini-high", "o4-mini-high"):
             reasoning_effort = "high"
@@ -763,7 +760,7 @@ class VVLlmClient(LLMClient):
 
         function = tool_choice.get("function")
         name = function.get("name") if isinstance(function, dict) else None
-        selected = [tool for tool in tools if VVLlmClient._tool_payload_name(tool) == name]
+        selected = [tool for tool in tools if VvLlmClient._tool_payload_name(tool) == name]
         if not selected:
             raise ValueError(f"tool_choice refers to unknown tool: {name}")
         return selected, "required"
@@ -1386,6 +1383,3 @@ class VVLlmClient(LLMClient):
             (dump_dir / filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             logging.getLogger(__name__).debug("Failed to dump request messages", exc_info=True)
-
-
-VvLlmClient = VVLlmClient

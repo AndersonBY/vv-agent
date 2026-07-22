@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import (
     Agent,
@@ -31,9 +32,7 @@ from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall,
 
 
 def _approval_resume_case(name: str) -> dict[str, Any]:
-    fixture = json.loads(
-        (Path(__file__).parent / "fixtures" / "parity" / "completion_policy_v1.json").read_text(encoding="utf-8")
-    )
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "parity" / "completion_policy.json").read_text(encoding="utf-8"))
     return next(case for case in fixture["approval_resume"]["cases"] if case["name"] == name)
 
 
@@ -58,21 +57,15 @@ def test_interrupted_result_snapshot_and_runner_resume_execute_approved_call_onc
 
     llm_calls = 0
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
+    def respond(_request) -> LLMResponse:
         nonlocal llm_calls
         llm_calls += 1
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="delete",
-                        tool_calls=[ToolCall(id="delete-call", name="delete_file", arguments={"path": "danger.txt"})],
-                    )
-                ]
-            ),
-            _resolved(),
+        return LLMResponse(
+            content="delete",
+            tool_calls=[ToolCall(id="delete-call", name="delete_file", arguments={"path": "danger.txt"})],
         )
+
+    model_provider = FixedModelProvider(ScriptedLLM(steps=[respond]), _resolved())
 
     result = Runner.run_sync(
         Agent(
@@ -130,26 +123,27 @@ def test_approval_resume_preserves_budget_usage_without_reserving_the_tool_twice
         executions.append(path)
         return f"deleted {path}"
 
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="delete",
+                tool_calls=[ToolCall(id="delete-budget", name="delete_file", arguments={"path": "x.txt"})],
+                raw={
+                    "usage": {
+                        "prompt_tokens": 6,
+                        "completion_tokens": 2,
+                        "total_tokens": 8,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    }
+                },
+            )
+        ]
+    )
     interrupted = Runner.run_sync(
         Agent(
             name="budgeted-approver",
             instructions="Delete after approval.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="delete",
-                        tool_calls=[ToolCall(id="delete-budget", name="delete_file", arguments={"path": "x.txt"})],
-                        raw={
-                            "usage": {
-                                "prompt_tokens": 6,
-                                "completion_tokens": 2,
-                                "total_tokens": 8,
-                                "prompt_tokens_details": {"cached_tokens": 0},
-                            }
-                        },
-                    )
-                ]
-            ),
+            model="approval-model",
             tools=[delete_file],
             tool_use_behavior="stop_on_first_tool",
         ),
@@ -157,6 +151,7 @@ def test_approval_resume_preserves_budget_usage_without_reserving_the_tool_twice
         run_config=RunConfig(
             workspace=tmp_path,
             budget_limits=RunBudgetLimits(max_total_tokens=20, max_tool_calls=1),
+            model_provider=FixedModelProvider(model, _resolved()),
         ),
     )
     assert interrupted.status == AgentStatus.WAIT_USER
@@ -210,9 +205,13 @@ def test_approved_continue_tool_returns_to_the_model_loop(tmp_path: Path) -> Non
         ]
     )
     interrupted = Runner.run_sync(
-        Agent(name="approver", instructions="Continue after the approved lookup.", model=model, tools=[lookup]),
+        Agent(name="approver", instructions="Continue after the approved lookup.", model="approval-model", tools=[lookup]),
         "look up item",
-        run_config=RunConfig(workspace=tmp_path, max_cycles=int(contract["configured_max_cycles"])),
+        run_config=RunConfig(
+            workspace=tmp_path,
+            max_cycles=int(contract["configured_max_cycles"]),
+            model_provider=FixedModelProvider(model, _resolved()),
+        ),
     )
     state = interrupted.into_state()
     state.approve(state.pending_approval_ids()[0])
@@ -255,24 +254,29 @@ def test_approved_continue_tool_honors_tool_stop_policy(
         return "approved result"
 
     event_store = JsonlRunEventStore(tmp_path / f"{expected_reason.value}.jsonl")
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="lookup draft",
+                tool_calls=[ToolCall(id="lookup-call", name="lookup", arguments={})],
+            )
+        ]
+    )
     interrupted = Runner.run_sync(
         Agent(
             name="approver",
             instructions="Stop according to the declared tool policy.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="lookup draft",
-                        tool_calls=[ToolCall(id="lookup-call", name="lookup", arguments={})],
-                    )
-                ]
-            ),
+            model="approval-model",
             tools=[lookup],
             tool_use_behavior=tool_use_behavior,
             stop_at_tool_names=stop_at_tool_names,
         ),
         "look up",
-        run_config=RunConfig(workspace=tmp_path, event_store=event_store),
+        run_config=RunConfig(
+            workspace=tmp_path,
+            event_store=event_store,
+            model_provider=FixedModelProvider(model, _resolved()),
+        ),
     )
     state = interrupted.into_state()
     state.approve(state.pending_approval_ids()[0])
@@ -305,24 +309,29 @@ def test_approved_terminal_tool_applies_output_guardrails_and_updates_terminal_e
         return GuardrailResult.block("blocked approved output")
 
     event_store = JsonlRunEventStore(tmp_path / "approval-guardrail.jsonl")
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="assistant draft before unsafe tool",
+                tool_calls=[ToolCall(id="unsafe-call", name="unsafe_action", arguments={})],
+            )
+        ]
+    )
     interrupted = Runner.run_sync(
         Agent(
             name="approver",
             instructions="Run only after approval.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="assistant draft before unsafe tool",
-                        tool_calls=[ToolCall(id="unsafe-call", name="unsafe_action", arguments={})],
-                    )
-                ]
-            ),
+            model="approval-model",
             tools=[unsafe_action],
             output_guardrails=[block_after_approval],
             tool_use_behavior="stop_on_first_tool",
         ),
         "run unsafe action",
-        run_config=RunConfig(workspace=tmp_path, event_store=event_store),
+        run_config=RunConfig(
+            workspace=tmp_path,
+            event_store=event_store,
+            model_provider=FixedModelProvider(model, _resolved()),
+        ),
     )
     state = interrupted.into_state()
     state.approve(state.pending_approval_ids()[0])
@@ -374,21 +383,26 @@ def test_approved_explicit_directive_preserves_wait_or_finish_semantics(
     expected_reason: CompletionReason,
     expected_output: str,
 ) -> None:
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="assistant draft before approval",
+                tool_calls=[ToolCall(id="controlled-call", name=tool_name, arguments=arguments)],
+            )
+        ]
+    )
     interrupted = Runner.run_sync(
         Agent(
             name="approver",
             instructions="Execute the explicitly controlled tool.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="assistant draft before approval",
-                        tool_calls=[ToolCall(id="controlled-call", name=tool_name, arguments=arguments)],
-                    )
-                ]
-            ),
+            model="approval-model",
         ),
         "run controlled tool",
-        run_config=RunConfig(workspace=tmp_path, tool_policy=ToolPolicy(approval="always")),
+        run_config=RunConfig(
+            workspace=tmp_path,
+            tool_policy=ToolPolicy(approval="always"),
+            model_provider=FixedModelProvider(model, _resolved()),
+        ),
     )
     state = interrupted.into_state()
     state.approve(state.pending_approval_ids()[0])
@@ -413,19 +427,17 @@ def test_run_handle_resume_uses_interrupted_result_state(tmp_path: Path) -> None
         executions.append(value)
         return value
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="write",
-                        tool_calls=[ToolCall(id="write-call", name="guarded_write", arguments={"value": "approved"})],
-                    )
-                ]
-            ),
-            _resolved(),
-        )
+    model_provider = FixedModelProvider(
+        ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="write",
+                    tool_calls=[ToolCall(id="write-call", name="guarded_write", arguments={"value": "approved"})],
+                )
+            ]
+        ),
+        _resolved(),
+    )
 
     handle = Runner.start(
         Agent(
@@ -484,10 +496,6 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
 
     active_model = ScriptedLLM(steps=[approval_call(), finish_after_denial])
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return active_model, _resolved()
-
     result = Runner.run_sync(
         Agent(
             name="writer",
@@ -499,7 +507,7 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
         "write",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(active_model, _resolved()),
             sub_task_manager=manager,
             execution_backend=backend,
             shared_state={"original": True},
@@ -529,7 +537,7 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
         "write",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(active_model, _resolved()),
             sub_task_manager=manager,
             execution_backend=backend,
             shared_state={"original": True},
@@ -546,15 +554,15 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
 
 
 def test_only_wait_user_results_convert_to_run_state() -> None:
+    model = ScriptedLLM(steps=[LLMResponse(content="done", tool_calls=[ToolCall(id="finish", name="task_finish", arguments={})])])
     result = Runner.run_sync(
         Agent(
             name="done",
             instructions="Finish.",
-            model=ScriptedLLM(
-                steps=[LLMResponse(content="done", tool_calls=[ToolCall(id="finish", name="task_finish", arguments={})])]
-            ),
+            model="approval-model",
         ),
         "go",
+        run_config=RunConfig(model_provider=FixedModelProvider(model, _resolved())),
     )
 
     with pytest.raises(ValueError, match="only interrupted runs"):
@@ -571,18 +579,23 @@ def test_approval_snapshot_nested_arguments_are_isolated_and_resume_is_once_only
         return str(payload["nested"])
 
     arguments = {"payload": {"nested": {"value": "original"}}}
+    model = ScriptedLLM(
+        steps=[LLMResponse(content="guard", tool_calls=[ToolCall(id="guard", name="guarded", arguments=arguments)])]
+    )
     result = Runner.run_sync(
         Agent(
             name="approver",
             instructions="Run once.",
-            model=ScriptedLLM(
-                steps=[LLMResponse(content="guard", tool_calls=[ToolCall(id="guard", name="guarded", arguments=arguments)])]
-            ),
+            model="approval-model",
             tools=[guarded],
             tool_use_behavior="stop_on_first_tool",
         ),
         "go",
-        run_config=RunConfig(workspace=tmp_path, session=session),
+        run_config=RunConfig(
+            workspace=tmp_path,
+            session=session,
+            model_provider=FixedModelProvider(model, _resolved()),
+        ),
     )
     state = result.into_state()
     approval = state.approvals[0]
@@ -612,23 +625,24 @@ def test_approval_resume_claim_is_shared_across_concurrent_state_uses(tmp_path: 
             executions += 1
         return value
 
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="guard",
+                tool_calls=[ToolCall(id="guard", name="guarded", arguments={"value": "ok"})],
+            )
+        ]
+    )
     result = Runner.run_sync(
         Agent(
             name="approver",
             instructions="Run once.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="guard",
-                        tool_calls=[ToolCall(id="guard", name="guarded", arguments={"value": "ok"})],
-                    )
-                ]
-            ),
+            model="approval-model",
             tools=[guarded],
             tool_use_behavior="stop_on_first_tool",
         ),
         "go",
-        run_config=RunConfig(workspace=tmp_path),
+        run_config=RunConfig(workspace=tmp_path, model_provider=FixedModelProvider(model, _resolved())),
     )
     state = result.into_state()
     state.approve(state.pending_approval_ids()[0])
@@ -659,23 +673,24 @@ def test_approved_resume_rejects_input_without_consuming_shared_claim(tmp_path: 
         executions.append(value)
         return value
 
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="guard",
+                tool_calls=[ToolCall(id="guard", name="guarded", arguments={"value": "ok"})],
+            )
+        ]
+    )
     interrupted = Runner.run_sync(
         Agent(
             name="approver",
             instructions="Run once.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="guard",
-                        tool_calls=[ToolCall(id="guard", name="guarded", arguments={"value": "ok"})],
-                    )
-                ]
-            ),
+            model="approval-model",
             tools=[guarded],
             tool_use_behavior="stop_on_first_tool",
         ),
         "go",
-        run_config=RunConfig(workspace=tmp_path),
+        run_config=RunConfig(workspace=tmp_path, model_provider=FixedModelProvider(model, _resolved())),
     )
     state = interrupted.into_state()
     interruption_id = state.pending_approval_ids()[0]
@@ -715,23 +730,29 @@ def test_pre_cancelled_approved_resume_with_input_rejects_before_cancellation(tm
         guardrail_calls += 1
         return GuardrailResult.allow()
 
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="guard",
+                tool_calls=[ToolCall(id="guard", name="guarded", arguments={})],
+            )
+        ]
+    )
     interrupted = Runner.run_sync(
         Agent(
             name="approver",
             instructions="Run after approval.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="guard",
-                        tool_calls=[ToolCall(id="guard", name="guarded", arguments={})],
-                    )
-                ]
-            ),
+            model="approval-model",
             tools=[guarded],
             output_guardrails=[observe_guardrail],
         ),
         "go",
-        run_config=RunConfig(workspace=tmp_path, cancellation_token=cancellation, event_store=event_store),
+        run_config=RunConfig(
+            workspace=tmp_path,
+            cancellation_token=cancellation,
+            event_store=event_store,
+            model_provider=FixedModelProvider(model, _resolved()),
+        ),
     )
     state = interrupted.into_state()
     state.approve(state.pending_approval_ids()[0])
@@ -774,19 +795,25 @@ def test_pre_cancelled_approved_resume_has_no_side_effect_or_guardrail_and_one_f
         guardrail_calls += 1
         return GuardrailResult.allow()
 
-    runner = Runner.configured(RunConfig(cancellation_token=cancellation))
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="assistant draft before approval",
+                tool_calls=[ToolCall(id="guard", name="guarded", arguments={"value": "unsafe"})],
+            )
+        ]
+    )
+    runner = Runner.configured(
+        RunConfig(
+            cancellation_token=cancellation,
+            model_provider=FixedModelProvider(model, _resolved()),
+        )
+    )
     interrupted = runner.run_sync(
         Agent(
             name="approver",
             instructions="Run only after approval.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="assistant draft before approval",
-                        tool_calls=[ToolCall(id="guard", name="guarded", arguments={"value": "unsafe"})],
-                    )
-                ]
-            ),
+            model="approval-model",
             tools=[guarded],
             output_guardrails=[observe_guardrail],
             tool_use_behavior="stop_on_first_tool",
@@ -830,18 +857,19 @@ def test_approval_typed_output_error_follows_fresh_terminal(tmp_path: Path) -> N
     expected = contract["expected"]
     assert isinstance(expected, dict)
     event_store = JsonlRunEventStore(tmp_path / "approval-typed-output.jsonl")
+    model = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="typed candidate",
+                tool_calls=[ToolCall(id="finish", name="task_finish", arguments={"message": "not-json"})],
+            )
+        ]
+    )
     interrupted = Runner.run_sync(
         Agent(
             name="typed-approver",
             instructions="Return typed output.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="typed candidate",
-                        tool_calls=[ToolCall(id="finish", name="task_finish", arguments={"message": "not-json"})],
-                    )
-                ]
-            ),
+            model="approval-model",
             output_type=dict,
         ),
         "go",
@@ -849,6 +877,7 @@ def test_approval_typed_output_error_follows_fresh_terminal(tmp_path: Path) -> N
             workspace=tmp_path,
             event_store=event_store,
             tool_policy=ToolPolicy(approval="always"),
+            model_provider=FixedModelProvider(model, _resolved()),
         ),
     )
     state = interrupted.into_state()

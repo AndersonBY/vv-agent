@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from support import FixedModelProvider
 
 from vv_agent import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -41,15 +41,10 @@ def test_interactive_session_options_pass_context_providers_to_run_config(tmp_pa
         seen_prompts.extend(message.content for message in messages if message.role == "system")
         return LLMResponse(content="answer", tool_calls=[])
 
-    def llm_builder(*_: Any, **__: Any):
-        return ScriptedLLM(steps=[respond]), _resolved()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[respond]), _resolved()),
             workspace=tmp_path,
-            llm_builder=llm_builder,
             context_providers=[_StaticProvider()],
         )
     )
@@ -71,15 +66,10 @@ def test_interactive_agent_definition_passes_session_context_providers_to_run_co
         seen_prompts.extend(message.content for message in messages if message.role == "system")
         return LLMResponse(content="answer", tool_calls=[])
 
-    def llm_builder(*_: Any, **__: Any):
-        return ScriptedLLM(steps=[respond]), _resolved()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[respond]), _resolved()),
             workspace=tmp_path,
-            llm_builder=llm_builder,
         )
     )
     session = client.create_session(

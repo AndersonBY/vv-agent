@@ -8,9 +8,9 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
 
-from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.config import build_vv_llm_from_local_settings
+from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.prompt import build_system_prompt
 from vv_agent.runtime import AgentRuntime, CancellationToken, ExecutionContext
 from vv_agent.runtime.backends.thread import ThreadBackend
@@ -18,22 +18,24 @@ from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask
 
 
-def log_handler(event: str, payload: dict[str, Any]) -> None:
-    if event in {"cycle_started", "cycle_llm_response", "run_completed", "cycle_failed"}:
-        print(f"  [{event}] {payload}", flush=True)
+def event_handler(event: RunEvent) -> None:
+    name = event.code if isinstance(event, DiagnosticEvent) else event.type
+    if name in {"cycle_started", "cycle_llm_response", "run_completed", "cycle_failed"}:
+        payload = event.details if isinstance(event, DiagnosticEvent) else event.to_dict()
+        print(f"  [{name}] {payload}", flush=True)
 
 
 def main() -> None:
-    settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
-    workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-    timeout = float(os.getenv("V_AGENT_EXAMPLE_TIMEOUT", "10"))
-    verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
+    settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+    model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
+    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+    timeout = float(os.getenv("VV_AGENT_EXAMPLE_TIMEOUT", "10"))
+    verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
     workspace.mkdir(parents=True, exist_ok=True)
 
-    llm, resolved = build_openai_llm_from_local_settings(settings_file, backend=backend, model=model)
+    llm, resolved = build_vv_llm_from_local_settings(settings_file, backend=backend, model=model)
 
     # 使用 ThreadBackend 以便在后台线程执行
     thread_backend = ThreadBackend(max_workers=2)
@@ -41,7 +43,7 @@ def main() -> None:
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=workspace,
-        log_handler=log_handler if verbose else None,
+        event_handler=event_handler if verbose else None,
         execution_backend=thread_backend,
     )
 

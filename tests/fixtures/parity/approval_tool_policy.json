@@ -1,0 +1,158 @@
+{
+  "contract": "approval_tool_policy",
+  "request_id": {
+    "regex": "^approval_[0-9a-f]{32}$",
+    "same_value_at": [
+      "provider_request.request_id",
+      "broker_pending.request_id",
+      "approval_requested_event.request_id",
+      "approval_resolved_event.request_id",
+      "tool_result.metadata.request_id"
+    ]
+  },
+  "tool_call": {
+    "id": "call-danger",
+    "name": "dangerous",
+    "arguments": {
+      "path": "tmp.txt"
+    }
+  },
+  "approval": {
+    "required_message": "Approval required for tool dangerous.",
+    "events": [
+      "approval_requested",
+      "approval_resolved"
+    ],
+    "result_shape": {
+      "status_code": "ERROR",
+      "directive": "continue",
+      "content_keys": [
+        "ok",
+        "error",
+        "error_code",
+        "tool_name"
+      ],
+      "metadata_keys": [
+        "mode",
+        "request_id",
+        "tool_name",
+        "arguments",
+        "action",
+        "message"
+      ],
+      "mode": "approval_resolved"
+    },
+    "decisions": [
+      {
+        "action": "deny",
+        "reason": "",
+        "metadata": {
+          "source": "contract",
+          "attempt": 1
+        },
+        "message": "Approval denied for tool dangerous.",
+        "error_code": "tool_approval_denied"
+      },
+      {
+        "action": "timeout",
+        "reason": "",
+        "metadata": {
+          "source": "contract",
+          "attempt": 2
+        },
+        "message": "Approval request timed out.",
+        "error_code": "tool_approval_timeout"
+      }
+    ],
+    "requested_event_metadata_keys": [
+      "arguments",
+      "tool_name"
+    ],
+    "resolved_event_metadata_keys": [
+      "reason",
+      "decision_metadata"
+    ],
+    "provider_failure": {
+      "message": "approval provider unavailable",
+      "status": "failed",
+      "events": [
+        "approval_requested",
+        "run_failed"
+      ],
+      "tool_executes": false,
+      "broker_retains_request": false
+    }
+  },
+  "policy": {
+    "precedence": [
+      "allowed_tools",
+      "disallowed_tools",
+      "can_use_tool",
+      "planned_name"
+    ],
+    "message": "Tool dangerous is not allowed for these arguments.",
+    "error_code": "tool_not_allowed",
+    "result_shape": {
+      "status_code": "ERROR",
+      "directive": "continue",
+      "content_keys": [
+        "ok",
+        "error",
+        "error_code",
+        "tool_name"
+      ],
+      "metadata_keys": [
+        "mode",
+        "policy_source",
+        "tool_name",
+        "arguments",
+        "message"
+      ],
+      "mode": "permission_denied"
+    },
+    "cases": [
+      {
+        "id": "allowed_tools_precedes_all_other_checks",
+        "allowed_tools": [],
+        "disallowed_tools": [
+          "dangerous"
+        ],
+        "can_use_tool": false,
+        "planned_tools": [],
+        "policy_source": "allowed_tools"
+      },
+      {
+        "id": "disallowed_tools_precedes_predicate_and_plan",
+        "allowed_tools": [
+          "dangerous"
+        ],
+        "disallowed_tools": [
+          "dangerous"
+        ],
+        "can_use_tool": false,
+        "planned_tools": [],
+        "policy_source": "disallowed_tools"
+      },
+      {
+        "id": "predicate_precedes_plan",
+        "allowed_tools": [
+          "dangerous"
+        ],
+        "disallowed_tools": [],
+        "can_use_tool": false,
+        "planned_tools": [],
+        "policy_source": "can_use_tool"
+      },
+      {
+        "id": "planned_name_is_the_fallback_check",
+        "allowed_tools": [
+          "dangerous"
+        ],
+        "disallowed_tools": [],
+        "can_use_tool": true,
+        "planned_tools": [],
+        "policy_source": "planned_name"
+      }
+    ]
+  }
+}

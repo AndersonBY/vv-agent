@@ -11,6 +11,7 @@ from vv_agent.constants import (
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
 )
+from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import SessionMemoryEntry, SessionMemoryState
 from vv_agent.runtime import AgentRuntime
@@ -155,13 +156,13 @@ def test_runtime_hits_max_cycles_with_continue_policy(tmp_path: Path) -> None:
 
 def test_runtime_emits_run_max_cycles_log(tmp_path: Path) -> None:
     llm = ScriptedLLM(steps=[LLMResponse(content="step1"), LLMResponse(content="step2")])
-    events: list[tuple[str, dict[str, object]]] = []
+    events: list[RunEvent] = []
 
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        log_handler=lambda event, payload: events.append((event, payload)),
+        event_handler=events.append,
     )
     task = AgentTask(
         task_id="task4_log",
@@ -175,9 +176,9 @@ def test_runtime_emits_run_max_cycles_log(tmp_path: Path) -> None:
     result = runtime.run(task)
     assert result.status == AgentStatus.MAX_CYCLES
 
-    max_cycles_payload = next(payload for event, payload in events if event == "run_max_cycles")
-    assert max_cycles_payload["cycle"] == 2
-    assert max_cycles_payload["final_answer"] == "Reached max cycles without finish signal."
+    max_cycles_event = next(event for event in events if isinstance(event, DiagnosticEvent) and event.code == "run_max_cycles")
+    assert max_cycles_event.cycle_index == 2
+    assert max_cycles_event.details["final_answer"] == "Reached max cycles without finish signal."
 
 
 def test_runtime_can_finish_without_tool_on_policy(tmp_path: Path) -> None:
@@ -216,16 +217,16 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
             ),
         ]
     )
-    events: list[tuple[str, dict[str, object]]] = []
+    events: list[RunEvent] = []
 
-    def handler(event: str, payload: dict[str, object]) -> None:
-        events.append((event, payload))
+    def handler(event: RunEvent) -> None:
+        events.append(event)
 
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        log_handler=handler,
+        event_handler=handler,
     )
     task = AgentTask(
         task_id="task_log",
@@ -238,13 +239,15 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
 
-    event_names = [name for name, _ in events]
+    event_names = [event.code if isinstance(event, DiagnosticEvent) else event.type for event in events]
     assert "run_started" in event_names
     assert "cycle_started" in event_names
     assert "cycle_llm_response" in event_names
     assert "tool_result" in event_names
     assert "run_completed" in event_names
-    cycle_payload = next(payload for name, payload in events if name == "cycle_llm_response")
+    cycle_payload = next(
+        event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "cycle_llm_response"
+    )
     assert "token_usage" in cycle_payload
     assert isinstance(cycle_payload["token_usage"], dict)
     assert isinstance(cycle_payload.get("assistant_message"), str)
@@ -259,7 +262,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert isinstance(first_tool_call_map.get("arguments"), dict)
     assert cycle_payload.get("tool_call_names") == [TASK_LIST_TOOL_NAME]
 
-    tool_payload = next(payload for name, payload in events if name == "tool_result")
+    tool_payload = next(event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "tool_result")
     assert isinstance(tool_payload.get("content"), str)
     assert "result" not in tool_payload
     assert isinstance(tool_payload.get("metadata"), dict)
@@ -570,9 +573,7 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
                     ToolCall(
                         id="c1",
                         name=TASK_LIST_TOOL_NAME,
-                        arguments={
-                            "todos": [{"title": long_title, "status": "completed", "priority": "medium"}]
-                        },
+                        arguments={"todos": [{"title": long_title, "status": "completed", "priority": "medium"}]},
                     )
                 ],
             ),
@@ -582,13 +583,13 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
             ),
         ]
     )
-    events: list[tuple[str, dict[str, object]]] = []
+    events: list[RunEvent] = []
 
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        log_handler=lambda event, payload: events.append((event, payload)),
+        event_handler=events.append,
     )
     task = AgentTask(
         task_id="task_long_tool_result",
@@ -601,7 +602,7 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
 
-    tool_payload = next(payload for name, payload in events if name == "tool_result")
+    tool_payload = next(event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "tool_result")
     full_result = str(tool_payload.get("content") or "")
     assert long_title in full_result
     assert len(full_result) > 220
@@ -618,9 +619,7 @@ def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path:
                     ToolCall(
                         id="c1",
                         name=TASK_LIST_TOOL_NAME,
-                        arguments={
-                            "todos": [{"title": long_title, "status": "completed", "priority": "medium"}]
-                        },
+                        arguments={"todos": [{"title": long_title, "status": "completed", "priority": "medium"}]},
                     )
                 ],
             ),
@@ -630,13 +629,13 @@ def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path:
             ),
         ]
     )
-    events: list[tuple[str, dict[str, object]]] = []
+    events: list[RunEvent] = []
 
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        log_handler=lambda event, payload: events.append((event, payload)),
+        event_handler=events.append,
         log_preview_chars=120,
     )
     task = AgentTask(
@@ -650,7 +649,7 @@ def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path:
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
 
-    tool_payload = next(payload for name, payload in events if name == "tool_result")
+    tool_payload = next(event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "tool_result")
     full_result = str(tool_payload.get("content") or "")
     preview = str(tool_payload.get("content_preview") or "")
     assert long_title in full_result
@@ -673,9 +672,7 @@ def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path
         model, messages = request.model, request.messages
         del model
         assistant_index = next(
-            index
-            for index, message in enumerate(messages)
-            if message.role == "assistant" and message.tool_calls
+            index for index, message in enumerate(messages) if message.role == "assistant" and message.tool_calls
         )
         first_tool = messages[assistant_index + 1]
         second_tool = messages[assistant_index + 2]
@@ -822,25 +819,21 @@ def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
     assert result.status == AgentStatus.COMPLETED
 
     assert len(result.token_usage.cycles) == 2
-    assert result.token_usage.cycles[0].usage.prompt_tokens == 100
-    assert result.token_usage.cycles[0].usage.completion_tokens == 25
-    assert result.token_usage.cycles[0].usage.cached_tokens == 40
-    assert result.token_usage.cycles[0].usage.cache_usage.read_tokens == 40
+    assert result.token_usage.cycles[0].usage.input_tokens == 100
+    assert result.token_usage.cycles[0].usage.output_tokens == 25
+    assert result.token_usage.cycles[0].usage.cache_usage.read_input_tokens == 40
     assert result.token_usage.cycles[0].usage.cache_usage.uncached_input_tokens == 60
-    assert result.token_usage.cycles[1].usage.prompt_tokens == 50
-    assert result.token_usage.cycles[1].usage.completion_tokens == 30
-    assert result.token_usage.cycles[1].usage.cache_creation_tokens == 12
-    assert result.token_usage.cycles[1].usage.cache_usage.write_tokens == 12
+    assert result.token_usage.cycles[1].usage.input_tokens == 50
+    assert result.token_usage.cycles[1].usage.output_tokens == 30
+    assert result.token_usage.cycles[1].usage.cache_usage.write_input_tokens == 12
     assert result.token_usage.cycles[1].usage.cache_usage.uncached_input_tokens is None
 
-    assert result.token_usage.prompt_tokens == 150
-    assert result.token_usage.completion_tokens == 55
+    assert result.token_usage.input_tokens == 150
+    assert result.token_usage.output_tokens == 55
     assert result.token_usage.total_tokens == 205
-    assert result.token_usage.cached_tokens == 40
-    assert result.token_usage.reasoning_tokens == 10
-    assert result.token_usage.cache_creation_tokens == 12
-    assert result.token_usage.cache_usage.read_tokens is None
-    assert result.token_usage.cache_usage.write_tokens is None
+    assert result.token_usage.reasoning_tokens is None
+    assert result.token_usage.cache_usage.read_input_tokens is None
+    assert result.token_usage.cache_usage.write_input_tokens is None
     assert result.token_usage.cache_usage.uncached_input_tokens is None
 
 
@@ -923,24 +916,11 @@ Body
     assert result.shared_state["active_skills"] == ["demo"]
 
 
-def test_memory_summary_model_priority_uses_metadata_over_local_settings(tmp_path: Path) -> None:
-    settings_file = tmp_path / "local_settings.py"
-    settings_file.write_text(
-        '\n'.join(
-            (
-                'DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND = "settings-backend"',
-                'DEFAULT_USER_MEMORY_SUMMARIZE_MODEL = "settings-model"',
-            )
-        ),
-        encoding="utf-8",
-    )
-
+def test_memory_summary_model_uses_explicit_task_metadata(tmp_path: Path) -> None:
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="fallback-backend",
     )
     task = AgentTask(
         task_id="task_memory_priority_metadata",
@@ -958,51 +938,19 @@ def test_memory_summary_model_priority_uses_metadata_over_local_settings(tmp_pat
     assert manager.summary_model == "metadata-model"
 
 
-def test_memory_summary_model_priority_uses_local_settings_over_fallback(tmp_path: Path) -> None:
-    settings_file = tmp_path / "local_settings.py"
-    settings_file.write_text(
-        '\n'.join(
-            (
-                'DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND = "settings-backend"',
-                'DEFAULT_USER_MEMORY_SUMMARIZE_MODEL = "settings-model"',
-            )
-        ),
-        encoding="utf-8",
-    )
-
+def test_memory_summary_model_defaults_to_task_model_without_backend(tmp_path: Path) -> None:
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="fallback-backend",
     )
     task = AgentTask(
-        task_id="task_memory_priority_settings",
+        task_id="task_memory_default",
         model="task-model",
         system_prompt="sys",
         user_prompt="go",
     )
 
     manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
-    assert manager.summary_backend == "settings-backend"
-    assert manager.summary_model == "settings-model"
-
-
-def test_memory_summary_model_priority_uses_fallback_when_missing(tmp_path: Path) -> None:
-    runtime = AgentRuntime(
-        llm_client=ScriptedLLM(),
-        tool_registry=build_default_registry(),
-        default_workspace=tmp_path,
-        default_backend="fallback-backend",
-    )
-    task = AgentTask(
-        task_id="task_memory_priority_fallback",
-        model="task-model",
-        system_prompt="sys",
-        user_prompt="go",
-    )
-
-    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
-    assert manager.summary_backend == "fallback-backend"
+    assert manager.summary_backend is None
     assert manager.summary_model == "task-model"

@@ -32,7 +32,7 @@ agents = {
     "default": Agent(
         name="planner",
         instructions="你是任务规划 Agent, 先拆任务, 再逐步执行并维护 todo.",
-        model="kimi-k2.6",
+        model="kimi-k3",
         model_settings=ModelSettings(temperature=0.2),
         tools=[save_note],
     ),
@@ -47,19 +47,19 @@ agents = {
 
 
 def main() -> None:
-    settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-    verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
-    agent_name = os.getenv("V_AGENT_EXAMPLE_AGENT", "default")
-    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "先拆分任务, 再逐步完成并汇报")
-    max_cycles = int(os.getenv("V_AGENT_EXAMPLE_MAX_CYCLES", "10"))
-    session_id = os.getenv("V_AGENT_EXAMPLE_SESSION_ID", "").strip()
+    settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+    verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "true").strip().lower() in {"1", "true", "yes", "on"}
+    agent_name = os.getenv("VV_AGENT_EXAMPLE_AGENT", "default")
+    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "先拆分任务, 再逐步完成并汇报")
+    max_cycles = int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "10"))
+    session_id = os.getenv("VV_AGENT_EXAMPLE_SESSION_ID", "").strip()
 
     workspace.mkdir(parents=True, exist_ok=True)
 
     agent = agents.get(agent_name, agents["default"])
-    if agent_name == "translator" and os.getenv("V_AGENT_EXAMPLE_BACKEND") is None:
+    if agent_name == "translator" and os.getenv("VV_AGENT_EXAMPLE_BACKEND") is None:
         backend = "minimax"
 
     config = RunConfig(

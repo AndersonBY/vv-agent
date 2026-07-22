@@ -1,0 +1,657 @@
+{
+  "version": 1,
+  "jsonRpc": {
+    "version": "2.0",
+    "validRequestIds": [
+      0,
+      42,
+      "req_42"
+    ],
+    "invalidRequestIds": [
+      null,
+      true,
+      1.5,
+      [],
+      {}
+    ],
+    "errorResponseAllowsNullId": true
+  },
+  "timestamps": {
+    "unit": "unix_seconds",
+    "jsonType": "number",
+    "eventMillis": 1720000000123,
+    "eventSeconds": 1720000000.123
+  },
+  "input": {
+    "valid": [
+      {
+        "type": "text",
+        "text": "hello"
+      },
+      {
+        "type": "image",
+        "url": "https://example.invalid/image.png"
+      }
+    ],
+    "invalid": [
+      "hello",
+      7,
+      true,
+      null,
+      []
+    ]
+  },
+  "liveReplay": {
+    "item": {
+      "itemId": "item_evt_contract",
+      "threadId": "thread_contract",
+      "turnId": "turn_contract",
+      "type": "agentMessage",
+      "status": "completed",
+      "payload": {
+        "text": "contract payload"
+      },
+      "createdAt": 1720000000.123,
+      "updatedAt": 1720000000.123
+    },
+    "notificationMethod": "item/completed",
+    "payloadMustMatch": true
+  },
+  "approval": {
+    "decisions": [
+      "allow",
+      "allow_session",
+      "deny",
+      "timeout"
+    ],
+    "caseSensitive": true,
+    "timeoutDecision": "timeout",
+    "disconnectDecision": "timeout",
+    "duplicateServerRequestId": "reject"
+  },
+  "ordering": {
+    "threadStart": [
+      "response",
+      "thread/started"
+    ],
+    "turnStart": [
+      "response",
+      "thread/status/changed",
+      "turn/started"
+    ],
+    "turnTerminal": [
+      "thread/status/changed",
+      "turn/completed"
+    ]
+  },
+  "terminal": {
+    "threadStatusAfterTurn": "idle",
+    "turnStatuses": [
+      "completed",
+      "failed",
+      "interrupted"
+    ],
+    "optionalFieldsOmittedWhenAbsent": [
+      "runId",
+      "finalOutput",
+      "completionReason",
+      "completionToolName",
+      "partialOutput",
+      "error",
+      "tokenUsage",
+      "budgetUsage",
+      "budgetExhaustion",
+      "checkpoint",
+      "interruption"
+    ],
+    "completionReasonValues": [
+      "tool_finish",
+      "no_tool_finish",
+      "stop_on_first_tool",
+      "stop_at_tool_name",
+      "wait_user",
+      "max_cycles",
+      "cancelled",
+      "failed",
+      "budget_exhausted"
+    ],
+    "agentStatusProjection": [
+      {
+        "name": "wait_user_is_interrupted_without_error",
+        "agentStatus": "wait_user",
+        "turnStatus": "interrupted",
+        "completionReason": "wait_user",
+        "errorField": "omitted"
+      },
+      {
+        "name": "cancelled_failure_stays_failed",
+        "agentStatus": "failed",
+        "turnStatus": "failed",
+        "completionReason": "cancelled",
+        "errorField": "present"
+      },
+      {
+        "name": "budget_exhaustion_is_failed_with_typed_observation",
+        "agentStatus": "failed",
+        "turnStatus": "failed",
+        "completionReason": "budget_exhausted",
+        "errorField": "present",
+        "budgetUsageField": "present",
+        "budgetExhaustionField": "present"
+      },
+      {
+        "name": "reconciliation_required_is_interrupted_without_error",
+        "agentStatus": "reconciliation_required",
+        "turnStatus": "interrupted",
+        "completionReason": null,
+        "errorField": "omitted",
+        "checkpointField": "present",
+        "interruptionField": "present"
+      }
+    ]
+  },
+  "nullability": {
+    "threadStartResponse": {
+      "cwd": null
+    },
+    "threadSnapshot": {
+      "cwd": null,
+      "archivedAt": null
+    },
+    "turnSnapshot": {
+      "runId": null,
+      "completedAt": null
+    }
+  },
+  "restart": {
+    "connectionIdCanReinitialize": true,
+    "staleRunningThreadStatus": "idle"
+  },
+  "schema": {
+    "json": [
+      "AppItem.json",
+      "AppThread.json",
+      "AppTurn.json",
+      "ApprovalDecision.json",
+      "ApprovalRequestParams.json",
+      "ApprovalResolveParams.json",
+      "ClientRequest.json",
+      "InitializeParams.json",
+      "InitializeResponse.json",
+      "JsonRpcMessage.json",
+      "SchemaExportResponse.json",
+      "ServerNotification.json",
+      "ServerRequest.json",
+      "ThreadReadResponse.json",
+      "ThreadResumeResponse.json",
+      "ThreadStartResponse.json",
+      "TurnResumeParams.json",
+      "TurnResumeResponse.json",
+      "TurnStartResponse.json"
+    ],
+    "typescript": [
+      "AppItem.ts",
+      "AppThread.ts",
+      "AppTurn.ts",
+      "ApprovalDecision.ts",
+      "ApprovalRequestParams.ts",
+      "ApprovalResolveParams.ts",
+      "ClientRequest.ts",
+      "InitializeParams.ts",
+      "InitializeResponse.ts",
+      "SchemaExportResponse.ts",
+      "ServerNotification.ts",
+      "ServerRequest.ts",
+      "ThreadReadResponse.ts",
+      "ThreadResumeResponse.ts",
+      "ThreadStartResponse.ts",
+      "TurnResumeParams.ts",
+      "TurnResumeResponse.ts",
+      "TurnStartResponse.ts"
+    ],
+    "typescriptSelfContained": true
+  },
+  "toolLifecycle": {
+    "plannedHasNoNotification": {
+      "event": {
+        "type": "tool_call_planned",
+        "event_id": "evt_tool_planned",
+        "created_at": 100,
+        "tool_name": "inspect",
+        "tool_call_id": "call_tool",
+        "arguments": {
+          "path": "README.md"
+        },
+        "tool_metadata": {
+          "side_effect": "read",
+          "idempotency": "supported",
+          "terminal": false,
+          "capability_tags": [
+            "source.inspect"
+          ],
+          "cost_dimensions": [
+            "workspace.bytes_read"
+          ]
+        }
+      },
+      "notifications": [],
+      "persistedItem": null,
+      "argumentsAvailableToApprovalRouting": true,
+      "presentedAsExecution": false
+    },
+    "executed": {
+      "startedNotifications": [
+        {
+          "jsonrpc": "2.0",
+          "method": "item/started",
+          "params": {
+            "itemId": "item_evt_tool_started",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
+            "status": "started",
+            "payload": {
+              "toolName": "inspect",
+              "toolCallId": "call_tool",
+              "toolMetadata": {
+                "sideEffect": "read",
+                "idempotency": "supported",
+                "terminal": false,
+                "capabilityTags": [
+                  "source.inspect"
+                ],
+                "costDimensions": [
+                  "workspace.bytes_read"
+                ]
+              }
+            },
+            "createdAt": 100.1,
+            "updatedAt": 100.1
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "method": "item/toolCall/delta",
+          "params": {
+            "itemId": "item_evt_tool_started",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
+            "status": "started",
+            "payload": {
+              "toolName": "inspect",
+              "toolCallId": "call_tool",
+              "toolMetadata": {
+                "sideEffect": "read",
+                "idempotency": "supported",
+                "terminal": false,
+                "capabilityTags": [
+                  "source.inspect"
+                ],
+                "costDimensions": [
+                  "workspace.bytes_read"
+                ]
+              }
+            },
+            "createdAt": 100.1,
+            "updatedAt": 100.1,
+            "delta": {
+              "path": "README.md"
+            }
+          }
+        }
+      ],
+      "completedNotifications": [
+        {
+          "jsonrpc": "2.0",
+          "method": "item/completed",
+          "params": {
+            "itemId": "item_evt_tool_completed",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
+            "status": "completed",
+            "payload": {
+              "toolName": "inspect",
+              "toolCallId": "call_tool",
+              "status": "success",
+              "directive": "continue",
+              "errorCode": null,
+              "executionStarted": true,
+              "durationMs": 7,
+              "toolMetadata": {
+                "sideEffect": "read",
+                "idempotency": "supported",
+                "terminal": false,
+                "capabilityTags": [
+                  "source.inspect"
+                ],
+                "costDimensions": [
+                  "workspace.bytes_read"
+                ]
+              }
+            },
+            "createdAt": 100.2,
+            "updatedAt": 100.2
+          }
+        }
+      ]
+    },
+    "policyDenial": {
+      "startedNotifications": [],
+      "completedNotifications": [
+        {
+          "jsonrpc": "2.0",
+          "method": "item/completed",
+          "params": {
+            "itemId": "item_evt_tool_denied",
+            "threadId": "thread-tool",
+            "turnId": "turn-tool",
+            "type": "toolCall",
+            "status": "failed",
+            "payload": {
+              "toolName": "write_record",
+              "toolCallId": "call_denied",
+              "status": "error",
+              "directive": "continue",
+              "errorCode": "tool_not_allowed",
+              "executionStarted": false,
+              "durationMs": null,
+              "toolMetadata": {
+                "sideEffect": "write",
+                "idempotency": "unsupported",
+                "terminal": false,
+                "capabilityTags": [
+                  "record.write"
+                ],
+                "costDimensions": []
+              }
+            },
+            "createdAt": 100.3,
+            "updatedAt": 100.3
+          }
+        }
+      ]
+    }
+  },
+  "durableResume": {
+    "method": "turn/resume",
+    "requestFields": [
+      "threadId",
+      "turnId",
+      "checkpointKey"
+    ],
+    "response": "TurnResumeResponse",
+    "newInputAllowed": false,
+    "approvalResumeIsSeparate": true,
+    "reconciliationRequiredTurnStatus": "interrupted",
+    "checkpointSummary": {
+      "statusDomain": "AgentStatus persisted in checkpoint.status; it is not the App Server TurnStatus",
+      "fields": [
+        "key",
+        "resumeAttempt",
+        "cycleIndex",
+        "status",
+        "terminalAcknowledged"
+      ],
+      "example": {
+        "key": "tenant-7/run-42",
+        "resumeAttempt": 2,
+        "cycleIndex": 1,
+        "status": "reconciliation_required",
+        "terminalAcknowledged": false
+      }
+    },
+    "interruptionSummary": {
+      "fields": [
+        "reason",
+        "operationId",
+        "operationKind",
+        "cycleIndex",
+        "risk",
+        "idempotencySupport"
+      ],
+      "example": {
+        "reason": "resume_requires_reconciliation",
+        "operationId": "op_tool_cycle_2_call_2",
+        "operationKind": "tool",
+        "cycleIndex": 2,
+        "risk": "unknown_tool_side_effect",
+        "idempotencySupport": "unknown"
+      }
+    },
+    "responseFields": [
+      "threadId",
+      "turnId",
+      "runId",
+      "status",
+      "finalOutput",
+      "completionReason",
+      "completionToolName",
+      "partialOutput",
+      "checkpoint",
+      "interruption",
+      "error"
+    ],
+    "protocolCases": [
+      {
+        "name": "resume_reaches_reconciliation_interruption",
+        "request": {
+          "jsonrpc": "2.0",
+          "id": "resume-1",
+          "method": "turn/resume",
+          "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "checkpointKey": "tenant-7/run-42"
+          }
+        },
+        "response": {
+          "jsonrpc": "2.0",
+          "id": "resume-1",
+          "result": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "runId": "run-resume-1",
+            "status": "running"
+          }
+        },
+        "notifications": [
+          {
+            "jsonrpc": "2.0",
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "thread-1",
+              "status": "running"
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {
+              "threadId": "thread-1",
+              "turnId": "turn-1",
+              "runId": "run-resume-1",
+              "status": "running"
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "thread/status/changed",
+            "params": {
+              "threadId": "thread-1",
+              "status": "idle"
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+              "threadId": "thread-1",
+              "turnId": "turn-1",
+              "runId": "run-resume-1",
+              "status": "interrupted",
+              "checkpoint": {
+                "key": "tenant-7/run-42",
+                "resumeAttempt": 2,
+                "cycleIndex": 1,
+                "status": "reconciliation_required",
+                "terminalAcknowledged": false
+              },
+              "interruption": {
+                "reason": "resume_requires_reconciliation",
+                "operationId": "op_tool_cycle_2_call_2",
+                "operationKind": "tool",
+                "cycleIndex": 2,
+                "risk": "unknown_tool_side_effect",
+                "idempotencySupport": "unknown"
+              }
+            }
+          }
+        ],
+        "notificationOrder": [
+          "thread/status/changed:running",
+          "turn/started",
+          "thread/status/changed:idle",
+          "turn/completed:interrupted"
+        ]
+      },
+      {
+        "name": "live_claim_keeps_existing_owner",
+        "request": {
+          "jsonrpc": "2.0",
+          "id": "resume-2",
+          "method": "turn/resume",
+          "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "checkpointKey": "tenant-7/run-42"
+          }
+        },
+        "response": {
+          "jsonrpc": "2.0",
+          "id": "resume-2",
+          "result": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "runId": "run-existing-owner",
+            "status": "running",
+            "checkpoint": {
+              "key": "tenant-7/run-42",
+              "resumeAttempt": 2,
+              "cycleIndex": 1,
+              "status": "running",
+              "terminalAcknowledged": false
+            }
+          }
+        },
+        "notifications": [],
+        "ownership": "existing_worker",
+        "newRunCreated": false,
+        "externalCalls": 0
+      },
+      {
+        "name": "terminal_replay_is_response_only",
+        "request": {
+          "jsonrpc": "2.0",
+          "id": "resume-3",
+          "method": "turn/resume",
+          "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "checkpointKey": "tenant-7/run-42"
+          }
+        },
+        "response": {
+          "jsonrpc": "2.0",
+          "id": "resume-3",
+          "result": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "runId": "run-terminal",
+            "status": "completed",
+            "finalOutput": "done",
+            "completionReason": "no_tool_finish",
+            "checkpoint": {
+              "key": "tenant-7/run-42",
+              "resumeAttempt": 2,
+              "cycleIndex": 2,
+              "status": "completed",
+              "terminalAcknowledged": true
+            }
+          }
+        },
+        "notifications": [],
+        "newRunCreated": false,
+        "externalCalls": 0
+      }
+    ],
+    "projectionCasesScope": "terminal TurnSnapshot or turn/completed params, not the immediate TurnResumeResponse",
+    "projectionCases": [
+      {
+        "name": "reconciliation_required",
+        "turnStatus": "interrupted",
+        "completionReasonField": "omitted",
+        "errorField": "omitted",
+        "checkpoint": {
+          "key": "tenant-7/run-42",
+          "resumeAttempt": 2,
+          "cycleIndex": 1,
+          "status": "reconciliation_required",
+          "terminalAcknowledged": false
+        },
+        "interruption": {
+          "reason": "resume_requires_reconciliation",
+          "operationId": "op_tool_cycle_2_call_2",
+          "operationKind": "tool",
+          "cycleIndex": 2,
+          "risk": "unknown_tool_side_effect",
+          "idempotencySupport": "unknown"
+        }
+      },
+      {
+        "name": "live_claim",
+        "turnStatus": "running",
+        "completionReasonField": "omitted",
+        "errorField": "omitted",
+        "checkpoint": {
+          "key": "tenant-7/run-42",
+          "resumeAttempt": 2,
+          "cycleIndex": 1,
+          "status": "running",
+          "terminalAcknowledged": false
+        },
+        "interruptionField": "omitted",
+        "externalCalls": 0
+      },
+      {
+        "name": "terminal_replay",
+        "turnStatus": "completed",
+        "completionReason": "no_tool_finish",
+        "errorField": "omitted",
+        "checkpoint": {
+          "key": "tenant-7/run-42",
+          "resumeAttempt": 2,
+          "cycleIndex": 2,
+          "status": "completed",
+          "terminalAcknowledged": true
+        },
+        "interruptionField": "omitted",
+        "externalCalls": 0
+      }
+    ],
+    "sensitiveFieldsNeverProjected": [
+      "runDefinition",
+      "runDefinitionDigest",
+      "operationArguments",
+      "operationResponse",
+      "extensionState",
+      "idempotencyKey"
+    ],
+    "ordering": [
+      "response",
+      "thread/status/changed",
+      "turn/started"
+    ]
+  }
+}

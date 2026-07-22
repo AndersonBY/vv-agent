@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from support import FixedModelProvider
+
 from vv_agent import Agent, GuardrailResult, RunConfig, Runner, input_guardrail, output_guardrail
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.model import ModelRef
+from vv_agent.model_settings import ModelSettings
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 
@@ -21,7 +25,28 @@ def _resolved() -> ResolvedModelConfig:
 
 
 def test_input_guardrail_can_block_before_model_call(tmp_path: Path) -> None:
-    provider_called = False
+    class ProbeProvider:
+        def __init__(self) -> None:
+            self.called = False
+
+        def resolve(self, model: ModelRef) -> ResolvedModelConfig:
+            del model
+            self.called = True
+            return _resolved()
+
+        def client(self, resolved: ResolvedModelConfig) -> ScriptedLLM:
+            del resolved
+            self.called = True
+            return ScriptedLLM()
+
+        def default_settings(self, resolved: ResolvedModelConfig) -> ModelSettings:
+            del resolved
+            return ModelSettings()
+
+        def default_model_ref(self) -> ModelRef:
+            return ModelRef.named("m")
+
+    provider = ProbeProvider()
 
     @input_guardrail
     def reject_empty(ctx, input_text: str) -> GuardrailResult:
@@ -30,19 +55,13 @@ def test_input_guardrail_can_block_before_model_call(tmp_path: Path) -> None:
             return GuardrailResult.block("input is required")
         return GuardrailResult.allow()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        nonlocal provider_called
-        del agent, run_config
-        provider_called = True
-        return ScriptedLLM(), _resolved()
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Answer.", model="m", input_guardrails=[reject_empty]),
         "   ",
-        run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
+        run_config=RunConfig(workspace=tmp_path, model_provider=provider),
     )
 
-    assert provider_called is False
+    assert provider.called is False
     assert result.status == AgentStatus.FAILED
     assert result.final_output == "input is required"
     assert result.resolved_model is None
@@ -57,19 +76,16 @@ def test_input_guardrail_can_rewrite_input(tmp_path: Path) -> None:
         del ctx, input_text
         return GuardrailResult.rewrite("rewritten prompt")
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
+    def respond(request: LlmRequest) -> LLMResponse:
+        model, messages = request.model, request.messages
+        del model
+        seen_user_messages.extend(message.content for message in messages if message.role == "user")
+        return LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+        )
 
-        def respond(request: LlmRequest) -> LLMResponse:
-            model, messages = request.model, request.messages
-            del model
-            seen_user_messages.extend(message.content for message in messages if message.role == "user")
-            return LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-            )
-
-        return ScriptedLLM(steps=[respond]), _resolved()
+    model_provider = FixedModelProvider(ScriptedLLM(steps=[respond]), _resolved())
 
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Answer.", model="m", input_guardrails=[normalize]),
@@ -88,19 +104,17 @@ def test_output_guardrail_can_rewrite_final_output(tmp_path: Path) -> None:
         del ctx
         return GuardrailResult.rewrite(f"redacted: {output}")
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="done",
-                        tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "secret"})],
-                    )
-                ]
-            ),
-            _resolved(),
-        )
+    model_provider = FixedModelProvider(
+        ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "secret"})],
+                )
+            ]
+        ),
+        _resolved(),
+    )
 
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Answer.", model="m", output_guardrails=[redact]),

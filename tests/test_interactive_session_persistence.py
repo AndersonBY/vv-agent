@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import (
     AgentSessionOptions,
@@ -24,7 +25,7 @@ from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.types import AgentResult, LLMResponse, ToolCall
 
-CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
+CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent.json"
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -60,13 +61,6 @@ def _standalone_run(*, prompt: str, messages: list[Message]) -> AgentSessionRun:
     )
 
 
-def test_agent_session_options_keeps_workspace_as_third_positional_argument(tmp_path: Path) -> None:
-    options = AgentSessionOptions(tmp_path / "settings.py", "test", tmp_path)
-
-    assert options.workspace == tmp_path
-    assert options.session is None
-
-
 def test_interactive_client_hydrates_and_reuses_backing_session_without_duplicates(tmp_path: Path) -> None:
     backing = MemorySession("persistent-thread")
     seeded = [
@@ -77,32 +71,26 @@ def test_interactive_client_hydrates_and_reuses_backing_session_without_duplicat
     requests: list[list[Message]] = []
     turn = 0
 
-    def llm_builder(*_: Any, **__: Any):
+    def respond(request: LlmRequest) -> LLMResponse:
         nonlocal turn
         turn += 1
         current_turn = turn
-
-        def respond(request: LlmRequest) -> LLMResponse:
-            requests.append(list(request.messages))
-            return LLMResponse(
-                content=f"answer {current_turn}",
-                tool_calls=[
-                    ToolCall(
-                        id=f"finish-{current_turn}",
-                        name=TASK_FINISH_TOOL_NAME,
-                        arguments={"message": f"done {current_turn}"},
-                    )
-                ],
-            )
-
-        return ScriptedLLM(steps=[respond]), _resolved()
+        requests.append(list(request.messages))
+        return LLMResponse(
+            content=f"answer {current_turn}",
+            tool_calls=[
+                ToolCall(
+                    id=f"finish-{current_turn}",
+                    name=TASK_FINISH_TOOL_NAME,
+                    arguments={"message": f"done {current_turn}"},
+                )
+            ],
+        )
 
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[respond, respond]), _resolved()),
             workspace=tmp_path,
-            llm_builder=llm_builder,
             session=backing,
         )
     )
@@ -201,8 +189,7 @@ def test_client_session_override_and_store_isolation(tmp_path: Path) -> None:
     override_backing.add_items([Message(role="user", content="override history")])
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[]), _resolved()),
             workspace=tmp_path,
             session=default_backing,
         )
@@ -274,8 +261,7 @@ def test_custom_run_replaces_rewritten_history_without_duplicate_continuations(t
         nonlocal turn
         turn += 1
         rewritten = [
-            replace(message, metadata={**message.metadata, "revision": turn})
-            for message in kwargs["session"].get_items()
+            replace(message, metadata={**message.metadata, "revision": turn}) for message in kwargs["session"].get_items()
         ]
         prompt = kwargs["prompt"]
         return _standalone_run(

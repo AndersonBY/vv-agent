@@ -3,9 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
-from vv_agent.checkpoint import ToolIdempotency
+from vv_agent.tools.argument_validation import (
+    assert_valid_tool_schema,
+    close_object_schemas,
+    invalid_tool_arguments_result,
+)
 from vv_agent.tools.base import ToolContext, ToolSpec
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
 from vv_agent.types import ToolCall, ToolExecutionResult
@@ -31,7 +35,6 @@ class ToolExecutor(Protocol):
     timeout_seconds: float | None
     failure_error_function: ToolErrorFormatter | None
     metadata: dict[str, Any]
-    idempotency: ToolIdempotency
     tool_metadata: ToolMetadata | None
 
     def spec(self, context: ToolContext | None = None) -> ToolSpec: ...
@@ -44,8 +47,7 @@ class ToolExecutor(Protocol):
 
 
 def get_executor_tool_metadata(executor: ToolExecutor) -> ToolMetadata | None:
-    """Read additive metadata without excluding legacy structural executors."""
-    return cast(ToolMetadata | None, getattr(executor, "tool_metadata", None))
+    return executor.tool_metadata
 
 
 @dataclass(slots=True)
@@ -89,10 +91,6 @@ class FunctionToolExecutor:
         return dict(self.tool.metadata)
 
     @property
-    def idempotency(self) -> ToolIdempotency:
-        return self.tool.idempotency
-
-    @property
     def tool_metadata(self) -> ToolMetadata | None:
         return self.tool.tool_metadata
 
@@ -106,7 +104,6 @@ class FunctionToolExecutor:
         return ToolSpec(
             name=self.name,
             handler=handler,
-            idempotency=self.idempotency,
             tool_metadata=self.tool_metadata,
         )
 
@@ -115,6 +112,13 @@ class FunctionToolExecutor:
         return self.tool.to_openai_schema()
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
+        invalid_result = invalid_tool_arguments_result(
+            tool_call_id=call.id,
+            schema=self.params_json_schema,
+            arguments=call.arguments,
+        )
+        if invalid_result is not None:
+            return invalid_result
         output = self.tool.invoke(context, call.arguments)
         return self.tool.to_tool_execution_result(output, tool_call_id=call.id)
 
@@ -137,14 +141,13 @@ class RegistryToolExecutor:
     timeout_seconds: float | None = None
     failure_error_function: ToolErrorFormatter | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
     tool_metadata: ToolMetadata | None = None
 
     def __post_init__(self) -> None:
-        self.tool_metadata, self.idempotency = normalize_tool_metadata(
-            self.tool_metadata,
-            legacy_idempotency=self.idempotency,
-        )
+        self.tool_metadata = normalize_tool_metadata(self.tool_metadata)
+        if self.schema is not None:
+            self.schema = close_object_schemas(self.schema)
+            assert_valid_tool_schema(self.params_json_schema)
         self.sync_description_from_schema()
 
     def sync_description_from_schema(self) -> None:
@@ -173,7 +176,6 @@ class RegistryToolExecutor:
         return ToolSpec(
             name=self.name,
             handler=self.handler,
-            idempotency=self.idempotency,
             tool_metadata=self.tool_metadata,
         )
 
@@ -191,6 +193,13 @@ class RegistryToolExecutor:
         }
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
+        invalid_result = invalid_tool_arguments_result(
+            tool_call_id=call.id,
+            schema=self.params_json_schema,
+            arguments=call.arguments,
+        )
+        if invalid_result is not None:
+            return invalid_result
         return self.handler(context, call.arguments)
 
     def requires_approval(self, context: ToolContext, arguments: dict[str, Any]) -> bool:
@@ -211,6 +220,7 @@ def is_tool_executor(value: Any) -> bool:
         "timeout_seconds",
         "failure_error_function",
         "metadata",
+        "tool_metadata",
     )
     methods = ("spec", "openai_schema", "execute", "requires_approval")
     return all(hasattr(value, attribute) for attribute in attributes) and all(

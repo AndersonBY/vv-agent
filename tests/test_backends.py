@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal, TypedDict, Unpack
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,7 +11,6 @@ from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.backends.thread import ThreadBackend
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.state import InMemoryStateStore
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 
@@ -65,10 +64,12 @@ class TestThreadBackend:
         assert result.final_answer == "threaded"
 
     def test_cancel_with_thread_backend(self):
-        llm = ScriptedLLM(steps=[
-            LLMResponse(content="c1"),
-            LLMResponse(content="c2"),
-        ])
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(content="c1"),
+                LLMResponse(content="c2"),
+            ]
+        )
         runtime = AgentRuntime(
             llm_client=llm,
             tool_registry=build_default_registry(),
@@ -96,105 +97,63 @@ class TestCeleryBackend:
     def test_import_without_celery(self):
         """CeleryBackend can be imported even without celery installed."""
         from vv_agent.runtime.backends.celery import CeleryBackend
+
         # Just verify the class exists
         assert CeleryBackend is not None
 
-    def test_mock_celery_backend(self):
-        """Test CeleryBackend inline fallback with a mock celery app (no recipe)."""
-        from vv_agent.runtime.backends.celery import _CELERY_AVAILABLE, CeleryBackend
-        if not _CELERY_AVAILABLE:
-            pytest.skip("celery not installed")
-
-        mock_app = MagicMock()
-        store = InMemoryStateStore()
-        backend = CeleryBackend(celery_app=mock_app, state_store=store)
-
-        llm = ScriptedLLM(steps=[LLMResponse(content="celery-done")])
-        runtime = AgentRuntime(
-            llm_client=llm,
-            tool_registry=build_default_registry(),
-            execution_backend=backend,
-        )
-        result = runtime.run(_make_task())
-        assert result.status == AgentStatus.COMPLETED
-        assert result.final_answer == "celery-done"
-
-    def test_distributed_mode_eager(self):
-        """Test distributed mode using Celery eager (in-process) execution."""
+    def test_distributed_backend_accepts_current_recipe(self, tmp_path: Path):
+        """CeleryBackend accepts the current capability-based recipe."""
         from vv_agent.runtime.backends.celery import (
             _CELERY_AVAILABLE,
             CeleryBackend,
             RuntimeRecipe,
             register_cycle_task,
         )
+
         if not _CELERY_AVAILABLE:
             pytest.skip("celery not installed")
 
-        import tempfile
-        from pathlib import Path
-
         from celery import Celery
 
-        from vv_agent.runtime.stores.sqlite import SqliteStateStore
+        from vv_agent.runtime.backends.distributed import (
+            CapabilityRef,
+            DistributedCapabilities,
+        )
 
-        # Create a temporary workspace and SQLite store.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir) / "workspace"
-            workspace.mkdir()
-            db_path = workspace / ".vv-agent-state" / "checkpoints.db"
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            store = SqliteStateStore(db_path=db_path)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        settings_file = tmp_path / "local_settings.py"
+        settings_file.write_text("BACKENDS = {}\nENDPOINTS = {}\nMODELS = {}\n")
+        celery_app = Celery("test_distributed")
+        celery_app.conf.task_always_eager = True
+        celery_app.conf.task_eager_propagates = True
+        celery_app.conf.task_serializer = "json"
+        celery_app.conf.result_serializer = "json"
+        celery_app.conf.accept_content = ["json"]
+        register_cycle_task(celery_app)
 
-            # Eager Celery app — tasks run in the same process.
-            celery_app = Celery("test_distributed")
-            celery_app.conf.task_always_eager = True
-            celery_app.conf.task_eager_propagates = True
-            celery_app.conf.task_serializer = "json"
-            celery_app.conf.result_serializer = "json"
-            celery_app.conf.accept_content = ["json"]
+        checkpoint_ref = CapabilityRef("checkpoint.test", "1")
+        recipe = RuntimeRecipe(
+            settings_file=str(settings_file),
+            backend="test",
+            model="test",
+            workspace=str(workspace),
+            capabilities=DistributedCapabilities(
+                checkpoint_store_ref=checkpoint_ref,
+            ),
+        )
+        backend = CeleryBackend(
+            celery_app=celery_app,
+            runtime_recipe=recipe,
+        )
 
-            register_cycle_task(celery_app)
-
-            # We need a real settings file for the worker to rebuild the
-            # runtime.  Use a minimal ScriptedLLM-based settings stub.
-            settings_file = Path(tmpdir) / "local_settings.py"
-            settings_file.write_text(
-                "BACKENDS = {}\n"
-                "ENDPOINTS = {}\n"
-                "MODELS = {}\n"
-            )
-
-            recipe = RuntimeRecipe(
-                settings_file=str(settings_file),
-                backend="test",
-                model="test",
-                workspace=str(workspace),
-            )
-
-            backend = CeleryBackend(
-                celery_app=celery_app,
-                state_store=store,
-                runtime_recipe=recipe,
-            )
-
-            # For eager mode, the worker rebuilds the runtime using
-            # build_openai_llm_from_local_settings which needs a real
-            # settings file.  Since we can't easily mock that in the
-            # worker process, we test the inline fallback path instead
-            # and verify the distributed plumbing (checkpoint save/load)
-            # works correctly.
-            #
-            # The full distributed path is validated via the example
-            # script with a real LLM backend.
-
-            # Verify that the backend was created with the recipe.
-            assert backend.runtime_recipe is not None
-            assert backend.runtime_recipe.backend == "test"
+        assert backend.runtime_recipe == recipe
 
     def test_runtime_recipe_serialization(self):
         """Test RuntimeRecipe round-trip serialization."""
         from vv_agent.runtime.backends.celery import _CELERY_AVAILABLE, RuntimeRecipe
         from vv_agent.runtime.backends.distributed import CapabilityRef, DistributedCapabilities
+
         if not _CELERY_AVAILABLE:
             pytest.skip("celery not installed")
 
@@ -207,6 +166,7 @@ class TestCeleryBackend:
             log_preview_chars=300,
             capabilities=DistributedCapabilities(
                 hook_refs=(CapabilityRef("hook.logging", "1"),),
+                checkpoint_store_ref=CapabilityRef("checkpoint.test", "1"),
             ),
         )
         d = recipe.to_dict()
@@ -217,6 +177,7 @@ class TestCeleryBackend:
         assert restored.workspace == recipe.workspace
         assert restored.timeout_seconds == recipe.timeout_seconds
         assert restored.capabilities.hook_refs == recipe.capabilities.hook_refs
+        assert restored.capabilities.checkpoint_store_ref == recipe.capabilities.checkpoint_store_ref
         assert restored.log_preview_chars == recipe.log_preview_chars
 
     def test_agent_task_serialization(self):
@@ -235,6 +196,7 @@ class TestCeleryBackend:
     def test_agent_result_serialization(self):
         """Test AgentResult round-trip serialization."""
         from vv_agent.types import AgentResult, Message
+
         result = AgentResult(
             status=AgentStatus.COMPLETED,
             messages=[Message(role="user", content="hi")],

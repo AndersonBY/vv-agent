@@ -1,0 +1,622 @@
+{
+  "schema_version": "vv-agent.tool-metadata.v1",
+  "limits": {
+    "maximum_capability_tags": 32,
+    "maximum_cost_dimensions": 32,
+    "maximum_label_code_points": 128,
+    "wire_integer_maximum": 9007199254740991
+  },
+  "metadata_contract": {
+    "optional": true,
+    "closed_fields": [
+      "side_effect",
+      "idempotency",
+      "terminal",
+      "capability_tags",
+      "cost_dimensions"
+    ],
+    "canonical_field_order": [
+      "side_effect",
+      "idempotency",
+      "terminal",
+      "capability_tags",
+      "cost_dimensions"
+    ],
+    "defaults": {
+      "side_effect": "unknown",
+      "idempotency": "unknown",
+      "terminal": false,
+      "capability_tags": [],
+      "cost_dimensions": []
+    },
+    "side_effect_values": [
+      "unknown",
+      "none",
+      "read",
+      "write",
+      "execute",
+      "network",
+      "external"
+    ],
+    "side_effect_semantics": "one coarse host declaration; the SDK does not infer additional effects, ordering, or hierarchy between values",
+    "idempotency_values": [
+      "unknown",
+      "supported",
+      "unsupported"
+    ],
+    "terminal_semantics": "declares that the tool may return finish or wait_user; it never makes the framework stop automatically",
+    "capability_tags_semantics": "opaque exact-match labels; the SDK does not interpret task or domain meaning",
+    "cost_dimensions_semantics": "opaque names of resources a tool may consume; declarations are not measurements, prices, or budget observations",
+    "generic_metadata_is_not_a_declaration": true,
+    "model_visible": false,
+    "absent_metadata_uses_neutral_defaults": true
+  },
+  "collection_normalization": {
+    "trim": "portable_whitespace",
+    "portable_whitespace_code_points": [
+      "U+0009",
+      "U+000A",
+      "U+000D",
+      "U+0020"
+    ],
+    "blank_after_trim": "reject",
+    "deduplicate": true,
+    "sort": "utf16_code_units",
+    "length_unit": "unicode_code_points",
+    "limits_apply_after_trim_and_deduplication": true
+  },
+  "normalization_cases": [
+    {
+      "name": "canonical_metadata",
+      "input": {
+        "side_effect": "read",
+        "idempotency": "supported",
+        "terminal": false,
+        "capability_tags": [
+          " source.inspect ",
+          "filesystem.read",
+          "source.inspect"
+        ],
+        "cost_dimensions": [
+          "workspace.bytes_read",
+          " host.cpu_ms "
+        ]
+      },
+      "expected": {
+        "side_effect": "read",
+        "idempotency": "supported",
+        "terminal": false,
+        "capability_tags": [
+          "filesystem.read",
+          "source.inspect"
+        ],
+        "cost_dimensions": [
+          "host.cpu_ms",
+          "workspace.bytes_read"
+        ]
+      }
+    },
+    {
+      "name": "explicit_defaults_are_canonical",
+      "input": {},
+      "expected": {
+        "side_effect": "unknown",
+        "idempotency": "unknown",
+        "terminal": false,
+        "capability_tags": [],
+        "cost_dimensions": []
+      }
+    },
+    {
+      "name": "utf16_non_bmp_sorting_is_portable",
+      "input": {
+        "capability_tags": [
+          "",
+          "😀"
+        ]
+      },
+      "expected": {
+        "side_effect": "unknown",
+        "idempotency": "unknown",
+        "terminal": false,
+        "capability_tags": [
+          "😀",
+          ""
+        ],
+        "cost_dimensions": []
+      }
+    },
+    {
+      "name": "nbsp_is_not_portable_trim_whitespace",
+      "input": {
+        "cost_dimensions": [
+          " host.cpu_ms "
+        ]
+      },
+      "expected": {
+        "side_effect": "unknown",
+        "idempotency": "unknown",
+        "terminal": false,
+        "capability_tags": [],
+        "cost_dimensions": [
+          " host.cpu_ms "
+        ]
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "unknown_side_effect",
+      "input": {
+        "side_effect": "browser"
+      }
+    },
+    {
+      "name": "unknown_idempotency",
+      "input": {
+        "idempotency": "always"
+      }
+    },
+    {
+      "name": "terminal_is_not_boolean",
+      "input": {
+        "terminal": "yes"
+      }
+    },
+    {
+      "name": "blank_capability_tag",
+      "input": {
+        "capability_tags": [
+          "  "
+        ]
+      }
+    },
+    {
+      "name": "cost_dimension_is_not_string",
+      "input": {
+        "cost_dimensions": [
+          7
+        ]
+      }
+    },
+    {
+      "name": "unknown_field",
+      "input": {
+        "task_type": "research"
+      }
+    }
+  ],
+  "generated_invalid_cases": [
+    {
+      "name": "too_many_capability_tags",
+      "generator": {
+        "field": "capability_tags",
+        "count": 33,
+        "value_prefix": "tag."
+      }
+    },
+    {
+      "name": "too_many_cost_dimensions",
+      "generator": {
+        "field": "cost_dimensions",
+        "count": 33,
+        "value_prefix": "cost."
+      }
+    },
+    {
+      "name": "label_too_long",
+      "generator": {
+        "field": "capability_tags",
+        "code_points": 129,
+        "value": "x"
+      }
+    },
+    {
+      "name": "policy_has_too_many_capability_tags",
+      "generator": {
+        "field": "denied_capability_tags",
+        "count": 33,
+        "value_prefix": "tag."
+      }
+    },
+    {
+      "name": "policy_label_too_long",
+      "generator": {
+        "field": "denied_cost_dimensions",
+        "code_points": 129,
+        "value": "x"
+      }
+    }
+  ],
+  "public_construction": {
+    "python": {
+      "type": "vv_agent.ToolMetadata",
+      "function_tool_constructor_parameter": "tool_metadata",
+      "function_tool_decorator_parameter": "tool_metadata",
+      "absent_value": null
+    },
+    "rust": {
+      "type": "vv_agent::ToolMetadata",
+      "default_constructor": "ToolMetadata::default",
+      "function_tool_builder": "FunctionTool::tool_metadata",
+      "tool_trait_accessor": "Tool::tool_metadata",
+      "executor_trait_accessor_has_default": true,
+      "absent_value": null
+    },
+    "propagation": [
+      "public_constructor",
+      "tool",
+      "registry_or_spec_adapter",
+      "executor",
+      "policy",
+      "telemetry",
+      "checkpoint"
+    ],
+    "generic_metadata_remains_separate": true
+  },
+  "policy_contract": {
+    "fields": [
+      "denied_side_effects",
+      "denied_capability_tags",
+      "deny_terminal_tools",
+      "denied_cost_dimensions"
+    ],
+    "list_merge": "set_union_then_utf16_sort",
+    "boolean_merge": "logical_or",
+    "missing_field_defaults": {
+      "denied_side_effects": [],
+      "denied_capability_tags": [],
+      "deny_terminal_tools": false,
+      "denied_cost_dimensions": []
+    },
+    "layers": [
+      "agent",
+      "runner_default",
+      "run_config",
+      "parent_effective_policy",
+      "child_declared_policy"
+    ],
+    "layer_rule": "every declared metadata denial is cumulative; no later layer removes an earlier denial",
+    "delegation_rule": "configured sub-agent, agent-as-tool, and handoff children inherit every parent metadata denial and may only add denials",
+    "enforcement_points": [
+      "schema_planner",
+      "executor"
+    ],
+    "matching": "exact",
+    "missing_tool_metadata": "does_not_match_any_metadata_denial",
+    "composition": "logical_and_with_existing_name_argument_approval_and_runtime_denials",
+    "can_expand_permissions": false,
+    "can_infer_from_tool_name_or_arguments": false,
+    "can_interpret_opaque_labels": false,
+    "denial_error_code": "tool_not_allowed",
+    "denial_precedence": [
+      "metadata.side_effect",
+      "metadata.terminal",
+      "metadata.capability_tag",
+      "metadata.cost_dimension"
+    ]
+  },
+  "policy_cases": [
+    {
+      "name": "missing_metadata_preserves_behavior",
+      "metadata": null,
+      "policy": {
+        "denied_side_effects": [
+          "read"
+        ],
+        "denied_capability_tags": [
+          "filesystem.read"
+        ],
+        "deny_terminal_tools": true,
+        "denied_cost_dimensions": [
+          "host.cpu_ms"
+        ]
+      },
+      "allowed": true,
+      "policy_source": null
+    },
+    {
+      "name": "declared_side_effect_is_denied",
+      "metadata": {
+        "side_effect": "read",
+        "idempotency": "supported",
+        "terminal": false,
+        "capability_tags": [],
+        "cost_dimensions": []
+      },
+      "policy": {
+        "denied_side_effects": [
+          "read"
+        ]
+      },
+      "allowed": false,
+      "policy_source": "metadata.side_effect"
+    },
+    {
+      "name": "terminal_declaration_is_denied_without_stopping_the_run",
+      "metadata": {
+        "side_effect": "none",
+        "idempotency": "unknown",
+        "terminal": true,
+        "capability_tags": [],
+        "cost_dimensions": []
+      },
+      "policy": {
+        "deny_terminal_tools": true
+      },
+      "allowed": false,
+      "policy_source": "metadata.terminal"
+    },
+    {
+      "name": "opaque_capability_tag_uses_exact_match",
+      "metadata": {
+        "side_effect": "external",
+        "idempotency": "unsupported",
+        "terminal": false,
+        "capability_tags": [
+          "calendar.write"
+        ],
+        "cost_dimensions": []
+      },
+      "policy": {
+        "denied_capability_tags": [
+          "calendar.write"
+        ]
+      },
+      "allowed": false,
+      "policy_source": "metadata.capability_tag"
+    },
+    {
+      "name": "opaque_cost_dimension_uses_exact_match",
+      "metadata": {
+        "side_effect": "network",
+        "idempotency": "unknown",
+        "terminal": false,
+        "capability_tags": [],
+        "cost_dimensions": [
+          "workflow.credit"
+        ]
+      },
+      "policy": {
+        "denied_cost_dimensions": [
+          "workflow.credit"
+        ]
+      },
+      "allowed": false,
+      "policy_source": "metadata.cost_dimension"
+    },
+    {
+      "name": "metadata_cannot_override_existing_name_denial",
+      "metadata": {
+        "side_effect": "none",
+        "idempotency": "supported",
+        "terminal": false,
+        "capability_tags": [],
+        "cost_dimensions": []
+      },
+      "existing_name_policy_allows": false,
+      "policy": {},
+      "allowed": false,
+      "policy_source": "disallowed_tools"
+    }
+  ],
+  "telemetry_contract": {
+    "event_types": [
+      "tool_call_planned",
+      "tool_call_started",
+      "tool_call_completed"
+    ],
+    "event_order": [
+      "tool_call_planned",
+      "approval_if_required",
+      "tool_call_started_if_execution_begins",
+      "tool_call_completed_when_a_result_exists"
+    ],
+    "planned_boundary": "after tool name and arguments normalize and before policy approval or executor dispatch",
+    "started_boundary": "immediately before the executor can cause effects",
+    "completed_boundary": "after a ToolExecutionResult exists and before it is returned to the runtime loop",
+    "parse_failure_before_planning_has_no_tool_lifecycle": true,
+    "planned_fields": [
+      "tool_name",
+      "tool_call_id",
+      "arguments",
+      "tool_metadata"
+    ],
+    "started_fields": [
+      "tool_name",
+      "tool_call_id",
+      "arguments",
+      "tool_metadata"
+    ],
+    "completed_fields": [
+      "tool_name",
+      "tool_call_id",
+      "status",
+      "directive",
+      "error_code",
+      "execution_started",
+      "duration_ms",
+      "tool_metadata"
+    ],
+    "tool_status_values": [
+      "success",
+      "error",
+      "wait_response",
+      "running",
+      "pending_compress"
+    ],
+    "directive_values": [
+      "continue",
+      "finish",
+      "wait_user"
+    ],
+    "error_code": "nullable string",
+    "execution_started": "true only after tool_call_started was emitted for the same call",
+    "duration_ms": "optional non-negative JSON-safe integer measured from a monotonic execution-start boundary",
+    "duration_when_execution_did_not_start": null,
+    "missing_metadata_field": "omit",
+    "writer_required_completed_fields": [
+      "status",
+      "directive",
+      "error_code",
+      "execution_started",
+      "duration_ms"
+    ],
+    "writer_null_rules": {
+      "successful_error_code": null,
+      "not_started_duration_ms": null
+    },
+    "telemetry_changes_runtime_decisions": false,
+    "generic_metadata_can_fabricate_typed_fields": false,
+    "event_store_failure_policy_unchanged": true,
+    "missing_required_completed_fields_are_rejected": true
+  },
+  "producer_cases": [
+    {
+      "name": "executed_tool",
+      "tool_metadata": {
+        "side_effect": "read",
+        "idempotency": "supported",
+        "terminal": false,
+        "capability_tags": [
+          "source.inspect"
+        ],
+        "cost_dimensions": [
+          "workspace.bytes_read"
+        ]
+      },
+      "expected_events": [
+        {
+          "type": "tool_call_planned",
+          "tool_name": "inspect",
+          "tool_call_id": "call_metadata",
+          "arguments": {
+            "path": "README.md"
+          },
+          "tool_metadata": {
+            "side_effect": "read",
+            "idempotency": "supported",
+            "terminal": false,
+            "capability_tags": [
+              "source.inspect"
+            ],
+            "cost_dimensions": [
+              "workspace.bytes_read"
+            ]
+          }
+        },
+        {
+          "type": "tool_call_started",
+          "tool_name": "inspect",
+          "tool_call_id": "call_metadata",
+          "arguments": {
+            "path": "README.md"
+          },
+          "tool_metadata": {
+            "side_effect": "read",
+            "idempotency": "supported",
+            "terminal": false,
+            "capability_tags": [
+              "source.inspect"
+            ],
+            "cost_dimensions": [
+              "workspace.bytes_read"
+            ]
+          }
+        },
+        {
+          "type": "tool_call_completed",
+          "tool_name": "inspect",
+          "tool_call_id": "call_metadata",
+          "status": "success",
+          "directive": "continue",
+          "error_code": null,
+          "execution_started": true,
+          "duration_ms": 7,
+          "tool_metadata": {
+            "side_effect": "read",
+            "idempotency": "supported",
+            "terminal": false,
+            "capability_tags": [
+              "source.inspect"
+            ],
+            "cost_dimensions": [
+              "workspace.bytes_read"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "metadata_policy_denial_has_no_execution_start",
+      "tool_metadata": {
+        "side_effect": "write",
+        "idempotency": "unsupported",
+        "terminal": false,
+        "capability_tags": [
+          "workspace.mutate"
+        ],
+        "cost_dimensions": []
+      },
+      "policy": {
+        "denied_side_effects": [
+          "write"
+        ]
+      },
+      "expected_event_types": [
+        "tool_call_planned",
+        "tool_call_completed"
+      ],
+      "expected_completed": {
+        "status": "error",
+        "directive": "continue",
+        "error_code": "tool_not_allowed",
+        "execution_started": false,
+        "duration_ms": null
+      }
+    },
+    {
+      "name": "missing_metadata_uses_neutral_defaults",
+      "tool_metadata": null,
+      "expected_event_types": [
+        "tool_call_planned",
+        "tool_call_started",
+        "tool_call_completed"
+      ],
+      "typed_metadata_field_present": false,
+      "runtime_behavior_changed": false,
+      "neutral_defaults": {
+        "side_effect": "unknown",
+        "idempotency": "unknown",
+        "terminal": false,
+        "capability_tags": [],
+        "cost_dimensions": []
+      }
+    }
+  ],
+  "app_server_projection": {
+    "tool_call_planned": "no_notification",
+    "tool_call_started": "item_started plus tool delta with toolMetadata when declared",
+    "tool_call_completed": "item_completed with required directive errorCode executionStarted durationMs and toolMetadata when declared",
+    "planned_is_never_presented_as_execution_started": true
+  },
+  "checkpoint": {
+    "run_definition_tool_field": "tool_metadata",
+    "missing_value": null,
+    "policy_fields_are_frozen": true,
+    "generic_metadata_is_not_promoted": true,
+    "resume_must_match_original_declaration": true
+  },
+  "task_independence": {
+    "forbidden_core_fields": [
+      "task_type",
+      "research_stage",
+      "coding_phase",
+      "browser_goal",
+      "evidence_quality"
+    ],
+    "opaque_labels_create_builtin_task_semantics": false,
+    "terminal_declaration_automatically_finishes": false,
+    "cost_dimensions_create_budget_measurements": false
+  }
+}

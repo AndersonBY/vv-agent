@@ -6,46 +6,49 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
-from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.config import build_vv_llm_from_local_settings
+from vv_agent.events import AssistantDeltaEvent, DiagnosticEvent, RunEvent
 from vv_agent.prompt import build_system_prompt
-from vv_agent.runtime import AgentRuntime, ExecutionContext
+from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask
-
-
-def log_handler(event: str, payload: dict[str, Any]) -> None:
-    if event in {"cycle_started", "run_completed"}:
-        print(f"\n[{event}] {payload}", flush=True)
-
 
 # 收集所有 token 用于统计
 collected_tokens: list[str] = []
 
 
-def stream_callback(text: str) -> None:
-    """每收到一个 token 就立即输出, 不换行."""
-    collected_tokens.append(text)
-    print(text, end="", flush=True)
+def build_event_handler(*, verbose: bool) -> Callable[[RunEvent], None]:
+    def event_handler(event: RunEvent) -> None:
+        if isinstance(event, AssistantDeltaEvent):
+            collected_tokens.append(event.delta)
+            print(event.delta, end="", flush=True)
+            return
+        name = event.code if isinstance(event, DiagnosticEvent) else event.type
+        if verbose and name in {"cycle_started", "run_completed"}:
+            payload = event.details if isinstance(event, DiagnosticEvent) else event.to_dict()
+            print(f"\n[{name}] {payload}", flush=True)
+
+    return event_handler
 
 
 def main() -> None:
-    settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
-    workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-    verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+    model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
+    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+    verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
 
     workspace.mkdir(parents=True, exist_ok=True)
 
-    llm, resolved = build_openai_llm_from_local_settings(settings_file, backend=backend, model=model)
+    llm, resolved = build_vv_llm_from_local_settings(settings_file, backend=backend, model=model)
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=workspace,
-        log_handler=log_handler if verbose else None,
+        event_handler=build_event_handler(verbose=verbose),
     )
 
     system_prompt = build_system_prompt(
@@ -59,16 +62,13 @@ def main() -> None:
         task_id=f"stream_demo_{uuid.uuid4().hex[:8]}",
         model=resolved.model_id,
         system_prompt=system_prompt,
-        user_prompt=os.getenv("V_AGENT_EXAMPLE_PROMPT", "用三句话介绍 Python 语言"),
+        user_prompt=os.getenv("VV_AGENT_EXAMPLE_PROMPT", "用三句话介绍 Python 语言"),
         max_cycles=5,
     )
 
-    # 通过 ExecutionContext 传入 stream_callback
-    ctx = ExecutionContext(stream_callback=stream_callback)
-
     print("[demo] 流式输出开始:\n")
     try:
-        result = runtime.run(task, ctx=ctx)
+        result = runtime.run(task)
         print(f"\n\n[demo] 状态: {result.status.value}")
         print(f"[demo] 共收到 {len(collected_tokens)} 个 token 片段")
     except Exception as e:

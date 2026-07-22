@@ -21,16 +21,16 @@ def main() -> None:
     agent = Agent(
         name="advanced",
         instructions="Stream progress when possible and finish with task_finish.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         execution_backend=ThreadBackend(max_workers=2),
         stream=print_event,
     )
-    result = Runner.run_sync(agent, os.getenv("V_AGENT_EXAMPLE_PROMPT", "Explain ThreadBackend."), run_config=config)
+    result = Runner.run_sync(agent, os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain ThreadBackend."), run_config=config)
     print("\nfinal:", result.final_output)
 
 

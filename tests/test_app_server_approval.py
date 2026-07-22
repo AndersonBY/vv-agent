@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig, function_tool
 from vv_agent.app_server import AppServer, ChannelTransport, MessageProcessor, OutgoingRouter, RequestId
@@ -358,15 +359,11 @@ def _server_with_approval_tool(
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     transport = ChannelTransport(connection_id="conn_1")
     host = DefaultAppServerHost(
         agent=Agent(name="assistant", instructions="Use the tool.", model="test-model", tools=[dangerous_tool]),
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             max_cycles=3,
             approval_timeout_seconds=approval_timeout_seconds,
         ),

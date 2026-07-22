@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 from typing import cast
 
+from support import FixedModelProvider
+
 from vv_agent import Agent, RunConfig
 from vv_agent.app_server import AppServer, AppServerErrorCode, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
@@ -42,14 +44,10 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     transport = ChannelTransport(connection_id="conn_1")
     host = DefaultAppServerHost(
         agent=Agent(name="assistant", instructions="Answer.", model="test-model"),
-        run_config=RunConfig(model_provider=model_provider, max_cycles=1),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model()), max_cycles=1),
     )
     server = AppServer(transport=transport, host=host)
 
@@ -88,7 +86,7 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
     token_usage = cast(dict[str, object], completed_params["tokenUsage"])
     cache_usage = cast(dict[str, object], token_usage["cache_usage"])
     assert cache_usage["status"] == "provider_reported"
-    assert cache_usage["read_tokens"] == 0
+    assert cache_usage["read_input_tokens"] == 0
 
 
 def test_turn_start_and_completion_emit_thread_status_changes() -> None:
@@ -347,14 +345,10 @@ def test_turn_interrupt_cancels_active_turn() -> None:
 def _server_with_scripted_steps(steps: list[ScriptStep], *, max_cycles: int = 1) -> tuple[AppServer, ChannelTransport]:
     llm = ScriptedLLM(steps=steps)
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     transport = ChannelTransport(connection_id="conn_1")
     host = DefaultAppServerHost(
         agent=Agent(name="assistant", instructions="Answer.", model="test-model"),
-        run_config=RunConfig(model_provider=model_provider, max_cycles=max_cycles),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model()), max_cycles=max_cycles),
     )
     return AppServer(transport=transport, host=host), transport
 

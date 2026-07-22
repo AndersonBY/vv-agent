@@ -53,6 +53,15 @@ versioned source of truth for architecture, workflows, and model configuration.
   records both implementation revisions.
 - If the sibling repository cannot be updated in the same change, record an
   explicit open parity gap and do not report the shared feature complete.
+- Keep `HEAD` forward-only. Maintain one current public and wire shape, and
+  delete superseded readers, aliases, shims, migrations, fixtures, tests, and
+  documentation in the same paired change. Git tags provide old runtimes.
+- Backward compatibility is not a design or acceptance requirement. Prefer a
+  breaking replacement when it improves the current architecture, update active
+  callers in the same change, and leave old behavior only in pinned releases.
+- Schema and protocol versions are strict rejection boundaries, not decoder
+  selectors. Reject missing, stale, unknown, and malformed versions, and reject
+  unknown fields unless the central contract defines a typed extension map.
 
 ## Common Commands
 
@@ -74,7 +83,7 @@ uv run pytest tests/test_runtime.py
 Live tests are opt-in and require real provider credentials:
 
 ```bash
-V_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live
+VV_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live
 ```
 
 ## Change Boundaries

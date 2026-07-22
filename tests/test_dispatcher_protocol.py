@@ -15,20 +15,28 @@ def _build_registry() -> ToolRegistry:
 
     def ok_handler(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
         del context, arguments
-        return ToolExecutionResult(tool_call_id="", status="success", content="ok")
+        return ToolExecutionResult(
+            tool_call_id="",
+            status_code=ToolResultStatus.SUCCESS,
+            content="ok",
+        )
 
     def wait_handler(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
         del context, arguments
         return ToolExecutionResult(
             tool_call_id="",
-            status="success",
+            status_code=ToolResultStatus.SUCCESS,
             content="need user",
             directive=ToolDirective.WAIT_USER,
         )
 
     def blank_id_handler(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
         del context, arguments
-        return ToolExecutionResult(tool_call_id="   ", status="success", content="ok")
+        return ToolExecutionResult(
+            tool_call_id="   ",
+            status_code=ToolResultStatus.SUCCESS,
+            content="ok",
+        )
 
     registry.register(ToolSpec(name="_ok", handler=ok_handler))
     registry.register(ToolSpec(name="_wait", handler=wait_handler))
@@ -38,8 +46,10 @@ def _build_registry() -> ToolRegistry:
 
 def _context(tmp_path: Path) -> ToolContext:
     return ToolContext(
-        workspace=tmp_path, shared_state={"todo_list": []},
-        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+        workspace=tmp_path,
+        shared_state={"todo_list": []},
+        cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
 

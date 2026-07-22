@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from support import FixedModelProvider
 
+from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.runtime.context import ExecutionContext
 
@@ -130,11 +132,13 @@ class TestCancellationInRuntime:
         from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 
         # 3 cycles, cancel after first
-        llm = ScriptedLLM(steps=[
-            LLMResponse(content="cycle1"),
-            LLMResponse(content="cycle2"),
-            LLMResponse(content="cycle3"),
-        ])
+        llm = ScriptedLLM(
+            steps=[
+                LLMResponse(content="cycle1"),
+                LLMResponse(content="cycle2"),
+                LLMResponse(content="cycle3"),
+            ]
+        )
         runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry())
         task = AgentTask(
             task_id="cancel-test-2",
@@ -166,15 +170,28 @@ def test_runner_emits_one_cancelled_terminal_event(tmp_path) -> None:
 
     token = CancellationToken()
     token.cancel()
+    llm = ScriptedLLM(steps=[LLMResponse(content="unused")])
+    endpoint = EndpointConfig(
+        endpoint_id="test",
+        api_key="test-key",
+        api_base="https://example.invalid/v1",
+    )
+    resolved = ResolvedModelConfig(
+        requested_model="test-model",
+        selected_model="test-model",
+        backend="test",
+        model_id="test-model",
+        endpoint_options=[EndpointOption(endpoint=endpoint, model_id="test-model")],
+    )
     result = Runner.run_sync(
-        Agent(name="cancelled", instructions="Stop.", model=ScriptedLLM(steps=[LLMResponse(content="unused")])),
+        Agent(name="cancelled", instructions="Stop.", model="test-model"),
         "stop",
-        run_config=RunConfig(workspace=tmp_path, cancellation_token=token),
+        run_config=RunConfig(
+            workspace=tmp_path,
+            cancellation_token=token,
+            model_provider=FixedModelProvider(llm, resolved),
+        ),
     )
 
-    terminal_types = [
-        event.type
-        for event in result.events
-        if event.type in {"run_completed", "run_failed", "run_cancelled"}
-    ]
+    terminal_types = [event.type for event in result.events if event.type in {"run_completed", "run_failed", "run_cancelled"}]
     assert terminal_types == ["run_cancelled"]

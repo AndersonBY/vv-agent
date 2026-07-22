@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -10,9 +10,7 @@ from vv_agent.checkpoint import ToolIdempotency
 _PORTABLE_WHITESPACE = frozenset({"\t", "\n", "\r", " "})
 _MAX_COLLECTION_ITEMS = 32
 _MAX_LABEL_CODE_POINTS = 128
-_TOOL_METADATA_FIELDS = frozenset(
-    {"side_effect", "idempotency", "terminal", "capability_tags", "cost_dimensions"}
-)
+_TOOL_METADATA_FIELDS = frozenset({"side_effect", "idempotency", "terminal", "capability_tags", "cost_dimensions"})
 
 
 class ToolSideEffect(StrEnum):
@@ -50,9 +48,7 @@ def normalize_metadata_labels(value: Iterable[str], *, field_name: str) -> list[
         if not label:
             raise ValueError(f"{field_name} cannot contain a blank label")
         if len(label) > _MAX_LABEL_CODE_POINTS:
-            raise ValueError(
-                f"{field_name} labels cannot exceed {_MAX_LABEL_CODE_POINTS} Unicode code points"
-            )
+            raise ValueError(f"{field_name} labels cannot exceed {_MAX_LABEL_CODE_POINTS} Unicode code points")
         normalized.add(label)
     if len(normalized) > _MAX_COLLECTION_ITEMS:
         raise ValueError(f"{field_name} cannot contain more than {_MAX_COLLECTION_ITEMS} labels")
@@ -69,9 +65,7 @@ def normalize_denied_side_effects(value: Iterable[ToolSideEffect | str]) -> list
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Unsupported denied side effect: {item!r}") from exc
     if len(normalized) > _MAX_COLLECTION_ITEMS:
-        raise ValueError(
-            f"denied_side_effects cannot contain more than {_MAX_COLLECTION_ITEMS} values"
-        )
+        raise ValueError(f"denied_side_effects cannot contain more than {_MAX_COLLECTION_ITEMS} values")
     return sorted(normalized, key=lambda item: _utf16_sort_key(item.value))
 
 
@@ -86,17 +80,13 @@ class ToolMetadata:
     def __post_init__(self) -> None:
         try:
             self.side_effect = (
-                self.side_effect
-                if isinstance(self.side_effect, ToolSideEffect)
-                else ToolSideEffect(self.side_effect)
+                self.side_effect if isinstance(self.side_effect, ToolSideEffect) else ToolSideEffect(self.side_effect)
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Unsupported tool side effect: {self.side_effect!r}") from exc
         try:
             self.idempotency = (
-                self.idempotency
-                if isinstance(self.idempotency, ToolIdempotency)
-                else ToolIdempotency(self.idempotency)
+                self.idempotency if isinstance(self.idempotency, ToolIdempotency) else ToolIdempotency(self.idempotency)
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Unsupported tool idempotency: {self.idempotency!r}") from exc
@@ -139,35 +129,11 @@ class ToolMetadata:
 
 def normalize_tool_metadata(
     value: ToolMetadata | Mapping[str, Any] | None,
-    *,
-    legacy_idempotency: ToolIdempotency | str = ToolIdempotency.UNKNOWN,
-) -> tuple[ToolMetadata | None, ToolIdempotency]:
-    try:
-        legacy = (
-            legacy_idempotency
-            if isinstance(legacy_idempotency, ToolIdempotency)
-            else ToolIdempotency(legacy_idempotency)
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Unsupported tool idempotency: {legacy_idempotency!r}") from exc
-
+) -> ToolMetadata | None:
     if value is None:
-        return None, legacy
+        return None
     metadata = value if isinstance(value, ToolMetadata) else ToolMetadata.from_dict(value)
-    metadata = ToolMetadata.from_dict(metadata.to_dict())
-    typed = metadata.idempotency
-    if typed is ToolIdempotency.UNKNOWN and legacy is not ToolIdempotency.UNKNOWN:
-        metadata = replace(metadata, idempotency=legacy)
-        typed = legacy
-    elif (
-        typed is not ToolIdempotency.UNKNOWN
-        and legacy is not ToolIdempotency.UNKNOWN
-        and typed is not legacy
-    ):
-        raise ValueError(
-            "tool_metadata_invalid: typed and legacy idempotency declarations conflict"
-        )
-    return metadata, typed if typed is not ToolIdempotency.UNKNOWN else legacy
+    return ToolMetadata.from_dict(metadata.to_dict())
 
 
 def metadata_policy_denial_source(
@@ -181,12 +147,8 @@ def metadata_policy_denial_source(
     if metadata is None:
         return None
     denied_effects = set(normalize_denied_side_effects(denied_side_effects))
-    denied_tags = set(
-        normalize_metadata_labels(denied_capability_tags, field_name="denied_capability_tags")
-    )
-    denied_costs = set(
-        normalize_metadata_labels(denied_cost_dimensions, field_name="denied_cost_dimensions")
-    )
+    denied_tags = set(normalize_metadata_labels(denied_capability_tags, field_name="denied_capability_tags"))
+    denied_costs = set(normalize_metadata_labels(denied_cost_dimensions, field_name="denied_cost_dimensions"))
     if metadata.side_effect in denied_effects:
         return "metadata.side_effect"
     if deny_terminal_tools and metadata.terminal:

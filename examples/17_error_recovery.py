@@ -13,16 +13,16 @@ def main() -> None:
     agent = Agent(
         name="recoverable",
         instructions="If possible, finish with task_finish.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        max_cycles=int(os.getenv("V_AGENT_EXAMPLE_MAX_CYCLES", "4")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        max_cycles=int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "4")),
     )
-    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "Finish a concise answer.")
-    max_retries = int(os.getenv("V_AGENT_EXAMPLE_MAX_RETRIES", "2"))
+    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Finish a concise answer.")
+    max_retries = int(os.getenv("VV_AGENT_EXAMPLE_MAX_RETRIES", "2"))
 
     result = None
     for attempt in range(1, max_retries + 2):

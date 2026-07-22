@@ -116,16 +116,18 @@ def test_after_cycle_steer_defers_tool_finish(tmp_path: Path) -> None:
                         )
                     ],
                 ),
-                lambda request: requests.append(request)
-                or LLMResponse(
-                    content="second",
-                    tool_calls=[
-                        ToolCall(
-                            id="finish-2",
-                            name=TASK_FINISH_TOOL_NAME,
-                            arguments={"message": "verified answer"},
-                        )
-                    ],
+                lambda request: (
+                    requests.append(request)
+                    or LLMResponse(
+                        content="second",
+                        tool_calls=[
+                            ToolCall(
+                                id="finish-2",
+                                name=TASK_FINISH_TOOL_NAME,
+                                arguments={"message": "verified answer"},
+                            )
+                        ],
+                    )
                 ),
             ]
         ),
@@ -164,7 +166,16 @@ def test_after_cycle_permission_narrowing_hides_schema_and_blocks_dispatch(
         executions.append(arguments)
         return ToolExecutionResult(tool_call_id="", content="executed")
 
-    registry.register_tool("restricted_tool", restricted_tool, "A restricted test tool.")
+    registry.register_tool(
+        "restricted_tool",
+        restricted_tool,
+        "A restricted test tool.",
+        parameters={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        },
+    )
 
     def forbidden_call(request: LlmRequest) -> LLMResponse:
         requests.append(request)
@@ -234,7 +245,7 @@ def test_after_cycle_stop_is_always_non_success(tmp_path: Path) -> None:
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
         after_cycle_hooks=[hook],
-        log_handler=lambda event, _payload: events.append(event),
+        event_handler=lambda event: events.append(getattr(event, "code", event.type)),
     )
     result = runtime.run(
         AgentTask(
@@ -273,9 +284,7 @@ def test_after_cycle_steer_cannot_cross_wait_or_max_cycle(tmp_path: Path) -> Non
         ),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        after_cycle_hooks=[
-            RecordingHook(decisions=[AfterCycleDecision.steer(["Do not wait."])])
-        ],
+        after_cycle_hooks=[RecordingHook(decisions=[AfterCycleDecision.steer(["Do not wait."])])],
     )
     wait_result = wait_runtime.run(
         AgentTask(
@@ -291,9 +300,7 @@ def test_after_cycle_steer_cannot_cross_wait_or_max_cycle(tmp_path: Path) -> Non
         llm_client=ScriptedLLM(steps=[LLMResponse(content="candidate")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        after_cycle_hooks=[
-            RecordingHook(decisions=[AfterCycleDecision.steer(["Try again."])])
-        ],
+        after_cycle_hooks=[RecordingHook(decisions=[AfterCycleDecision.steer(["Try again."])])],
     )
     max_result = max_runtime.run(
         AgentTask(

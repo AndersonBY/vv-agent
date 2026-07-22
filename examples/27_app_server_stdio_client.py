@@ -19,11 +19,11 @@ from vv_agent.app_server.server import AppServer
 from vv_agent.app_server.transport import StdioJsonlTransport
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 
-settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
-workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-max_cycles = int(os.getenv("V_AGENT_EXAMPLE_MAX_CYCLES", "3"))
+settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
+workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+max_cycles = int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "3"))
 workspace.mkdir(parents=True, exist_ok=True)
 
 host = DefaultAppServerHost(
@@ -53,7 +53,7 @@ def _json_line(payload: dict[str, Any]) -> str:
 
 def main() -> None:
     prompt = os.getenv(
-        "V_AGENT_EXAMPLE_PROMPT",
+        "VV_AGENT_EXAMPLE_PROMPT",
         "请把这句话翻译成英文: stdio JSONL 客户端正在和真实 App Server 进程通信。",
     )
     process = subprocess.Popen(

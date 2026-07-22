@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -10,17 +9,14 @@ import pytest
 from vv_agent import SubRunCompletedEvent
 from vv_agent.runtime import SubTaskManager
 from vv_agent.tools import ToolContext, build_default_registry
-from vv_agent.types import AgentStatus, CompletionReason, SubTaskOutcome, ToolResultStatus
+from vv_agent.types import AgentStatus, CompletionReason, SubTaskOutcome, ToolCall, ToolResultStatus
 from vv_agent.workspace import MemoryWorkspaceBackend
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "manager_tool_envelope_v1.json"
-FIXTURE_SHA256 = "2f1dfc343b9c1800b95de8b21e3afa9cdfab7514071c221b6465188441221f02"
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "manager_tool_envelope.json"
 
 
 def _fixture() -> dict[str, Any]:
-    raw = FIXTURE_PATH.read_bytes()
-    assert hashlib.sha256(raw).hexdigest() == FIXTURE_SHA256
-    return json.loads(raw)
+    return json.loads(FIXTURE_PATH.read_bytes())
 
 
 def _manager() -> SubTaskManager:
@@ -45,6 +41,16 @@ def _assert_error_metadata_matches_content(result: Any) -> None:
     assert result.metadata == payload
 
 
+def _assert_schema_error_metadata(result: Any) -> None:
+    payload = json.loads(result.content)
+    assert result.status_code == ToolResultStatus.ERROR
+    assert payload["error_code"] == "invalid_tool_arguments"
+    assert result.metadata == {
+        "error_code": "invalid_tool_arguments",
+        "issue_count": len(payload["issues"]),
+    }
+
+
 @pytest.mark.parametrize("case", _fixture()["create_error_cases"], ids=lambda case: case["name"])
 def test_create_sub_task_error_corpus_matches_full_envelope(tmp_path: Path, case: dict[str, Any]) -> None:
     context = _context(tmp_path)
@@ -54,7 +60,10 @@ def test_create_sub_task_error_corpus_matches_full_envelope(tmp_path: Path, case
         status=AgentStatus.COMPLETED,
     )
 
-    result = build_default_registry().get("create_sub_task").handler(context, case["arguments"])
+    result = build_default_registry().execute(
+        ToolCall(id=case["name"], name="create_sub_task", arguments=case["arguments"]),
+        context,
+    )
 
     payload = json.loads(result.content)
     assert payload == case["expected"]
@@ -67,7 +76,10 @@ def test_sub_task_status_error_corpus_matches_full_envelope(tmp_path: Path, case
     context = _context(tmp_path)
     context.sub_task_manager = _manager()
 
-    result = build_default_registry().get("sub_task_status").handler(context, case["arguments"])
+    result = build_default_registry().execute(
+        ToolCall(id=case["name"], name="sub_task_status", arguments=case["arguments"]),
+        context,
+    )
 
     payload = json.loads(result.content)
     assert payload == case["expected"]
@@ -80,7 +92,10 @@ def test_sub_task_status_success_corpus_matches_full_envelope(tmp_path: Path, ca
     context = _context(tmp_path)
     context.sub_task_manager = _manager()
 
-    result = build_default_registry().get("sub_task_status").handler(context, case["arguments"])
+    result = build_default_registry().execute(
+        ToolCall(id=case["name"], name="sub_task_status", arguments=case["arguments"]),
+        context,
+    )
 
     payload = json.loads(result.content)
     assert payload == case["expected"]
@@ -313,7 +328,7 @@ def test_early_errors_mirror_content_into_metadata(tmp_path: Path) -> None:
                 "tasks": "not an array",
                 "exclude_files_pattern": r"(?=secret)",
             },
-            "invalid_tasks_payload",
+            "invalid_tool_arguments",
         ),
         (
             {
@@ -321,7 +336,7 @@ def test_early_errors_mirror_content_into_metadata(tmp_path: Path) -> None:
                 "tasks": [],
                 "exclude_files_pattern": r"(?=secret)",
             },
-            "invalid_tasks_payload",
+            "invalid_tool_arguments",
         ),
         (
             {
@@ -329,11 +344,11 @@ def test_early_errors_mirror_content_into_metadata(tmp_path: Path) -> None:
                 "tasks": [42],
                 "exclude_files_pattern": r"(?=secret)",
             },
-            "invalid_tasks_payload",
+            "invalid_tool_arguments",
         ),
     ],
 )
-def test_payload_validation_precedes_exclude_pattern(
+def test_schema_and_payload_mode_validation_precede_exclude_pattern(
     tmp_path: Path,
     arguments: dict[str, Any],
     expected_code: str,
@@ -345,11 +360,17 @@ def test_payload_validation_precedes_exclude_pattern(
         status=AgentStatus.COMPLETED,
     )
 
-    result = build_default_registry().get("create_sub_task").handler(context, arguments)
+    result = build_default_registry().execute(
+        ToolCall(id="payload_priority", name="create_sub_task", arguments=arguments),
+        context,
+    )
 
     assert result.error_code == expected_code
-    _assert_error_metadata_matches_content(result)
-    assert _fixture()["validation"]["payload_validation_precedes_exclude_pattern"] is True
+    if expected_code == "invalid_tool_arguments":
+        _assert_schema_error_metadata(result)
+    else:
+        _assert_error_metadata_matches_content(result)
+    assert _fixture()["validation"]["payload_mode_validation_precedes_exclude_pattern"] is True
 
 
 @pytest.mark.parametrize(
@@ -384,11 +405,15 @@ def test_create_sub_task_rejects_non_string_schema_values(
     context = _context(tmp_path)
     context.sub_task_runner = run
 
-    result = build_default_registry().get("create_sub_task").handler(context, arguments)
+    result = build_default_registry().execute(
+        ToolCall(id="invalid_create_arguments", name="create_sub_task", arguments=arguments),
+        context,
+    )
 
-    _assert_error_metadata_matches_content(result)
+    _assert_schema_error_metadata(result)
+    assert result.error_code == "invalid_tool_arguments"
     assert calls == 0
-    assert _fixture()["validation"]["non_string_schema_values"] == "reject"
+    assert _fixture()["validation"]["handler_receives_schema_valid_arguments"] is True
 
 
 @pytest.mark.parametrize(
@@ -406,10 +431,14 @@ def test_sub_task_status_rejects_non_string_schema_values(
     context = _context(tmp_path)
     context.sub_task_manager = _manager()
 
-    result = build_default_registry().get("sub_task_status").handler(context, arguments)
+    result = build_default_registry().execute(
+        ToolCall(id="invalid_status_arguments", name="sub_task_status", arguments=arguments),
+        context,
+    )
 
-    _assert_error_metadata_matches_content(result)
-    assert _fixture()["validation"]["non_string_schema_values"] == "reject"
+    _assert_schema_error_metadata(result)
+    assert result.error_code == "invalid_tool_arguments"
+    assert _fixture()["validation"]["handler_receives_schema_valid_arguments"] is True
 
 
 def test_status_envelope_preserves_lineage_and_omits_unknown_activity(tmp_path: Path) -> None:

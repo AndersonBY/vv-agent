@@ -23,10 +23,12 @@ typed `RunEvent` objects, `ApprovalProvider`, `ContextProvider`,
 `RunEventStore`, and the interactive session API for desktop/runtime
 integrations. Extension points that live in package modules include
 `vv_agent.memory.MemoryProvider` and `vv_agent.tools.ToolExecutor`.
-Lower-level runtime implementation details include `RuntimeTask`, `AgentResult`,
+Lower-level runtime implementation details include `AgentTask`, `AgentResult`,
 `Message`, `CycleRecord`, and `ToolCall`.
 
-Task completion is explicit: tool directives are the backward-compatible default, while an opt-in no-tool policy can finish or pause on a normal assistant response. No implicit "last message = answer" heuristics.
+Task completion is explicit: tool directives are the default, while a declared
+no-tool policy can finish or pause on a normal assistant response. No implicit
+"last message = answer" heuristic is used.
 
 ## Setup
 
@@ -45,10 +47,10 @@ uv run pytest
 ### CLI
 
 ```bash
-uv run vv-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k2.6
+uv run vv-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k3
 
 # With per-cycle logging
-uv run vv-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k2.6 --verbose
+uv run vv-agent --prompt "Summarize this framework" --backend moonshot --model kimi-k3 --verbose
 ```
 
 CLI flags: `--settings-file`, `--backend`, `--model`, `--verbose`.
@@ -66,7 +68,7 @@ def read_order(order_id: str) -> str:
 agent = Agent(
     name="ops",
     instructions="Check facts first, then answer.",
-    model="kimi-k2.6",
+    model="kimi-k3",
     tools=[read_order],
 )
 
@@ -82,7 +84,7 @@ repeating the same `RunConfig`:
 ```python
 runner = Runner.configured(RunConfig(
     model_provider=provider,
-    model="kimi-k2.6",
+    model="kimi-k3",
     workspace="./workspace",
 ))
 result = runner.run_sync(agent, "Analyze order 123")
@@ -107,7 +109,7 @@ history across runs.
 ```python
 from vv_agent import Agent, MemorySession, RunConfig, Runner
 
-agent = Agent(name="assistant", instructions="Remember context.", model="kimi-k2.6")
+agent = Agent(name="assistant", instructions="Remember context.", model="kimi-k3")
 session = MemorySession("thread-001")
 config = RunConfig(
     default_backend="moonshot",
@@ -133,9 +135,9 @@ interactive session controller.
 
 `RunConfig.event_store` can persist every typed event. `JsonlRunEventStore`
 stores event dictionaries and replays events by `run_id`, including child runs
-whose `parent_run_id` points at the requested run. Raw runtime logs remain
-available for compatibility through the runtime log callbacks, but `RunEvent`
-is the primary UI and app-state contract.
+whose `parent_run_id` points at the requested run. Typed `RunEvent` is the only
+public runtime event boundary; task-neutral observations use
+`DiagnosticEvent`.
 
 For a normalized tool call, the execution lifecycle is
 `tool_call_planned`, optional approval events, `tool_call_started` immediately
@@ -163,8 +165,8 @@ events, routes tool approval as server-to-client requests, supports
 self-contained TypeScript bindings.
 
 ```bash
-uv run vv-agent app-server --listen stdio --settings-file local_settings.py --backend moonshot --model kimi-k2.6
-uv run vv-agent app-server generate-json-schema --out ./app-server-schema
+uv run vv-agent app-server --listen stdio --settings local_settings.py --backend moonshot --model kimi-k3
+uv run vv-agent app-server schema --out ./app-server-schema
 uv run vv-agent app-server generate-ts --out ./app-server-schema/typescript
 uv run vv-agent debug app-server send-message "hello"
 ```
@@ -174,9 +176,9 @@ context, tools, approval UI, memory, and model settings into framework
 `Agent` and `RunConfig` objects. The App Server remains a runtime boundary; it
 does not import product UI, account, billing, browser, or IM modules.
 
-See [docs/app-server.md](docs/app-server.md) for protocol details and the
-host migration checklists for [v-claw](docs/app-server-vclaw-migration.md) and
-[backend services](docs/app-server-backend-migration.md).
+See [docs/app-server.md](docs/app-server.md) for protocol details and
+[docs/app-server-host-integration.md](docs/app-server-host-integration.md) for
+the current host boundary and rollout checks.
 
 ### Interactive Sessions
 
@@ -219,7 +221,7 @@ session = client.create_session(
     session_id="thread-001",
     agent=InteractiveAgentDefinition(
         description="Operate in the user's workspace and report progress.",
-        model="kimi-k2.6",
+        model="kimi-k3",
         no_tool_policy="finish",
     ),
 )
@@ -244,17 +246,17 @@ to the target agent and the target output should finish the run.
 from vv_agent import Agent, RunConfig, Runner, ToolPolicy, handoff
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 
-researcher = Agent(name="researcher", instructions="Collect facts.", model="kimi-k2.6")
+researcher = Agent(name="researcher", instructions="Collect facts.", model="kimi-k3")
 writer = Agent(
     name="writer",
     instructions="Write from research.",
-    model="kimi-k2.6",
+    model="kimi-k3",
     tools=[researcher.as_tool(name="research", description="Collect facts.")],
 )
 triage = Agent(
     name="triage",
     instructions="Transfer writing tasks.",
-    model="kimi-k2.6",
+    model="kimi-k3",
     handoffs=[handoff(agent=writer, description="Use for writing.")],
 )
 
@@ -280,8 +282,8 @@ Set `Agent(no_tool_policy="finish")` when a normal assistant response should
 finish the run without `task_finish`, or override it for one call with
 `RunConfig(no_tool_policy="continue" | "wait_user" | "finish")`. Per-run
 configuration wins over a configured Runner default, which wins over the
-Agent value; omitting every layer keeps the backward-compatible `continue`
-behavior. Inspect `result.completion_reason`, `result.completion_tool_name`,
+Agent value; omitting every layer uses `continue`. Inspect
+`result.completion_reason`, `result.completion_tool_name`,
 and `result.partial_output` to distinguish natural completion, tool-driven
 completion, waits, cancellation, failure, and max-cycle exhaustion.
 
@@ -293,7 +295,7 @@ successful answer. See [Run Budgets](docs/run-budgets.md).
 
 Tools can request approval with `@function_tool(needs_approval=True)`. By
 default the run enters `WAIT_USER` before the tool body is called and emits a
-`ToolApprovalRequestedEvent`. `ToolPolicy(approval="never")` disables that
+`ApprovalRequestedEvent`. `ToolPolicy(approval="never")` disables that
 approval gate for trusted runs. The four policy modes are `default`, `always`,
 `never`, and `on_request`: `default` inherits the next configured policy,
 whereas explicit `on_request` follows each tool's static or dynamic approval
@@ -340,10 +342,8 @@ per-run, and delegated-child layers, and a matching denial returns
 argument, approval, budget, or runtime restriction.
 
 Typed metadata is separate from generic `FunctionTool.metadata` and is not
-added to the model-visible function schema. The existing `idempotency=` input
-remains a compatibility alias; conflicting non-`unknown` legacy and typed
-values fail before model or tool work. When typed metadata and the new denials
-are omitted, model schemas and runtime behavior remain unchanged.
+added to the model-visible function schema. `ToolMetadata.idempotency` is the
+only idempotency declaration used by execution, telemetry, and checkpointing.
 
 ### Guardrails And Tracing
 
@@ -364,7 +364,7 @@ def reject_empty(ctx, input_text: str) -> GuardrailResult:
 agent = Agent(
     name="assistant",
     instructions="Answer carefully.",
-    model="kimi-k2.6",
+    model="kimi-k3",
     input_guardrails=[reject_empty],
 )
 
@@ -400,7 +400,7 @@ from vv_agent import Agent, RunConfig, Runner
 agent = Agent(
     name="desktop",
     instructions="Desktop helper",
-    model="kimi-k2.6",
+    model="kimi-k3",
     metadata={"bash_env": {"HTTP_PROXY": "http://127.0.0.1:7890"}},
 )
 result = Runner.run_sync(
@@ -428,24 +428,40 @@ The cycle loop is delegated to a pluggable `ExecutionBackend`.
 
 ### CeleryBackend
 
-Two modes:
-
-- **Inline fallback** (no `RuntimeRecipe`): cycles run in-process, same as `InlineBackend`.
-- **Distributed** (with `RuntimeRecipe`): each cycle is a Celery task. Workers rebuild the `AgentRuntime` from the recipe and load state from a shared `StateStore` (SQLite or Redis).
+Each cycle is a Celery task. Workers rebuild the `AgentRuntime` from a required
+`RuntimeRecipe` and resolve the declared shared `CheckpointStore` capability.
 
 ```python
+from vv_agent import CheckpointConfig, RunConfig
 from vv_agent.runtime.backends.celery import CeleryBackend, RuntimeRecipe, register_cycle_task
+from vv_agent.runtime.backends.distributed import (
+    CapabilityRef,
+    DistributedCapabilities,
+    DistributedCapabilityRegistry,
+)
+from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 
-register_cycle_task(celery_app)
+checkpoint_ref = CapabilityRef("checkpoint.production", "1")
+checkpoint_store = SqliteCheckpointStore(".vv-agent-state/checkpoints.db")
+worker_capabilities = DistributedCapabilityRegistry()
+worker_capabilities.register("checkpoint_store", checkpoint_ref, checkpoint_store)
+register_cycle_task(celery_app, capability_registry=worker_capabilities)
 
 recipe = RuntimeRecipe(
     settings_file="local_settings.py",
     backend="moonshot",
-    model="kimi-k2.6",
+    model="kimi-k3",
     workspace="./workspace",
+    capabilities=DistributedCapabilities(checkpoint_store_ref=checkpoint_ref),
 )
-backend = CeleryBackend(celery_app=app, state_store=store, runtime_recipe=recipe)
-runtime = AgentRuntime(llm_client=llm, tool_registry=registry, execution_backend=backend)
+backend = CeleryBackend(celery_app=celery_app, runtime_recipe=recipe)
+run_config = RunConfig(
+    execution_backend=backend,
+    checkpoint_config=CheckpointConfig(
+        key="tenant-7/task-42",
+        store=checkpoint_store,
+    ),
+)
 ```
 
 Install celery extras: `uv sync --extra celery`.
@@ -453,6 +469,7 @@ Install celery extras: `uv sync --extra celery`.
 ### Cancellation and Streaming
 
 ```python
+from vv_agent.events import AssistantDeltaEvent, RunEvent
 from vv_agent.runtime import CancellationToken, ExecutionContext
 
 # Cancel from another thread
@@ -460,13 +477,13 @@ token = CancellationToken()
 ctx = ExecutionContext(cancellation_token=token)
 result = runtime.run(task, ctx=ctx)
 
-def on_stream_event(event: dict) -> None:
-    if event.get("event") == "assistant_delta":
-        print(event.get("content_delta", ""), end="")
+def on_event(event: RunEvent) -> None:
+    if isinstance(event, AssistantDeltaEvent):
+        print(event.delta, end="")
 
 
 # Stream LLM output events, including assistant deltas and tool progress
-ctx = ExecutionContext(stream_callback=on_stream_event)
+ctx = ExecutionContext(event_handler=on_event)
 result = runtime.run(task, ctx=ctx)
 ```
 
@@ -563,15 +580,14 @@ class MyBackend(WorkspaceBackend):
 | `vv_agent.runtime.CycleRunner` | Single LLM turn and cycle record construction |
 | `vv_agent.runtime.ToolCallRunner` | Tool execution with directive convergence |
 | `vv_agent.runtime.RuntimeHookManager` | Hook dispatch (before/after LLM, tool call, memory compact) |
-| `vv_agent.runtime.StateStore` | Checkpoint persistence protocol (`InMemoryStateStore` / `SqliteStateStore` / `RedisStateStore`) |
+| `vv_agent.runtime.CheckpointStore` | Checkpoint persistence protocol (`InMemoryCheckpointStore` / `SqliteCheckpointStore` / `RedisCheckpointStore`) |
 | `vv_agent.memory.MemoryManager` | Context compression when history exceeds threshold |
 | `vv_agent.workspace` | Pluggable file storage: `LocalWorkspaceBackend`, `MemoryWorkspaceBackend`, `S3WorkspaceBackend` |
 | `vv_agent.tools` | Built-in tools plus `function_tool`, `FunctionTool`, and structured tool outputs |
 | `vv_agent` | Public SDK: `Agent`, `Runner`, `RunConfig`, `ModelSettings`, tools, sessions, typed events |
 | `vv_agent.app_server` | JSONL App Server protocol, transport, thread state, replay, approval callbacks, schema export, and host provider boundary |
-| `vv_agent.sdk` | Lower-level runtime compatibility helpers; new user code should not use this as the main entry point |
 | `vv_agent.skills` | Agent Skills support (`SKILL.md` parsing, validation, unified normalization, prompt rendering with budget management, `activate_skill` tool) |
-| `vv_agent.llm.VVLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
+| `vv_agent.llm.VvLlmClient` | Unified LLM interface via `vv-llm` (endpoint rotation, retry, streaming) |
 | `vv_agent.config` | Model/endpoint/key resolution from `local_settings.py` |
 
 ## Runtime Boundary
@@ -614,17 +630,18 @@ resolved auto-compaction threshold is exceeded.
   - `memory_compact_threshold` (default `250000`; configured ceiling for full compaction)
   - `memory_threshold_percentage` (warning threshold percentage, default `90`)
 - Compile mapping:
-  - `AgentCompiler` forwards stable agent/run metadata into `RuntimeTask`.
+  - `AgentCompiler` forwards stable agent/run metadata into `AgentTask`.
   - Resolved model limits are recorded as `model_context_window` and
     `model_max_output_tokens`; output capability is not copied into
     `reserved_output_tokens`.
-  - Existing durable task/checkpoint records keep their stored threshold and
-    metadata when decoded or resumed.
+  - Current durable task/checkpoint records carry the exact configured threshold
+    and capacity metadata used by resume.
   - Runtime-only compaction knobs remain metadata-backed until promoted into
     stable public fields.
 - Token budget model:
   - Context precedence is explicit `model_context_window`, resolved model
-    capability, then the `200000` fallback.
+    capability, then a derived planning context. The default is
+    `250000 + 16000 + 13000 = 279000`.
   - Output reserve precedence is effective `ModelSettings.max_tokens`, explicit
     `reserved_output_tokens`, then the `16000` framework fallback.
   - Only the framework fallback reserve may be capped downward by a smaller
@@ -655,8 +672,8 @@ resolved auto-compaction threshold is exceeded.
   - New `memory_compact_completed` producers include the strongest actual mode
     (`none`, `micro`, `structural`, `summary`, or `emergency`) and a
     content-aware `changed` flag.
-  - Legacy events may omit these additive fields; present fields use strict
-    types and closed enum values.
+  - Every current event includes the complete typed capacity and result fields;
+    missing or unknown fields are rejected.
 - Session Memory behavior:
   - Stored in `workspace/.memory/session/<session-or-task-scope>/session_memory.json` by default
   - Scoped to the current session when `metadata.session_id` is present; otherwise scoped to the current `task_id`
@@ -669,7 +686,7 @@ resolved auto-compaction threshold is exceeded.
 ### Runtime metadata keys
 
 Pass these via `Agent.metadata` or `RunConfig.metadata`; the compiler forwards
-them into `RuntimeTask.metadata`:
+them into `AgentTask.metadata`:
 
 - `memory_keep_recent_messages`
 - `model_context_window`
@@ -681,7 +698,7 @@ them into `RuntimeTask.metadata`:
 - `microcompact_min_result_length`
 - `microcompact_compactable_tools`
 - `include_memory_warning`
-- `session_memory_enabled` / `enable_session_memory`
+- `session_memory_enabled`
 - `session_memory_min_tokens`
 - `session_memory_max_tokens`
 - `session_memory_min_text_messages`
@@ -699,16 +716,9 @@ them into `RuntimeTask.metadata`:
 
 Priority is strict:
 
-1. `RuntimeTask.metadata`
-   - `memory_summary_backend` / `memory_summary_model`
-   - aliases: `compress_memory_summary_backend` / `compress_memory_summary_model`
-   - aliases: `memory_compress_backend` / `memory_compress_model`
-2. `local_settings.py` constants
-   - `DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND` / `DEFAULT_USER_MEMORY_SUMMARIZE_MODEL`
-   - aliases: `DEFAULT_MEMORY_SUMMARIZE_BACKEND` / `DEFAULT_MEMORY_SUMMARIZE_MODEL`
-   - aliases: `VV_AGENT_MEMORY_SUMMARY_BACKEND` / `VV_AGENT_MEMORY_SUMMARY_MODEL`
-3. Fallback
-   - runtime `default_backend` + current task `model`
+1. `AgentTask.metadata.memory_summary_model`, with optional
+   `memory_summary_backend`.
+2. The current task model through the run's `ModelProvider`.
 
 ## Built-in Tools
 
@@ -725,14 +735,17 @@ The `bash` tool supports two background paths:
 
 Use `Agent.as_tool()` when the parent agent should call a child agent and then
 continue. Use `handoff()` when the child agent should take over and finish the
-run. The lower-level `create_sub_task` tools remain available for runtime
-compatibility, but they are no longer the primary public SDK contract.
+run. Use `create_sub_task` and `sub_task_status` when the model needs explicit
+background or parallel task management.
 
-Each delegated sub-task now runs in a real `AgentSession` (session id defaults to the sub-task id). Tool payloads include `session_id`, and runtime events include stable identifiers (`task_id` / `session_id`) so host apps can subscribe, persist, and stream sub-task progress independently, including `sub_agent_assistant_delta` and `sub_agent_tool_call_progress` events.
+Each delegated sub-task runs in a real `AgentSession` whose session id defaults
+to the sub-task id. Child `RunEvent` values preserve their run, trace, parent,
+task, and session identities so hosts can subscribe, persist, and replay them
+without an untyped event translation.
 
 Batch mode in `create_sub_task` dispatches valid sub-task items through the runtime execution backend's `parallel_map`, so synchronous batches run concurrently when the backend supports parallel execution.
 
-Use `sub_task_status` to query legacy runtime sub-task states, inspect
+Use `sub_task_status` to query runtime sub-task states, inspect
 lightweight progress snapshots (`detail_level=snapshot`), or send follow-up
 messages to running/completed sub-tasks.
 
@@ -747,7 +760,9 @@ Sub-task runtime metadata now includes `task_id`, `session_id`, and `browser_sco
 
 Host apps can interrupt a currently running sub-agent by calling `vv_agent.runtime.engine.steer_sub_agent_session(session_id=..., prompt=...)`.
 
-When a sub-agent uses a different model from the parent, the runtime needs `settings_file` and `default_backend` to resolve the LLM client.
+Configured child runs inherit the same explicit `ModelProvider` as the parent
+and resolve their own model. No settings path or backend fallback is rebuilt
+inside the child runtime.
 
 ## Examples
 
@@ -767,14 +782,13 @@ uv run pytest                              # unit tests (no network)
 uv run ruff check .                        # lint
 uv run ty check                            # type check
 
-V_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live   # integration tests (needs real LLM)
+VV_AGENT_RUN_LIVE_TESTS=1 uv run pytest -m live   # integration tests (needs real LLM)
 ```
 
 Environment variables for live tests:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `V_AGENT_LOCAL_SETTINGS` | `local_settings.py` | Settings file path |
-| `V_AGENT_LIVE_BACKEND` | `moonshot` | LLM backend |
-| `V_AGENT_LIVE_MODEL` | `kimi-k2.6` | Model name |
-| `V_AGENT_ENABLE_BASE64_KEY_DECODE` | - | Set `1` to enable base64 API key decoding |
+| `VV_AGENT_LOCAL_SETTINGS` | `local_settings.py` | Settings file path |
+| `VV_AGENT_LIVE_BACKEND` | `moonshot` | LLM backend |
+| `VV_AGENT_LIVE_MODEL` | `kimi-k3` | Model name |

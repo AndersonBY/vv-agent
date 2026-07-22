@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig, Runner, event_from_dict
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -32,7 +33,8 @@ def test_jsonl_event_store_appends_and_replays_events(tmp_path) -> None:
         trace_id="trace_1",
         tool_name="search",
         tool_call_id="call_1",
-        approved=False,
+        request_id="request_1",
+        action="deny",
         event_id="evt_approval",
         created_at=124.45,
     )
@@ -51,7 +53,7 @@ def test_jsonl_event_store_appends_and_replays_events(tmp_path) -> None:
     assert replayed[0].parent_run_id == "run_parent"
     assert replayed[0].metadata == {"source": "test"}
     assert isinstance(replayed[1], ApprovalResolvedEvent)
-    assert replayed[1].approved is False
+    assert replayed[1].action == "deny"
     assert event_from_dict(replayed[1].to_dict()).event_id == "evt_approval"
 
 
@@ -181,15 +183,12 @@ def _model_provider():
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        del agent, run_config
-        endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
-        return llm, ResolvedModelConfig(
-            backend="test",
-            requested_model="test-model",
-            selected_model="test-model",
-            model_id="test-model",
-            endpoint_options=[EndpointOption(endpoint=endpoint, model_id="test-model")],
-        )
-
-    return model_provider
+    endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
+    resolved = ResolvedModelConfig(
+        backend="test",
+        requested_model="test-model",
+        selected_model="test-model",
+        model_id="test-model",
+        endpoint_options=[EndpointOption(endpoint=endpoint, model_id="test-model")],
+    )
+    return FixedModelProvider(llm, resolved)

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from support import FixedModelProvider
+
 import vv_agent.interactive as interactive_mod
 from vv_agent import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.llm import ScriptedLLM
 from vv_agent.memory.provider import (
     MemoryCompactCompleted,
     MemoryCompactStarted,
@@ -81,15 +84,10 @@ def test_interactive_session_options_pass_memory_providers_to_run_config(monkeyp
 
     monkeypatch.setattr(interactive_mod.Runner, "_start_compiled", fake_start)
 
-    def llm_builder(*_: Any, **__: Any):
-        return object(), _resolved()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[]), _resolved()),
             workspace=tmp_path,
-            llm_builder=llm_builder,
             memory_providers=[provider],
         )
     )
@@ -121,15 +119,10 @@ def test_interactive_agent_definition_passes_memory_providers_to_run_config(monk
 
     monkeypatch.setattr(interactive_mod.Runner, "_start_compiled", fake_start)
 
-    def llm_builder(*_: Any, **__: Any):
-        return object(), _resolved()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[]), _resolved()),
             workspace=tmp_path,
-            llm_builder=llm_builder,
         )
     )
     session = client.create_session(

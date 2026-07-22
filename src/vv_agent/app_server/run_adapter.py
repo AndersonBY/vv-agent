@@ -21,7 +21,7 @@ from vv_agent.checkpoint import CheckpointError, ResumeObservation, ResumePolicy
 from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
 from vv_agent.runner import Runner
-from vv_agent.runtime.state_v2 import CheckpointV2
+from vv_agent.runtime.state import Checkpoint
 from vv_agent.types import AgentStatus, Message
 
 
@@ -180,7 +180,7 @@ class RunAdapter:
             resume_policy=ResumePolicy.REQUIRE_EXISTING,
         )
         run_config = replace(run_config, checkpoint_config=checkpoint_config)
-        checkpoint = checkpoint_config.store.load_checkpoint_v2(checkpoint_key)
+        checkpoint = checkpoint_config.store.load_checkpoint(checkpoint_key)
         if checkpoint is None:
             raise TurnResumeError("Checkpoint does not exist")
         self._validate_checkpoint_binding(checkpoint, thread=snapshot.thread, turn=turn)
@@ -222,7 +222,7 @@ class RunAdapter:
         prompt = self._prompt_from_input(turn.input)
         if checkpoint.terminal_result is not None:
             result = Runner.run_sync(agent, prompt, run_config=run_config)
-            retained = checkpoint_config.store.load_checkpoint_v2(checkpoint_key)
+            retained = checkpoint_config.store.load_checkpoint(checkpoint_key)
             if retained is None or retained.terminal_result is None:
                 raise TurnResumeError("Terminal checkpoint disappeared during replay")
             response = self._resume_response(
@@ -409,7 +409,7 @@ class RunAdapter:
         return "failed"
 
     @staticmethod
-    def _has_live_claim(checkpoint: CheckpointV2) -> bool:
+    def _has_live_claim(checkpoint: Checkpoint) -> bool:
         now_ms = time.time_ns() // 1_000_000
         return bool(
             checkpoint.claim_token is not None
@@ -419,7 +419,7 @@ class RunAdapter:
 
     def _validate_checkpoint_binding(
         self,
-        checkpoint: CheckpointV2,
+        checkpoint: Checkpoint,
         *,
         thread: ThreadRecord,
         turn: TurnRecord,
@@ -437,7 +437,7 @@ class RunAdapter:
             raise TurnResumeError("Checkpoint input does not match the requested turn")
 
     @staticmethod
-    def _checkpoint_summary(checkpoint: CheckpointV2) -> CheckpointSummary:
+    def _checkpoint_summary(checkpoint: Checkpoint) -> CheckpointSummary:
         return CheckpointSummary(
             key=checkpoint.checkpoint_key,
             resume_attempt=checkpoint.resume_attempt,
@@ -463,7 +463,7 @@ class RunAdapter:
         thread_id: str,
         turn_id: str,
         result: RunResult,
-        checkpoint: CheckpointV2,
+        checkpoint: Checkpoint,
     ) -> TurnResumeResponse:
         status = self._turn_status(result.status)
         error = None
@@ -503,11 +503,11 @@ class RunAdapter:
         return "Checkpoint resume failed"
 
     @staticmethod
-    def _load_result_checkpoint(started: StartedTurn, result: RunResult) -> CheckpointV2 | None:
+    def _load_result_checkpoint(started: StartedTurn, result: RunResult) -> Checkpoint | None:
         checkpoint_key = result.checkpoint_key or started.checkpoint_key
         if started.checkpoint_store is None or checkpoint_key is None:
             return None
-        return started.checkpoint_store.load_checkpoint_v2(checkpoint_key)
+        return started.checkpoint_store.load_checkpoint(checkpoint_key)
 
     def _prompt_from_input(self, input: list[dict[str, Any]]) -> str:
         parts: list[str] = []

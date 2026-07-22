@@ -16,7 +16,7 @@ from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import SubRunCompletedEvent, SubRunStartedEvent
 from vv_agent.interactive import AgentSessionRun, InteractiveAgentDefinition, create_agent_session
 from vv_agent.llm import ScriptedLLM
-from vv_agent.runtime import AgentRuntime, ExecutionContext, InMemoryStateStore, SubTaskManager, get_sub_agent_session
+from vv_agent.runtime import AgentRuntime, ExecutionContext, InMemoryCheckpointStore, SubTaskManager, get_sub_agent_session
 from vv_agent.runtime.engine import register_sub_agent_session, unregister_sub_agent_session
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import (
@@ -32,7 +32,7 @@ from vv_agent.types import (
 )
 from vv_agent.workspace import MemoryWorkspaceBackend
 
-CONFIGURED_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
+CONFIGURED_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent.json"
 
 
 def _configured_contract() -> dict[str, Any]:
@@ -447,16 +447,16 @@ def test_turn_snapshot_projects_current_execution_capabilities_only() -> None:
     old_provider = object()
     old_model_provider = object()
     old_broker = ApprovalBroker()
-    old_state_store = InMemoryStateStore()
+    old_checkpoint_store = InMemoryCheckpointStore()
     current_provider = object()
     current_model_provider = object()
     current_broker = ApprovalBroker()
-    current_state_store = InMemoryStateStore()
+    current_checkpoint_store = InMemoryCheckpointStore()
     memory_provider = object()
     app_state = object()
     current_run_context = RunContext(context=app_state, run_id="parent-run-b")
     old_context = ExecutionContext(
-        state_store=old_state_store,
+        checkpoint_store=old_checkpoint_store,
         metadata={
             "_vv_agent_approval_provider": old_provider,
             "_vv_agent_approval_broker": old_broker,
@@ -466,7 +466,7 @@ def test_turn_snapshot_projects_current_execution_capabilities_only() -> None:
         },
     )
     current_context = ExecutionContext(
-        state_store=current_state_store,
+        checkpoint_store=current_checkpoint_store,
         metadata={
             "_vv_agent_approval_provider": current_provider,
             "_vv_agent_approval_broker": current_broker,
@@ -490,7 +490,7 @@ def test_turn_snapshot_projects_current_execution_capabilities_only() -> None:
 
     projected = AgentRuntime._context_from_turn_snapshot(base_ctx=old_context, snapshot=snapshot)
 
-    assert projected.state_store is current_state_store
+    assert projected.checkpoint_store is current_checkpoint_store
     assert projected.metadata["_vv_agent_approval_provider"] is current_provider
     assert projected.metadata["_vv_agent_approval_broker"] is current_broker
     assert projected.metadata["_vv_agent_approval_timeout_seconds"] == 3.5
@@ -625,13 +625,13 @@ def _parent_task(task_id: str) -> AgentTask:
 def test_retained_session_forwards_continuation_events_only_to_current_parent_turn(tmp_path: Path) -> None:
     llm = _TurnRoutingLLM()
     manager = _manager()
-    turn_a_logs: list[tuple[str, dict[str, Any]]] = []
-    turn_b_logs: list[tuple[str, dict[str, Any]]] = []
+    turn_a_logs: list[Any] = []
+    turn_b_logs: list[Any] = []
     runtime_a = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        log_handler=lambda event, payload: turn_a_logs.append((event, payload)),
+        event_handler=turn_a_logs.append,
     )
     first = runtime_a.run(
         _parent_task("parent-turn-a"),
@@ -651,7 +651,7 @@ def test_retained_session_forwards_continuation_events_only_to_current_parent_tu
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        log_handler=lambda event, payload: turn_b_logs.append((event, payload)),
+        event_handler=turn_b_logs.append,
     )
     second = runtime_b.run(
         _parent_task("parent-turn-b"),
@@ -666,10 +666,10 @@ def test_retained_session_forwards_continuation_events_only_to_current_parent_tu
 
     assert second.status == AgentStatus.COMPLETED
     assert manager.wait(llm.task_id, timeout=2) is not None
-    assert not [event for event, _payload in turn_a_logs if event.startswith("sub_agent_")]
-    turn_b_sub_events = [event for event, _payload in turn_b_logs if event.startswith("sub_agent_")]
-    assert "sub_agent_session_run_start" in turn_b_sub_events
-    assert "sub_agent_session_run_end" in turn_b_sub_events
+    assert not [event for event in turn_a_logs if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)]
+    turn_b_sub_events = [event for event in turn_b_logs if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)]
+    assert [event.type for event in turn_b_sub_events] == ["sub_run_started", "sub_run_completed"]
+    assert all(event.parent_run_id == "parent-run-b" for event in turn_b_sub_events)
 
 
 def test_listener_exception_isolated_and_agent_session_running_state_recovers(tmp_path: Path) -> None:
@@ -722,7 +722,6 @@ def test_terminal_task_releases_parent_sink_and_plain_continuation_does_not_reus
     record = manager.get("retained-task")
     assert record is not None
     assert record.initial_event_forwarder is None
-    assert record.turn_event_handler is None
     record.parent_run_id = "sidecar-parent-run"
     record.parent_tool_call_id = "sidecar-parent-call"
 
@@ -733,8 +732,6 @@ def test_terminal_task_releases_parent_sink_and_plain_continuation_does_not_reus
     assert continued.outcome.status == AgentStatus.COMPLETED
     assert initial_events == []
     assert continued.initial_event_forwarder is None
-    assert continued.turn_event_handler is None
-    assert continued.use_turn_event_handler is True
     assert continued.parent_run_id == "parent-run-a"
     assert continued.parent_tool_call_id == "parent-call-a"
 
@@ -835,15 +832,19 @@ def test_running_worker_hides_early_recorded_outcome_until_exit(tmp_path: Path) 
     snapshot = manager.get("worker-task")
     assert snapshot is not None and snapshot.is_running()
     assert snapshot.outcome is None
-    result = build_default_registry().get("sub_task_status").handler(
-        ToolContext(
-            workspace=tmp_path,
-            shared_state={},
-            cycle_index=1,
-            workspace_backend=MemoryWorkspaceBackend(),
-            sub_task_manager=manager,
-        ),
-        {"task_ids": ["worker-task"]},
+    result = (
+        build_default_registry()
+        .get("sub_task_status")
+        .handler(
+            ToolContext(
+                workspace=tmp_path,
+                shared_state={},
+                cycle_index=1,
+                workspace_backend=MemoryWorkspaceBackend(),
+                sub_task_manager=manager,
+            ),
+            {"task_ids": ["worker-task"]},
+        )
     )
     payload = json.loads(result.content)
     assert payload["tasks"][0]["status"] == AgentStatus.RUNNING.value
@@ -933,11 +934,11 @@ def _retained_configured_child(
         ),
         sub_task_manager=manager,
         ctx=ExecutionContext(
+            event_handler=events.append,
             metadata={
                 "_vv_agent_run_id": "parent-run-a",
                 "_vv_agent_trace_id": "trace-a",
-                "_vv_agent_emit_event": events.append,
-            }
+            },
         ),
     )
     assert outcome.status == AgentStatus.COMPLETED
@@ -1061,10 +1062,10 @@ def test_continuation_completion_follows_persistence_and_failure_emits_only_fail
         prompt="continue after persistence",
         context=_tool_context(
             execution_context=ExecutionContext(
+                event_handler=event_sink,
                 metadata={
-                    "_vv_agent_emit_event": event_sink,
                     "_vv_agent_trace_id": "trace-b",
-                }
+                },
             ),
             run_context=RunContext(run_id="parent-run-b"),
             tool_call_id="continue-b",
@@ -1073,11 +1074,7 @@ def test_continuation_completion_follows_persistence_and_failure_emits_only_fail
     continued = manager.wait(task_id, timeout=3)
 
     assert continued is not None and continued.outcome is not None
-    lifecycle = [
-        event
-        for event in continuation_events
-        if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)
-    ]
+    lifecycle = [event for event in continuation_events if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)]
     assert [event.type for event in lifecycle] == ["sub_run_started", "sub_run_completed"]
     completion = lifecycle[1]
     assert isinstance(completion, SubRunCompletedEvent)
@@ -1123,10 +1120,10 @@ def test_continuation_started_sink_failure_emits_one_failed_completion_and_clean
         prompt="continue with broken started sink",
         context=_tool_context(
             execution_context=ExecutionContext(
+                event_handler=failing_started_sink,
                 metadata={
-                    "_vv_agent_emit_event": failing_started_sink,
                     "_vv_agent_trace_id": "trace-b",
-                }
+                },
             ),
             run_context=RunContext(run_id="parent-run-b"),
             tool_call_id="continue-b",
@@ -1137,11 +1134,7 @@ def test_continuation_started_sink_failure_emits_one_failed_completion_and_clean
     assert failed is not None and failed.outcome is not None
     assert failed.outcome.status == AgentStatus.FAILED
     assert failed.outcome.error is not None and "started event sink failed" in failed.outcome.error
-    lifecycle = [
-        event
-        for event in continuation_events
-        if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)
-    ]
+    lifecycle = [event for event in continuation_events if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)]
     assert [event.type for event in lifecycle] == ["sub_run_started", "sub_run_completed"]
     completion = lifecycle[1]
     assert isinstance(completion, SubRunCompletedEvent)
@@ -1178,10 +1171,10 @@ def test_continuation_completion_sink_failure_does_not_skip_manager_cleanup(
         prompt="continue with broken completion sink",
         context=_tool_context(
             execution_context=ExecutionContext(
+                event_handler=failing_completion_sink,
                 metadata={
-                    "_vv_agent_emit_event": failing_completion_sink,
                     "_vv_agent_trace_id": "trace-b",
-                }
+                },
             ),
             run_context=RunContext(run_id="parent-run-b"),
             tool_call_id="continue-b",
@@ -1191,11 +1184,7 @@ def test_continuation_completion_sink_failure_does_not_skip_manager_cleanup(
 
     assert completed is not None and completed.outcome is not None
     assert completed.outcome.status == AgentStatus.COMPLETED
-    lifecycle = [
-        event
-        for event in continuation_events
-        if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)
-    ]
+    lifecycle = [event for event in continuation_events if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)]
     assert [event.type for event in lifecycle] == ["sub_run_started", "sub_run_completed"]
     assert registered == {}
     assert not completed.is_running()

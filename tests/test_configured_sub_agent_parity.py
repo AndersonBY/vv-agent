@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import queue
 import threading
@@ -31,7 +30,7 @@ from vv_agent.events import (
 )
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import MemoryManager
-from vv_agent.model import ScriptedModelProvider
+from vv_agent.model import ModelRef, ScriptedModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.run_config import RunConfig, ToolPolicy
 from vv_agent.runner import Runner
@@ -39,7 +38,7 @@ from vv_agent.runtime import (
     AgentRuntime,
     CancellationToken,
     ExecutionContext,
-    InMemoryStateStore,
+    InMemoryCheckpointStore,
     SubTaskManager,
     get_sub_agent_session,
 )
@@ -70,10 +69,8 @@ from vv_agent.workspace import (
     compile_portable_workspace_regex,
 )
 
-CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json"
-EVENT_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_events_v1.jsonl"
-CONTRACT_SHA256 = "31815c91a21868b4252a550a45ccdacdd2687443ae55527551a20bb77934fd43"
-EVENT_CONTRACT_SHA256 = "c2816a3962a44a3c0f5172edbffe4c88352142fee13f457da9a0667ceef996b0"
+CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent.json"
+EVENT_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_events.jsonl"
 
 
 def _contract() -> dict[str, Any]:
@@ -130,8 +127,6 @@ class _SnapshotManagerSession(_ManagerSession):
     def _continue_run_with_snapshot(self, prompt: str, snapshot: Any) -> _ManagerRun:
         assert prompt == "continue from approved parent turn"
         self._snapshots.append(snapshot)
-        if snapshot.stream_callback is not None:
-            snapshot.stream_callback({"event": "assistant_delta", "delta": "continued"})
         return _ManagerRun(_manager_result())
 
 
@@ -224,11 +219,9 @@ def _normalize_sub_event(event: SubRunStartedEvent | SubRunCompletedEvent) -> di
     return payload
 
 
-def test_configured_sub_agent_shared_fixtures_have_expected_hashes() -> None:
+def test_configured_sub_agent_shared_fixtures_use_one_current_version() -> None:
     assert _contract()["version"] == "v1"
     assert all(event["version"] == _contract()["version"] for event in _event_contract())
-    assert hashlib.sha256(CONTRACT_PATH.read_bytes()).hexdigest() == CONTRACT_SHA256
-    assert hashlib.sha256(EVENT_CONTRACT_PATH.read_bytes()).hexdigest() == EVENT_CONTRACT_SHA256
 
 
 def test_portable_workspace_regex_cases_match_shared_contract() -> None:
@@ -278,13 +271,13 @@ def _parent_task() -> AgentTask:
         system_prompt="Parent prompt",
         user_prompt="Parent task",
         max_cycles=6,
-        memory_compact_threshold=64_000,
+        memory_compact_threshold=250_000,
         memory_threshold_percentage=80,
         use_workspace=True,
         agent_type="computer",
         extra_tool_names=["custom_tool"],
         exclude_tools=["parent_excluded"],
-        model_settings=ModelSettings(temperature=0.25, max_tokens=512),
+        model_settings=ModelSettings(temperature=0.25),
         metadata={
             "language": "en-US",
             "available_skills": [{"name": "review"}],
@@ -348,7 +341,6 @@ def test_configured_sub_agent_task_projection_matches_shared_contract(tmp_path: 
         "no_tool_policy": task.no_tool_policy,
         "allow_interruption": task.allow_interruption,
         "use_workspace": task.use_workspace,
-        "has_sub_agents": task.has_sub_agents,
         "agent_type": task.agent_type,
         "native_multimodal": task.native_multimodal,
         "extra_tool_names": task.extra_tool_names,
@@ -458,11 +450,11 @@ def test_runtime_revalidates_mutated_sub_agent_config_and_pairs_events(
         sub_agents={"researcher": sub_agent},
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
     manager = _manager()
 
@@ -551,21 +543,20 @@ def test_sub_agent_config_from_wire_rejects_shared_type_and_range_corpus(
         SubAgentConfig.from_dict(payload)
 
 
-def test_configured_sub_agent_wire_ignores_unknown_top_level_fields() -> None:
-    assert _contract()["validation"]["unknown_top_level_fields"] == "ignore"
-    config = SubAgentConfig.from_dict({"model": "child-model", "backned": "ignored"})
-    task = AgentTask.from_dict(
-        {
-            "task_id": "task",
-            "model": "model",
-            "system_prompt": "system",
-            "user_prompt": "user",
-            "runtime_metadata": {"trace_id": "legacy"},
-        }
-    )
-
-    assert "backned" not in config.to_dict()
-    assert "runtime_metadata" not in task.to_dict()
+def test_configured_sub_agent_wire_rejects_unknown_top_level_fields() -> None:
+    assert _contract()["validation"]["unknown_top_level_fields"] == "reject"
+    with pytest.raises(ValueError, match="unknown fields: backned"):
+        SubAgentConfig.from_dict({"model": "child-model", "backned": "invalid"})
+    with pytest.raises(ValueError, match="unknown fields: runtime_metadata"):
+        AgentTask.from_dict(
+            {
+                "task_id": "task",
+                "model": "model",
+                "system_prompt": "system",
+                "user_prompt": "user",
+                "runtime_metadata": {"trace_id": "invalid"},
+            }
+        )
 
 
 def test_runtime_boundary_uses_normalized_model_without_mutating_config(tmp_path: Path) -> None:
@@ -639,7 +630,7 @@ def test_request_metadata_cannot_assign_framework_owned_child_identity(tmp_path:
             },
         ),
         sub_task_manager=_manager(),
-        ctx=ExecutionContext(metadata={"_vv_agent_emit_event": events.append}),
+        ctx=ExecutionContext(event_handler=events.append),
     )
 
     pair = _sub_events(events)
@@ -665,7 +656,7 @@ def test_runtime_lineage_prefers_public_then_execution_then_request_without_task
 
     def run_with_context(context: ExecutionContext, request_parent_run_id: str | None) -> tuple[Any, Any]:
         events: list[Any] = []
-        context.metadata["_vv_agent_emit_event"] = events.append
+        context.event_handler = events.append
         request_metadata = {"parent_tool_call_id": "delegate"}
         if request_parent_run_id is not None:
             request_metadata["parent_run_id"] = request_parent_run_id
@@ -749,7 +740,6 @@ def test_runtime_trace_identity_precedence_and_child_run_fallback(
     )
     public_metadata = {"trace_id": public_trace_id} if public_trace_id is not None else {}
     context_metadata: dict[str, Any] = {
-        "_vv_agent_emit_event": events.append,
         "_vv_agent_run_context": RunContext(run_id="parent-run", metadata=public_metadata),
     }
     if execution_trace_id is not None:
@@ -770,7 +760,7 @@ def test_runtime_trace_identity_precedence_and_child_run_fallback(
             metadata={"parent_tool_call_id": "delegate"},
         ),
         sub_task_manager=_manager(),
-        ctx=ExecutionContext(metadata=context_metadata),
+        ctx=ExecutionContext(event_handler=events.append, metadata=context_metadata),
     )
 
     assert outcome.status == AgentStatus.COMPLETED
@@ -793,8 +783,8 @@ def test_public_run_context_private_trace_id_precedes_public_trace_id(tmp_path: 
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
-            "_vv_agent_emit_event": events.append,
             "_vv_agent_run_context": RunContext(
                 run_id="parent-run",
                 metadata={
@@ -802,7 +792,7 @@ def test_public_run_context_private_trace_id_precedes_public_trace_id(tmp_path: 
                     "trace_id": "public-trace",
                 },
             ),
-        }
+        },
     )
 
     outcome = AgentRuntime(
@@ -927,6 +917,7 @@ def test_non_string_identity_metadata_is_ignored_and_falls_through(
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_context": RunContext(
                 run_id=invalid_value,
@@ -935,8 +926,7 @@ def test_non_string_identity_metadata_is_ignored_and_falls_through(
             "_vv_agent_run_id": invalid_value,
             "_vv_agent_trace_id": invalid_value,
             "trace_id": invalid_value,
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
 
     outcome = AgentRuntime(
@@ -1007,11 +997,11 @@ def test_runtime_boundary_rejects_non_portable_regex_before_lifecycle(tmp_path: 
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
 
     outcome = runtime._run_sub_task(
@@ -1101,11 +1091,11 @@ def test_configured_sub_agent_uses_parent_workspace_backend_and_emits_sub_run_ev
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Read files")},
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
     manager = _manager()
 
@@ -1173,11 +1163,11 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
         },
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
 
     result = runtime.run(task, ctx=context, sub_task_manager=_manager())
@@ -1259,7 +1249,7 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
     lifecycle_contract = _contract()["lifecycle"]
     successful = cast(SubRunCompletedEvent, sub_events[1])
     assert successful.token_usage is not None
-    assert (successful.token_usage["total_tokens"] == 0) is lifecycle_contract["preserve_successful_zero_token_usage"]
+    assert (successful.token_usage["total_tokens"] is None) is lifecycle_contract["preserve_successful_missing_token_usage"]
     assert (failed.metadata.get("error_code") == "invalid_sub_agent_system_prompt") is lifecycle_contract[
         "failure_error_code_in_metadata"
     ]
@@ -1313,12 +1303,12 @@ class _ExplicitBackendModelProvider:
 @pytest.mark.parametrize(
     ("child_metadata", "expected_context", "expected_capability", "expected_reserve"),
     [
-        ({}, 32_000, 4_096, None),
-        ({"model_context_window": 0}, 32_000, 4_096, None),
+        ({}, 1_000_000, None, None),
+        ({"model_context_window": 0}, 1_000_000, None, None),
         (
             {"model_context_window": 12_345, "reserved_output_tokens": 678},
             12_345,
-            4_096,
+            None,
             678,
         ),
     ],
@@ -1332,7 +1322,7 @@ def test_explicit_backend_and_resolved_limits_reach_real_child_request(
     tmp_path: Path,
     child_metadata: dict[str, int],
     expected_context: int,
-    expected_capability: int,
+    expected_capability: int | None,
     expected_reserve: int | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1382,13 +1372,13 @@ def test_explicit_backend_and_resolved_limits_reach_real_child_request(
         },
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_model_provider": provider,
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-model-contract",
-            "_vv_agent_emit_event": events.append,
             "_vv_agent_model_settings": ModelSettings(max_tokens=512),
-        }
+        },
     )
 
     result = runtime.run(task, ctx=context, sub_task_manager=manager)
@@ -1401,7 +1391,10 @@ def test_explicit_backend_and_resolved_limits_reach_real_child_request(
     assert observed_requests
     request_metadata = observed_requests[0].metadata
     assert request_metadata["model_context_window"] == expected_context
-    assert request_metadata["model_max_output_tokens"] == expected_capability
+    if expected_capability is None:
+        assert "model_max_output_tokens" not in request_metadata
+    else:
+        assert request_metadata["model_max_output_tokens"] == expected_capability
     if expected_reserve is None:
         assert "reserved_output_tokens" not in request_metadata
     else:
@@ -1440,7 +1433,6 @@ def test_same_model_parent_client_reuse_inherits_parent_task_token_limits(tmp_pa
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        default_backend="parent-backend",
     )
     task = AgentTask(
         task_id="parent-client-reuse",
@@ -1466,7 +1458,7 @@ def test_same_model_parent_client_reuse_inherits_parent_task_token_limits(tmp_pa
     assert model_contract["same_model_reuses_parent_client_only_without_explicit_backend"] is True
     assert model_contract["same_model_parent_client_inherits_token_limits"] is True
     assert child_requests[0].metadata["model_context_window"] == expected_metadata["model_context_window"]
-    assert child_requests[0].metadata["model_max_output_tokens"] == expected_metadata["model_max_output_tokens"]
+    assert "model_max_output_tokens" not in child_requests[0].metadata
     assert "reserved_output_tokens" not in child_requests[0].metadata
     assert child_requests[0].model_settings is None or child_requests[0].model_settings.max_tokens is None
 
@@ -1546,7 +1538,7 @@ def test_async_batch_submit_exceptions_continue_and_report_shared_envelope(
     details = payload["details"] if not accepted_titles else payload
     expected_accepted = len(accepted_titles)
 
-    assert _contract()["manager"]["async_submission"]["batch_continues_after_item_failure"] is True
+    assert _contract()["manager"]["async_submission"]["batch_continues_after_submission_failure"] is True
     assert details["summary"] == {"total": 3, "accepted": expected_accepted, "failed": 3 - expected_accepted}
     assert len(details["results"]) == 3
     assert [item["index"] for item in details["results"]] == [0, 1, 2]
@@ -1568,7 +1560,6 @@ def test_async_batch_submit_exceptions_continue_and_report_shared_envelope(
 def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path: Path) -> None:
     child_requests: list[LlmRequest] = []
     captured_contexts: list[ToolContext] = []
-    forwarded_streams: list[dict[str, Any]] = []
     events: list[Any] = []
 
     def child_capture_request(request: LlmRequest) -> LLMResponse:
@@ -1596,8 +1587,7 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
     def capture_context(context: ToolContext, _arguments: dict[str, Any]) -> ToolExecutionResult:
         captured_contexts.append(context)
         assert context.ctx is not None
-        assert context.ctx.stream_callback is not None
-        context.ctx.stream_callback({"event": "assistant_delta", "content_delta": "capability probe"})
+        assert context.ctx.event_handler is not None
         return ToolExecutionResult(tool_call_id="", content="captured")
 
     registry.register_tool("capture_context", capture_context, "Capture child context")
@@ -1638,24 +1628,22 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
         metadata={"parent_only": True},
     )
     parent_token = CancellationToken()
-    state_store = InMemoryStateStore()
+    checkpoint_store = InMemoryCheckpointStore()
     approval_provider = object()
     approval_broker = ApprovalBroker()
     memory_providers = [object()]
     trace_context = object()
     event_sink = events.append
-    stream_sink = forwarded_streams.append
     parent_session = object()
     context = ExecutionContext(
         cancellation_token=parent_token,
-        stream_callback=stream_sink,
-        state_store=state_store,
+        event_handler=event_sink,
+        checkpoint_store=checkpoint_store,
         metadata={
             "_vv_agent_agent_name": "parent",
             "_vv_agent_approval_provider": approval_provider,
             "_vv_agent_approval_broker": approval_broker,
             "_vv_agent_approval_timeout_seconds": 12.5,
-            "_vv_agent_emit_event": event_sink,
             "_vv_agent_input": "parent input",
             "_vv_agent_memory_providers": memory_providers,
             "_vv_agent_model_provider": provider,
@@ -1685,13 +1673,13 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
     child_tool_context = captured_contexts[0]
     child_ctx = child_tool_context.ctx
     assert child_ctx is not None
-    assert child_ctx.state_store is state_store
+    assert child_ctx.checkpoint_store is checkpoint_store
     assert child_ctx.cancellation_token is not None
     assert child_ctx.cancellation_token is not parent_token
     assert child_ctx.metadata["_vv_agent_approval_provider"] is approval_provider
     assert child_ctx.metadata["_vv_agent_approval_broker"] is approval_broker
     assert child_ctx.metadata["_vv_agent_approval_timeout_seconds"] == 12.5
-    assert child_ctx.metadata["_vv_agent_emit_event"] is event_sink
+    assert child_ctx.event_handler is event_sink
     assert child_ctx.metadata["_vv_agent_memory_providers"] is memory_providers
     assert child_ctx.metadata["_vv_agent_model_provider"] is provider
     assert child_ctx.metadata["_vv_agent_trace_context"] is trace_context
@@ -1700,7 +1688,8 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
     assert child_ctx.metadata["_vv_agent_agent_name"] == "researcher"
     assert child_ctx.metadata["_vv_agent_session_id"] != "parent-session"
     assert child_ctx.metadata["_vv_agent_run_id"] != "parent-run"
-    assert "_vv_agent_input" not in child_ctx.metadata
+    assert child_ctx.metadata["_vv_agent_input"] == "Inspect capabilities"
+    assert child_ctx.metadata["_vv_agent_input"] != "parent input"
     assert "_vv_agent_session" not in child_ctx.metadata
     child_run_context = child_ctx.metadata["_vv_agent_run_context"]
     assert child_run_context is not parent_run_context
@@ -1728,7 +1717,6 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
     assert child_tool_context.run_context is child_run_context
     assert child_tool_context.session is None
     assert "parent_secret" not in child_tool_context.shared_state
-    assert forwarded_streams[-1]["event"] == "assistant_delta"
     observed_capabilities = {
         "inherited": [
             name
@@ -1737,11 +1725,10 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
                 "approval_broker": child_ctx.metadata.get("_vv_agent_approval_broker") is approval_broker,
                 "approval_provider": child_ctx.metadata.get("_vv_agent_approval_provider") is approval_provider,
                 "approval_timeout": child_ctx.metadata.get("_vv_agent_approval_timeout_seconds") == 12.5,
-                "event_sink": child_ctx.metadata.get("_vv_agent_emit_event") is event_sink,
+                "event_sink": child_ctx.event_handler is event_sink,
                 "memory_providers": child_ctx.metadata.get("_vv_agent_memory_providers") is memory_providers,
                 "model_provider": child_ctx.metadata.get("_vv_agent_model_provider") is provider,
-                "state_store": child_ctx.state_store is state_store,
-                "stream_sink": forwarded_streams[-1].get("event") == "assistant_delta",
+                "checkpoint_store": child_ctx.checkpoint_store is checkpoint_store,
                 "trace_context": child_ctx.metadata.get("_vv_agent_trace_context") is trace_context,
             }.items()
             if present
@@ -1762,7 +1749,7 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
         "isolated": [
             name
             for name, isolated in {
-                "input": "_vv_agent_input" not in child_ctx.metadata,
+                "input": child_ctx.metadata.get("_vv_agent_input") != "parent input",
                 "parent_run_context": child_run_context is not parent_run_context,
                 "session": child_tool_context.session is None and "_vv_agent_session" not in child_ctx.metadata,
                 "shared_state": "parent_secret" not in child_tool_context.shared_state,
@@ -1903,15 +1890,18 @@ def test_configured_child_stream_observer_failure_isolated_and_child_remains_con
     lifecycle: list[Any] = []
     observer_calls = 0
 
-    def broken_observer(_event: dict[str, Any]) -> None:
+    def broken_observer(event: Any) -> None:
         nonlocal observer_calls
-        observer_calls += 1
-        raise RuntimeError("caller stream observer failed")
+        lifecycle.append(event)
+        if isinstance(event, AssistantDeltaEvent):
+            observer_calls += 1
+            raise RuntimeError("caller stream observer failed")
 
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
+        event_handler=broken_observer,
     )
     task = AgentTask(
         task_id="observer-panic-parent",
@@ -1928,11 +1918,9 @@ def test_configured_child_stream_observer_failure_isolated_and_child_remains_con
         },
     )
     context = ExecutionContext(
-        stream_callback=broken_observer,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-stream-panic",
-            "_vv_agent_emit_event": lifecycle.append,
         },
     )
 
@@ -1996,7 +1984,6 @@ def test_configured_child_stream_is_allowlisted_and_keeps_canonical_typed_identi
             )
         },
     )
-    raw_streams: list[dict[str, Any]] = []
     typed_events: list[Any] = []
 
     result = Runner._run_compiled_sync(
@@ -2006,35 +1993,13 @@ def test_configured_child_stream_is_allowlisted_and_keeps_canonical_typed_identi
         run_config=RunConfig(
             model_provider=provider,
             workspace=tmp_path,
-            runtime_stream_callback=raw_streams.append,
             stream=typed_events.append,
             tracing={"trace_id": "trace-stream-contract"},
         ),
     )
 
     assert result.status == AgentStatus.COMPLETED
-    assert len(raw_streams) == 4
-    assert [raw["event"] for raw in raw_streams] == stream_contract["allowed_events"]
-    identity_fields = set(stream_contract["canonical_identity_fields"])
-    cycle_field = stream_contract["canonical_cycle_field"]
-    for raw in raw_streams:
-        producer_fields = set(stream_contract["producer_fields"][raw["event"]])
-        assert set(raw).issubset(producer_fields | identity_fields | {cycle_field})
-        assert (set(raw) - identity_fields - {cycle_field}).isdisjoint(stream_contract["reserved_producer_fields"])
-        assert raw[cycle_field] == 1
-    assert raw_streams[0]["content_delta"] == "child delta"
-    assert raw_streams[0]["content_chars"] == 11
-    assert raw_streams[0]["estimated_tokens"] == 2
-
     started = next(event for event in result.events if isinstance(event, SubRunStartedEvent))
-    for raw in raw_streams:
-        assert raw["run_id"] == raw["child_run_id"] == started.run_id
-        assert raw["session_id"] == raw["child_session_id"] == started.session_id
-        assert raw["task_id"] == started.task_id
-        assert raw["agent_name"] == raw["sub_agent_name"] == "researcher"
-        assert raw["trace_id"] == "trace-stream-contract"
-        assert raw["parent_run_id"] == result.run_id
-        assert raw["parent_tool_call_id"] == "delegate"
 
     child_stream_types = (
         AssistantDeltaEvent,
@@ -2043,15 +2008,22 @@ def test_configured_child_stream_is_allowlisted_and_keeps_canonical_typed_identi
         ModelToolCallProgressEvent,
     )
     typed_streams = [event for event in typed_events if isinstance(event, child_stream_types)]
-    assert [event.type for event in typed_streams] == [stream_contract["typed_wire_types"][raw["event"]] for raw in raw_streams]
-    for typed_event, raw in zip(typed_streams, raw_streams, strict=True):
+    assert [event.type for event in typed_streams] == [
+        stream_contract["provider_adapter_wire_types"][provider_event]
+        for provider_event in stream_contract["provider_adapter_allowed_events"]
+    ]
+    for typed_event in typed_streams:
         assert typed_event.run_id == started.run_id
         assert typed_event.trace_id == "trace-stream-contract"
         assert typed_event.agent_name == "researcher"
         assert typed_event.session_id == started.session_id
         assert typed_event.parent_run_id == result.run_id
         assert typed_event.cycle_index == 1
-        assert typed_event.metadata == raw
+        assert typed_event.metadata == {}
+    first_delta = cast(AssistantDeltaEvent, typed_streams[0])
+    assert first_delta.delta == "child delta"
+    assert first_delta.content_chars == 11
+    assert first_delta.estimated_tokens == 2
 
     parent_terminals = [event for event in typed_events if isinstance(event, RunCompletedEvent) and event.run_id == result.run_id]
     assert len(parent_terminals) == 1
@@ -2319,37 +2291,30 @@ def test_manual_approval_resume_runs_sub_task_status_with_accepting_turn_snapsho
         session=_SnapshotManagerSession(snapshots),
     )
     token = CancellationToken()
-    raw_stream: list[dict[str, Any]] = []
+    typed_events: list[Any] = []
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="",
-                        tool_calls=[
-                            ToolCall(
-                                id="approved-status-call",
-                                name="sub_task_status",
-                                arguments={
-                                    "task_ids": [task_id],
-                                    "message": "continue from approved parent turn",
-                                    "wait_for_response": True,
-                                },
-                            )
-                        ],
-                    )
-                ]
-            ),
-            ResolvedModelConfig(
-                backend="test",
-                requested_model="approval-model",
-                selected_model="approval-model",
-                model_id="approval-model",
-                endpoint_options=[],
-            ),
-        )
+    model_provider = ScriptedModelProvider(
+        backend="test",
+        default_model="approval-model",
+        llm=ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="approved-status-call",
+                            name="sub_task_status",
+                            arguments={
+                                "task_ids": [task_id],
+                                "message": "continue from approved parent turn",
+                                "wait_for_response": True,
+                            },
+                        )
+                    ],
+                )
+            ]
+        ),
+    )
 
     runtime_task = AgentTask(
         task_id="parent-approval-turn",
@@ -2369,7 +2334,7 @@ def test_manual_approval_resume_runs_sub_task_status_with_accepting_turn_snapsho
             workspace=tmp_path,
             sub_task_manager=manager,
             cancellation_token=token,
-            runtime_stream_callback=raw_stream.append,
+            stream=typed_events.append,
             metadata={"trace_id": "trace-approved-status"},
             tool_policy=ToolPolicy(
                 allowed_tools=["task_finish", "sub_task_status"],
@@ -2396,9 +2361,7 @@ def test_manual_approval_resume_runs_sub_task_status_with_accepting_turn_snapsho
     assert snapshot.disallowed_tools is None
     assert callable(snapshot.can_use_tool)
     assert snapshot.approval == "always"
-    assert callable(snapshot.event_sink)
-    assert callable(snapshot.stream_callback)
-    assert raw_stream == [{"event": "assistant_delta", "delta": "continued"}]
+    assert callable(snapshot.event_handler)
     record = manager.get(task_id)
     assert record is not None and record.outcome is not None
     assert record.outcome.status == AgentStatus.COMPLETED
@@ -2427,18 +2390,28 @@ def test_model_resolution_failure_emits_started_before_resolution_and_one_comple
     observed_at_resolution: list[str] = []
     resolution_requests: list[tuple[str, str]] = []
 
-    def failing_builder(*_args: Any, **kwargs: Any) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        observed_at_resolution.extend(event.type for event in _sub_events(events))
-        resolution_requests.append((kwargs["backend"], kwargs["model"]))
-        raise RuntimeError("child model unavailable")
+    class FailingModelProvider:
+        def resolve(self, model: ModelRef) -> ResolvedModelConfig:
+            observed_at_resolution.extend(event.type for event in _sub_events(events))
+            resolution_requests.append((model.backend_name() or "test", model.model()))
+            raise RuntimeError("child model unavailable")
+
+        def client(self, resolved: ResolvedModelConfig) -> ScriptedLLM:
+            del resolved
+            raise AssertionError("client must not be requested after resolution fails")
+
+        def default_settings(self, resolved: ResolvedModelConfig) -> ModelSettings:
+            del resolved
+            return ModelSettings()
+
+        def default_model_ref(self) -> ModelRef:
+            return ModelRef.backend("test", "parent-model")
 
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(steps=[_delegate({"agent_id": "researcher", "task_description": "Collect facts"})]),
+        model_provider=FailingModelProvider(),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=tmp_path / "settings.py",
-        default_backend="test",
-        llm_builder=failing_builder,
     )
     task = AgentTask(
         task_id="parent-task",
@@ -2455,11 +2428,11 @@ def test_model_resolution_failure_emits_started_before_resolution_and_one_comple
         },
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
     manager = _manager()
 
@@ -2531,11 +2504,11 @@ def test_failed_child_preserves_usage_after_a_completed_cycle(tmp_path: Path) ->
         },
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
 
     result = runtime.run(task, ctx=context, sub_task_manager=_manager())
@@ -2546,89 +2519,10 @@ def test_failed_child_preserves_usage_after_a_completed_cycle(tmp_path: Path) ->
     assert completed.metadata["error_code"] == _contract()["lifecycle"]["failure_error_code_fallback"]
     assert _contract()["lifecycle"]["preserve_failed_usage_after_completed_cycle"] is True
     assert completed.token_usage is not None
-    assert completed.token_usage["prompt_tokens"] == 11
-    assert completed.token_usage["completion_tokens"] == 7
+    assert completed.token_usage["input_tokens"] == 11
+    assert completed.token_usage["output_tokens"] == 7
     assert completed.token_usage["total_tokens"] == 18
     assert completed.token_usage["cycles"][0]["cycle_index"] == 1
-
-
-def test_child_runtime_inherits_settings_file_and_default_backend(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings_file = tmp_path / "settings.py"
-    settings_file.write_text("LLM_SETTINGS = {}\n", encoding="utf-8")
-    observed_runtime_config: list[tuple[Path | None, str | None, bool]] = []
-    original_build_memory_manager = AgentRuntime._build_memory_manager
-
-    def capture_runtime_config(
-        self: AgentRuntime,
-        *,
-        task: AgentTask,
-        workspace_path: Path,
-        ctx: Any = None,
-    ) -> Any:
-        observed_runtime_config.append((self.settings_file, self.default_backend, bool(task.metadata.get("is_sub_task"))))
-        return original_build_memory_manager(
-            self,
-            task=task,
-            workspace_path=workspace_path,
-            ctx=ctx,
-        )
-
-    monkeypatch.setattr(AgentRuntime, "_build_memory_manager", capture_runtime_config)
-    llm = ScriptedLLM(
-        steps=[
-            _delegate({"agent_id": "researcher", "task_description": "Inspect runtime config"}),
-            _finish("child done", tool_call_id="child-finish"),
-            _finish("parent done", tool_call_id="parent-finish"),
-        ]
-    )
-
-    def builder(
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        del settings_path, timeout_seconds
-        return (
-            llm,
-            ResolvedModelConfig(
-                backend=backend,
-                requested_model=model,
-                selected_model=model,
-                model_id=model,
-                endpoint_options=[],
-            ),
-        )
-
-    runtime = AgentRuntime(
-        llm_client=llm,
-        tool_registry=build_default_registry(),
-        default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="test",
-        llm_builder=builder,
-    )
-    task = AgentTask(
-        task_id="parent-task",
-        model="parent-model",
-        system_prompt="Parent prompt",
-        user_prompt="Delegate",
-        max_cycles=3,
-        sub_agents={"researcher": SubAgentConfig(model="child-model", description="Research")},
-    )
-
-    result = runtime.run(task, sub_task_manager=_manager())
-
-    assert result.status == AgentStatus.COMPLETED
-    parent_config = next(config for config in observed_runtime_config if not config[2])
-    child_config = next(config for config in observed_runtime_config if config[2])
-    inheritance = _contract()["model_resolution"]["child_runtime_inherits"]
-    assert (child_config[0] == parent_config[0] == settings_file.resolve()) is inheritance["settings_file"]
-    assert (child_config[1] == parent_config[1] == "test") is inheritance["default_backend"]
 
 
 @pytest.mark.parametrize(
@@ -2688,11 +2582,11 @@ def test_wait_user_and_max_cycles_each_complete_started_lifecycle(
         },
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
     manager = _manager()
 
@@ -2788,10 +2682,10 @@ def _blocked_runtime(
     )
     context = ExecutionContext(
         cancellation_token=token,
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
         },
     )
     return llm, runtime, task, context, token, manager, events
@@ -3549,11 +3443,11 @@ def test_configured_sub_agent_continuation_replays_complete_prior_turn(tmp_path:
     )
 
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
 
     result = runtime.run(task, ctx=context, sub_task_manager=manager)
@@ -3688,10 +3582,10 @@ def test_parent_cancellation_reaches_configured_sub_agent_continuation(tmp_path:
     )
     context = ExecutionContext(
         cancellation_token=token,
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
         },
     )
 
@@ -3796,11 +3690,11 @@ def test_configured_async_child_panic_cleans_up_and_retained_session_can_continu
         },
     )
     context = ExecutionContext(
+        event_handler=events.append,
         metadata={
             "_vv_agent_run_id": "parent-run",
             "_vv_agent_trace_id": "trace-parity",
-            "_vv_agent_emit_event": events.append,
-        }
+        },
     )
 
     parent_result = runtime.run(task, ctx=context, sub_task_manager=manager)

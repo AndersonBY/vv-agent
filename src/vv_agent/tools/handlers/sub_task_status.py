@@ -16,8 +16,6 @@ DEFAULT_SUB_TASK_MAX_WAIT_SECONDS = 3600
 MIN_SUB_TASK_MAX_WAIT_SECONDS = 60
 MAX_SUB_TASK_MAX_WAIT_SECONDS = 24 * 60 * 60
 LOCAL_SUB_TASK_WAIT_POLL_SECONDS = 0.1
-MIN_I64 = -(2**63)
-MAX_I64 = 2**63 - 1
 RUNNING_SUB_TASK_STATUSES = {
     AgentStatus.PENDING.value,
     AgentStatus.RUNNING.value,
@@ -26,77 +24,12 @@ RUNNING_SUB_TASK_STATUSES = {
 }
 
 
-def _coerce_bool(value: Any, *, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        if value in (0, 1):
-            return bool(value)
-        return default
-    if isinstance(value, str):
-        normalized = trim_portable_whitespace(value).lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return default
-
-
-def _normalize_detail_level(detail_level: str | None) -> str:
-    normalized = trim_portable_whitespace(detail_level or "basic").lower()
-    return normalized if normalized in {"basic", "snapshot"} else "basic"
-
-
-def _parse_integer_arg(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if MIN_I64 <= value <= MAX_I64 else None
-    if isinstance(value, str):
-        normalized = trim_portable_whitespace(value)
-        if not normalized or (normalized[0] in "+-" and len(normalized) == 1):
-            return None
-        digits = normalized[1:] if normalized[0] in "+-" else normalized
-        if not digits.isascii() or not digits.isdigit():
-            return None
-        try:
-            parsed = int(normalized)
-        except ValueError:
-            return None
-        return parsed if MIN_I64 <= parsed <= MAX_I64 else None
-    return None
-
-
-def _normalize_workspace_file_limit(workspace_file_limit: Any) -> int:
-    limit = _parse_integer_arg(workspace_file_limit)
-    if limit is None:
-        limit = DEFAULT_SUB_TASK_SNAPSHOT_FILE_LIMIT
-    return max(1, min(limit, MAX_SUB_TASK_SNAPSHOT_FILE_LIMIT))
-
-
-def _normalize_wait_interval_seconds(check_interval_seconds: Any) -> int:
-    seconds = _parse_integer_arg(check_interval_seconds)
-    if seconds is None:
-        seconds = DEFAULT_SUB_TASK_WAIT_INTERVAL_SECONDS
-    return max(MIN_SUB_TASK_WAIT_INTERVAL_SECONDS, min(seconds, MAX_SUB_TASK_WAIT_INTERVAL_SECONDS))
-
-
-def _normalize_max_wait_seconds(max_wait_seconds: Any) -> int:
-    if max_wait_seconds is None:
-        return DEFAULT_SUB_TASK_MAX_WAIT_SECONDS
-    seconds = _parse_integer_arg(max_wait_seconds)
-    if seconds is None:
-        return DEFAULT_SUB_TASK_MAX_WAIT_SECONDS
-    return max(MIN_SUB_TASK_MAX_WAIT_SECONDS, min(seconds, MAX_SUB_TASK_MAX_WAIT_SECONDS))
-
-
 def _error(message: str, *, error_code: str, details: dict[str, Any] | None = None) -> ToolExecutionResult:
     payload: dict[str, Any] = {"ok": False, "error": message, "error_code": error_code}
     if details:
         payload["details"] = details
     return ToolExecutionResult(
         tool_call_id="",
-        status="error",
         status_code=ToolResultStatus.ERROR,
         error_code=error_code,
         content=to_json(payload),
@@ -107,7 +40,6 @@ def _error(message: str, *, error_code: str, details: dict[str, Any] | None = No
 def _success(payload: dict[str, Any]) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
         status_code=ToolResultStatus.SUCCESS,
         content=to_json(payload),
         metadata=payload,
@@ -217,9 +149,7 @@ def _build_status_entry(
 
 def _running_task_ids(tasks: list[dict[str, Any]]) -> list[str]:
     return [
-        str(entry.get("task_id"))
-        for entry in tasks
-        if entry.get("status") in RUNNING_SUB_TASK_STATUSES and entry.get("task_id")
+        str(entry.get("task_id")) for entry in tasks if entry.get("status") in RUNNING_SUB_TASK_STATUSES and entry.get("task_id")
     ]
 
 
@@ -323,8 +253,7 @@ def _add_wait_metadata(
     )
     if wait_exceeded:
         payload["message"] = (
-            "Sub-task(s) are still running after the maximum wait. "
-            "Call sub_task_status again later instead of tight polling."
+            "Sub-task(s) are still running after the maximum wait. Call sub_task_status again later instead of tight polling."
         )
 
 
@@ -350,19 +279,45 @@ def sub_task_status(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
     if not task_ids:
         return _error("`task_ids` must include at least one valid task id", error_code="invalid_task_ids")
 
-    raw_detail_level = arguments.get("detail_level")
-    if "detail_level" in arguments and not isinstance(raw_detail_level, str):
-        return _error("`detail_level` must be a string", error_code="invalid_detail_level")
-    detail_level = _normalize_detail_level(raw_detail_level)
-    workspace_file_limit = _normalize_workspace_file_limit(arguments.get("workspace_file_limit"))
+    detail_level = arguments.get("detail_level", "basic")
+    if not isinstance(detail_level, str) or detail_level not in {"basic", "snapshot"}:
+        return _error("`detail_level` must be `basic` or `snapshot`", error_code="invalid_tool_arguments")
+
+    workspace_file_limit = arguments.get("workspace_file_limit", DEFAULT_SUB_TASK_SNAPSHOT_FILE_LIMIT)
+    if (
+        isinstance(workspace_file_limit, bool)
+        or not isinstance(workspace_file_limit, int)
+        or not 1 <= workspace_file_limit <= MAX_SUB_TASK_SNAPSHOT_FILE_LIMIT
+    ):
+        return _error("`workspace_file_limit` must be an integer from 1 to 100", error_code="invalid_tool_arguments")
     raw_message = arguments.get("message")
     if "message" in arguments and not isinstance(raw_message, str):
         return _error("`message` must be a string", error_code="invalid_sub_task_message")
     message = trim_portable_whitespace(raw_message) if raw_message is not None else ""
-    wait_for_response = _coerce_bool(arguments.get("wait_for_response"), default=False)
-    wait_for_completion = _coerce_bool(arguments.get("wait_for_completion"), default=False)
-    check_interval_seconds = _normalize_wait_interval_seconds(arguments.get("check_interval_seconds"))
-    max_wait_seconds = _normalize_max_wait_seconds(arguments.get("max_wait_seconds"))
+    wait_for_response = arguments.get("wait_for_response", False)
+    if not isinstance(wait_for_response, bool):
+        return _error("`wait_for_response` must be a boolean", error_code="invalid_tool_arguments")
+    wait_for_completion = arguments.get("wait_for_completion", False)
+    if not isinstance(wait_for_completion, bool):
+        return _error("`wait_for_completion` must be a boolean", error_code="invalid_tool_arguments")
+
+    check_interval_seconds = arguments.get("check_interval_seconds", DEFAULT_SUB_TASK_WAIT_INTERVAL_SECONDS)
+    if (
+        isinstance(check_interval_seconds, bool)
+        or not isinstance(check_interval_seconds, int)
+        or not MIN_SUB_TASK_WAIT_INTERVAL_SECONDS <= check_interval_seconds <= MAX_SUB_TASK_WAIT_INTERVAL_SECONDS
+    ):
+        return _error("`check_interval_seconds` must be an integer from 30 to 1800", error_code="invalid_tool_arguments")
+
+    max_wait_seconds = arguments.get("max_wait_seconds")
+    if max_wait_seconds is None:
+        max_wait_seconds = DEFAULT_SUB_TASK_MAX_WAIT_SECONDS
+    elif (
+        isinstance(max_wait_seconds, bool)
+        or not isinstance(max_wait_seconds, int)
+        or not MIN_SUB_TASK_MAX_WAIT_SECONDS <= max_wait_seconds <= MAX_SUB_TASK_MAX_WAIT_SECONDS
+    ):
+        return _error("`max_wait_seconds` must be null or an integer from 60 to 86400", error_code="invalid_tool_arguments")
 
     interaction: dict[str, Any] | None = None
     if message:

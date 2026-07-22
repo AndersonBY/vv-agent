@@ -607,7 +607,6 @@ Protocol:
 - Items omitted from the new array are removed.
 - Missing `id` values are generated automatically as short stable ids.
 - Each item must include `title`, `status`, and `priority`.
-- Missing status defaults to `pending`; missing priority defaults to `medium` at runtime for runtime tolerance.
 - Only one item may have `status=in_progress`.
 
 When to use:
@@ -615,7 +614,7 @@ When to use:
 - Make progress state explicit before delegating, running long commands, or switching from investigation to edits.
 
 Returns:
-- The normalized TODO list with generated ids/defaults and validation errors when statuses conflict.
+- The current TODO list with generated ids, timestamps, and validation errors when statuses conflict.
 
 Use this tool to keep task planning explicit and machine-readable.""",
             "parameters": {
@@ -800,12 +799,13 @@ Execution:
 - `wait_for_completion=true` (default): wait for result(s) and return final payload. Batch mode may run requests through the \
 runtime execution backend in parallel and returns a summary plus one result per task.
 - `wait_for_completion=false`: start background sub-task(s) and return `task_id` / `task_ids` for later polling.
-- Batch payloads can include partial failures; inspect the summary and each result before deciding whether the parent task \
-can continue.
+- After a schema-valid batch is accepted, individual child executions or background submissions can still fail; inspect each \
+runtime result before deciding whether the parent task can continue.
 
 Result handling:
 - For synchronous runs, read every returned result and error entry before using the child output.
-- Treat partial failures as unresolved work unless the failed child was optional or its failure is itself the required evidence.
+- Treat runtime partial failures as unresolved work unless the failed child was optional or its failure is itself the required \
+evidence.
 - For background runs, preserve the returned task ids and use `sub_task_status` later to inspect progress, fetch results, or \
 send follow-up messages.""",
             "parameters": {
@@ -835,6 +835,7 @@ send follow-up messages.""",
                     },
                     "tasks": {
                         "type": "array",
+                        "minItems": 1,
                         "description": (
                             "Batch mode: multiple independent tasks for the same sub-agent. Use when parallel "
                             "work can be safely delegated without shared mutable state or ordering dependencies."
@@ -924,6 +925,7 @@ Snapshot use:
                 "properties": {
                     "task_ids": {
                         "type": "array",
+                        "minItems": 1,
                         "description": (
                             "Sub-task ids to query. Use the ids returned by `create_sub_task`; duplicate ids "
                             "are deduplicated. When `message` is provided, only the first id is used as the target."

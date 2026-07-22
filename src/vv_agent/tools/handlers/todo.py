@@ -6,7 +6,7 @@ from typing import Any
 
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import get_todo_list, is_string_keyed_dict, to_json
-from vv_agent.types import ToolExecutionResult
+from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 _ALLOWED_STATUS = {"pending", "in_progress", "completed"}
 _ALLOWED_PRIORITY = {"low", "medium", "high"}
@@ -15,7 +15,7 @@ _ALLOWED_PRIORITY = {"low", "medium", "high"}
 def _error(message: str, *, error_code: str) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_call_id="",
-        status="error",
+        status_code=ToolResultStatus.ERROR,
         error_code=error_code,
         content=to_json({"error": message, "error_code": error_code}),
     )
@@ -101,7 +101,7 @@ def todo_write(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json(result),
     )
 
@@ -112,6 +112,6 @@ def todo_read(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
     result = {"action": "read", "todos": todos, "count": len(todos)}
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json(result),
     )

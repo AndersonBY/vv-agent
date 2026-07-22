@@ -85,7 +85,8 @@ class ToolCallRunner:
             checkpoint_plan = None
             if isinstance(checkpoint_controller, CheckpointResumeController):
                 try:
-                    idempotency = self.tool_registry.tool_idempotency(patched_call.name)
+                    metadata = self.tool_registry.tool_metadata(patched_call.name)
+                    idempotency = metadata.idempotency if metadata is not None else ToolIdempotency.UNKNOWN
                 except Exception:
                     idempotency = ToolIdempotency.UNKNOWN
                 if not isinstance(idempotency, ToolIdempotency):
@@ -192,12 +193,12 @@ class ToolCallRunner:
                 )
                 return final_result
 
-            event_sink = ctx.metadata.get("_vv_agent_emit_event") if ctx is not None else None
+            event_sink = ctx.event_handler if ctx is not None else None
             result = self.tool_orchestrator.run_one(
                 patched_call,
                 context=call_context,
                 allowed_tool_names=allowed_tool_names,
-                event_sink=event_sink if callable(event_sink) else None,
+                event_sink=event_sink,
                 _precomputed_result=precomputed_result,
                 _result_finalizer=finalize_result,
             )
@@ -331,7 +332,6 @@ class ToolCallRunner:
     ) -> ToolExecutionResult:
         return ToolExecutionResult(
             tool_call_id=call.id,
-            status="error",
             status_code=ToolResultStatus.ERROR,
             error_code=error_code,
             content=json.dumps(

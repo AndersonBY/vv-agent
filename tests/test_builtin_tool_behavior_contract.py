@@ -19,11 +19,11 @@ from vv_agent.constants import (
 from vv_agent.prompt import build_system_prompt
 from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.tool_planner import plan_tool_schemas
-from vv_agent.tools import RegistryToolExecutor, ToolContext, ToolExposure, build_default_registry
+from vv_agent.tools import RegistryToolExecutor, ToolContext, ToolExposure, ToolRegistry, build_default_registry
 from vv_agent.types import AgentTask, ToolCall, ToolExecutionResult
 from vv_agent.workspace import LocalWorkspaceBackend
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures/parity/builtin_tool_behavior_v1.json"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures/parity/builtin_tool_behavior.json"
 _FIXTURE: dict[str, Any] = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
@@ -38,13 +38,13 @@ def _context(tmp_path: Path) -> ToolContext:
 
 def _assert_result(result: ToolExecutionResult, expected: dict[str, Any]) -> None:
     wire = result.to_dict()
-    for key in ("status", "status_code", "directive"):
+    for key in ("status_code", "directive"):
         assert wire[key] == expected[key]
     assert wire.get("error_code") == expected.get("error_code")
     assert json.loads(result.content) == expected["content"]
     assert result.metadata == expected["metadata"]
 
-    if expected["status"] == "error":
+    if expected["status_code"] == "ERROR":
         required = set(_FIXTURE["canonical"]["error_content_required_keys"])
         assert required <= set(json.loads(result.content))
 
@@ -62,6 +62,29 @@ def _execute(
         ToolCall(id=f"fixture-{tool_name}", name=tool_name, arguments=arguments),
         context,
     )
+
+
+def test_fixture_drives_schema_validation_before_handler_execution(tmp_path: Path) -> None:
+    case = _FIXTURE["tools"]["schema_validation"]
+    calls = 0
+
+    def handler(_context: ToolContext, _arguments: dict[str, Any]) -> ToolExecutionResult:
+        nonlocal calls
+        calls += 1
+        return ToolExecutionResult(tool_call_id="", content="{}")
+
+    registry = ToolRegistry()
+    registry.register_tool(
+        "schema_validation",
+        handler,
+        "Validate fixture arguments.",
+        case["schema"],
+    )
+
+    result = _execute(registry, _context(tmp_path), "schema_validation", case["invalid_arguments"])
+
+    _assert_result(result, case["result"])
+    assert calls == 0
 
 
 def test_fixture_drives_prompt_registry_dynamic_hint_and_projection(tmp_path: Path) -> None:
@@ -201,7 +224,7 @@ def test_fixture_drives_bash_and_background_command_contract(tmp_path: Path) -> 
     result = _execute(registry, context, BASH_TOOL_NAME, background["arguments"])
     wire = result.to_dict()
     expected = background["result"]
-    for key in ("status", "status_code", "directive"):
+    for key in ("status_code", "directive"):
         assert wire[key] == expected[key]
     content = json.loads(result.content)
     for key, value in expected["content_subset"].items():

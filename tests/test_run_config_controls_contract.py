@@ -6,7 +6,7 @@ from pathlib import Path
 
 from vv_agent import RunConfig
 
-FIXTURE = Path("tests/fixtures/parity/run_config_controls_v1.json")
+FIXTURE = Path("tests/fixtures/parity/run_config_controls.json")
 
 
 def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() -> None:
@@ -48,7 +48,6 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "initial_state",
         "cycle_injection",
         "sub_task_manager",
-        "raw_runtime_observers",
         "diagnostics",
     }
 
@@ -88,8 +87,6 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "before_cycle_messages",
         "interruption_messages",
         "sub_task_manager",
-        "runtime_log_handler",
-        "runtime_stream_callback",
         "log_preview_chars",
         "debug_dump_dir",
     } <= public_fields

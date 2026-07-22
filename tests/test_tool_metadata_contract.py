@@ -13,18 +13,17 @@ from vv_agent import (
     RunConfig,
     Runner,
     ToolContext,
-    ToolIdempotency,
     ToolMetadata,
     ToolOutputText,
     ToolPolicy,
     function_tool,
 )
-from vv_agent.llm import ScriptedLLM
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import LLMResponse, ToolCall, ToolDirective, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "tool_metadata_v1.json"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "tool_metadata.json"
 with _FIXTURE_PATH.open(encoding="utf-8") as fixture_file:
     _CONTRACT: dict[str, Any] = json.load(fixture_file)
 
@@ -38,13 +37,11 @@ def _implementation() -> str:
 def _build_tool(
     *,
     tool_metadata: ToolMetadata | dict[str, Any] | None = None,
-    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN,
 ) -> FunctionTool:
     return function_tool(
         _implementation,
         name=_TOOL_NAME,
         description="Fixture-backed tool metadata producer.",
-        idempotency=idempotency,
         tool_metadata=tool_metadata,
     )
 
@@ -151,34 +148,6 @@ def test_public_producers_reject_generated_invalid_cases(case: dict[str, Any]) -
 
 @pytest.mark.parametrize(
     "case",
-    _CONTRACT["legacy_idempotency"]["cases"],
-    ids=lambda case: case["name"],
-)
-def test_function_tool_consumes_legacy_idempotency_cases(case: dict[str, Any]) -> None:
-    legacy = ToolIdempotency(case["legacy"])
-    typed = deepcopy(case["typed"])
-
-    if not case["valid"]:
-        with pytest.raises(ValueError, match=str(case["error_code"])):
-            _build_tool(tool_metadata=typed, idempotency=legacy)
-        return
-
-    tool = _build_tool(tool_metadata=typed, idempotency=legacy)
-
-    assert tool.idempotency.value == case["expected_effective"]
-    assert tool.idempotency.value == case["expected_run_definition_idempotency"]
-    assert _tool_metadata_dict(tool) == case["expected_run_definition_tool_metadata"]
-
-    normalized_again = _build_tool(
-        tool_metadata=tool.tool_metadata,
-        idempotency=tool.idempotency,
-    )
-    assert normalized_again.idempotency == tool.idempotency
-    assert _tool_metadata_dict(normalized_again) == _tool_metadata_dict(tool)
-
-
-@pytest.mark.parametrize(
-    "case",
     _CONTRACT["policy_cases"],
     ids=lambda case: case["name"],
 )
@@ -202,16 +171,19 @@ def test_runner_consumes_tool_policy_cases(case: dict[str, Any], tmp_path: Path)
     agent = Agent(
         name="fixture-agent",
         instructions="Call the fixture tool.",
-        model=ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="",
-                    tool_calls=[ToolCall(id="fixture-call", name=_TOOL_NAME, arguments={})],
-                )
-            ]
-        ),
+        model="fixture-model",
         tools=[tool],
         tool_use_behavior="stop_on_first_tool",
+    )
+    model_provider = ScriptedModelProvider.from_steps(
+        "test",
+        "fixture-model",
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="fixture-call", name=_TOOL_NAME, arguments={})],
+            )
+        ],
     )
 
     result = Runner.run_sync(
@@ -219,6 +191,7 @@ def test_runner_consumes_tool_policy_cases(case: dict[str, Any], tmp_path: Path)
         "run the fixture case",
         run_config=RunConfig(
             workspace=tmp_path,
+            model_provider=model_provider,
             max_cycles=1,
             tool_policy=policy,
         ),

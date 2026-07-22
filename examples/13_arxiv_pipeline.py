@@ -35,16 +35,16 @@ def main() -> None:
     agent = Agent(
         name="paper-analyst",
         instructions="Search papers, write a short Chinese summary, save it, then call task_finish.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[search_arxiv, save_report],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         max_cycles=8,
     )
-    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "Find three papers about agent memory and save a report.")
+    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Find three papers about agent memory and save a report.")
     result = Runner.run_sync(agent, prompt, run_config=config)
     print(result.final_output)
 

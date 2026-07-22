@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import html
 from pathlib import Path
-from typing import Any
 
-from vv_agent.skills.normalize import SkillEntry, normalize_skill_list
+from vv_agent.skills.normalize import SkillEntry
 from vv_agent.skills.parser import find_skill_md, read_properties
 
 MAX_SKILLS_PROMPT_CHARS = 8000
@@ -96,15 +95,3 @@ def to_available_skills_xml(skill_dirs: list[Path]) -> str:
         lines.append(skill_entry_to_xml(entry))
     lines.append("</available_skills>")
     return "\n".join(lines)
-
-
-def metadata_to_prompt_entries(
-    available_skills: list[dict[str, Any] | str],
-    *,
-    workspace: Path | None = None,
-) -> list[SkillEntry]:
-    """Normalize runtime skill metadata into prompt-friendly entries.
-
-    Thin wrapper around :func:`normalize_skill_list` for backward compatibility.
-    """
-    return normalize_skill_list(available_skills, workspace=workspace)

@@ -17,7 +17,7 @@ from vv_agent.app_server.schema import (
 
 
 def _observable_contract() -> dict[str, Any]:
-    fixture = Path(__file__).parent / "fixtures" / "parity" / "app_server_observable_v1.json"
+    fixture = Path(__file__).parent / "fixtures" / "parity" / "app_server_observable.json"
     return json.loads(fixture.read_text(encoding="utf-8"))
 
 

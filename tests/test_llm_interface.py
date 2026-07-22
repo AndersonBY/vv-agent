@@ -14,7 +14,7 @@ from vv_llm.types.llm_parameters import Usage
 
 from vv_agent import constants as constants_module
 from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
-from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient
+from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 from vv_agent.model_settings import ModelSettings, RetrySettings, ToolChoice
 from vv_agent.runtime.token_usage import normalize_token_usage
 from vv_agent.types import Message
@@ -75,9 +75,9 @@ def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
-    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    monkeypatch.setattr(VvLlmClient, "_should_use_stream", staticmethod(lambda model: False))
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(endpoint_id="first", api_key="k1", api_base="https://first.example/v1"),
             EndpointTarget(endpoint_id="second", api_key="k2", api_base="https://second.example/v1"),
@@ -120,12 +120,12 @@ def test_llm_bridge_preserves_provider_reported_zero_cache_usage(monkeypatch) ->
         _passthrough_format_messages,
     )
     monkeypatch.setattr(
-        VVLlmClient,
+        VvLlmClient,
         "_should_use_stream",
         staticmethod(lambda model: False),
     )
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="moonshot",
@@ -148,7 +148,7 @@ def test_llm_bridge_preserves_provider_reported_zero_cache_usage(monkeypatch) ->
         usage_source=response.raw["usage_source"],
     )
     assert response.raw["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
-    assert normalized.cache_usage.read_tokens == 0
+    assert normalized.cache_usage.read_input_tokens == 0
     assert normalized.cache_usage.uncached_input_tokens == 11
     assert normalized.usage_source.value == "provider_reported"
 
@@ -170,8 +170,8 @@ def test_llm_retries_transient_status_on_the_same_endpoint(monkeypatch) -> None:
     _FakeChatClient.seen_calls = []
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
-    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
-    llm = VVLlmClient(
+    monkeypatch.setattr(VvLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    llm = VvLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="first", api_key="k", api_base="https://first.example/v1")],
         randomize_endpoints=False,
         max_retries_per_endpoint=2,
@@ -198,8 +198,8 @@ def test_llm_auth_status_fails_over_without_same_endpoint_retry(monkeypatch) -> 
     _FakeChatClient.seen_calls = []
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
-    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
-    llm = VVLlmClient(
+    monkeypatch.setattr(VvLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(endpoint_id="first", api_key="bad", api_base="https://first.example/v1"),
             EndpointTarget(endpoint_id="second", api_key="good", api_base="https://second.example/v1"),
@@ -232,8 +232,8 @@ def test_llm_aborts_non_retryable_errors_without_failover(monkeypatch, failure: 
     _FakeChatClient.seen_calls = []
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
-    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
-    llm = VVLlmClient(
+    monkeypatch.setattr(VvLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(endpoint_id="first", api_key="k1", api_base="https://first.example/v1"),
             EndpointTarget(endpoint_id="second", api_key="k2", api_base="https://second.example/v1"),
@@ -288,7 +288,7 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="stream", api_key="k", api_base="https://stream.example/v1")],
         backend="moonshot",
         selected_model="kimi-k2.5",
@@ -346,7 +346,7 @@ def test_llm_stream_emits_tool_call_progress_events(monkeypatch) -> None:
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="stream-events", api_key="k", api_base="https://stream.example/v1")],
         backend="moonshot",
         selected_model="kimi-k2.5",
@@ -408,7 +408,7 @@ def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="stream-reasoning",
@@ -462,7 +462,7 @@ def test_llm_stream_preserves_gemini3_tool_call_extra_content(monkeypatch) -> No
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="gemini-stream",
@@ -485,24 +485,20 @@ def test_llm_stream_preserves_gemini3_tool_call_extra_content(monkeypatch) -> No
 
     assert response.content == "done"
     assert response.tool_calls[0].extra_content == {"google": {"thought_signature": "sig_123"}}
-    assert response.raw["tool_call_extra_content"] == {
-        "tc1": {"google": {"thought_signature": "sig_123"}}
-    }
+    assert response.raw["tool_call_extra_content"] == {"tc1": {"google": {"thought_signature": "sig_123"}}}
 
 
 def test_resolve_request_options_aligns_claude_thinking_profile() -> None:
-    llm = VVLlmClient(endpoint_targets=[])
+    llm = VvLlmClient(endpoint_targets=[])
     options = llm._resolve_request_options("claude-opus-4-7-thinking", stream=True, endpoint_type="openai")
     assert options.model == "claude-opus-4-7"
     assert options.temperature == 1.0
-    assert options.max_tokens == 20000
+    assert options.max_tokens is None
     assert options.thinking == {"type": "enabled", "budget_tokens": 16000}
 
 
 def test_llm_rejects_per_request_extra_headers() -> None:
-    llm = VVLlmClient(
-        endpoint_targets=[EndpointTarget(endpoint_id="demo", api_key="k", api_base="https://example.test/v1")]
-    )
+    llm = VvLlmClient(endpoint_targets=[EndpointTarget(endpoint_id="demo", api_key="k", api_base="https://example.test/v1")])
 
     with pytest.raises(ValueError, match="extra_headers is not supported"):
         llm.complete(
@@ -514,9 +510,7 @@ def test_llm_rejects_per_request_extra_headers() -> None:
 
 
 def test_llm_rejects_per_request_extra_args() -> None:
-    llm = VVLlmClient(
-        endpoint_targets=[EndpointTarget(endpoint_id="demo", api_key="k", api_base="https://example.test/v1")]
-    )
+    llm = VvLlmClient(endpoint_targets=[EndpointTarget(endpoint_id="demo", api_key="k", api_base="https://example.test/v1")])
 
     with pytest.raises(ValueError, match="extra_args is not supported"):
         llm.complete(
@@ -534,12 +528,10 @@ def test_tool_choice_semantics_reach_the_real_provider_request(monkeypatch) -> N
 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
-    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    monkeypatch.setattr(VvLlmClient, "_should_use_stream", staticmethod(lambda model: False))
 
-    llm = VVLlmClient(
-        endpoint_targets=[
-            EndpointTarget(endpoint_id="tool-choice", api_key="k", api_base="https://example.test/v1")
-        ],
+    llm = VvLlmClient(
+        endpoint_targets=[EndpointTarget(endpoint_id="tool-choice", api_key="k", api_base="https://example.test/v1")],
         randomize_endpoints=False,
         max_retries_per_endpoint=1,
         backoff_seconds=0.0,
@@ -582,7 +574,7 @@ def test_tool_choice_semantics_reach_the_real_provider_request(monkeypatch) -> N
 
 
 def test_resolve_request_options_aligns_gemini3_profile() -> None:
-    llm = VVLlmClient(endpoint_targets=[])
+    llm = VvLlmClient(endpoint_targets=[])
     options = llm._resolve_request_options("gemini-3-pro", stream=True, endpoint_type="openai")
     assert options.model == "gemini-3-pro-preview"
     assert options.temperature == 1.0
@@ -600,7 +592,7 @@ def test_resolve_request_options_aligns_gemini3_profile() -> None:
 
 
 def test_request_retry_settings_do_not_leak_into_the_next_request() -> None:
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[],
         max_retries_per_endpoint=3,
         backoff_seconds=2.0,
@@ -630,8 +622,8 @@ def test_provider_timeout_default_and_model_override_reach_the_request(monkeypat
     _FakeChatClient.seen_calls = []
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
-    monkeypatch.setattr(VVLlmClient, "_should_use_stream", staticmethod(lambda model: False))
-    llm = VVLlmClient(
+    monkeypatch.setattr(VvLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+    llm = VvLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="timeout", api_key="k", api_base="https://example.test/v1")],
         timeout_seconds=12.5,
         randomize_endpoints=False,
@@ -669,7 +661,7 @@ def test_llm_stream_request_payload_aligns_qwen_thinking(monkeypatch) -> None:
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="qwen", api_key="k", api_base="https://qwen.example/v1")],
         backend="qwen",
         selected_model="qwen3-32b-thinking",
@@ -684,7 +676,7 @@ def test_llm_stream_request_payload_aligns_qwen_thinking(monkeypatch) -> None:
 
 def test_tool_call_incremental_uses_qwen_endpoint_prefix_for_new_models() -> None:
     assert (
-        VVLlmClient._tool_call_incremental_enabled(
+        VvLlmClient._tool_call_incremental_enabled(
             model="qwen-next-custom",
             endpoint_type="qwen",
         )
@@ -731,7 +723,7 @@ def test_llm_stream_aggregates_tool_calls_without_index(monkeypatch) -> None:
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="missing-index",
@@ -757,7 +749,7 @@ def test_prepare_messages_for_minimax_converts_extra_system_messages() -> None:
         {"role": "assistant", "content": "next"},
     ]
 
-    prepared = VVLlmClient._prepare_messages_for_model(cast(list[ChatCompletionMessageParam], messages), "MiniMax-M2.5")
+    prepared = VvLlmClient._prepare_messages_for_model(cast(list[ChatCompletionMessageParam], messages), "MiniMax-M2.5")
     assert prepared[0]["role"] == "system"
     assert prepared[1]["role"] == "user"
     assert prepared[1]["content"] == "[memory_summary]\nsummary"
@@ -770,7 +762,7 @@ def test_prepare_messages_for_lowercase_minimax_converts_extra_system_messages()
         {"role": "system", "name": "memory_summary", "content": "summary"},
     ]
 
-    prepared = VVLlmClient._prepare_messages_for_model(
+    prepared = VvLlmClient._prepare_messages_for_model(
         cast(list[ChatCompletionMessageParam], messages),
         "minimax-m2.5",
     )
@@ -784,7 +776,7 @@ def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
         {"role": "system", "content": "base system"},
         {"role": "system", "name": "memory_summary", "content": "summary"},
     ]
-    prepared = VVLlmClient._prepare_messages_for_model(
+    prepared = VvLlmClient._prepare_messages_for_model(
         cast(list[ChatCompletionMessageParam], messages),
         "kimi-k2.5",
     )
@@ -793,14 +785,14 @@ def test_prepare_messages_for_non_minimax_keeps_multi_system_messages() -> None:
 
 
 def test_should_use_stream_defaults_all_models_to_stream() -> None:
-    assert VVLlmClient._should_use_stream("MiniMax-M2.5") is True
-    assert VVLlmClient._should_use_stream("deepseek-v5-pro") is True
-    assert VVLlmClient._should_use_stream("gpt-4o") is True
-    assert VVLlmClient._should_use_stream("custom-enterprise-model") is True
+    assert VvLlmClient._should_use_stream("MiniMax-M2.5") is True
+    assert VvLlmClient._should_use_stream("deepseek-v5-pro") is True
+    assert VvLlmClient._should_use_stream("gpt-4o") is True
+    assert VvLlmClient._should_use_stream("custom-enterprise-model") is True
 
 
 def test_vv_llm_request_options_apply_public_model_settings() -> None:
-    llm = VVLlmClient(endpoint_targets=[], backend="openai", selected_model="gpt-4o")
+    llm = VvLlmClient(endpoint_targets=[], backend="openai", selected_model="gpt-4o")
 
     options = llm._resolve_request_options(
         "gpt-4o",
@@ -826,7 +818,7 @@ def test_vv_llm_request_options_apply_public_model_settings() -> None:
 
 
 def test_deepseek_provider_defaults_new_models_to_reasoning_options() -> None:
-    llm = VVLlmClient(endpoint_targets=[], backend="deepseek", selected_model="deepseek-v5-pro")
+    llm = VvLlmClient(endpoint_targets=[], backend="deepseek", selected_model="deepseek-v5-pro")
 
     options = llm._resolve_request_options(
         "deepseek-v5-pro",
@@ -841,7 +833,7 @@ def test_deepseek_provider_defaults_new_models_to_reasoning_options() -> None:
 
 
 def test_kimi_k3_request_options_enforce_provider_profile_after_public_settings() -> None:
-    llm = VVLlmClient(endpoint_targets=[], backend="moonshot", selected_model="kimi-k3")
+    llm = VvLlmClient(endpoint_targets=[], backend="moonshot", selected_model="kimi-k3")
 
     options = llm._resolve_request_options(
         "kimi-k3",
@@ -877,13 +869,13 @@ def test_kimi_k3_request_options_enforce_provider_profile_after_public_settings(
 
 
 def test_minimax_provider_defaults_new_models_to_reasoning_chain() -> None:
-    llm = VVLlmClient(endpoint_targets=[], backend="minimax", selected_model="minimax-m3")
+    llm = VvLlmClient(endpoint_targets=[], backend="minimax", selected_model="minimax-m3")
 
     assert llm._should_preserve_reasoning_chain("minimax-m3") is True
 
 
 def test_build_message_payload_keeps_reasoning_only_for_last_assistant_by_default() -> None:
-    llm = VVLlmClient(endpoint_targets=[], backend="openai", selected_model="gpt-4o")
+    llm = VvLlmClient(endpoint_targets=[], backend="openai", selected_model="gpt-4o")
     payload = llm._build_message_payload(
         [
             Message(role="system", content="sys"),
@@ -901,7 +893,7 @@ def test_build_message_payload_keeps_reasoning_only_for_last_assistant_by_defaul
 
 
 def test_build_message_payload_preserves_reasoning_chain_for_reasoning_models() -> None:
-    llm = VVLlmClient(endpoint_targets=[], backend="moonshot", selected_model="kimi-k2.5")
+    llm = VvLlmClient(endpoint_targets=[], backend="moonshot", selected_model="kimi-k2.5")
     payload = llm._build_message_payload(
         [
             Message(role="system", content="sys"),
@@ -938,7 +930,7 @@ def test_deepseek_request_preserves_reasoning_for_all_assistant_turns(monkeypatc
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="deepseek-default", api_key="k", api_base="https://deepseek.example/v1")],
         backend="deepseek",
         selected_model="deepseek-v5-pro",
@@ -980,7 +972,7 @@ def test_moonshot_provider_defaults_new_models_to_reasoning_chain(monkeypatch) -
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="moonshot-new-reasoning",
@@ -1032,7 +1024,7 @@ def test_kimi_k3_real_request_uses_fixed_profile_and_completion_limit(monkeypatc
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="moonshot-k3-profile",
@@ -1083,7 +1075,7 @@ def test_moonshot_request_preserves_reasoning_for_all_assistant_turns(monkeypatc
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="moonshot-reasoning",
@@ -1122,7 +1114,7 @@ def test_llm_estimates_usage_when_backend_missing_usage(monkeypatch) -> None:
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.get_token_counts", lambda text, model, use_token_server_first=False: 10)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[EndpointTarget(endpoint_id="usage-missing", api_key="k", api_base="https://u.example/v1")],
         backend="openai",
         selected_model="gpt-4o-mini",
@@ -1171,7 +1163,7 @@ def test_llm_stream_collects_raw_content_blocks(monkeypatch) -> None:
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="stream-raw-content",
@@ -1205,7 +1197,7 @@ def test_llm_debug_dump_writes_request_messages(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="dump-endpoint",
@@ -1251,7 +1243,7 @@ def test_claude_direct_request_adds_explicit_breakpoints(monkeypatch) -> None:
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
     monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
 
-    llm = VVLlmClient(
+    llm = VvLlmClient(
         endpoint_targets=[
             EndpointTarget(
                 endpoint_id="anthropic-direct",
@@ -1356,7 +1348,7 @@ def test_apply_claude_prompt_cache_uses_sonnet_4_6_threshold() -> None:
         messages=[
             {
                 "role": "system",
-                    "content": "stable system " * 350,
+                "content": "stable system " * 350,
             },
             {
                 "role": "user",

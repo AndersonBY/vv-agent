@@ -107,16 +107,11 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
             "toolName": event.tool_name,
             "toolCallId": event.tool_call_id,
             "status": event.status,
+            "directive": event.directive,
+            "errorCode": event.error_code,
+            "executionStarted": event.execution_started,
+            "durationMs": event.duration_ms,
         }
-        additive_fields = {
-            "directive": "directive",
-            "error_code": "errorCode",
-            "execution_started": "executionStarted",
-            "duration_ms": "durationMs",
-        }
-        for event_field, payload_field in additive_fields.items():
-            if event.has_additive_field(event_field):
-                payload[payload_field] = getattr(event, event_field)
         tool_metadata = _tool_metadata_payload(event.tool_metadata)
         if tool_metadata is not None:
             payload["toolMetadata"] = tool_metadata
@@ -163,13 +158,8 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
             ),
         )
     if isinstance(event, ApprovalResolvedEvent):
-        action = event.action
-        if action is None:
-            action = ApprovalDecision.ALLOW.value if event.approved else ApprovalDecision.DENY.value
-        try:
-            decision = ApprovalDecision.from_wire(action)
-        except ValueError:
-            decision = ApprovalDecision.ALLOW if event.approved else ApprovalDecision.DENY
+        decision = ApprovalDecision.from_wire(event.action)
+        approved = decision in {ApprovalDecision.ALLOW, ApprovalDecision.ALLOW_SESSION}
         reason = str(event.metadata.get("reason") or "")
         decision_metadata = dict(event.metadata.get("decision_metadata") or {})
         item = _item(
@@ -183,7 +173,7 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
                 "toolName": event.tool_name,
                 "toolCallId": event.tool_call_id,
                 "action": decision.value,
-                "approved": event.approved,
+                "approved": approved,
                 "reason": reason,
                 "decisionMetadata": decision_metadata,
             },

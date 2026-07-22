@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -9,8 +8,7 @@ from vv_agent.memory import MemoryManager, MicrocompactConfig, SessionMemory, Se
 from vv_agent.memory.token_utils import count_messages_tokens, count_tokens
 from vv_agent.types import Message
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "memory_local_v1.json"
-_FIXTURE_SHA256 = "6194162f72b99e37b371869493088a3d92bcfbd1397f41b84aea503331e0db6d"
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "memory_local.json"
 _CONTRACT: dict[str, Any] = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
@@ -54,9 +52,6 @@ def _first_json_object(text: str) -> dict[str, Any]:
 
 
 def test_memory_local_fixture_identity_and_fields() -> None:
-    fixture_bytes = _FIXTURE_PATH.read_bytes()
-
-    assert hashlib.sha256(fixture_bytes).hexdigest() == _FIXTURE_SHA256
     assert set(_CONTRACT) == {
         "contract",
         "character_unit",
@@ -70,7 +65,7 @@ def test_memory_local_fixture_identity_and_fields() -> None:
         "session_extraction",
         "summary_parse",
     }
-    assert _CONTRACT["contract"] == "memory_local_v1"
+    assert _CONTRACT["contract"] == "memory_local"
     assert _CONTRACT["character_unit"] == "unicode_code_point"
 
 
@@ -150,11 +145,7 @@ def test_memory_local_session_prompt_truncation_matches_fixture() -> None:
 
         expected_content = original
         if len(original) > int(contract["limit_chars"]):
-            expected_content = (
-                unit * int(contract["head_chars"])
-                + str(contract["notice"])
-                + unit * int(contract["tail_chars"])
-            )
+            expected_content = unit * int(contract["head_chars"]) + str(contract["notice"]) + unit * int(contract["tail_chars"])
         assert content == expected_content
         actual_cases.append(
             {

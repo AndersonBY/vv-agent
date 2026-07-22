@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+from support import FixedModelProvider
+
 from vv_agent import Agent, RunConfig, Runner, ToolPolicy, build_default_registry, function_tool
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import (
@@ -67,16 +69,12 @@ def test_tool_policy_allowed_tools_filters_default_and_custom_tool_schemas(tmp_p
 
     llm = CapturingLLM()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved()
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Use tools.", model="m", tools=[allowed, secret]),
         "go",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved()),
             tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "allowed"]),
         ),
     )
@@ -93,16 +91,12 @@ def test_tool_policy_disallowed_tools_filters_custom_tool_schema(tmp_path: Path)
 
     llm = CapturingLLM()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved()
-
     Runner.run_sync(
         Agent(name="assistant", instructions="Use tools.", model="m", tools=[blocked]),
         "go",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved()),
             tool_policy=ToolPolicy(disallowed_tools=["blocked"]),
         ),
     )
@@ -113,16 +107,12 @@ def test_tool_policy_disallowed_tools_filters_custom_tool_schema(tmp_path: Path)
 def test_default_registry_factory_does_not_expose_gated_tools_for_plain_agent(tmp_path: Path) -> None:
     llm = CapturingLLM()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved()
-
     Runner.run_sync(
         Agent(name="assistant", instructions="Use tools.", model="m"),
         "go",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved()),
             tool_registry_factory=build_default_registry,
         ),
     )
@@ -133,22 +123,18 @@ def test_default_registry_factory_does_not_expose_gated_tools_for_plain_agent(tm
 
 
 def test_tool_policy_disallowed_default_tool_cannot_execute_even_if_model_calls_it(tmp_path: Path) -> None:
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            CapturingLLMWithToolCall(
-                WRITE_FILE_TOOL_NAME,
-                {"path": "secret.txt", "content": "leak"},
-            ),
-            _resolved(),
-        )
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Use tools.", model="m"),
         "write",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(
+                CapturingLLMWithToolCall(
+                    WRITE_FILE_TOOL_NAME,
+                    {"path": "secret.txt", "content": "leak"},
+                ),
+                _resolved(),
+            ),
             tool_policy=ToolPolicy(disallowed_tools=[WRITE_FILE_TOOL_NAME]),
         ),
     )
@@ -160,16 +146,12 @@ def test_tool_policy_disallowed_default_tool_cannot_execute_even_if_model_calls_
 def test_tool_policy_allowed_tools_can_expose_edit_file_schema(tmp_path: Path) -> None:
     llm = CapturingLLM()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved()
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Use tools.", model="m"),
         "edit",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved()),
             tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, EDIT_FILE_TOOL_NAME]),
         ),
     )
@@ -181,16 +163,12 @@ def test_tool_policy_allowed_tools_can_expose_edit_file_schema(tmp_path: Path) -
 def test_tool_policy_disallowed_tools_can_hide_edit_file_schema(tmp_path: Path) -> None:
     llm = CapturingLLM()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved()
-
     Runner.run_sync(
         Agent(name="assistant", instructions="Use tools.", model="m"),
         "edit",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved()),
             tool_policy=ToolPolicy(disallowed_tools=[EDIT_FILE_TOOL_NAME]),
         ),
     )
@@ -211,19 +189,15 @@ def test_tool_policy_can_use_tool_blocks_executor_registered_tool(tmp_path: Path
         registry.register_executor(registered_executor.to_executor())
         return registry
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            CapturingLLMWithToolCall("registered_executor", {"path": "secret.txt"}),
-            _resolved(),
-        )
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Use tools.", model="m"),
         "run",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(
+                CapturingLLMWithToolCall("registered_executor", {"path": "secret.txt"}),
+                _resolved(),
+            ),
             tool_registry_factory=registry_factory,
             tool_policy=ToolPolicy(can_use_tool=lambda name, args: False),
         ),
@@ -249,16 +223,12 @@ def test_empty_actual_schema_plan_rejects_forced_runtime_tool_call(tmp_path: Pat
         )
         return registry
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return CapturingLLMWithToolCall("runtime_only", {}), _resolved()
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Do not expose tools.", model="m"),
         "run",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(CapturingLLMWithToolCall("runtime_only", {}), _resolved()),
             tool_registry_factory=registry_factory,
             max_cycles=1,
             tool_policy=ToolPolicy(allowed_tools=[]),
@@ -278,14 +248,10 @@ def test_function_tool_is_enabled_false_hides_schema(tmp_path: Path) -> None:
 
     llm = CapturingLLM()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved()
-
     Runner.run_sync(
         Agent(name="assistant", instructions="Use tools.", model="m", tools=[disabled]),
         "go",
-        run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
+        run_config=RunConfig(workspace=tmp_path, model_provider=FixedModelProvider(llm, _resolved())),
     )
 
     assert "disabled" not in llm.tool_names
@@ -301,13 +267,6 @@ def test_tool_policy_can_use_tool_blocks_invocation_with_arguments(tmp_path: Pat
         invoked = True
         return f"deleted {path}"
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            CapturingLLMWithToolCall("delete_file", {"path": "secrets.txt"}),
-            _resolved(),
-        )
-
     result = Runner.run_sync(
         Agent(
             name="assistant",
@@ -319,11 +278,13 @@ def test_tool_policy_can_use_tool_blocks_invocation_with_arguments(tmp_path: Pat
         "delete",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(
+                CapturingLLMWithToolCall("delete_file", {"path": "secrets.txt"}),
+                _resolved(),
+            ),
             max_cycles=1,
             tool_policy=ToolPolicy(
-                can_use_tool=lambda tool_name, arguments: tool_name != "delete_file"
-                or arguments.get("path") != "secrets.txt"
+                can_use_tool=lambda tool_name, arguments: tool_name != "delete_file" or arguments.get("path") != "secrets.txt"
             ),
         ),
     )
@@ -344,10 +305,6 @@ def test_tool_policy_denial_happens_before_function_tool_approval(tmp_path: Path
         invoked = True
         return "ran"
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return CapturingLLMWithToolCall("destructive_action", {}), _resolved()
-
     result = Runner.run_sync(
         Agent(
             name="assistant",
@@ -358,7 +315,7 @@ def test_tool_policy_denial_happens_before_function_tool_approval(tmp_path: Path
         "run",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(CapturingLLMWithToolCall("destructive_action", {}), _resolved()),
             max_cycles=1,
             tool_policy=ToolPolicy(can_use_tool=lambda name, arguments: False),
         ),

@@ -10,7 +10,7 @@ from vv_agent.constants import (
     WRITE_FILE_TOOL_NAME,
 )
 from vv_agent.tools import ToolContext, build_default_registry
-from vv_agent.types import ToolCall, ToolDirective
+from vv_agent.types import ToolCall, ToolDirective, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
 
 
@@ -35,7 +35,7 @@ def test_read_file_counts_unicode_characters_and_preserves_result_contract(tmp_p
     result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "cjk.txt"})
     payload = json.loads(result.content)
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.directive == ToolDirective.CONTINUE
     assert result.error_code is None
     assert result.metadata == {}
@@ -55,7 +55,7 @@ def test_read_file_too_large_counts_unicode_characters(tmp_path: Path) -> None:
     result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large-cjk.txt"})
     payload = json.loads(result.content)
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.directive == ToolDirective.CONTINUE
     assert result.error_code is None
     assert result.metadata == {}
@@ -70,24 +70,29 @@ def test_read_file_validation_and_not_found_errors_are_structured(tmp_path: Path
 
     missing_path = _execute(registry, context, READ_FILE_TOOL_NAME, {})
     missing_payload = json.loads(missing_path.content)
-    assert missing_path.status == "error"
+    assert missing_path.status_code is ToolResultStatus.ERROR
     assert missing_path.directive == ToolDirective.CONTINUE
-    assert missing_path.error_code == "invalid_arguments"
+    assert missing_path.error_code == "invalid_tool_arguments"
     assert missing_path.metadata == {
-        "error_code": "invalid_arguments",
-        "missing_arguments": ["path"],
+        "error_code": "invalid_tool_arguments",
+        "issue_count": 1,
     }
     assert missing_payload == {
         "ok": False,
-        "error": "`path` is required.",
-        "error_code": "invalid_arguments",
-        "message": "`path` is required.",
-        "missing_arguments": ["path"],
+        "error": "Tool arguments do not match the declared schema",
+        "error_code": "invalid_tool_arguments",
+        "issues": [
+            {
+                "instance_path": "",
+                "rule": "required",
+                "schema_path": "/required",
+            }
+        ],
     }
 
     not_found = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "missing.txt"})
     not_found_payload = json.loads(not_found.content)
-    assert not_found.status == "error"
+    assert not_found.status_code is ToolResultStatus.ERROR
     assert not_found.directive == ToolDirective.CONTINUE
     assert not_found.error_code == "file_not_found"
     assert not_found.metadata == {"error_code": "file_not_found", "path": "missing.txt"}
@@ -107,7 +112,7 @@ def test_write_file_reports_utf8_bytes_and_compatible_unicode_chars(tmp_path: Pa
     )
     payload = json.loads(result.content)
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.directive == ToolDirective.CONTINUE
     assert result.error_code is None
     assert payload["written_bytes"] == 6
@@ -131,18 +136,10 @@ def test_edit_file_returns_real_unified_diff(tmp_path: Path) -> None:
         {"path": "diff.txt", "old_string": "beta", "new_string": "BETTA"},
     )
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.directive == ToolDirective.CONTINUE
     assert result.error_code is None
-    assert result.metadata["diff"] == (
-        "--- diff.txt\n"
-        "+++ diff.txt\n"
-        "@@ -1,3 +1,3 @@\n"
-        " alpha\n"
-        "-beta\n"
-        "+BETTA\n"
-        " gamma\n"
-    )
+    assert result.metadata["diff"] == ("--- diff.txt\n+++ diff.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETTA\n gamma\n")
     assert result.metadata["diff_truncated"] is False
     assert result.metadata["additions"] == 1
     assert result.metadata["deletions"] == 1
@@ -163,7 +160,7 @@ def test_edit_file_truncates_large_cjk_diff_at_unicode_boundary(tmp_path: Path) 
     )
     diff = result.metadata["diff"]
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.metadata["diff_truncated"] is True
     assert len(diff) == 12_000
     assert len(diff.encode("utf-8")) > 12_000
@@ -187,7 +184,7 @@ def test_read_and_edit_preserve_utf8_bom_and_crlf(tmp_path: Path) -> None:
         {"path": "bom-crlf.txt", "old_string": "第二行", "new_string": "更新行"},
     )
 
-    assert edit_result.status == "success"
+    assert edit_result.status_code is ToolResultStatus.SUCCESS
     assert edit_result.metadata["line_ending"] == "crlf"
     assert "\ufeff" not in edit_result.metadata["diff"]
     assert "\r" not in edit_result.metadata["diff"]
@@ -207,7 +204,7 @@ def test_search_files_uses_unicode_output_budget_and_omits_zero_sensitive_count(
         {"pattern": "token", "output_mode": "content"},
     )
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.directive == ToolDirective.CONTINUE
     assert result.error_code is None
     assert result.metadata["content_truncated"] is True

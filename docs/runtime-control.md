@@ -21,11 +21,11 @@ override it.
 session state, cycle/handoff bounds, tool policy and registry construction,
 execution backend, cancellation, approvals, event storage, hooks, tracing,
 context/memory providers, initial messages/shared state, before-cycle and
-interruption injection, sub-task management, raw runtime observers, log
-preview length, and LLM request debug dumps.
+interruption injection, sub-task management, typed event observers, log preview
+length, and LLM request debug dumps.
 
 The cross-language capability manifest is
-`tests/fixtures/parity/run_config_controls_v1.json`. Python field coverage is
+`tests/fixtures/parity/run_config_controls.json`. Python field coverage is
 enforced by `tests/test_run_config_controls_contract.py`; the Rust sibling runs
 the same manifest through an end-to-end control wiring test.
 
@@ -112,10 +112,9 @@ the host wants the grant to span multiple runs in one host session.
 App Server approval requests, client resolution, notifications, and generated
 schemas preserve all four canonical decisions.
 
-`ApprovalResolvedEvent.action` preserves the canonical decision as `allow`,
-`allow_session`, `deny`, or `timeout`. Its `approved` field remains available
-for compatibility and is derived from the action for newly produced events.
-Legacy v1 events containing only `approved` remain readable.
+`ApprovalResolvedEvent.action` is the only decision field and contains one of
+`allow`, `allow_session`, `deny`, or `timeout`. Missing, unknown, or additional
+decision fields are rejected.
 
 ## Session History
 
@@ -132,11 +131,11 @@ once. A callback registered after cancellation is invoked once immediately.
 When a terminal result has already been emitted, a later `RunHandle.cancel()`
 returns `False` and the completed result remains authoritative.
 
-## V1 Event Producers
+## Typed Event Producers
 
 The core Runner emits `run_started` followed by `agent_started`, then
 `cycle_started` and `llm_started` for every cycle. `assistant_delta` is emitted
-only when the model client invokes the real stream callback; the complete
+only when the LLM adapter projects a valid provider stream delta; the complete
 `cycle_llm_response` diagnostic is not projected as a duplicate delta.
 
 Actual tool execution uses a three-event lifecycle after serialized arguments
@@ -166,21 +165,17 @@ checkpoint v2 operation journal.
 
 When a configured session accepts the current turn through `add_items()`, the
 Runner emits `session_persisted`. Run, trace, agent, and session identities are
-captured by Runner and cannot be replaced by model stream payloads or user
-metadata. Tool completion statuses use lowercase wire values such as `success`,
-`error`, and `wait_response`. `event_from_dict()` accepts legacy
-`created_at_ms` input and normalizes it to seconds in `created_at`.
+captured by Runner and cannot be replaced by provider payloads or user metadata.
+Tool completion statuses use lowercase wire values such as `success`, `error`,
+and `wait_response`.
 
-The event wire version remains `v1`. Contract 0.8 writers always include
-`directive`, `error_code`, `execution_started`, and `duration_ms` on newly
-written completed events. Readers still accept older completed events without
-those additive fields and preserve their absence rather than inventing an
-execution fact or duration. An undeclared `tool_metadata` field stays omitted;
-keys inside generic event metadata never fabricate the typed declaration. Thus
-consumers that ignore the additive fields, and runs that leave tool metadata
-and its policy fields disabled, retain their prior behavior.
+The event wire version is `v1`, used as a strict discriminator rather than a
+decoder selector. Current events require their complete field set; readers
+reject missing, stale, unknown, and malformed fields. The public runtime exposes
+only typed `RunEvent` objects. Task-neutral internal observations use
+`DiagnosticEvent(level, code, details)` and cannot replace authoritative
+lifecycle or terminal events.
 
-`tests/fixtures/parity/runner_events_v1.jsonl` is the normalized real-producer
-fixture shared with the Rust SDK. Random event/run ids and timestamps are
-normalized, while implementation-private runtime-log metadata is excluded. The
-event order and stable wire fields come from a real Runner execution.
+`tests/fixtures/parity/run_events.jsonl` is the normalized real-producer
+fixture shared with Rust. Random event/run ids and timestamps are normalized;
+the event order and stable wire fields come from a real Runner execution.

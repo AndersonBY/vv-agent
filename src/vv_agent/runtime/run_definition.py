@@ -8,7 +8,6 @@ from vv_agent.agent import Agent
 from vv_agent.checkpoint import (
     CREDENTIAL_REDACTION_VALUE,
     CheckpointError,
-    ToolIdempotency,
     compute_run_definition_digest,
     utf16_sort_key,
     validate_checkpoint_extension,
@@ -63,8 +62,6 @@ def build_run_definition(
 
     model_settings_payload = model_settings.to_dict()
     transport_timeout = model_settings_payload.pop("timeout_seconds", None)
-    if transport_timeout is None:
-        transport_timeout = run_config.timeout_seconds
 
     _normalize_extra_headers(model_settings_payload)
     provider_slots = list(credential_slots or [])
@@ -160,10 +157,7 @@ def _tool_definitions(
         if not isinstance(name, str) or not registry.has_executor(name):
             continue
         executor = registry.get_executor(name)
-        idempotency = getattr(executor, "idempotency", ToolIdempotency.UNKNOWN)
-        if not isinstance(idempotency, ToolIdempotency):
-            idempotency = ToolIdempotency(idempotency)
-        tool_metadata = getattr(executor, "tool_metadata", None)
+        tool_metadata = executor.tool_metadata
         if tool_metadata is None:
             tool_metadata_payload = None
         else:
@@ -183,7 +177,6 @@ def _tool_definitions(
         definitions.append(
             {
                 "schema": schema,
-                "idempotency": idempotency.value,
                 "tool_metadata": tool_metadata_payload,
                 "timeout_seconds": getattr(executor, "timeout_seconds", None),
                 "approval": approval,
@@ -269,7 +262,6 @@ def _validate_behavior_capability_refs(
         (run_config.approval_provider is not None, "approval_provider"),
         (run_config.host_cost_meter is not None, "host_cost_meter"),
         (run_config.reconciliation_provider is not None, "reconciliation_provider"),
-        (run_config.llm_builder is not None, "llm_builder"),
         (run_config.tool_registry_factory is not None, "tool_registry_factory"),
         (run_config.sub_task_manager is not None, "sub_task_manager"),
         (

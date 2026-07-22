@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.config import build_vv_llm_from_local_settings
 from vv_agent.constants import (
     BASH_TOOL_NAME,
     EDIT_FILE_TOOL_NAME,
@@ -15,10 +15,11 @@ from vv_agent.constants import (
     TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
+from vv_agent.events import RunEvent, ToolCallCompletedEvent
 from vv_agent.prompt import build_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, ToolCall, ToolExecutionResult
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, ToolCall, ToolExecutionResult, ToolResultStatus
 
 pytestmark = pytest.mark.live
 
@@ -33,12 +34,12 @@ class ToolEvent:
 def _live_settings_file() -> Path:
     settings_file = Path(
         os.getenv(
-            "V_AGENT_LOCAL_SETTINGS",
+            "VV_AGENT_LOCAL_SETTINGS",
             Path(__file__).resolve().parents[1] / "local_settings.py",
         )
     )
-    if os.getenv("V_AGENT_RUN_LIVE_TESTS") != "1":
-        pytest.skip("Set V_AGENT_RUN_LIVE_TESTS=1 to run live integration tests")
+    if os.getenv("VV_AGENT_RUN_LIVE_TESTS") != "1":
+        pytest.skip("Set VV_AGENT_RUN_LIVE_TESTS=1 to run live integration tests")
     if not settings_file.exists():
         pytest.skip(f"Live settings file not found: {settings_file}")
     return settings_file
@@ -47,19 +48,17 @@ def _live_settings_file() -> Path:
 def _build_live_runtime(
     workspace: Path,
     *,
-    log_handler: Callable[[str, dict[str, object]], None] | None = None,
+    event_handler: Callable[[RunEvent], None] | None = None,
 ) -> tuple[AgentRuntime, str]:
     settings_file = _live_settings_file()
-    backend = os.getenv("V_AGENT_LIVE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_LIVE_MODEL", "kimi-k2.6")
-    llm, resolved = build_openai_llm_from_local_settings(settings_file, backend=backend, model=model)
+    backend = os.getenv("VV_AGENT_LIVE_BACKEND", "moonshot")
+    model = os.getenv("VV_AGENT_LIVE_MODEL", "kimi-k3")
+    llm, resolved = build_vv_llm_from_local_settings(settings_file, backend=backend, model=model)
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=workspace,
-        log_handler=log_handler,
-        settings_file=settings_file,
-        default_backend=backend,
+        event_handler=event_handler,
         tool_registry_factory=build_default_registry,
     )
     return runtime, resolved.model_id
@@ -130,8 +129,8 @@ def test_live_edit_file_feedback_recovers_when_model_edits_before_read(tmp_path:
     assert WRITE_FILE_TOOL_NAME not in event_names
     assert event_names[:3] == [EDIT_FILE_TOOL_NAME, READ_FILE_TOOL_NAME, EDIT_FILE_TOOL_NAME], event_names
     assert events[0].result.error_code == "file_not_read"
-    assert events[0].result.status == "error"
-    assert events[2].result.status == "success"
+    assert events[0].result.status_code is ToolResultStatus.ERROR
+    assert events[2].result.status_code is ToolResultStatus.SUCCESS
     assert event_names[-1] == TASK_FINISH_TOOL_NAME
 
 
@@ -140,15 +139,15 @@ def test_live_edit_file_feedback_recovers_when_file_changes_after_read(tmp_path:
     target.write_text("alpha\nneedle = stale original\nomega\n", encoding="utf-8")
     state = {"externally_modified": False}
 
-    def log_handler(event: str, payload: dict[str, object]) -> None:
-        if event != "tool_result":
+    def event_handler(event: RunEvent) -> None:
+        if not isinstance(event, ToolCallCompletedEvent):
             return
-        if payload.get("tool_name") != READ_FILE_TOOL_NAME or state["externally_modified"]:
+        if event.tool_name != READ_FILE_TOOL_NAME or state["externally_modified"]:
             return
         target.write_text("alpha\nneedle = externally changed\nomega\n", encoding="utf-8")
         state["externally_modified"] = True
 
-    runtime, model_id = _build_live_runtime(tmp_path, log_handler=log_handler)
+    runtime, model_id = _build_live_runtime(tmp_path, event_handler=event_handler)
     task = _build_live_task(
         model_id=model_id,
         workspace=tmp_path,
@@ -173,12 +172,10 @@ def test_live_edit_file_feedback_recovers_when_file_changes_after_read(tmp_path:
     assert BASH_TOOL_NAME not in event_names
     assert WRITE_FILE_TOOL_NAME not in event_names
     assert event_names.count(READ_FILE_TOOL_NAME) >= 2, event_names
-    assert any(
-        event.name == EDIT_FILE_TOOL_NAME and event.result.error_code == "file_changed_since_read"
-        for event in events
-    ), event_names
-    assert any(
-        event.name == EDIT_FILE_TOOL_NAME and event.result.status == "success"
-        for event in events
-    ), event_names
+    assert any(event.name == EDIT_FILE_TOOL_NAME and event.result.error_code == "file_changed_since_read" for event in events), (
+        event_names
+    )
+    assert any(event.name == EDIT_FILE_TOOL_NAME and event.result.status_code is ToolResultStatus.SUCCESS for event in events), (
+        event_names
+    )
     assert event_names[-1] == TASK_FINISH_TOOL_NAME

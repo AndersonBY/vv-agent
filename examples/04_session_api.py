@@ -10,16 +10,16 @@ from vv_agent import Agent, MemorySession, RunConfig, Runner
 
 
 def main() -> None:
-    session = MemorySession(os.getenv("V_AGENT_EXAMPLE_SESSION_ID", "demo-thread"))
+    session = MemorySession(os.getenv("VV_AGENT_EXAMPLE_SESSION_ID", "demo-thread"))
     agent = Agent(
         name="assistant",
         instructions="Use prior turns from the session when answering. Finish with task_finish.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         session=session,
     )
 

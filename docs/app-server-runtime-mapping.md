@@ -23,6 +23,6 @@
 
 ## Constraints
 
-- App Server must not parse raw runtime logs.
+- App Server consumes only typed `RunEvent` values.
 - App Server must not call `AgentRuntime` internals directly.
 - App Server must not import product modules from v-claw or backend.

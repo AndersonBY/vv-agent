@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.result import RunResult
 from vv_agent.types import AgentResult
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "result_public_v1.json"
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "result_public.json"
 
 
 def _contract() -> dict[str, Any]:
@@ -77,3 +80,24 @@ def test_run_result_public_projection_matches_shared_contract_without_credential
     assert result.resolved_model is not None
     result.resolved_model.endpoint_options.clear()
     assert result.to_dict()["resolved_model"]["endpoint"] is None
+
+
+def test_agent_result_reader_enforces_the_closed_current_wire() -> None:
+    contract = _contract()
+    raw = contract["agent_result"]
+    wire = contract["agent_result_wire"]
+
+    assert AgentResult.from_dict(raw).to_dict() == raw
+    for field_name in wire["required_fields"]:
+        invalid = deepcopy(raw)
+        del invalid[field_name]
+        with pytest.raises((KeyError, TypeError, ValueError), match="AgentResult"):
+            AgentResult.from_dict(invalid)
+
+    for field_name in wire["optional_fields"]:
+        invalid = {**deepcopy(raw), field_name: None}
+        with pytest.raises(ValueError, match="must be omitted"):
+            AgentResult.from_dict(invalid)
+
+    with pytest.raises(ValueError, match="unknown"):
+        AgentResult.from_dict({**deepcopy(raw), "legacy": True})

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import vv_agent
-from vv_agent import Agent, Handoff, ModelSettings, function_tool, handoff
+import pytest
+
+from vv_agent import Agent, Handoff, ModelSettings, ToolOutputError, function_tool, handoff
 
 
 def test_agent_exposes_instructions_and_tools() -> None:
@@ -37,6 +38,17 @@ def test_agent_as_tool_wraps_child_agent() -> None:
     assert tool.metadata["mode"] == "agent_as_tool"
 
 
+@pytest.mark.parametrize("legacy_field", ["task", "input", "prompt"])
+def test_agent_as_tool_rejects_removed_task_description_aliases(legacy_field: str) -> None:
+    child = Agent(name="researcher", instructions="Research facts.", model="m")
+    tool = child.as_tool(name="research")
+
+    output = tool.invoke(None, {legacy_field: "research the current contract"})
+
+    assert isinstance(output, ToolOutputError)
+    assert "requires task_description" in output.message
+
+
 def test_handoff_declares_control_transfer_contract() -> None:
     target = Agent(name="writer", instructions="Write the final answer.", model="m")
     transfer = handoff(agent=target, description="Transfer to writer.")
@@ -45,31 +57,3 @@ def test_handoff_declares_control_transfer_contract() -> None:
     assert transfer.agent is target
     assert transfer.description == "Transfer to writer."
     assert transfer.tool_name == "transfer_to_writer"
-
-
-def test_top_level_public_api_does_not_export_legacy_entry_points() -> None:
-    legacy_names = {
-        "AgentDefinition",
-        "AgentSDKClient",
-        "AgentSDKOptions",
-        "AgentTask",
-        "AgentRuntime",
-    }
-
-    assert legacy_names.isdisjoint(set(vv_agent.__all__))
-    for name in legacy_names:
-        assert not hasattr(vv_agent, name)
-
-
-def test_sdk_package_no_longer_exports_legacy_entry_points() -> None:
-    import vv_agent.sdk as sdk
-
-    legacy_names = {
-        "AgentDefinition",
-        "AgentSDKClient",
-        "AgentSDKOptions",
-    }
-
-    assert legacy_names.isdisjoint(set(getattr(sdk, "__all__", ())))
-    for name in legacy_names:
-        assert not hasattr(sdk, name)

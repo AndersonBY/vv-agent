@@ -41,7 +41,6 @@ from vv_agent.events import (
     ToolCallCompletedEvent,
     ToolCallPlannedEvent,
     ToolCallStartedEvent,
-    event_from_dict,
 )
 from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
@@ -51,7 +50,7 @@ from vv_agent.types import AgentResult, AgentStatus, CompletionReason
 
 
 def _observable_contract() -> dict[str, Any]:
-    fixture = Path(__file__).parent / "fixtures" / "parity" / "app_server_observable_v1.json"
+    fixture = Path(__file__).parent / "fixtures" / "parity" / "app_server_observable.json"
     return json.loads(fixture.read_text(encoding="utf-8"))
 
 
@@ -149,21 +148,6 @@ def test_tool_lifecycle_app_server_projection_matches_shared_fixture() -> None:
     )
     assert _mapped_notifications(denied) == contract["policyDenial"]["completedNotifications"]
 
-    legacy = event_from_dict(
-        {
-            "version": "v1",
-            "type": "tool_call_completed",
-            "event_id": "evt_tool_legacy",
-            "run_id": "run_tool",
-            "trace_id": "trace_tool",
-            "created_at": 99,
-            "tool_name": "lookup",
-            "tool_call_id": "call_legacy",
-            "status": "success",
-        }
-    )
-    assert _mapped_notifications(legacy) == [contract["legacyCompleted"]["notification"]]
-
 
 class _ContractHost:
     def __init__(self) -> None:
@@ -184,7 +168,12 @@ class _ContractHost:
         self.model_requests.append(request)
         return ModelListResponse(
             models=[
-                ModelSummary("legacy", "legacy-provider", "Legacy", {"tier": "old"}),
+                ModelSummary(
+                    id="minimal",
+                    provider="minimal-provider",
+                    display_name="Minimal",
+                    metadata={"tier": "standard"},
+                ),
                 ModelSummary(
                     id="modern",
                     context_length=128_000,
@@ -657,11 +646,11 @@ def test_model_list_forwards_optional_filters_and_emits_canonical_superset() -> 
     assert response["result"] == {
         "models": [
             {
-                "id": "legacy",
-                "provider": "legacy-provider",
-                "displayName": "Legacy",
+                "id": "minimal",
+                "provider": "minimal-provider",
+                "displayName": "Minimal",
                 "supportsTools": False,
-                "metadata": {"tier": "old"},
+                "metadata": {"tier": "standard"},
             },
             {
                 "id": "modern",
@@ -852,12 +841,8 @@ def test_schema_matches_optional_and_required_runtime_params() -> None:
     assert definitions["TurnResumeParams"]["required"] == durable_resume["requestFields"]
     assert set(definitions["TurnResumeParams"]["properties"]) == set(durable_resume["requestFields"])
     assert set(definitions["TurnResumeResponse"]["properties"]) == set(durable_resume["responseFields"])
-    assert set(definitions["CheckpointSummary"]["properties"]) == set(
-        durable_resume["checkpointSummary"]["fields"]
-    )
-    assert set(definitions["InterruptionSummary"]["properties"]) == set(
-        durable_resume["interruptionSummary"]["fields"]
-    )
+    assert set(definitions["CheckpointSummary"]["properties"]) == set(durable_resume["checkpointSummary"]["fields"])
+    assert set(definitions["InterruptionSummary"]["properties"]) == set(durable_resume["interruptionSummary"]["fields"])
     assert definitions["ModelSummary"]["required"] == ["id", "supportsTools"]
     assert "params" not in variants["model/list"]["required"]
     assert "params" not in variants["thread/start"]["required"]

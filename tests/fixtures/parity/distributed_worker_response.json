@@ -1,0 +1,795 @@
+{
+  "schema_version": "vv-agent.distributed-worker-response.v1",
+  "wire_rules": {
+    "discriminator": "type",
+    "types": [
+      "pending",
+      "committed",
+      "terminal_candidate",
+      "terminal_replay"
+    ],
+    "closed_objects": true,
+    "json_safe_integer_maximum": 9007199254740991,
+    "checkpoint_revision_minimum": 0,
+    "committed_cycle_minimum": 1,
+    "boolean_is_not_an_integer": true,
+    "terminal_result": "complete current AgentResult wire object",
+    "terminal_candidate_statuses": [
+      "reconciliation_required",
+      "wait_user",
+      "completed",
+      "failed",
+      "max_cycles"
+    ],
+    "terminal_replay_statuses": [
+      "wait_user",
+      "completed",
+      "failed",
+      "max_cycles"
+    ],
+    "scheduler_must_verify_authoritative_checkpoint": true,
+    "transport_failure_is_response_variant": false,
+    "legacy_boolean_wire_is_rejected": true,
+    "mutation_case_encoding": {
+      "base_valid_case": "name in valid_cases",
+      "operation": [
+        "add",
+        "replace",
+        "remove"
+      ],
+      "path": "array of object field names",
+      "value": "required for add and replace"
+    }
+  },
+  "agent_result_wire": {
+    "required_fields": [
+      "status",
+      "completion_reason",
+      "completion_tool_name",
+      "partial_output",
+      "messages",
+      "cycles",
+      "final_answer",
+      "wait_reason",
+      "error",
+      "shared_state",
+      "token_usage",
+      "checkpoint_key",
+      "resume_observation"
+    ],
+    "optional_fields": [
+      "budget_usage",
+      "budget_exhaustion",
+      "error_code"
+    ],
+    "optional_fields_omitted_when_absent": true,
+    "optional_fields_reject_null": true,
+    "unknown_fields": "reject"
+  },
+  "status_matrix_cases": [
+    {
+      "type": "terminal_candidate",
+      "accepted_statuses": [
+        "reconciliation_required",
+        "wait_user",
+        "completed",
+        "failed",
+        "max_cycles"
+      ]
+    },
+    {
+      "type": "terminal_replay",
+      "accepted_statuses": [
+        "wait_user",
+        "completed",
+        "failed",
+        "max_cycles"
+      ]
+    }
+  ],
+  "rejected_result_statuses": [
+    {
+      "type": "terminal_candidate",
+      "statuses": [
+        "pending",
+        "running"
+      ]
+    },
+    {
+      "type": "terminal_replay",
+      "statuses": [
+        "pending",
+        "running",
+        "reconciliation_required"
+      ]
+    }
+  ],
+  "transport_failure": {
+    "representation": "out_of_band_dispatch_error",
+    "scheduler_action": "re-read the authoritative checkpoint before deciding whether to redispatch",
+    "worker_response_type": null
+  },
+  "legacy_wire_fields": [
+    "finished",
+    "terminal_candidate",
+    "terminal_replay"
+  ],
+  "valid_cases": [
+    {
+      "name": "pending",
+      "response": {
+        "schema_version": "vv-agent.distributed-worker-response.v1",
+        "type": "pending"
+      }
+    },
+    {
+      "name": "committed",
+      "response": {
+        "schema_version": "vv-agent.distributed-worker-response.v1",
+        "type": "committed",
+        "checkpoint_revision": 2,
+        "committed_cycle": 1
+      }
+    },
+    {
+      "name": "terminal_candidate",
+      "response": {
+        "schema_version": "vv-agent.distributed-worker-response.v1",
+        "type": "terminal_candidate",
+        "checkpoint_revision": 2,
+        "result": {
+          "status": "completed",
+          "completion_reason": "no_tool_finish",
+          "completion_tool_name": null,
+          "partial_output": null,
+          "messages": [],
+          "cycles": [],
+          "final_answer": "done",
+          "wait_reason": null,
+          "error": null,
+          "shared_state": {},
+          "token_usage": {
+            "schema_version": "vv-agent.task-token-usage.v1",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "reasoning_tokens": null,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            },
+            "cycles": []
+          },
+          "checkpoint_key": null,
+          "resume_observation": null
+        }
+      }
+    },
+    {
+      "name": "terminal_replay",
+      "response": {
+        "schema_version": "vv-agent.distributed-worker-response.v1",
+        "type": "terminal_replay",
+        "checkpoint_revision": 2,
+        "result": {
+          "status": "completed",
+          "completion_reason": "no_tool_finish",
+          "completion_tool_name": null,
+          "partial_output": null,
+          "messages": [],
+          "cycles": [],
+          "final_answer": "done",
+          "wait_reason": null,
+          "error": null,
+          "shared_state": {},
+          "token_usage": {
+            "schema_version": "vv-agent.task-token-usage.v1",
+            "input_tokens": null,
+            "output_tokens": null,
+            "total_tokens": null,
+            "reasoning_tokens": null,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            },
+            "cycles": []
+          },
+          "checkpoint_key": null,
+          "resume_observation": null
+        }
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "payload_is_not_an_object",
+      "response": [],
+      "error": "distributed worker response must be an object"
+    },
+    {
+      "name": "payload_is_null",
+      "response": null,
+      "error": "distributed worker response must be an object"
+    },
+    {
+      "name": "payload_is_boolean",
+      "response": true,
+      "error": "distributed worker response must be an object"
+    },
+    {
+      "name": "payload_is_number",
+      "response": 1,
+      "error": "distributed worker response must be an object"
+    },
+    {
+      "name": "missing_schema_version",
+      "response": {
+        "type": "pending"
+      },
+      "error": "unsupported distributed worker response schema_version"
+    },
+    {
+      "name": "null_schema_version",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "schema_version"
+        ],
+        "value": null
+      },
+      "error": "unsupported distributed worker response schema_version"
+    },
+    {
+      "name": "boolean_schema_version",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "schema_version"
+        ],
+        "value": true
+      },
+      "error": "unsupported distributed worker response schema_version"
+    },
+    {
+      "name": "number_schema_version",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "schema_version"
+        ],
+        "value": 1
+      },
+      "error": "unsupported distributed worker response schema_version"
+    },
+    {
+      "name": "stale_schema_version",
+      "response": {
+        "schema_version": "vv-agent.distributed-worker-response.v0",
+        "type": "pending"
+      },
+      "error": "unsupported distributed worker response schema_version"
+    },
+    {
+      "name": "unknown_schema_version",
+      "response": {
+        "schema_version": "vv-agent.distributed-worker-response.v2",
+        "type": "pending"
+      },
+      "error": "unsupported distributed worker response schema_version"
+    },
+    {
+      "name": "missing_type",
+      "response": {
+        "schema_version": "vv-agent.distributed-worker-response.v1"
+      },
+      "error": "unsupported distributed worker response type"
+    },
+    {
+      "name": "null_type",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "type"
+        ],
+        "value": null
+      },
+      "error": "unsupported distributed worker response type"
+    },
+    {
+      "name": "boolean_type",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "type"
+        ],
+        "value": true
+      },
+      "error": "unsupported distributed worker response type"
+    },
+    {
+      "name": "number_type",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "type"
+        ],
+        "value": 1
+      },
+      "error": "unsupported distributed worker response type"
+    },
+    {
+      "name": "unknown_type",
+      "response": {
+        "schema_version": "vv-agent.distributed-worker-response.v1",
+        "type": "finished"
+      },
+      "error": "unsupported distributed worker response type"
+    },
+    {
+      "name": "legacy_finished_discriminator",
+      "response": {
+        "finished": false
+      },
+      "error": "unsupported distributed worker response schema_version"
+    },
+    {
+      "name": "current_schema_with_legacy_finished_field",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "finished"
+        ],
+        "value": false
+      },
+      "error": "distributed worker response fields do not match type pending"
+    },
+    {
+      "name": "current_schema_with_terminal_candidate_boolean",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "terminal_candidate"
+        ],
+        "value": true
+      },
+      "error": "distributed worker response fields do not match type pending"
+    },
+    {
+      "name": "current_schema_with_terminal_replay_boolean",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "terminal_replay"
+        ],
+        "value": true
+      },
+      "error": "distributed worker response fields do not match type pending"
+    },
+    {
+      "name": "pending_unknown_field",
+      "base_valid_case": "pending",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": 2
+      },
+      "error": "distributed worker response fields do not match type pending"
+    },
+    {
+      "name": "committed_missing_revision",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "checkpoint_revision"
+        ]
+      },
+      "error": "distributed worker response fields do not match type committed"
+    },
+    {
+      "name": "committed_missing_cycle",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "committed_cycle"
+        ]
+      },
+      "error": "distributed worker response fields do not match type committed"
+    },
+    {
+      "name": "committed_boolean_revision",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": true
+      },
+      "error": "checkpoint_revision must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "committed_negative_revision",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": -1
+      },
+      "error": "checkpoint_revision must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "committed_float_revision",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": 2.5
+      },
+      "error": "checkpoint_revision must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "committed_revision_above_wire_maximum",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": 9007199254740992
+      },
+      "error": "checkpoint_revision must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "committed_boolean_cycle",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "committed_cycle"
+        ],
+        "value": false
+      },
+      "error": "committed_cycle must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "committed_negative_cycle",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "committed_cycle"
+        ],
+        "value": -1
+      },
+      "error": "committed_cycle must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "committed_float_cycle",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "committed_cycle"
+        ],
+        "value": 1.5
+      },
+      "error": "committed_cycle must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "committed_zero_cycle",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "committed_cycle"
+        ],
+        "value": 0
+      },
+      "error": "committed_cycle must be a positive JSON-safe integer"
+    },
+    {
+      "name": "committed_cycle_above_wire_maximum",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "committed_cycle"
+        ],
+        "value": 9007199254740992
+      },
+      "error": "committed_cycle must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "committed_mixed_with_result",
+      "base_valid_case": "committed",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "result"
+        ],
+        "value": {}
+      },
+      "error": "distributed worker response fields do not match type committed"
+    },
+    {
+      "name": "terminal_candidate_missing_revision",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "checkpoint_revision"
+        ]
+      },
+      "error": "distributed worker response fields do not match type terminal_candidate"
+    },
+    {
+      "name": "terminal_candidate_missing_result",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "result"
+        ]
+      },
+      "error": "distributed worker response fields do not match type terminal_candidate"
+    },
+    {
+      "name": "terminal_candidate_boolean_revision",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": true
+      },
+      "error": "checkpoint_revision must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "terminal_candidate_negative_revision",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": -1
+      },
+      "error": "checkpoint_revision must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "terminal_candidate_float_revision",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": 2.5
+      },
+      "error": "checkpoint_revision must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "terminal_candidate_revision_above_wire_maximum",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "checkpoint_revision"
+        ],
+        "value": 9007199254740992
+      },
+      "error": "checkpoint_revision must be a JSON-safe unsigned integer"
+    },
+    {
+      "name": "terminal_candidate_mixed_with_committed_cycle",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "committed_cycle"
+        ],
+        "value": 1
+      },
+      "error": "distributed worker response fields do not match type terminal_candidate"
+    },
+    {
+      "name": "terminal_candidate_unknown_field",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "legacy"
+        ],
+        "value": true
+      },
+      "error": "distributed worker response fields do not match type terminal_candidate"
+    },
+    {
+      "name": "terminal_candidate_invalid_result",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "result"
+        ],
+        "value": {}
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_result_is_null",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "result"
+        ],
+        "value": null
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_result_is_list",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "result"
+        ],
+        "value": []
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_result_missing_required_field",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "remove",
+        "path": [
+          "result",
+          "messages"
+        ]
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_result_unknown_field",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "result",
+          "legacy"
+        ],
+        "value": true
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_result_optional_budget_usage_is_null",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "result",
+          "budget_usage"
+        ],
+        "value": null
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_result_optional_budget_exhaustion_is_null",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "result",
+          "budget_exhaustion"
+        ],
+        "value": null
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_result_optional_error_code_is_null",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "result",
+          "error_code"
+        ],
+        "value": null
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_candidate_pending_result",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "result",
+          "status"
+        ],
+        "value": "pending"
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_candidate_running_result",
+      "base_valid_case": "terminal_candidate",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "result",
+          "status"
+        ],
+        "value": "running"
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    },
+    {
+      "name": "terminal_replay_mixed_with_committed_cycle",
+      "base_valid_case": "terminal_replay",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "committed_cycle"
+        ],
+        "value": 1
+      },
+      "error": "distributed worker response fields do not match type terminal_replay"
+    },
+    {
+      "name": "terminal_replay_unknown_field",
+      "base_valid_case": "terminal_replay",
+      "mutation": {
+        "operation": "add",
+        "path": [
+          "legacy"
+        ],
+        "value": true
+      },
+      "error": "distributed worker response fields do not match type terminal_replay"
+    },
+    {
+      "name": "terminal_replay_reconciliation_required_result",
+      "base_valid_case": "terminal_replay",
+      "mutation": {
+        "operation": "replace",
+        "path": [
+          "result",
+          "status"
+        ],
+        "value": "reconciliation_required"
+      },
+      "error": "distributed worker response result must be a complete current AgentResult"
+    }
+  ]
+}

@@ -226,23 +226,6 @@ def test_configured_runner_start_and_resume_preserve_runner_defaults(tmp_path: P
     assert runner_metadata == [True]
 
 
-def test_explicit_framework_values_override_configured_runner_defaults() -> None:
-    agent = Agent(name="assistant", instructions="Finish.")
-    runner_defaults = RunConfig(settings_file="runner_settings.py", timeout_seconds=12.0)
-
-    inherited = Runner._effective_run_config(agent, RunConfig(), runner_defaults=runner_defaults)
-    overridden = Runner._effective_run_config(
-        agent,
-        RunConfig(settings_file="local_settings.py", timeout_seconds=90.0),
-        runner_defaults=runner_defaults,
-    )
-
-    assert inherited.settings_file == "runner_settings.py"
-    assert inherited.timeout_seconds == 12.0
-    assert overridden.settings_file == "local_settings.py"
-    assert overridden.timeout_seconds == 90.0
-
-
 def test_configured_runner_runs_default_after_cycle_hooks_before_per_run_hooks(
     tmp_path: Path,
 ) -> None:

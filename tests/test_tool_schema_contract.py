@@ -6,7 +6,7 @@ from typing import Any
 
 from vv_agent.tools import ToolRegistry, build_default_registry
 
-RUST_CANONICAL_SCHEMA_SHA256 = "f85422117d41d28ffa3cdfcfd9a42892854de624808fadc2124f4ebe7a452b61"
+RUST_CANONICAL_SCHEMA_SHA256 = "24d8f7bde18b11374820f742cfa244c83666626a315e09d4b6e1b69e899a70aa"
 
 CANONICAL_TOOL_NAMES = [
     "task_finish",

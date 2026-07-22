@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import threading
 from collections.abc import Callable
@@ -9,6 +8,7 @@ from threading import Event, Thread
 from typing import Any
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import Agent, GuardrailResult, RunConfig, Runner, function_tool, input_guardrail
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -18,14 +18,11 @@ from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolCall
 
-RUN_HANDLE_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_handle_v1.json"
-RUN_HANDLE_FIXTURE_SHA256 = "aa6d933f26674beeb68964fa320e62859711114bdd7581ebde1b281f18a439bf"
+RUN_HANDLE_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_handle.json"
 
 
 def _run_handle_contract() -> dict[str, Any]:
-    raw = RUN_HANDLE_FIXTURE.read_bytes()
-    assert hashlib.sha256(raw).hexdigest() == RUN_HANDLE_FIXTURE_SHA256
-    return json.loads(raw)
+    return json.loads(RUN_HANDLE_FIXTURE.read_bytes())
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -78,13 +75,10 @@ def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
-        run_config=RunConfig(model_provider=model_provider),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model())),
     )
 
     first_types: list[str] = []
@@ -108,10 +102,11 @@ def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
 def test_run_handle_state_reports_completed_result() -> None:
     agent = Agent(name="assistant", instructions="Answer.", model="test-model")
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return _finish_llm("ok"), _resolved_model()
-
-    handle = Runner.start(agent, "say hi", run_config=RunConfig(model_provider=model_provider))
+    handle = Runner.start(
+        agent,
+        "say hi",
+        run_config=RunConfig(model_provider=FixedModelProvider(_finish_llm("ok"), _resolved_model())),
+    )
     assert handle.result(timeout=2).status == AgentStatus.COMPLETED
 
     state = handle.state()
@@ -149,13 +144,10 @@ def test_runner_start_preserves_default_no_tool_continue_policy() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "say hi",
-        run_config=RunConfig(model_provider=model_provider, max_cycles=2),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model()), max_cycles=2),
     )
     result = handle.result(timeout=2)
 
@@ -170,9 +162,12 @@ def test_completed_result_wins_over_late_cancel_request() -> None:
 
     agent = Agent(name="assistant", instructions="Answer.", model="test-model")
 
-    def model_provider(agent: Agent, run_config: RunConfig):
+    def finish_when_ready(_request) -> LLMResponse:
         ready.wait(timeout=2)
-        return _finish_llm("ok"), _resolved_model()
+        return LLMResponse(
+            content="ok",
+            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+        )
 
     def stream(event) -> None:
         if event.type == "run_completed":
@@ -181,7 +176,10 @@ def test_completed_result_wins_over_late_cancel_request() -> None:
     handle = Runner.start(
         agent,
         "say hi",
-        run_config=RunConfig(model_provider=model_provider, stream=stream),
+        run_config=RunConfig(
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[finish_when_ready]), _resolved_model()),
+            stream=stream,
+        ),
     )
     handle_ref["handle"] = handle
     ready.set()
@@ -219,13 +217,10 @@ def test_stream_sync_is_backed_by_live_handle() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     stream = Runner.stream_sync(
         agent,
         "go",
-        run_config=RunConfig(model_provider=model_provider),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model())),
     )
     seen_tool_started = Event()
     stream_finished = Event()
@@ -261,15 +256,12 @@ def test_stream_sync_is_backed_by_live_handle() -> None:
 def test_stream_sync_raises_worker_exception_after_yielding_events() -> None:
     agent = Agent(name="assistant", instructions="Return JSON.", model="test-model", output_type=dict)
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return _finish_llm("not json"), _resolved_model()
-
     events = []
     with pytest.raises(ValueError):
         for event in Runner.stream_sync(
             agent,
             "say hi",
-            run_config=RunConfig(model_provider=model_provider),
+            run_config=RunConfig(model_provider=FixedModelProvider(_finish_llm("not json"), _resolved_model())),
         ):
             events.append(event)
 
@@ -309,14 +301,10 @@ def test_run_handle_subscribers_are_independent_and_lossless_after_live_capacity
     gate = Event()
     llm = _BurstStreamingLLM(gate, event_count)
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     handle = Runner.start(
         Agent(name="burst", instructions="Finish.", model="test-model"),
         "go",
-        run_config=RunConfig(model_provider=model_provider),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model())),
     )
     first = handle.events()
     second = handle.events()
@@ -367,14 +355,13 @@ def test_run_handle_cancel_accepted_state_and_terminal_reason_match_fixture(tmp_
     contract = _run_handle_contract()["cancellation"]
     llm = _BlockingCancellationLLM()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     handle = Runner.start(
         Agent(name="cancel", instructions="Wait.", model="test-model"),
         "go",
-        run_config=RunConfig(model_provider=model_provider, workspace=tmp_path),
+        run_config=RunConfig(
+            model_provider=FixedModelProvider(llm, _resolved_model()),
+            workspace=tmp_path,
+        ),
     )
     assert llm.started.wait(timeout=2)
     assert handle.cancel(contract["reason"]) is True
@@ -461,6 +448,9 @@ class _AsyncChildModelProvider:
     def default_settings(self, resolved: ResolvedModelConfig) -> ModelSettings:
         del resolved
         return ModelSettings()
+
+    def default_model_ref(self) -> ModelRef:
+        return ModelRef.named("test-model")
 
 
 def test_run_handle_events_wait_for_async_child_after_parent_result_and_allow_tail_cancel(tmp_path: Path) -> None:

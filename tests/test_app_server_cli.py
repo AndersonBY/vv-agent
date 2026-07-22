@@ -9,6 +9,8 @@ import pytest
 
 from vv_agent.app_server.host import AgentResolutionRequest, RunConfigResolutionRequest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.model import ModelRef
+from vv_agent.model_settings import ModelSettings
 
 _JSON_SCHEMA_NAMES = {
     "AppItem",
@@ -31,9 +33,7 @@ _JSON_SCHEMA_NAMES = {
     "TurnResumeResponse",
     "TurnStartResponse",
 }
-_JSON_SCHEMA_FILES = {f"json/{name}.json" for name in _JSON_SCHEMA_NAMES} | {
-    "json/vv_agent_app_server.schemas.json"
-}
+_JSON_SCHEMA_FILES = {f"json/{name}.json" for name in _JSON_SCHEMA_NAMES} | {"json/vv_agent_app_server.schemas.json"}
 
 
 def _generated_files(root: Path) -> set[str]:
@@ -54,6 +54,7 @@ def test_app_server_help_lists_stdio_listener() -> None:
     assert "--backend" in result.stdout
     assert "--model" in result.stdout
     assert "--timeout-seconds" in result.stdout
+    assert "schema" in result.stdout
     assert "generate-ts" in result.stdout
 
 
@@ -73,7 +74,7 @@ def test_top_level_help_lists_all_command_surfaces() -> None:
 
 def test_app_server_generate_schema_cli_writes_files(tmp_path) -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "vv_agent", "app-server", "generate-json-schema", "--out", str(tmp_path)],
+        [sys.executable, "-m", "vv_agent", "app-server", "schema", "--out", str(tmp_path)],
         capture_output=True,
         check=False,
         text=True,
@@ -84,18 +85,6 @@ def test_app_server_generate_schema_cli_writes_files(tmp_path) -> None:
     aggregate = json.loads((tmp_path / "json" / "vv_agent_app_server.schemas.json").read_text(encoding="utf-8"))
     assert set(aggregate) == _JSON_SCHEMA_NAMES
     assert "TurnStartParams" not in aggregate
-
-
-def test_app_server_schema_alias_writes_files(tmp_path) -> None:
-    result = subprocess.run(
-        [sys.executable, "-m", "vv_agent", "app-server", "schema", "--out", str(tmp_path)],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-
-    assert result.returncode == 0
-    assert _generated_files(tmp_path) == _JSON_SCHEMA_FILES
 
 
 def test_app_server_generate_ts_cli_writes_self_contained_types(tmp_path) -> None:
@@ -353,33 +342,6 @@ def test_app_server_runtime_errors_exit_one(monkeypatch, capsys) -> None:
     assert capsys.readouterr().err.strip() == "stdio failed"
 
 
-def test_app_server_rejects_legacy_production_flags(capsys) -> None:
-    from vv_agent import cli
-
-    exit_code = cli.main(
-        [
-            "app-server",
-            "--listen",
-            "stdio",
-            "--settings",
-            "settings.py",
-            "--backend",
-            "b",
-            "--model",
-            "m",
-            "--settings-file",
-            "legacy.py",
-            "--max-cycles",
-            "4",
-        ]
-    )
-
-    assert exit_code == 2
-    stderr = capsys.readouterr().err
-    assert "unrecognized arguments" in stderr
-    assert "--settings-file" in stderr
-
-
 def test_app_server_timeout_defaults_to_ninety_seconds() -> None:
     from vv_agent import cli
 
@@ -438,13 +400,41 @@ def test_app_server_host_is_built_from_explicit_model_configuration(monkeypatch,
         function_call_available=True,
     )
     llm = object()
-    calls: list[tuple[Path, str, str, float]] = []
+    calls: list[tuple[Path, str, float]] = []
 
-    def build(settings_file, *, backend, model, timeout_seconds):
-        calls.append((Path(settings_file), backend, model, timeout_seconds))
-        return llm, resolved
+    class Provider:
+        def __init__(self, settings_file: Path, backend: str | None = None, timeout_seconds: float = 90.0) -> None:
+            self.settings_file = settings_file
+            self.backend = backend
+            self.timeout_seconds = timeout_seconds
 
-    monkeypatch.setattr(cli, "build_openai_llm_from_local_settings", build)
+        @classmethod
+        def from_settings_file(cls, settings_file: Path) -> Provider:
+            return cls(Path(settings_file))
+
+        def with_default_backend(self, backend: str) -> Provider:
+            return Provider(self.settings_file, backend, self.timeout_seconds)
+
+        def with_timeout_seconds(self, timeout_seconds: float) -> Provider:
+            return Provider(self.settings_file, self.backend, timeout_seconds)
+
+        def resolve(self, model: ModelRef) -> ResolvedModelConfig:
+            assert model == ModelRef.named("test-model")
+            calls.append((self.settings_file, str(self.backend), self.timeout_seconds))
+            return resolved
+
+        def client(self, resolved_model: ResolvedModelConfig):
+            assert resolved_model is resolved
+            return llm
+
+        def default_settings(self, resolved_model: ResolvedModelConfig) -> ModelSettings:
+            assert resolved_model is resolved
+            return ModelSettings(timeout_seconds=self.timeout_seconds)
+
+        def default_model_ref(self) -> ModelRef | None:
+            return None
+
+    monkeypatch.setattr(cli, "VvLlmModelProvider", Provider)
     settings_file = tmp_path / "settings.py"
     host = cli._build_app_server_host(
         settings_file=settings_file,
@@ -458,34 +448,21 @@ def test_app_server_host_is_built_from_explicit_model_configuration(monkeypatch,
     agent = host.resolve_agent(AgentResolutionRequest(thread_id="thread_1", agent_key="default"))
     run_config = host.build_run_config(RunConfigResolutionRequest(thread_id="thread_1", agent_key="default"))
     assert run_config.model_provider is not None
-    provided_llm, provided_model = run_config.model_provider(agent, run_config)
+    assert run_config.model is not None
+    provided_model = run_config.model_provider.resolve(ModelRef.coerce(run_config.model))
+    provided_llm = run_config.model_provider.client(provided_model)
     models = host.list_models(__import__("vv_agent.app_server.protocol", fromlist=["ModelListRequest"]).ModelListRequest())
 
-    assert calls == [(settings_file, "test-backend", "test-model", 12.5)]
-    assert agent.model == "provider-model"
+    assert calls == [(settings_file, "test-backend", 12.5), (settings_file, "test-backend", 12.5)]
+    assert agent.model == ModelRef.named("test-model")
     assert run_config.max_cycles == 4
     assert run_config.approval_timeout_seconds == 30.0
-    assert run_config.timeout_seconds == 12.5
     assert (provided_llm, provided_model) == (llm, resolved)
     assert models.models[0].id == "provider-model"
     assert models.models[0].context_length == 256_000
     assert models.models[0].supports_tools is True
     assert models.models[0].to_dict()["contextLength"] == 256_000
     assert models.models[0].to_dict()["supportsTools"] is True
-
-
-def test_app_server_lifecycle_fixture_is_valid_jsonl() -> None:
-    fixture = Path("tests/fixtures/app_server_lifecycle.jsonl")
-    lines = fixture.read_text(encoding="utf-8").splitlines()
-
-    assert [json.loads(line)["method"] for line in lines] == [
-        "initialize",
-        "initialized",
-        "thread/start",
-        "turn/start",
-        "thread/list",
-        "thread/archive",
-    ]
 
 
 def test_debug_app_server_send_message_prints_jsonl_flow() -> None:

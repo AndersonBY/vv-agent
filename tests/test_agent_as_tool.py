@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from support import ModelMapProvider
+
 from vv_agent import Agent, RunConfig, Runner
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
+from vv_agent.model import ModelRef
 from vv_agent.types import LLMResponse, ToolCall
 
 
@@ -30,50 +33,63 @@ def test_agent_as_tool_returns_child_output_to_parent(tmp_path: Path) -> None:
     )
     provider_calls: list[str] = []
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del run_config
-        provider_calls.append(agent.name)
-        if agent.name == "researcher":
-            return (
-                ScriptedLLM(
-                    steps=[
-                        LLMResponse(
-                            content="research done",
-                            tool_calls=[
-                                ToolCall(
-                                    id="child-finish",
-                                    name=TASK_FINISH_TOOL_NAME,
-                                    arguments={"message": "facts from child"},
-                                )
-                            ],
-                        )
-                    ]
-                ),
-                _resolved(agent.name),
+    researcher_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="research done",
+                tool_calls=[
+                    ToolCall(
+                        id="child-finish",
+                        name=TASK_FINISH_TOOL_NAME,
+                        arguments={"message": "facts from child"},
+                    )
+                ],
             )
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="need research",
-                        tool_calls=[ToolCall(id="research-call", name="research", arguments={"input": "find facts"})],
-                    ),
-                    LLMResponse(
-                        content="final",
-                        tool_calls=[
-                            ToolCall(
-                                id="parent-finish",
-                                name=TASK_FINISH_TOOL_NAME,
-                                arguments={"message": "final with facts"},
-                            )
-                        ],
-                    ),
-                ]
+        ]
+    )
+    writer_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="need research",
+                tool_calls=[
+                    ToolCall(
+                        id="research-call",
+                        name="research",
+                        arguments={"task_description": "find facts"},
+                    )
+                ],
             ),
-            _resolved(agent.name),
-        )
+            LLMResponse(
+                content="final",
+                tool_calls=[
+                    ToolCall(
+                        id="parent-finish",
+                        name=TASK_FINISH_TOOL_NAME,
+                        arguments={"message": "final with facts"},
+                    )
+                ],
+            ),
+        ]
+    )
 
-    result = Runner.run_sync(writer, "write report", run_config=RunConfig(workspace=tmp_path, model_provider=model_provider))
+    class RecordingProvider(ModelMapProvider):
+        def resolve(self, model: ModelRef) -> ResolvedModelConfig:
+            provider_calls.append(model.model_name)
+            return super().resolve(model)
+
+    provider = RecordingProvider(
+        routes={
+            "researcher": (researcher_llm, _resolved("researcher")),
+            "writer": (writer_llm, _resolved("writer")),
+        },
+        default_model="writer",
+    )
+
+    result = Runner.run_sync(
+        writer,
+        "write report",
+        run_config=RunConfig(workspace=tmp_path, model_provider=provider),
+    )
 
     assert result.final_output == "final with facts"
     assert provider_calls == ["writer", "researcher"]

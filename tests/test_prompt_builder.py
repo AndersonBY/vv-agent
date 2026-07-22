@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -194,28 +192,3 @@ def test_task_start_time_is_fixed_when_builder_is_created(monkeypatch) -> None:
 
     assert builder.build() == builder.build()
     assert FakeDateTime.calls == 1
-
-
-def test_full_prompt_bundle_matches_the_cross_language_golden_contract() -> None:
-    payload = {}
-    for language in ("en-US", "zh-CN"):
-        bundle = build_system_prompt_bundle(
-            "You are careful.",
-            language=language,
-            available_sub_agents={
-                "writer": "Writes final reports.",
-                "researcher": "Finds evidence.",
-            },
-            current_time_utc=datetime(2026, 5, 26, tzinfo=UTC),
-            session_memory_context="Remember prior context.",
-        )
-        payload[language] = {
-            "prompt": bundle.prompt,
-            "sections": bundle.sections,
-            "stable_hash": bundle.stable_hash,
-        }
-
-    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    assert hashlib.sha256(canonical.encode()).hexdigest() == (
-        "1ca970a84ee909f0e8d6dd55e6e8a3a64b67df158d1f0cd681d3686cd15c3415"
-    )

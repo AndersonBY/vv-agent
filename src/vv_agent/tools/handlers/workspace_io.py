@@ -12,7 +12,7 @@ from typing import Any
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
-from vv_agent.types import ToolExecutionResult
+from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 READ_FILE_MAX_LINES = 2_000
 READ_FILE_MAX_CHARS = 50_000
@@ -20,9 +20,7 @@ FILE_BASELINES_STATE_KEY = "_workspace_file_baselines"
 READ_FILE_BASELINE_SOURCE = "read_file"
 WRITE_FILE_BASELINE_SOURCE = "write_file"
 EDIT_FILE_BASELINE_SOURCE = "edit_file"
-EDIT_FILE_ALLOWED_BASELINE_SOURCES = frozenset(
-    {READ_FILE_BASELINE_SOURCE, WRITE_FILE_BASELINE_SOURCE, EDIT_FILE_BASELINE_SOURCE}
-)
+EDIT_FILE_ALLOWED_BASELINE_SOURCES = frozenset({READ_FILE_BASELINE_SOURCE, WRITE_FILE_BASELINE_SOURCE, EDIT_FILE_BASELINE_SOURCE})
 WRITE_FILE_ALLOWED_BASELINE_SOURCES = frozenset(
     {READ_FILE_BASELINE_SOURCE, WRITE_FILE_BASELINE_SOURCE, EDIT_FILE_BASELINE_SOURCE}
 )
@@ -67,10 +65,10 @@ def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
     parts: list[str] = []
     i = 0
     while i < len(pattern):
-        if pattern[i:i + 3] == "**/":
+        if pattern[i : i + 3] == "**/":
             parts.append("(?:.+/)?")
             i += 3
-        elif pattern[i:i + 2] == "**":
+        elif pattern[i : i + 2] == "**":
             parts.append(".*")
             i += 2
         elif pattern[i] == "*":
@@ -133,7 +131,7 @@ def _get_file_baselines(context: ToolContext) -> dict[str, dict[str, Any]]:
 
 def _decode_workspace_text(raw: bytes) -> tuple[str, bool]:
     has_bom = raw.startswith(UTF8_BOM)
-    payload = raw[len(UTF8_BOM):] if has_bom else raw
+    payload = raw[len(UTF8_BOM) :] if has_bom else raw
     try:
         return payload.decode("utf-8"), has_bom
     except UnicodeDecodeError as exc:
@@ -177,9 +175,7 @@ def _baseline_error(
         return "file_not_read"
     if baseline.get("source") not in allowed_sources:
         return "file_not_read"
-    if baseline.get("is_partial") and not (
-        allow_partial and baseline.get("source") == READ_FILE_BASELINE_SOURCE
-    ):
+    if baseline.get("is_partial") and not (allow_partial and baseline.get("source") == READ_FILE_BASELINE_SOURCE):
         return "file_not_read"
     if baseline.get("hash") != _content_hash(current_raw):
         return "file_changed_since_read"
@@ -196,7 +192,7 @@ def _workspace_error(message: str, *, error_code: str, **details: Any) -> ToolEx
     payload.update(details)
     return ToolExecutionResult(
         tool_call_id="",
-        status="error",
+        status_code=ToolResultStatus.ERROR,
         error_code=error_code,
         content=to_json(payload),
         metadata={"error_code": error_code, **details},
@@ -208,7 +204,7 @@ def _split_unified_diff_lines(text: str) -> list[str]:
     start = 0
     for index, char in enumerate(text):
         if char == "\n":
-            lines.append(text[start:index + 1])
+            lines.append(text[start : index + 1])
             start = index + 1
     if start < len(text):
         lines.append(text[start:])
@@ -236,11 +232,7 @@ def _bounded_unified_diff(path: str, before: str, after: str) -> tuple[str, bool
     after_lines = _split_unified_diff_lines(after)
 
     prefix = 0
-    while (
-        prefix < len(before_lines)
-        and prefix < len(after_lines)
-        and before_lines[prefix] == after_lines[prefix]
-    ):
+    while prefix < len(before_lines) and prefix < len(after_lines) and before_lines[prefix] == after_lines[prefix]:
         prefix += 1
 
     suffix = 0
@@ -271,22 +263,10 @@ def _bounded_unified_diff(path: str, before: str, after: str) -> tuple[str, bool
         f"-{_format_unified_range(context_start, before_hunk_count)} "
         f"+{_format_unified_range(context_start, after_hunk_count)} @@\n",
     ]
-    diff_parts.extend(
-        _render_unified_line(" ", line)
-        for line in before_lines[context_start:prefix]
-    )
-    diff_parts.extend(
-        _render_unified_line("-", line)
-        for line in before_lines[prefix:before_changed_end]
-    )
-    diff_parts.extend(
-        _render_unified_line("+", line)
-        for line in after_lines[prefix:after_changed_end]
-    )
-    diff_parts.extend(
-        _render_unified_line(" ", line)
-        for line in after_lines[after_changed_end:after_hunk_end]
-    )
+    diff_parts.extend(_render_unified_line(" ", line) for line in before_lines[context_start:prefix])
+    diff_parts.extend(_render_unified_line("-", line) for line in before_lines[prefix:before_changed_end])
+    diff_parts.extend(_render_unified_line("+", line) for line in after_lines[prefix:after_changed_end])
+    diff_parts.extend(_render_unified_line(" ", line) for line in after_lines[after_changed_end:after_hunk_end])
     diff_text = "".join(diff_parts)
     if len(diff_text) <= EDIT_DIFF_MAX_CHARS:
         return diff_text, False, additions, deletions
@@ -621,10 +601,7 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         except (OSError, ValueError) as exc:
             return _workspace_error(str(exc), error_code="workspace_backend_error", path=path)
         if not include_hidden:
-            all_files = [
-                f for f in all_files
-                if not any(part.startswith(".") for part in Path(f).parts)
-            ]
+            all_files = [f for f in all_files if not any(part.startswith(".") for part in Path(f).parts)]
         all_files = sorted(all_files)
         scan_limited = len(all_files) > scan_limit
         files = all_files[:scan_limit] if scan_limited else all_files
@@ -644,7 +621,7 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         total_count = max(0, total_count - sensitive_files_omitted)
 
     files = _sort_find_files(context, files, effective_sort) if isinstance(local_root, Path) else sorted(files)
-    visible_files = files[offset:offset + max_results]
+    visible_files = files[offset : offset + max_results]
     truncated = offset + len(visible_files) < total_count or scan_limited
 
     payload: dict[str, Any] = {
@@ -664,14 +641,12 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         payload["count_is_estimate"] = True
         payload["scan_limit"] = scan_limit
         payload["message"] = (
-            "Listing stopped early due to scan limit. Narrow `path`/`glob` "
-            "or increase `scan_limit` for more complete results."
+            "Listing stopped early due to scan limit. Narrow `path`/`glob` or increase `scan_limit` for more complete results."
         )
     if ignored_roots_summary:
         payload["ignored_roots"] = ignored_roots_summary
         ignored_message = (
-            "Common dependency/cache directories are summarized by default. "
-            "List those directories explicitly when needed."
+            "Common dependency/cache directories are summarized by default. List those directories explicitly when needed."
         )
         if payload.get("message"):
             payload["message"] = f"{payload['message']} {ignored_message}"
@@ -680,7 +655,7 @@ def find_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json(payload),
     )
 
@@ -756,7 +731,7 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         )
         return ToolExecutionResult(
             tool_call_id="",
-            status="success",
+            status_code=ToolResultStatus.SUCCESS,
             content=to_json(
                 {
                     "path": path,
@@ -797,7 +772,7 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json(
             {
                 "path": path,
@@ -883,11 +858,11 @@ def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         source=WRITE_FILE_BASELINE_SOURCE,
     )
 
-    # Compatibility field: written_chars counts Unicode code points, not bytes.
+    # Keep byte and Unicode-code-point counts explicit for callers.
     written_chars = len(write_content)
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json(
             {
                 "ok": True,
@@ -944,7 +919,7 @@ def file_info(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         payload["suffix"] = info.suffix
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json(payload),
     )
 
@@ -1033,7 +1008,7 @@ def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
     diff, diff_truncated, additions, deletions = _bounded_unified_diff(path, text, updated)
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json({"ok": True, "path": path, "replaced_count": replaced_count}),
         metadata={
             "changed_files": [path],

@@ -18,7 +18,7 @@ from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.tool_planner import plan_tool_names
 from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
 
-_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "public_configured_sub_agent_v1.json"
+_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "public_configured_sub_agent.json"
 
 
 def _contract() -> dict[str, Any]:
@@ -28,10 +28,7 @@ def _contract() -> dict[str, Any]:
 
 
 def _sub_agents(entries: list[dict[str, Any]]) -> dict[str, SubAgentConfig]:
-    return {
-        cast(str, entry["id"]): SubAgentConfig.from_dict(cast(dict[str, Any], entry["config"]))
-        for entry in entries
-    }
+    return {cast(str, entry["id"]): SubAgentConfig.from_dict(cast(dict[str, Any], entry["config"])) for entry in entries}
 
 
 def _resolved(model: str) -> ResolvedModelConfig:
@@ -141,7 +138,6 @@ def test_compiler_projects_configured_sub_agents_and_prompt_contract(
         trace_id="trace-public-configured-sub-agent",
     )
 
-    assert task.has_sub_agents is projection["has_sub_agents"]
     assert task.sub_agents_enabled is projection["sub_agents_enabled"]
     assert task.sub_agents is not agent.sub_agents
     assert {name: config.to_dict() for name, config in task.sub_agents.items()} == dict(
@@ -164,8 +160,7 @@ def test_compiler_projects_configured_sub_agents_and_prompt_contract(
 
     assert task.system_prompt == projection["prompt"]
     assert task.metadata["system_prompt_sections"] == [
-        {key: value for key, value in section.items() if key != "priority"}
-        for section in expected_sections
+        {key: value for key, value in section.items() if key != "priority"} for section in expected_sections
     ]
     assert task.metadata["system_prompt_sources"] == projection["sources"]
     assert task.metadata["system_prompt_stable_hash"] == projection["stable_hash"]

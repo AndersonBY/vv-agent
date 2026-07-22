@@ -80,20 +80,6 @@ class CycleStatus(StrEnum):
     FAILED = "failed"
 
 
-_LEGACY_STATUS_TO_CODE: dict[str, ToolResultStatus] = {
-    "success": ToolResultStatus.SUCCESS,
-    "error": ToolResultStatus.ERROR,
-}
-
-_STATUS_CODE_TO_LEGACY: dict[ToolResultStatus, Literal["success", "error"]] = {
-    ToolResultStatus.SUCCESS: "success",
-    ToolResultStatus.ERROR: "error",
-    ToolResultStatus.WAIT_RESPONSE: "success",
-    ToolResultStatus.RUNNING: "success",
-    ToolResultStatus.PENDING_COMPRESS: "success",
-}
-
-
 @dataclass(slots=True)
 class Message:
     role: Role
@@ -183,6 +169,7 @@ class ToolCall:
             extra_content=extra_content,
         )
 
+
 class UsageSource(StrEnum):
     PROVIDER_REPORTED = "provider_reported"
     ESTIMATED = "estimated"
@@ -195,18 +182,22 @@ class CacheUsageStatus(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+TOKEN_USAGE_SCHEMA_VERSION = "vv-agent.token-usage.v1"
+TASK_TOKEN_USAGE_SCHEMA_VERSION = "vv-agent.task-token-usage.v1"
+
+
 @dataclass(slots=True)
 class CacheUsage:
     status: CacheUsageStatus = CacheUsageStatus.ACCOUNTING_MISSING
-    read_tokens: int | None = None
-    write_tokens: int | None = None
+    read_input_tokens: int | None = None
+    write_input_tokens: int | None = None
     uncached_input_tokens: int | None = None
     source: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, CacheUsageStatus):
             self.status = CacheUsageStatus(self.status)
-        for name in ("read_tokens", "write_tokens", "uncached_input_tokens"):
+        for name in ("read_input_tokens", "write_input_tokens", "uncached_input_tokens"):
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError(f"cache usage {name} must be a non-negative integer or None")
@@ -216,21 +207,33 @@ class CacheUsage:
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status.value,
-            "read_tokens": self.read_tokens,
-            "write_tokens": self.write_tokens,
+            "read_input_tokens": self.read_input_tokens,
+            "write_input_tokens": self.write_input_tokens,
             "uncached_input_tokens": self.uncached_input_tokens,
             "source": self.source,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CacheUsage:
-        return cls(
-            status=CacheUsageStatus(data.get("status", CacheUsageStatus.ACCOUNTING_MISSING.value)),
-            read_tokens=_optional_non_negative_int(data.get("read_tokens")),
-            write_tokens=_optional_non_negative_int(data.get("write_tokens")),
-            uncached_input_tokens=_optional_non_negative_int(data.get("uncached_input_tokens")),
-            source=data.get("source") if isinstance(data.get("source"), str) else None,
+        _require_exact_keys(
+            data,
+            {
+                "status",
+                "read_input_tokens",
+                "write_input_tokens",
+                "uncached_input_tokens",
+                "source",
+            },
+            "CacheUsage",
         )
+        return cls(
+            status=CacheUsageStatus(data["status"]),
+            read_input_tokens=_optional_non_negative_int(data["read_input_tokens"]),
+            write_input_tokens=_optional_non_negative_int(data["write_input_tokens"]),
+            uncached_input_tokens=_optional_non_negative_int(data.get("uncached_input_tokens")),
+            source=data["source"],
+        )
+
 
 def _aggregate_cache_usage(observations: list[CacheUsage]) -> CacheUsage:
     if not observations:
@@ -251,8 +254,8 @@ def _aggregate_cache_usage(observations: list[CacheUsage]) -> CacheUsage:
 
     return CacheUsage(
         status=status,
-        read_tokens=complete_sum("read_tokens"),
-        write_tokens=complete_sum("write_tokens"),
+        read_input_tokens=complete_sum("read_input_tokens"),
+        write_input_tokens=complete_sum("write_input_tokens"),
         uncached_input_tokens=complete_sum("uncached_input_tokens"),
         source="aggregate",
     )
@@ -266,72 +269,95 @@ def _optional_non_negative_int(value: Any) -> int | None:
     return value
 
 
+def _require_exact_keys(data: Any, expected: set[str], label: str) -> None:
+    if not isinstance(data, dict):
+        raise TypeError(f"{label} must be an object")
+    actual = set(data)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unknown = sorted(actual - expected)
+        raise ValueError(f"invalid {label} fields: missing={missing}, unknown={unknown}")
+
+
 @dataclass(slots=True)
 class TokenUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    cached_tokens: int = 0
-    reasoning_tokens: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_creation_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    reasoning_tokens: int | None = None
     usage_source: UsageSource = UsageSource.ACCOUNTING_MISSING
     cache_usage: CacheUsage = field(default_factory=CacheUsage)
-    raw: dict[str, Any] = field(default_factory=dict)
+    provider_usage: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.usage_source, UsageSource):
             self.usage_source = UsageSource(self.usage_source)
         if not isinstance(self.cache_usage, CacheUsage):
             raise TypeError("cache_usage must be a CacheUsage instance")
+        for name in ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens"):
+            setattr(self, name, _optional_non_negative_int(getattr(self, name)))
+        if not isinstance(self.provider_usage, dict):
+            raise TypeError("provider_usage must be an object")
 
     def has_usage(self) -> bool:
-        return any(
-            (
-                self.prompt_tokens,
-                self.completion_tokens,
-                self.total_tokens,
-                self.cached_tokens,
-                self.reasoning_tokens,
-                self.input_tokens,
-                self.output_tokens,
-                self.cache_creation_tokens,
-                self.usage_source is not UsageSource.ACCOUNTING_MISSING,
-                self.cache_usage.status is not CacheUsageStatus.ACCOUNTING_MISSING,
+        return (
+            any(
+                value is not None
+                for value in (
+                    self.input_tokens,
+                    self.output_tokens,
+                    self.total_tokens,
+                    self.reasoning_tokens,
+                )
             )
+            or self.usage_source is not UsageSource.ACCOUNTING_MISSING
+            or self.cache_usage.status is not CacheUsageStatus.ACCOUNTING_MISSING
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
-            "cached_tokens": self.cached_tokens,
-            "reasoning_tokens": self.reasoning_tokens,
+            "schema_version": TOKEN_USAGE_SCHEMA_VERSION,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
-            "cache_creation_tokens": self.cache_creation_tokens,
+            "total_tokens": self.total_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
             "usage_source": self.usage_source.value,
             "cache_usage": self.cache_usage.to_dict(),
-            "raw": dict(self.raw),
+            "provider_usage": deepcopy(self.provider_usage),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TokenUsage:
-        cache_usage = data.get("cache_usage")
+        _require_exact_keys(
+            data,
+            {
+                "schema_version",
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "reasoning_tokens",
+                "usage_source",
+                "cache_usage",
+                "provider_usage",
+            },
+            "TokenUsage",
+        )
+        if data["schema_version"] != TOKEN_USAGE_SCHEMA_VERSION:
+            raise ValueError(f"unsupported TokenUsage schema: {data['schema_version']!r}")
+        cache_usage = data["cache_usage"]
+        provider_usage = data["provider_usage"]
+        if not isinstance(cache_usage, dict):
+            raise TypeError("TokenUsage cache_usage must be an object")
+        if not isinstance(provider_usage, dict):
+            raise TypeError("TokenUsage provider_usage must be an object")
         return cls(
-            prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(data.get("completion_tokens", 0) or 0),
-            total_tokens=int(data.get("total_tokens", 0) or 0),
-            cached_tokens=int(data.get("cached_tokens", 0) or 0),
-            reasoning_tokens=int(data.get("reasoning_tokens", 0) or 0),
-            input_tokens=int(data.get("input_tokens", 0) or 0),
-            output_tokens=int(data.get("output_tokens", 0) or 0),
-            cache_creation_tokens=int(data.get("cache_creation_tokens", 0) or 0),
-            usage_source=UsageSource(data.get("usage_source", UsageSource.ACCOUNTING_MISSING.value)),
-            cache_usage=CacheUsage.from_dict(cache_usage if isinstance(cache_usage, dict) else {}),
-            raw=dict(data.get("raw", {})) if isinstance(data.get("raw", {}), dict) else {},
+            input_tokens=_optional_non_negative_int(data["input_tokens"]),
+            output_tokens=_optional_non_negative_int(data["output_tokens"]),
+            total_tokens=_optional_non_negative_int(data["total_tokens"]),
+            reasoning_tokens=_optional_non_negative_int(data["reasoning_tokens"]),
+            usage_source=UsageSource(data["usage_source"]),
+            cache_usage=CacheUsage.from_dict(cache_usage),
+            provider_usage=deepcopy(provider_usage),
         )
 
 
@@ -340,77 +366,92 @@ class CycleTokenUsage:
     cycle_index: int
     usage: TokenUsage
 
+    def __post_init__(self) -> None:
+        if isinstance(self.cycle_index, bool) or not isinstance(self.cycle_index, int):
+            raise TypeError("cycle_index must be an integer")
+        if not 1 <= self.cycle_index <= _MAX_U32:
+            raise ValueError("cycle_index must be between 1 and 4294967295")
+        if not isinstance(self.usage, TokenUsage):
+            raise TypeError("usage must be a TokenUsage")
+
     def to_dict(self) -> dict[str, Any]:
-        payload = self.usage.to_dict()
-        payload["cycle_index"] = self.cycle_index
-        return payload
+        return {"cycle_index": self.cycle_index, "usage": self.usage.to_dict()}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CycleTokenUsage:
+        _require_exact_keys(data, {"cycle_index", "usage"}, "CycleTokenUsage")
+        nested = data["usage"]
+        if not isinstance(nested, dict):
+            raise TypeError("CycleTokenUsage usage must be an object")
         return cls(
-            cycle_index=int(data.get("cycle_index", 0) or 0),
-            usage=TokenUsage.from_dict(data),
+            cycle_index=data["cycle_index"],
+            usage=TokenUsage.from_dict(nested),
         )
 
 
 @dataclass(slots=True)
 class TaskTokenUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    cached_tokens: int = 0
-    reasoning_tokens: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_creation_tokens: int = 0
-    cache_usage: CacheUsage = field(default_factory=CacheUsage)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cache_usage: CacheUsage = field(default_factory=lambda: CacheUsage(source="aggregate"))
     cycles: list[CycleTokenUsage] = field(default_factory=list)
 
     def add_cycle(self, cycle_index: int, usage: TokenUsage) -> None:
-        if not usage.has_usage():
-            return
-        self.prompt_tokens += usage.prompt_tokens
-        self.completion_tokens += usage.completion_tokens
-        self.total_tokens += usage.total_tokens
-        self.cached_tokens += usage.cached_tokens
-        self.reasoning_tokens += usage.reasoning_tokens
-        self.input_tokens += usage.input_tokens
-        self.output_tokens += usage.output_tokens
-        self.cache_creation_tokens += usage.cache_creation_tokens
         self.cycles.append(CycleTokenUsage(cycle_index=cycle_index, usage=usage))
+        self.input_tokens = self._complete_sum("input_tokens")
+        self.output_tokens = self._complete_sum("output_tokens")
+        self.total_tokens = self._complete_sum("total_tokens")
+        self.reasoning_tokens = self._complete_sum("reasoning_tokens")
         self.cache_usage = _aggregate_cache_usage([item.usage.cache_usage for item in self.cycles])
+
+    def _complete_sum(self, name: str) -> int | None:
+        values = [getattr(item.usage, name) for item in self.cycles]
+        if not values or any(value is None for value in values):
+            return None
+        return sum(cast(int, value) for value in values)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
-            "cached_tokens": self.cached_tokens,
-            "reasoning_tokens": self.reasoning_tokens,
+            "schema_version": TASK_TOKEN_USAGE_SCHEMA_VERSION,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
-            "cache_creation_tokens": self.cache_creation_tokens,
+            "total_tokens": self.total_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
             "cache_usage": self.cache_usage.to_dict(),
             "cycles": [item.to_dict() for item in self.cycles],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TaskTokenUsage:
-        cache_usage = data.get("cache_usage")
-        usage = cls(
-            prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(data.get("completion_tokens", 0) or 0),
-            total_tokens=int(data.get("total_tokens", 0) or 0),
-            cached_tokens=int(data.get("cached_tokens", 0) or 0),
-            reasoning_tokens=int(data.get("reasoning_tokens", 0) or 0),
-            input_tokens=int(data.get("input_tokens", 0) or 0),
-            output_tokens=int(data.get("output_tokens", 0) or 0),
-            cache_creation_tokens=int(data.get("cache_creation_tokens", 0) or 0),
-            cache_usage=CacheUsage.from_dict(cache_usage if isinstance(cache_usage, dict) else {}),
+        _require_exact_keys(
+            data,
+            {
+                "schema_version",
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "reasoning_tokens",
+                "cache_usage",
+                "cycles",
+            },
+            "TaskTokenUsage",
         )
-        cycles = data.get("cycles", [])
-        if isinstance(cycles, list):
-            usage.cycles = [CycleTokenUsage.from_dict(item) for item in cycles if isinstance(item, dict)]
+        if data["schema_version"] != TASK_TOKEN_USAGE_SCHEMA_VERSION:
+            raise ValueError(f"unsupported TaskTokenUsage schema: {data['schema_version']!r}")
+        cycles = data["cycles"]
+        if not isinstance(cycles, list):
+            raise TypeError("TaskTokenUsage cycles must be a list")
+        usage = cls()
+        for item in cycles:
+            if not isinstance(item, dict):
+                raise TypeError("TaskTokenUsage cycle must be an object")
+            cycle = CycleTokenUsage.from_dict(item)
+            usage.add_cycle(cycle.cycle_index, cycle.usage)
+        expected = usage.to_dict()
+        if data != expected:
+            raise ValueError("TaskTokenUsage aggregate does not match cycle usage")
         return usage
 
 
@@ -418,8 +459,7 @@ class TaskTokenUsage:
 class ToolExecutionResult:
     tool_call_id: str
     content: str
-    status: Literal["success", "error"] | None = None
-    status_code: ToolResultStatus | None = None
+    status_code: ToolResultStatus = ToolResultStatus.SUCCESS
     directive: ToolDirective = ToolDirective.CONTINUE
     error_code: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -427,16 +467,10 @@ class ToolExecutionResult:
     image_path: str | None = None
 
     def __post_init__(self) -> None:
-        if self.status is None and self.status_code is None:
-            self.status = "success"
-            self.status_code = ToolResultStatus.SUCCESS
-            return
-
-        if self.status_code is None:
-            self.status_code = _LEGACY_STATUS_TO_CODE.get(self.status or "success", ToolResultStatus.SUCCESS)
-
-        if self.status is None:
-            self.status = _STATUS_CODE_TO_LEGACY[self.status_code]
+        if not isinstance(self.status_code, ToolResultStatus):
+            self.status_code = ToolResultStatus(self.status_code)
+        if not isinstance(self.directive, ToolDirective):
+            self.directive = ToolDirective(self.directive)
 
     def to_tool_message(self) -> Message:
         return Message(role="tool", content=self.content, tool_call_id=self.tool_call_id)
@@ -445,12 +479,9 @@ class ToolExecutionResult:
         d: dict[str, Any] = {
             "tool_call_id": self.tool_call_id,
             "content": self.content,
+            "status_code": self.status_code.value,
             "directive": self.directive.value,
         }
-        if self.status is not None:
-            d["status"] = self.status
-        if self.status_code is not None:
-            d["status_code"] = self.status_code.value
         if self.error_code is not None:
             d["error_code"] = self.error_code
         if self.metadata:
@@ -463,17 +494,32 @@ class ToolExecutionResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolExecutionResult:
-        status_code_raw = data.get("status_code")
-        status_code = ToolResultStatus(status_code_raw) if status_code_raw else None
-        directive_raw = data.get("directive", "continue")
+        if not isinstance(data, dict):
+            raise TypeError("ToolExecutionResult payload must be a dict")
+        allowed = {
+            "tool_call_id",
+            "content",
+            "status_code",
+            "directive",
+            "error_code",
+            "metadata",
+            "image_url",
+            "image_path",
+        }
+        unknown = sorted(set(data) - allowed)
+        missing = sorted({"tool_call_id", "content", "status_code", "directive"} - set(data))
+        if missing or unknown:
+            raise ValueError(f"ToolExecutionResult fields do not match the current wire: missing={missing}, unknown={unknown}")
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise TypeError("ToolExecutionResult metadata must be an object")
         return cls(
-            tool_call_id=data.get("tool_call_id", ""),
-            content=data.get("content", ""),
-            status=data.get("status"),
-            status_code=status_code,
-            directive=ToolDirective(directive_raw),
+            tool_call_id=data["tool_call_id"],
+            content=data["content"],
+            status_code=ToolResultStatus(data["status_code"]),
+            directive=ToolDirective(data["directive"]),
             error_code=data.get("error_code"),
-            metadata=dict(data.get("metadata", {})),
+            metadata=dict(metadata),
             image_url=data.get("image_url"),
             image_path=data.get("image_path"),
         )
@@ -556,9 +602,7 @@ class SubAgentConfig:
             raise TypeError("sub-agent metadata must be a dict with string keys")
         from vv_agent.tools.metadata import normalize_denied_side_effects, normalize_metadata_labels
 
-        self.denied_side_effects = [
-            item.value for item in normalize_denied_side_effects(self.denied_side_effects)
-        ]
+        self.denied_side_effects = [item.value for item in normalize_denied_side_effects(self.denied_side_effects)]
         self.denied_capability_tags = normalize_metadata_labels(
             self.denied_capability_tags,
             field_name="denied_capability_tags",
@@ -592,6 +636,23 @@ class SubAgentConfig:
     def from_dict(cls, data: dict[str, Any]) -> SubAgentConfig:
         if not isinstance(data, dict):
             raise TypeError("SubAgentConfig payload must be a dict")
+        _reject_unknown_fields(
+            data,
+            {
+                "model",
+                "description",
+                "backend",
+                "system_prompt",
+                "max_cycles",
+                "exclude_tools",
+                "denied_side_effects",
+                "denied_capability_tags",
+                "deny_terminal_tools",
+                "denied_cost_dimensions",
+                "metadata",
+            },
+            "SubAgentConfig",
+        )
         return cls(
             model=data["model"],
             description=data.get("description", ""),
@@ -612,6 +673,12 @@ def _agent_task_required_string(data: dict[str, Any], field_name: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"AgentTask field {field_name!r} must be a string")
     return value
+
+
+def _reject_unknown_fields(data: dict[str, Any], allowed: set[str], label: str) -> None:
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ValueError(f"{label} contains unknown fields: {', '.join(unknown)}")
 
 
 def _agent_task_integer(
@@ -716,9 +783,7 @@ def _agent_task_messages(data: dict[str, Any]) -> list[Message]:
         if "metadata" in typed_payload:
             metadata = typed_payload["metadata"]
             if not isinstance(metadata, dict) or not all(isinstance(key, str) for key in metadata):
-                raise TypeError(
-                    f"AgentTask initial_messages[{index}].metadata must be a dict with string keys"
-                )
+                raise TypeError(f"AgentTask initial_messages[{index}].metadata must be a dict with string keys")
         messages.append(Message.from_dict(typed_payload))
     return messages
 
@@ -735,8 +800,6 @@ class AgentTask:
     no_tool_policy: NoToolPolicy = "continue"
     allow_interruption: bool = True
     use_workspace: bool = True
-    # Legacy switch; prefer configuring `sub_agents` with concrete entries.
-    has_sub_agents: bool = False
     sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)
     agent_type: str | None = None
     native_multimodal: bool = False
@@ -749,7 +812,7 @@ class AgentTask:
 
     @property
     def sub_agents_enabled(self) -> bool:
-        return self.has_sub_agents or bool(self.sub_agents)
+        return bool(self.sub_agents)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -763,7 +826,6 @@ class AgentTask:
             "no_tool_policy": self.no_tool_policy,
             "allow_interruption": self.allow_interruption,
             "use_workspace": self.use_workspace,
-            "has_sub_agents": self.has_sub_agents,
             "agent_type": self.agent_type,
             "native_multimodal": self.native_multimodal,
             "sub_agents": {name: config.to_dict() for name, config in self.sub_agents.items()},
@@ -780,6 +842,31 @@ class AgentTask:
         """Restore the public dict form; only the four constructor fields are required."""
         if not isinstance(data, dict):
             raise TypeError("AgentTask payload must be a dict")
+        _reject_unknown_fields(
+            data,
+            {
+                "task_id",
+                "model",
+                "system_prompt",
+                "user_prompt",
+                "max_cycles",
+                "memory_compact_threshold",
+                "memory_threshold_percentage",
+                "no_tool_policy",
+                "allow_interruption",
+                "use_workspace",
+                "sub_agents",
+                "agent_type",
+                "native_multimodal",
+                "extra_tool_names",
+                "exclude_tools",
+                "model_settings",
+                "initial_messages",
+                "initial_shared_state",
+                "metadata",
+            },
+            "AgentTask",
+        )
         return cls(
             task_id=_agent_task_required_string(data, "task_id"),
             model=_agent_task_required_string(data, "model"),
@@ -801,7 +888,6 @@ class AgentTask:
             no_tool_policy=_agent_task_no_tool_policy(data),
             allow_interruption=_agent_task_bool(data, "allow_interruption", default=True),
             use_workspace=_agent_task_bool(data, "use_workspace", default=True),
-            has_sub_agents=_agent_task_bool(data, "has_sub_agents", default=False),
             sub_agents=_agent_task_sub_agents(data),
             agent_type=_agent_task_optional_string(data, "agent_type"),
             native_multimodal=_agent_task_bool(data, "native_multimodal", default=False),
@@ -912,9 +998,7 @@ class AgentResult:
             "shared_state": self.shared_state,
             "token_usage": self.token_usage.to_dict(),
             "checkpoint_key": self.checkpoint_key,
-            "resume_observation": (
-                self.resume_observation.to_dict() if self.resume_observation is not None else None
-            ),
+            "resume_observation": (self.resume_observation.to_dict() if self.resume_observation is not None else None),
         }
         if self.budget_usage is not None:
             payload["budget_usage"] = self.budget_usage.to_dict()
@@ -926,55 +1010,94 @@ class AgentResult:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentResult:
-        token_usage_raw = data.get("token_usage")
-        token_usage = TaskTokenUsage()
-        if isinstance(token_usage_raw, dict):
-            token_usage = TaskTokenUsage.from_dict(token_usage_raw)
-        completion_reason_raw = data.get("completion_reason")
+        required_fields = {
+            "status",
+            "completion_reason",
+            "completion_tool_name",
+            "partial_output",
+            "messages",
+            "cycles",
+            "final_answer",
+            "wait_reason",
+            "error",
+            "shared_state",
+            "token_usage",
+            "checkpoint_key",
+            "resume_observation",
+        }
+        optional_fields = {"budget_usage", "budget_exhaustion", "error_code"}
+        if not isinstance(data, dict):
+            raise TypeError("AgentResult must be an object")
+        actual_fields = set(data)
+        missing = required_fields - actual_fields
+        unknown = actual_fields - required_fields - optional_fields
+        if missing or unknown:
+            raise ValueError(f"invalid AgentResult fields: missing={sorted(missing)}, unknown={sorted(unknown)}")
+        null_optional = sorted(
+            field_name for field_name in optional_fields if data.get(field_name) is None and field_name in data
+        )
+        if null_optional:
+            raise ValueError(f"AgentResult optional fields must be omitted when absent: {null_optional}")
+
+        token_usage_raw = data["token_usage"]
+        if not isinstance(token_usage_raw, dict):
+            raise TypeError("AgentResult field 'token_usage' must be an object")
+        token_usage = TaskTokenUsage.from_dict(token_usage_raw)
+        completion_reason_raw = data["completion_reason"]
         if completion_reason_raw is not None and not isinstance(completion_reason_raw, str):
             raise TypeError("AgentResult field 'completion_reason' must be a string or None")
-        completion_tool_name = data.get("completion_tool_name")
+        completion_tool_name = data["completion_tool_name"]
         if completion_tool_name is not None and not isinstance(completion_tool_name, str):
             raise TypeError("AgentResult field 'completion_tool_name' must be a string or None")
-        partial_output = data.get("partial_output")
+        partial_output = data["partial_output"]
         if partial_output is not None and not isinstance(partial_output, str):
             raise TypeError("AgentResult field 'partial_output' must be a string or None")
         budget_usage_raw = data.get("budget_usage")
-        if budget_usage_raw is not None and not isinstance(budget_usage_raw, dict):
-            raise TypeError("AgentResult field 'budget_usage' must be an object or None")
+        if "budget_usage" in data and not isinstance(budget_usage_raw, dict):
+            raise TypeError("AgentResult field 'budget_usage' must be an object")
         budget_exhaustion_raw = data.get("budget_exhaustion")
-        if budget_exhaustion_raw is not None and not isinstance(budget_exhaustion_raw, dict):
-            raise TypeError("AgentResult field 'budget_exhaustion' must be an object or None")
-        checkpoint_key = data.get("checkpoint_key")
+        if "budget_exhaustion" in data and not isinstance(budget_exhaustion_raw, dict):
+            raise TypeError("AgentResult field 'budget_exhaustion' must be an object")
+        checkpoint_key = data["checkpoint_key"]
         if checkpoint_key is not None and not isinstance(checkpoint_key, str):
             raise TypeError("AgentResult field 'checkpoint_key' must be a string or None")
-        resume_observation_raw = data.get("resume_observation")
+        resume_observation_raw = data["resume_observation"]
         if resume_observation_raw is not None and not isinstance(resume_observation_raw, dict):
             raise TypeError("AgentResult field 'resume_observation' must be an object or None")
         error_code = data.get("error_code")
-        if error_code is not None and not isinstance(error_code, str):
-            raise TypeError("AgentResult field 'error_code' must be a string or None")
-        return cls(
+        if "error_code" in data and not isinstance(error_code, str):
+            raise TypeError("AgentResult field 'error_code' must be a string")
+        for field_name in ("final_answer", "wait_reason", "error"):
+            value = data[field_name]
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"AgentResult field {field_name!r} must be a string or None")
+        if not isinstance(data["messages"], list):
+            raise TypeError("AgentResult field 'messages' must be a list")
+        if not isinstance(data["cycles"], list):
+            raise TypeError("AgentResult field 'cycles' must be a list")
+        if not isinstance(data["shared_state"], dict):
+            raise TypeError("AgentResult field 'shared_state' must be an object")
+
+        result = cls(
             status=AgentStatus(data["status"]),
             completion_reason=(CompletionReason(completion_reason_raw) if completion_reason_raw is not None else None),
             completion_tool_name=completion_tool_name,
             partial_output=partial_output,
-            messages=[Message.from_dict(m) for m in data.get("messages", [])],
-            cycles=[CycleRecord.from_dict(c) for c in data.get("cycles", [])],
-            final_answer=data.get("final_answer"),
-            wait_reason=data.get("wait_reason"),
-            error=data.get("error"),
-            shared_state=data.get("shared_state", {}),
+            messages=[Message.from_dict(m) for m in data["messages"]],
+            cycles=[CycleRecord.from_dict(c) for c in data["cycles"]],
+            final_answer=data["final_answer"],
+            wait_reason=data["wait_reason"],
+            error=data["error"],
+            shared_state=deepcopy(data["shared_state"]),
             token_usage=token_usage,
             budget_usage=(BudgetUsageSnapshot.from_dict(budget_usage_raw) if budget_usage_raw is not None else None),
-            budget_exhaustion=(
-                BudgetExhaustion.from_dict(budget_exhaustion_raw) if budget_exhaustion_raw is not None else None
-            ),
+            budget_exhaustion=(BudgetExhaustion.from_dict(budget_exhaustion_raw) if budget_exhaustion_raw is not None else None),
             checkpoint_key=checkpoint_key,
             resume_observation=(
-                ResumeObservation.from_dict(resume_observation_raw)
-                if resume_observation_raw is not None
-                else None
+                ResumeObservation.from_dict(resume_observation_raw) if resume_observation_raw is not None else None
             ),
             error_code=error_code,
         )
+        if result.to_dict() != data:
+            raise ValueError("AgentResult must use the canonical current wire shape")
+        return result

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,48 +13,63 @@ from vv_agent.event_store import RunEventReplayQuery
 from vv_agent.events import RunEvent
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.runtime import CancellationToken
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "runner_terminal_v1.json"
-FIXTURE_SHA256 = "e202e1156e2bf93995168316b83ccd811ee6b4bba17154b740d6d12768eebdd6"
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "runner_terminal.json"
 TERMINAL_TYPES = {"run_completed", "run_failed", "run_cancelled"}
 
 
 def _contract() -> dict[str, Any]:
-    payload = FIXTURE_PATH.read_bytes()
-    assert hashlib.sha256(payload).hexdigest() == FIXTURE_SHA256
-    return json.loads(payload)
+    return json.loads(FIXTURE_PATH.read_bytes())
 
 
-def _agent(*, output_guardrails=None, assistant_message: str = "finish", final_message: str = "done") -> Agent:
-    return Agent(
-        name="terminal-agent",
-        instructions="Finish.",
-        model=ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content=assistant_message,
-                    tool_calls=[
-                        ToolCall(
-                            id="finish",
-                            name=TASK_FINISH_TOOL_NAME,
-                            arguments={"message": final_message},
-                        )
-                    ],
-                )
-            ]
+def _agent(
+    *,
+    output_guardrails=None,
+    assistant_message: str = "finish",
+    final_message: str = "done",
+) -> tuple[Agent, ScriptedModelProvider]:
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content=assistant_message,
+                tool_calls=[
+                    ToolCall(
+                        id="finish",
+                        name=TASK_FINISH_TOOL_NAME,
+                        arguments={"message": final_message},
+                    )
+                ],
+            )
+        ]
+    )
+    return (
+        Agent(
+            name="terminal-agent",
+            instructions="Finish.",
+            model="terminal-model",
+            output_guardrails=list(output_guardrails or []),
         ),
-        output_guardrails=list(output_guardrails or []),
+        ScriptedModelProvider(
+            backend="test",
+            default_model="terminal-model",
+            llm=llm,
+        ),
     )
 
 
 def test_session_persists_before_the_only_success_terminal() -> None:
     expected = _contract()["success_with_session"]
+    agent, provider = _agent()
     result = Runner.run_sync(
-        _agent(),
+        agent,
         "go",
-        run_config=RunConfig(session=MemorySession("terminal-session")),
+        run_config=RunConfig(
+            model_provider=provider,
+            session=MemorySession("terminal-session"),
+        ),
     )
     types = [event.type for event in result.events]
 
@@ -80,14 +94,18 @@ def test_output_guardrail_block_short_circuits_and_owns_final_terminal() -> None
         later_calls += 1
         return GuardrailResult.rewrite(output)
 
+    agent, provider = _agent(
+        output_guardrails=[block, later],
+        assistant_message=expected["partial_output"],
+        final_message="tool result must not become partial output",
+    )
     result = Runner.run_sync(
-        _agent(
-            output_guardrails=[block, later],
-            assistant_message=expected["partial_output"],
-            final_message="tool result must not become partial output",
-        ),
+        agent,
         "go",
-        run_config=RunConfig(session=MemorySession("blocked-session")),
+        run_config=RunConfig(
+            model_provider=provider,
+            session=MemorySession("blocked-session"),
+        ),
     )
     types = [event.type for event in result.events]
 
@@ -110,10 +128,17 @@ def test_max_cycles_preserves_partial_output_and_typed_reason() -> None:
         Agent(
             name="max-cycles-agent",
             instructions="Continue until stopped.",
-            model=ScriptedLLM(steps=[LLMResponse(content=expected["partial_output"])]),
+            model="max-cycles-model",
         ),
         "go",
-        run_config=RunConfig(max_cycles=1),
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.from_steps(
+                "test",
+                "max-cycles-model",
+                [LLMResponse(content=expected["partial_output"])],
+            ),
+            max_cycles=1,
+        ),
     )
 
     assert result.status == AgentStatus(expected["status"])
@@ -132,10 +157,13 @@ def test_cancellation_has_typed_reason_and_single_terminal() -> None:
         Agent(
             name="cancelled-agent",
             instructions="This model must not be called.",
-            model=ScriptedLLM(steps=[]),
+            model="cancelled-model",
         ),
         "go",
-        run_config=RunConfig(cancellation_token=cancellation),
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.from_steps("test", "cancelled-model", []),
+            cancellation_token=cancellation,
+        ),
     )
     terminals = [event for event in result.events if event.type in TERMINAL_TYPES]
 
@@ -160,11 +188,14 @@ def test_cancellation_reason_precedes_output_guardrail_failure() -> None:
         Agent(
             name="cancelled-guardrail-agent",
             instructions="This model must not be called.",
-            model=ScriptedLLM(steps=[]),
+            model="cancelled-model",
             output_guardrails=[block],
         ),
         "go",
-        run_config=RunConfig(cancellation_token=cancellation),
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.from_steps("test", "cancelled-model", []),
+            cancellation_token=cancellation,
+        ),
     )
 
     assert result.status == AgentStatus.FAILED
@@ -182,8 +213,15 @@ def test_budget_exhaustion_emits_observation_before_the_only_terminal() -> None:
         Agent(
             name="budget-terminal-agent",
             instructions="Return the scripted draft.",
-            model=ScriptedLLM(
-                steps=[
+            model="budget-model",
+            no_tool_policy="finish",
+        ),
+        "go",
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.from_steps(
+                "test",
+                "budget-model",
+                [
                     LLMResponse(
                         content=expected["partial_output"],
                         raw={
@@ -195,12 +233,10 @@ def test_budget_exhaustion_emits_observation_before_the_only_terminal() -> None:
                             }
                         },
                     )
-                ]
+                ],
             ),
-            no_tool_policy="finish",
+            budget_limits=RunBudgetLimits(max_total_tokens=10),
         ),
-        "go",
-        run_config=RunConfig(budget_limits=RunBudgetLimits(max_total_tokens=10)),
     )
     terminals = [event for event in result.events if event.type in TERMINAL_TYPES]
 
@@ -220,11 +256,16 @@ def test_budget_exhaustion_emits_observation_before_the_only_terminal() -> None:
 
 def test_event_store_fail_closed_is_a_normal_runner_error() -> None:
     expected = _contract()["event_store_fail_closed"]
+    agent, provider = _agent()
     with pytest.raises(RuntimeError, match=str(expected["error"])):
         Runner.run_sync(
-            _agent(),
+            agent,
             "go",
-            run_config=RunConfig(event_store=_FailingStore(), event_store_fail_closed=True),
+            run_config=RunConfig(
+                model_provider=provider,
+                event_store=_FailingStore(),
+                event_store_fail_closed=True,
+            ),
         )
 
 

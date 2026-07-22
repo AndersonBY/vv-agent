@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import ast
 import json
 import logging
 import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
+from enum import Enum
+from math import isfinite
 from pathlib import Path
 from threading import RLock
-from typing import Any, Protocol
+from typing import Any, TypedDict
 
 from vv_agent.approval import ApprovalError
 from vv_agent.budget import (
@@ -21,24 +22,24 @@ from vv_agent.budget import (
     RunBudgetLimits,
 )
 from vv_agent.checkpoint import utf16_sort_key
-from vv_agent.config import (
-    EndpointConfig,
-    EndpointOption,
-    ResolvedModelConfig,
-    build_openai_llm_from_local_settings,
-    project_resolved_model_limits,
-)
+from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import (
+    AgentStartedEvent,
     BudgetExhaustedEvent,
     BudgetSnapshotEvent,
+    CycleStartedEvent,
+    DiagnosticEvent,
+    LLMStartedEvent,
     RunEvent,
+    RunStartedEvent,
     SubRunCompletedEvent,
     SubRunStartedEvent,
 )
 from vv_agent.llm.base import LLMClient, LlmRequest, complete_llm_request
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.token_utils import resolve_model_token_limits
+from vv_agent.model import ModelProvider, ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
 from vv_agent.runtime.backends.base import ExecutionBackend
@@ -48,7 +49,7 @@ from vv_agent.runtime.checkpoint_resume import (
     CheckpointReconciliationRequired,
     CheckpointResumeController,
 )
-from vv_agent.runtime.context import ExecutionContext, StreamCallback
+from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
 from vv_agent.runtime.lifecycle import (
@@ -64,11 +65,7 @@ from vv_agent.runtime.lifecycle import (
     read_after_cycle_disallowed_tools,
 )
 from vv_agent.runtime.sub_task_identity import normalize_identity_string, take_sub_task_identity
-from vv_agent.runtime.sub_task_manager import (
-    _TURN_LOG_HANDLER_METADATA_KEY,
-    SubTaskManager,
-    _SubTaskTurnSnapshot,
-)
+from vv_agent.runtime.sub_task_manager import SubTaskManager, _SubTaskTurnSnapshot
 from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.runtime.tool_call_runner import ToolCallRunner, _ConfiguredSubTaskCancelledError
 from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints, plan_tool_names
@@ -99,7 +96,6 @@ from vv_agent.workspace import (
     WorkspaceBackend,
 )
 
-RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
 RunEventHandler = Callable[[RunEvent], None]
 BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
 InterruptionMessageProvider = Callable[[], list[Message]]
@@ -142,20 +138,6 @@ _RESERVED_SUB_AGENT_METADATA_KEYS = (
     "_vv_agent_parent_tool_call_id",
     *_TOOL_POLICY_METADATA_KEYS,
 )
-_SUB_AGENT_STREAM_PRODUCER_FIELDS = {
-    "assistant_delta": frozenset({"content_chars", "content_delta", "delta", "estimated_tokens", "event"}),
-    "reasoning_delta": frozenset({"estimated_tokens", "event", "reasoning_chars", "reasoning_delta"}),
-    "tool_call_started": frozenset(
-        {"arguments_chars", "estimated_tokens", "event", "function_name", "tool_call_id", "tool_call_index"}
-    ),
-    "tool_call_progress": frozenset(
-        {"arguments_chars", "estimated_tokens", "event", "function_name", "tool_call_id", "tool_call_index"}
-    ),
-}
-
-
-class _CanonicalSubAgentStreamPayload(dict[str, Any]):
-    """Marks a payload whose child identity was written by the runtime."""
 
 
 def _enrich_sub_agent_payload(
@@ -172,48 +154,18 @@ def _enrich_sub_agent_payload(
     return enriched
 
 
-def _canonicalize_sub_agent_stream_event(
-    payload: dict[str, Any],
-    *,
-    task_id: str,
-    session_id: str,
-    sub_agent_name: str,
-    child_run_id: str,
-    trace_id: str,
-    parent_run_id: str,
-    parent_tool_call_id: str,
-) -> _CanonicalSubAgentStreamPayload | None:
-    event_name = payload.get("event")
-    if not isinstance(event_name, str) or event_name not in _SUB_AGENT_STREAM_PRODUCER_FIELDS:
-        return None
-    canonical = _CanonicalSubAgentStreamPayload(
-        {key: value for key, value in payload.items() if key in _SUB_AGENT_STREAM_PRODUCER_FIELDS[event_name]}
-    )
-    canonical.update(
-        {
-            "event": event_name,
-            "agent_name": sub_agent_name,
-            "child_run_id": child_run_id,
-            "child_session_id": session_id,
-            "parent_run_id": parent_run_id,
-            "parent_tool_call_id": parent_tool_call_id,
-            "run_id": child_run_id,
-            "session_id": session_id,
-            "sub_agent_name": sub_agent_name,
-            "task_id": task_id,
-            "trace_id": trace_id,
-        }
-    )
-    cycle_index = payload.get("cycle")
-    if isinstance(cycle_index, int) and not isinstance(cycle_index, bool) and cycle_index > 0:
-        canonical["cycle_index"] = cycle_index
-    return canonical
-
-
 class _SubTaskContractError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class _EventIdentityKwargs(TypedDict):
+    run_id: str
+    trace_id: str
+    agent_name: str | None
+    session_id: str | None
+    parent_run_id: str | None
 
 
 class _RunBudgetController:
@@ -223,12 +175,10 @@ class _RunBudgetController:
         evaluator: BudgetEvaluator,
         task: AgentTask,
         ctx: ExecutionContext | None,
-        emit_log: Callable[..., None],
     ) -> None:
         self.evaluator = evaluator
         self.task = task
         self.ctx = ctx
-        self.emit_log = emit_log
         self.exhaustion: BudgetExhaustion | None = None
         self._last_emitted_snapshot: BudgetUsageSnapshot | None = None
 
@@ -342,29 +292,8 @@ class _RunBudgetController:
         return AgentRuntime._metadata_str(self.ctx.metadata, *keys)
 
     def _emit_event(self, event: RunEvent) -> None:
-        if self.ctx is not None:
-            emitter = self.ctx.metadata.get("_vv_agent_emit_event")
-            if callable(emitter):
-                emitter(event)
-        payload = event.to_dict()
-        payload.pop("type", None)
-        self.emit_log(event.type, **payload)
-
-
-def _parse_optional_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        if value in (0, 1):
-            return bool(value)
-        return None
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return None
+        if self.ctx is not None and self.ctx.event_handler is not None:
+            self.ctx.event_handler(event)
 
 
 def steer_sub_agent_session(*, session_id: str, prompt: str) -> bool:
@@ -429,60 +358,41 @@ def _unregister_sub_agent_session(session_id: str, session: Any | None = None) -
     unregister_sub_agent_session(session_id, session)
 
 
-class LLMBuilder(Protocol):
-    def __call__(
-        self,
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[LLMClient, ResolvedModelConfig]: ...
-
-
 class AgentRuntime:
     def __init__(
         self,
         *,
         llm_client: LLMClient,
+        model_provider: ModelProvider | None = None,
         tool_registry: ToolRegistry,
         default_workspace: str | Path | None = None,
-        log_handler: RuntimeLogHandler | None = None,
+        event_handler: RunEventHandler | None = None,
         log_preview_chars: int | None = None,
-        settings_file: str | Path | None = None,
-        default_backend: str | None = None,
-        llm_builder: LLMBuilder | None = None,
         tool_registry_factory: Callable[[], ToolRegistry] | None = None,
-        sub_agent_timeout_seconds: float = 90.0,
         hooks: list[RuntimeHook] | None = None,
         after_cycle_hooks: list[AfterCycleHook] | None = None,
         execution_backend: ExecutionBackend | None = None,
         workspace_backend: WorkspaceBackend | None = None,
     ) -> None:
         self.llm_client = llm_client
+        self.model_provider = model_provider
         self.tool_registry = tool_registry
         self.default_workspace = Path(default_workspace).resolve() if default_workspace else None
-        self.log_handler = log_handler
+        self.event_handler = event_handler
         if log_preview_chars is None:
             self.log_preview_chars: int | None = None
         else:
             self.log_preview_chars = max(int(log_preview_chars), 40)
-        self.settings_file = Path(settings_file).resolve() if settings_file else None
-        self.default_backend = default_backend
-        self.llm_builder = llm_builder or build_openai_llm_from_local_settings
         self.tool_registry_factory = tool_registry_factory
-        self.sub_agent_timeout_seconds = max(sub_agent_timeout_seconds, 1.0)
         self.hook_manager = RuntimeHookManager(hooks=list(hooks or []))
         self.after_cycle_hook_manager = AfterCycleHookManager(hooks=list(after_cycle_hooks or []))
         self.execution_backend: ExecutionBackend = execution_backend or InlineBackend()
         self._workspace_backend = workspace_backend
         self._memory_summary_clients: dict[tuple[str, str], LLMClient] = {}
-        self._memory_summary_defaults: tuple[str | None, str | None] | None = None
         self.cycle_runner = CycleRunner(
             llm_client=llm_client,
             tool_registry=tool_registry,
             hook_manager=self.hook_manager,
-            runtime_event_handler=self._emit_runtime_event,
         )
         self.tool_call_runner = ToolCallRunner(
             tool_registry=tool_registry,
@@ -530,6 +440,14 @@ class AgentRuntime:
         )
         freeze_dynamic_tool_schema_hints(task)
         runtime_ctx = ctx if ctx is not None else ExecutionContext()
+        if runtime_ctx.event_handler is None and self.event_handler is not None:
+            runtime_ctx.event_handler = self._notify_runtime_observer
+        runtime_run_id = self._metadata_str(runtime_ctx.metadata, "_vv_agent_run_id", "run_id") or task.task_id
+        runtime_trace_id = self._metadata_str(runtime_ctx.metadata, "_vv_agent_trace_id", "trace_id") or runtime_run_id
+        runtime_ctx.metadata.setdefault("_vv_agent_run_id", runtime_run_id)
+        runtime_ctx.metadata.setdefault("_vv_agent_trace_id", runtime_trace_id)
+        runtime_ctx.metadata.setdefault("_vv_agent_agent_name", str(task.metadata.get("agent_name") or task.task_id))
+        runtime_ctx.metadata.setdefault("_vv_agent_input", user_message or task.user_prompt)
         runtime_ctx.metadata.setdefault("execution_backend", self.execution_backend)
         effective_budget_limits = budget_limits
         if effective_budget_limits is None:
@@ -549,8 +467,9 @@ class AgentRuntime:
             if callable(getattr(metadata_meter, "read", None)):
                 host_cost_meter = metadata_meter
 
-        self._emit_log(
+        self._emit_observation(
             "run_started",
+            ctx=runtime_ctx,
             task_id=task.task_id,
             model=task.model,
             workspace=str(workspace_path),
@@ -573,7 +492,6 @@ class AgentRuntime:
                     ),
                     task=task,
                     ctx=runtime_ctx,
-                    emit_log=self._emit_log,
                 )
 
         result: AgentResult | None = None
@@ -602,7 +520,7 @@ class AgentRuntime:
                     )
 
         if result is None:
-            self._emit_log("agent_started", model=task.model)
+            self._emit_observation("agent_started", ctx=runtime_ctx, model=task.model)
 
         if checkpoint_controller is not None:
             runtime_ctx.metadata["_vv_agent_checkpoint_controller"] = checkpoint_controller
@@ -686,8 +604,9 @@ class AgentRuntime:
             result.completion_reason = CompletionReason.CANCELLED
             result.completion_tool_name = None
             result.partial_output = result.partial_output or _last_assistant_output(result.cycles)
-            self._emit_log(
+            self._emit_observation(
                 "run_cancelled",
+                ctx=runtime_ctx,
                 cycle=len(result.cycles) or None,
                 reason=self._preview_text(result.error or "Operation was cancelled"),
                 completion_reason=result.completion_reason.value,
@@ -697,8 +616,9 @@ class AgentRuntime:
             result.completion_reason = CompletionReason.MAX_CYCLES
             result.completion_tool_name = None
             result.partial_output = result.partial_output or _last_assistant_output(result.cycles)
-            self._emit_log(
+            self._emit_observation(
                 "run_max_cycles",
+                ctx=runtime_ctx,
                 cycle=len(result.cycles),
                 final_answer=self._preview_text(result.final_answer or ""),
                 error=self._preview_text(result.error or ""),
@@ -757,8 +677,9 @@ class AgentRuntime:
                     shared_state=shared,
                 )
             except AfterCycleHookError as exc:
-                self._emit_log(
+                self._emit_observation(
                     "after_cycle_failed",
+                    ctx=ctx,
                     cycle=cycle_index,
                     error_code=exc.code,
                     error=str(exc),
@@ -790,35 +711,35 @@ class AgentRuntime:
                 injected = before_cycle_messages(cycle_index, messages, shared)
                 if injected:
                     messages.extend(injected)
-                    self._emit_log(
+                    self._emit_observation(
                         "cycle_injected_messages",
+                        ctx=ctx,
                         cycle=cycle_index,
                         count=len(injected),
                     )
-            self._emit_log(
+            self._emit_observation(
                 "cycle_started",
+                ctx=ctx,
                 cycle=cycle_index,
                 max_cycles=task.max_cycles,
                 message_count=len(messages),
             )
-            cycle_start_message_count = len(messages)
             previous_prompt_tokens: int | None = None
             recent_tool_call_ids: set[str] | None = None
             if cycles:
                 last_cycle = cycles[-1]
                 usage = last_cycle.token_usage
-                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-                if prompt_tokens <= 0:
-                    prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-                if prompt_tokens > 0:
-                    previous_prompt_tokens = prompt_tokens
+                input_tokens = getattr(usage, "input_tokens", None)
+                if isinstance(input_tokens, int) and not isinstance(input_tokens, bool) and input_tokens >= 0:
+                    previous_prompt_tokens = input_tokens
 
                 candidate_ids = {call.id for call in last_cycle.tool_calls if getattr(call, "id", "")}
                 if candidate_ids:
                     recent_tool_call_ids = candidate_ids
             try:
-                self._emit_log(
+                self._emit_observation(
                     "llm_started",
+                    ctx=ctx,
                     cycle=cycle_index,
                     model=task.model,
                     message_count=len(messages),
@@ -840,7 +761,7 @@ class AgentRuntime:
                     ctx is not None and ctx.cancellation_token is not None and ctx.cancellation_token.cancelled
                 )
                 if not cancelled:
-                    self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
+                    self._emit_observation("cycle_failed", ctx=ctx, cycle=cycle_index, error=str(exc))
                 return AgentResult(
                     status=AgentStatus.FAILED,
                     completion_reason=CompletionReason.FAILED,
@@ -855,8 +776,9 @@ class AgentRuntime:
             messages.clear()
             messages.extend(updated_messages)
 
-            self._emit_log(
+            self._emit_observation(
                 "cycle_llm_response",
+                ctx=ctx,
                 cycle=cycle_index,
                 assistant_message=cycle_record.assistant_message,
                 assistant_preview=self._preview_text(cycle_record.assistant_message),
@@ -885,14 +807,6 @@ class AgentRuntime:
             if cancelled:
                 cycles.append(cycle_record)
                 return cancellation_result()
-            if cycle_record.memory_compacted:
-                self._emit_log(
-                    "memory_compacted",
-                    cycle=cycle_index,
-                    before_count=cycle_start_message_count,
-                    after_count=len(updated_messages),
-                )
-
             if cycle_record.tool_calls:
                 if budget_controller is not None:
                     exhaustion = budget_controller.preflight_tools(
@@ -909,8 +823,6 @@ class AgentRuntime:
                             exhaustion=exhaustion,
                         )
                 tool_context_metadata = dict(task.metadata)
-                if self.log_handler is not None:
-                    tool_context_metadata[_TURN_LOG_HANDLER_METADATA_KEY] = self.log_handler
                 context = ToolContext(
                     workspace=workspace_path,
                     shared_state=shared,
@@ -934,13 +846,14 @@ class AgentRuntime:
                 )
 
                 def _on_tool_result(call: ToolCall, result: ToolExecutionResult, *, _cycle: int = cycle_index) -> None:
-                    self._emit_log(
+                    self._emit_observation(
                         "tool_result",
+                        ctx=ctx,
                         cycle=_cycle,
                         tool_name=call.name,
                         tool_arguments=call.arguments,
                         tool_call_id=result.tool_call_id,
-                        status=result.status_code.value if result.status_code else result.status,
+                        status=result.status_code.value,
                         directive=result.directive.value,
                         error_code=result.error_code,
                         content=result.content,
@@ -949,8 +862,9 @@ class AgentRuntime:
                     )
 
                 def _on_tool_start(call: ToolCall, *, _cycle: int = cycle_index) -> None:
-                    self._emit_log(
+                    self._emit_observation(
                         "tool_started",
+                        ctx=ctx,
                         cycle=_cycle,
                         tool_name=call.name,
                         tool_arguments=call.arguments,
@@ -973,7 +887,7 @@ class AgentRuntime:
                     cycles.append(cycle_record)
                     if budget_controller is not None:
                         budget_controller.tool_batch_complete(cycle_index, operation_failed=True)
-                    self._emit_log("cycle_failed", cycle=cycle_index, error=str(exc))
+                    self._emit_observation("cycle_failed", ctx=ctx, cycle=cycle_index, error=str(exc))
                     return AgentResult(
                         status=AgentStatus.FAILED,
                         completion_reason=CompletionReason.FAILED,
@@ -1010,8 +924,9 @@ class AgentRuntime:
                     return cancellation_result()
                 if tool_outcome.interruption_messages:
                     messages.extend(tool_outcome.interruption_messages)
-                    self._emit_log(
+                    self._emit_observation(
                         "run_steered",
+                        ctx=ctx,
                         cycle=cycle_index,
                         steering_count=len(tool_outcome.interruption_messages),
                     )
@@ -1043,6 +958,7 @@ class AgentRuntime:
                     )
                 after_cycle_decision, after_cycle_result = self._apply_after_cycle_hooks(
                     task=task,
+                    ctx=ctx,
                     cycle_record=cycle_record,
                     messages=messages,
                     cycles=cycles,
@@ -1059,8 +975,9 @@ class AgentRuntime:
                     wait_reason = tool_result.metadata.get("question") if isinstance(tool_result.metadata, dict) else None
                     if not wait_reason:
                         wait_reason = tool_result.content
-                    self._emit_log(
+                    self._emit_observation(
                         "run_wait_user",
+                        ctx=ctx,
                         cycle=cycle_index,
                         wait_reason=self._preview_text(str(wait_reason)),
                         completion_reason=CompletionReason.WAIT_USER.value,
@@ -1081,8 +998,9 @@ class AgentRuntime:
 
                 if tool_result and tool_result.directive == ToolDirective.FINISH:
                     final_answer = self._extract_final_message(tool_result)
-                    self._emit_log(
+                    self._emit_observation(
                         "run_completed",
+                        ctx=ctx,
                         cycle=cycle_index,
                         final_answer=self._preview_text(final_answer),
                         completion_reason=(tool_outcome.completion_reason or CompletionReason.TOOL_FINISH).value,
@@ -1127,6 +1045,7 @@ class AgentRuntime:
                 )
             after_cycle_decision, after_cycle_result = self._apply_after_cycle_hooks(
                 task=task,
+                ctx=ctx,
                 cycle_record=cycle_record,
                 messages=messages,
                 cycles=cycles,
@@ -1140,8 +1059,9 @@ class AgentRuntime:
                 return None
 
             if task.no_tool_policy == "finish":
-                self._emit_log(
+                self._emit_observation(
                     "run_completed",
+                    ctx=ctx,
                     cycle=cycle_index,
                     final_answer=self._preview_text(cycle_record.assistant_message),
                     completion_reason=CompletionReason.NO_TOOL_FINISH.value,
@@ -1157,8 +1077,9 @@ class AgentRuntime:
                 )
 
             if task.no_tool_policy == "wait_user":
-                self._emit_log(
+                self._emit_observation(
                     "run_wait_user",
+                    ctx=ctx,
                     cycle=cycle_index,
                     wait_reason=self._preview_text(cycle_record.assistant_message or "No tool call"),
                     completion_reason=CompletionReason.WAIT_USER.value,
@@ -1186,6 +1107,7 @@ class AgentRuntime:
         self,
         *,
         task: AgentTask,
+        ctx: ExecutionContext | None,
         cycle_record: CycleRecord,
         messages: list[Message],
         cycles: list[CycleRecord],
@@ -1229,8 +1151,9 @@ class AgentRuntime:
                     shared_state=shared_state,
                 )
         except AfterCycleHookError as exc:
-            self._emit_log(
+            self._emit_observation(
                 "after_cycle_failed",
+                ctx=ctx,
                 cycle=cycle_record.index,
                 error_code=exc.code,
                 error=str(exc),
@@ -1244,8 +1167,9 @@ class AgentRuntime:
             )
         except Exception as exc:
             code = "after_cycle_hook_failed"
-            self._emit_log(
+            self._emit_observation(
                 "after_cycle_failed",
+                ctx=ctx,
                 cycle=cycle_record.index,
                 error_code=code,
                 error=str(exc),
@@ -1260,8 +1184,9 @@ class AgentRuntime:
 
         if decision.action is AfterCycleAction.STOP_NON_SUCCESS:
             assert decision.stop is not None
-            self._emit_log(
+            self._emit_observation(
                 "after_cycle_stopped",
+                ctx=ctx,
                 cycle=cycle_record.index,
                 error_code=decision.stop.code,
                 error=decision.stop.message,
@@ -1277,8 +1202,9 @@ class AgentRuntime:
         if decision.action is AfterCycleAction.STEER:
             if not native_outcome.steer_allowed:
                 code = "after_cycle_steer_unavailable"
-                self._emit_log(
+                self._emit_observation(
                     "after_cycle_failed",
+                    ctx=ctx,
                     cycle=cycle_record.index,
                     error_code=code,
                     error="after-cycle steering is unavailable at this boundary",
@@ -1291,15 +1217,17 @@ class AgentRuntime:
                     budget_controller=budget_controller,
                 )
             messages.extend(Message(role="user", content=content) for content in decision.steering_messages)
-            self._emit_log(
+            self._emit_observation(
                 "after_cycle_steered",
+                ctx=ctx,
                 cycle=cycle_record.index,
                 steering_count=len(decision.steering_messages),
                 disallowed_tools=list(decision.disallow_tools),
             )
         else:
-            self._emit_log(
+            self._emit_observation(
                 "after_cycle_decision",
+                ctx=ctx,
                 cycle=cycle_record.index,
                 action=decision.action.value,
                 disallowed_tools=list(decision.disallow_tools),
@@ -1355,27 +1283,6 @@ class AgentRuntime:
         if effective:
             task.metadata["_vv_agent_disallowed_tools"] = effective
 
-    def _emit_cycle_tool_results(self, *, cycle_record: CycleRecord) -> None:
-        for idx, result in enumerate(cycle_record.tool_results):
-            tool_name = None
-            tool_arguments = None
-            if idx < len(cycle_record.tool_calls):
-                tool_name = cycle_record.tool_calls[idx].name
-                tool_arguments = cycle_record.tool_calls[idx].arguments
-            self._emit_log(
-                "tool_result",
-                cycle=cycle_record.index,
-                tool_name=tool_name or "unknown",
-                tool_arguments=tool_arguments,
-                tool_call_id=result.tool_call_id,
-                status=result.status_code.value if result.status_code else result.status,
-                directive=result.directive.value,
-                error_code=result.error_code,
-                content=result.content,
-                metadata=dict(result.metadata),
-                content_preview=self._preview_text(result.content),
-            )
-
     @staticmethod
     def _budget_failure_result(
         *,
@@ -1401,22 +1308,119 @@ class AgentRuntime:
             budget_exhaustion=exhaustion,
         )
 
-    def _emit_log(self, event: str, **payload: Any) -> None:
-        if self.log_handler is None:
-            return
-        self.log_handler(event, payload)
+    def _emit_observation(
+        self,
+        code: str,
+        *,
+        ctx: ExecutionContext | None,
+        level: str | None = None,
+        **details: Any,
+    ) -> None:
+        metadata = ctx.metadata if ctx is not None else {}
+        run_id = self._metadata_str(metadata, "_vv_agent_run_id", "run_id") or "runtime"
+        trace_id = self._metadata_str(metadata, "_vv_agent_trace_id", "trace_id") or run_id
+        agent_name = self._metadata_str(metadata, "_vv_agent_agent_name", "agent_name")
+        session_id = self._metadata_str(metadata, "_vv_agent_session_id", "session_id")
+        parent_run_id = self._metadata_str(metadata, "_vv_agent_parent_run_id", "parent_run_id")
+        cycle_index = details.pop("cycle", details.pop("cycle_index", None))
+        if isinstance(cycle_index, bool) or not isinstance(cycle_index, int):
+            cycle_index = None
+        normalized = self._diagnostic_details(details)
 
-    def _emit_runtime_event(self, event: RunEvent) -> None:
-        payload = event.to_dict()
-        payload.pop("type", None)
-        self._emit_log(event.type, **payload)
+        common: _EventIdentityKwargs = {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "agent_name": agent_name,
+            "session_id": session_id,
+            "parent_run_id": parent_run_id,
+        }
+        if code == "run_started":
+            event: RunEvent = RunStartedEvent(
+                input=str(metadata.get("_vv_agent_input") or ""),
+                metadata=normalized,
+                **common,
+            )
+        elif code == "agent_started":
+            event = AgentStartedEvent(cycle_index=cycle_index, metadata=normalized, **common)
+        elif code == "cycle_started":
+            event = CycleStartedEvent(cycle_index=cycle_index, metadata=normalized, **common)
+        elif code == "llm_started":
+            event = LLMStartedEvent(
+                cycle_index=cycle_index,
+                model=str(normalized.pop("model", "")),
+                metadata=normalized,
+                **common,
+            )
+        else:
+            event = DiagnosticEvent(
+                cycle_index=cycle_index,
+                level=level or self._diagnostic_level(code),
+                code=code,
+                details=normalized,
+                **common,
+            )
+        self._emit_event(event, ctx=ctx)
+
+    def _emit_event(self, event: RunEvent, *, ctx: ExecutionContext | None) -> None:
+        emitter = self._event_emitter_from_context(ctx)
+        if emitter is not None:
+            emitter(event)
+            return
+        if self.event_handler is None:
+            return
+        try:
+            self.event_handler(event)
+        except BaseException:
+            logging.getLogger(__name__).exception("Runtime event observer failed")
+
+    def _notify_runtime_observer(self, event: RunEvent) -> None:
+        if self.event_handler is None:
+            return
+        try:
+            self.event_handler(event)
+        except BaseException:
+            logging.getLogger(__name__).exception("Runtime event observer failed")
+
+    @staticmethod
+    def _diagnostic_level(code: str) -> str:
+        if code.endswith("_failed") or code in {"cycle_failed"}:
+            return "error"
+        if code in {"run_max_cycles"}:
+            return "warning"
+        if code.startswith("after_cycle_") or code in {"run_steered", "run_wait_user"}:
+            return "info"
+        return "debug"
+
+    @classmethod
+    def _diagnostic_details(cls, details: dict[str, Any]) -> dict[str, Any]:
+        return {str(key): cls._diagnostic_value(value) for key, value in details.items()}
+
+    @classmethod
+    def _diagnostic_value(cls, value: Any) -> Any:
+        if value is None or isinstance(value, str | bool):
+            return value
+        if isinstance(value, int):
+            return max(min(value, (1 << 53) - 1), -((1 << 53) - 1))
+        if isinstance(value, float):
+            return value if isfinite(value) else str(value)
+        if isinstance(value, Enum):
+            return cls._diagnostic_value(value.value)
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): cls._diagnostic_value(item) for key, item in value.items()}
+        if isinstance(value, list | tuple | set | frozenset):
+            return [cls._diagnostic_value(item) for item in value]
+        serializer = getattr(value, "to_dict", None)
+        if callable(serializer):
+            return cls._diagnostic_value(serializer())
+        return str(value)
 
     @staticmethod
     def _event_emitter_from_context(ctx: ExecutionContext | None) -> RunEventHandler | None:
         if ctx is None:
             return None
-        emitter = ctx.metadata.get("_vv_agent_emit_event")
-        return emitter if callable(emitter) else None
+        return ctx.event_handler
 
     @staticmethod
     def _metadata_str(metadata: dict[str, Any], *keys: str) -> str | None:
@@ -1522,21 +1526,8 @@ class AgentRuntime:
             return values or None
 
         warning_threshold = max(1, min(task.memory_threshold_percentage, 100))
-        local_summary_backend, local_summary_model = self._load_local_memory_summary_defaults()
-        metadata_summary_backend = self._read_optional_str(
-            metadata,
-            "memory_summary_backend",
-            "compress_memory_summary_backend",
-            "memory_compress_backend",
-        )
-        metadata_summary_model = self._read_optional_str(
-            metadata,
-            "memory_summary_model",
-            "compress_memory_summary_model",
-            "memory_compress_model",
-        )
-        summary_backend = metadata_summary_backend or local_summary_backend or self.default_backend
-        summary_model = metadata_summary_model or local_summary_model or task.model
+        summary_backend = self._read_optional_str(metadata, "memory_summary_backend")
+        summary_model = self._read_optional_str(metadata, "memory_summary_model") or task.model
         session_memory_extraction_backend = (
             self._read_optional_str(metadata, "session_memory_extraction_backend") or summary_backend
         )
@@ -1558,8 +1549,6 @@ class AgentRuntime:
                 model_context_window = fallback_context_window
             if model_max_output_tokens is None:
                 model_max_output_tokens = fallback_max_output_tokens
-        model_context_window = model_context_window or 200_000
-
         effective_model_settings = task.model_settings
         if ctx is not None:
             runtime_model_settings = ctx.metadata.get("_vv_agent_model_settings")
@@ -1583,6 +1572,13 @@ class AgentRuntime:
             if model_max_output_tokens is not None and model_max_output_tokens < reserved_output_tokens:
                 reserved_output_tokens = model_max_output_tokens
                 reserved_output_source = "framework_fallback_capped_by_model_capability"
+        autocompact_buffer_tokens = read_int("autocompact_buffer_tokens", 13_000, minimum=0)
+        if model_context_window is None:
+            planning_prompt_capacity = task.memory_compact_threshold if task.memory_compact_threshold > 0 else 250_000
+            model_context_window = min(
+                planning_prompt_capacity + reserved_output_tokens + autocompact_buffer_tokens,
+                (1 << 64) - 1,
+            )
         session_memory: SessionMemory | None = None
         if session_memory_enabled:
             session_memory_scope = self._read_optional_str(metadata, "session_id", "task_id") or str(task.task_id or "").strip()
@@ -1609,7 +1605,7 @@ class AgentRuntime:
             model_max_output_tokens=model_max_output_tokens,
             reserved_output_tokens=reserved_output_tokens,
             reserved_output_source=reserved_output_source,
-            autocompact_buffer_tokens=read_int("autocompact_buffer_tokens", 13_000, minimum=0),
+            autocompact_buffer_tokens=autocompact_buffer_tokens,
             language=str(metadata.get("language", "zh-CN")),
             warning_threshold_percentage=warning_threshold,
             include_memory_warning=bool(metadata.get("include_memory_warning", False)),
@@ -1645,77 +1641,12 @@ class AgentRuntime:
 
     @staticmethod
     def _read_session_memory_enabled(metadata: dict[str, Any]) -> bool:
-        explicit = _parse_optional_bool(metadata.get("session_memory_enabled", metadata.get("enable_session_memory")))
-        if explicit is not None:
+        if "session_memory_enabled" in metadata:
+            explicit = metadata["session_memory_enabled"]
+            if not isinstance(explicit, bool):
+                raise ValueError("session_memory_enabled must be a boolean")
             return explicit
         return not bool(metadata.get("is_sub_task"))
-
-    def _load_local_memory_summary_defaults(self) -> tuple[str | None, str | None]:
-        if self._memory_summary_defaults is not None:
-            return self._memory_summary_defaults
-
-        backend: str | None = None
-        model: str | None = None
-        settings_file = self.settings_file
-        if settings_file is None or not settings_file.exists():
-            self._memory_summary_defaults = (None, None)
-            return self._memory_summary_defaults
-
-        try:
-            module = ast.parse(settings_file.read_text(encoding="utf-8"), filename=str(settings_file))
-            backend = self._read_literal_setting(
-                module,
-                "DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND",
-                "DEFAULT_MEMORY_SUMMARIZE_BACKEND",
-                "VV_AGENT_MEMORY_SUMMARY_BACKEND",
-            )
-            model = self._read_literal_setting(
-                module,
-                "DEFAULT_USER_MEMORY_SUMMARIZE_MODEL",
-                "DEFAULT_MEMORY_SUMMARIZE_MODEL",
-                "VV_AGENT_MEMORY_SUMMARY_MODEL",
-            )
-        except Exception:
-            logging.getLogger(__name__).debug(
-                "Failed to load memory summary defaults from settings file",
-                exc_info=True,
-            )
-
-        self._memory_summary_defaults = (backend, model)
-        return self._memory_summary_defaults
-
-    @staticmethod
-    def _read_literal_setting(module: ast.Module, *names: str) -> str | None:
-        if not names:
-            return None
-        name_set = set(names)
-
-        for node in module.body:
-            target_name: str | None = None
-            value_node: ast.expr | None = None
-
-            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                target_name = node.target.id
-                value_node = node.value
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        target_name = target.id
-                        value_node = node.value
-                        break
-
-            if target_name not in name_set or value_node is None:
-                continue
-
-            try:
-                literal = ast.literal_eval(value_node)
-            except Exception:
-                continue
-            if isinstance(literal, str):
-                value = literal.strip()
-                if value:
-                    return value
-        return None
 
     def _summarize_memory_prompt(
         self,
@@ -1725,22 +1656,22 @@ class AgentRuntime:
         *,
         ctx: ExecutionContext | None = None,
     ) -> str | None:
-        backend_name = (backend or self.default_backend or "").strip()
+        backend_name = (backend or "").strip()
         model_name = (model or "").strip()
-        if not backend_name or not model_name:
-            return None
-        if self.settings_file is None:
+        if not model_name:
             return None
 
         cache_key = (backend_name, model_name)
         client = self._memory_summary_clients.get(cache_key)
         if client is None:
-            client, _ = self.llm_builder(
-                self.settings_file,
-                backend=backend_name,
-                model=model_name,
-                timeout_seconds=self.sub_agent_timeout_seconds,
-            )
+            if self.model_provider is None:
+                if backend_name:
+                    return None
+                client = self.llm_client
+            else:
+                model_ref = ModelRef.backend(backend_name, model_name) if backend_name else ModelRef.named(model_name)
+                resolved = self.model_provider.resolve(model_ref)
+                client = self.model_provider.client(resolved)
             self._memory_summary_clients[cache_key] = client
 
         request = LlmRequest(
@@ -1797,16 +1728,10 @@ class AgentRuntime:
     @staticmethod
     def _allow_outside_workspace_paths(task: AgentTask) -> bool:
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
-        for key in (
-            "allow_outside_workspace_paths",
-            "allow_outside_workspace",
-            "workspace_allow_outside_main",
-            "workspace_allow_outside",
-        ):
-            parsed = _parse_optional_bool(metadata.get(key))
-            if parsed is not None:
-                return parsed
-        return False
+        value = metadata.get("allow_outside_workspace_paths", False)
+        if not isinstance(value, bool):
+            raise ValueError("allow_outside_workspace_paths must be a boolean")
+        return value
 
     @staticmethod
     def _build_continue_hint() -> str:
@@ -2108,7 +2033,7 @@ class AgentRuntime:
                 raise
 
         def _emit_sub_session_event(event: str, payload: dict[str, Any]) -> None:
-            if self.log_handler is None:
+            if event_emitter is None:
                 return
             enriched = _enrich_sub_agent_payload(
                 payload,
@@ -2120,7 +2045,18 @@ class AgentRuntime:
                 enriched.setdefault("parent_tool_call_id", parent_tool_call_id)
             if parent_run_id:
                 enriched.setdefault("parent_run_id", parent_run_id)
-            self.log_handler(f"sub_agent_{event}", enriched)
+            event_emitter(
+                DiagnosticEvent(
+                    run_id=child_run_id,
+                    trace_id=trace_id,
+                    session_id=sub_session_id,
+                    parent_run_id=parent_run_id or None,
+                    agent_name=request.agent_name,
+                    level="debug",
+                    code=f"sub_agent_{event}",
+                    details=self._diagnostic_details(enriched),
+                )
+            )
 
         outcome_workspace_backend = sub_workspace_backend
         try:
@@ -2157,25 +2093,18 @@ class AgentRuntime:
             )
             sub_runtime = AgentRuntime(
                 llm_client=llm_client,
+                model_provider=self.model_provider,
                 tool_registry=self._build_sub_agent_registry(),
                 default_workspace=workspace_path,
                 log_preview_chars=self.log_preview_chars,
-                settings_file=self.settings_file,
-                default_backend=self.default_backend,
-                llm_builder=self.llm_builder,
                 tool_registry_factory=self.tool_registry_factory,
-                sub_agent_timeout_seconds=self.sub_agent_timeout_seconds,
                 workspace_backend=sub_workspace_backend,
             )
 
             sub_agent_definition = InteractiveAgentDefinition(
                 description=sub_agent.description,
                 model=sub_task.model,
-                backend=(
-                    _trim_portable_whitespace(sub_agent.backend) or self.default_backend
-                    if isinstance(sub_agent.backend, str)
-                    else self.default_backend
-                ),
+                backend=resolved_config.backend,
                 language=str(parent_task.metadata.get("language", "zh-CN")),
                 max_cycles=sub_task.max_cycles,
                 no_tool_policy=sub_task.no_tool_policy,
@@ -2184,7 +2113,6 @@ class AgentRuntime:
                 enable_todo_management=True,
                 agent_type=sub_task.agent_type,
                 native_multimodal=sub_task.native_multimodal,
-                enable_sub_agents=False,
                 sub_agents={},
                 extra_tool_names=list(sub_task.extra_tool_names),
                 exclude_tools=list(sub_task.exclude_tools),
@@ -2203,7 +2131,6 @@ class AgentRuntime:
                 initial_messages: list[Message] | None = None,
                 before_cycle_messages: BeforeCycleMessageProvider | None = None,
                 interruption_messages: InterruptionMessageProvider | None = None,
-                log_handler: RuntimeLogHandler | None = None,
                 cancellation_token: CancellationToken | None = None,
                 session: Any | None = None,
                 _sub_task_turn_snapshot: _SubTaskTurnSnapshot | None = None,
@@ -2228,7 +2155,7 @@ class AgentRuntime:
                         base_ctx=ctx,
                         snapshot=_sub_task_turn_snapshot,
                     )
-                    current_event_emitter = _sub_task_turn_snapshot.event_sink
+                    current_event_emitter = _sub_task_turn_snapshot.event_handler
                     current_trace_id = _sub_task_turn_snapshot.trace_id or current_child_run_id
                     current_parent_run_id = _sub_task_turn_snapshot.parent_run_id or ""
                     current_parent_tool_call_id = _sub_task_turn_snapshot.parent_tool_call_id or ""
@@ -2279,56 +2206,19 @@ class AgentRuntime:
                         parent_run_id=current_parent_run_id,
                         parent_tool_call_id=current_parent_tool_call_id,
                     )
-                    parent_stream_callback = child_ctx.stream_callback if child_ctx is not None else None
-                    if log_handler is not None or parent_stream_callback is not None:
-
-                        def _sub_stream_callback(event: dict[str, Any]) -> None:
-                            canonical = _canonicalize_sub_agent_stream_event(
-                                event,
-                                task_id=sub_task_id,
-                                session_id=sub_session_id,
-                                sub_agent_name=request.agent_name,
-                                child_run_id=current_child_run_id,
-                                trace_id=current_trace_id,
-                                parent_run_id=current_parent_run_id,
-                                parent_tool_call_id=current_parent_tool_call_id,
-                            )
-                            if canonical is None:
-                                return
-                            event_name = canonical["event"]
-                            log_payload = dict(canonical)
-                            log_payload.pop("event", None)
-                            if log_handler is not None:
-                                log_handler(event_name, log_payload)
-                            if parent_stream_callback is not None:
-                                try:
-                                    parent_stream_callback(canonical)
-                                except BaseException:
-                                    logging.getLogger(__name__).exception("Configured sub-agent stream observer failed")
-
-                        if child_ctx is None:
-                            child_ctx = ExecutionContext(stream_callback=_sub_stream_callback)
-                        else:
-                            child_ctx.stream_callback = _sub_stream_callback
-
-                    previous_log_handler = sub_runtime.log_handler
-                    sub_runtime.log_handler = log_handler
-                    try:
-                        if initial_messages is None and session is not None:
-                            persisted_messages = list(session.get_items())
-                            initial_messages = persisted_messages or None
-                        sub_result = sub_runtime.run(
-                            run_task,
-                            workspace=workspace,
-                            shared_state=run_shared_state,
-                            initial_messages=initial_messages,
-                            user_message=prompt,
-                            before_cycle_messages=before_cycle_messages,
-                            interruption_messages=interruption_messages,
-                            ctx=child_ctx,
-                        )
-                    finally:
-                        sub_runtime.log_handler = previous_log_handler
+                    if initial_messages is None and session is not None:
+                        persisted_messages = list(session.get_items())
+                        initial_messages = persisted_messages or None
+                    sub_result = sub_runtime.run(
+                        run_task,
+                        workspace=workspace,
+                        shared_state=run_shared_state,
+                        initial_messages=initial_messages,
+                        user_message=prompt,
+                        before_cycle_messages=before_cycle_messages,
+                        interruption_messages=interruption_messages,
+                        ctx=child_ctx,
+                    )
                     session_run = AgentSessionRun(
                         agent_name=task_name,
                         result=sub_result,
@@ -2524,11 +2414,11 @@ class AgentRuntime:
     ) -> tuple[LLMClient, str, dict[str, str], ResolvedModelConfig]:
         requested_model = _trim_portable_whitespace(str(sub_agent.model))
         requested_backend = _trim_portable_whitespace(str(sub_agent.backend or "")) or None
-        backend = requested_backend or _trim_portable_whitespace(str(self.default_backend or "")) or "inline"
+        backend = requested_backend or "inline"
         model_provider = ctx.metadata.get("_vv_agent_model_provider") if ctx is not None else None
-        if model_provider is not None and hasattr(model_provider, "resolve") and hasattr(model_provider, "client"):
-            from vv_agent.model import ModelRef
-
+        if model_provider is None:
+            model_provider = self.model_provider
+        if model_provider is not None:
             model_ref = (
                 ModelRef.backend(requested_backend, requested_model)
                 if requested_backend is not None
@@ -2536,50 +2426,29 @@ class AgentRuntime:
             )
             resolved = model_provider.resolve(model_ref)
             return self._resolved_sub_agent_client(model_provider.client(resolved), resolved)
-        if self.settings_file is None:
-            if requested_backend is not None:
-                raise ValueError(
-                    "Sub-agent model resolution requires a model provider or settings_file when backend is explicit."
-                )
-            if requested_model != parent_task.model:
-                raise ValueError(
-                    "Sub-agent model resolution requires runtime settings_file when sub-agent model differs from parent model."
-                )
-            fallback_endpoint = EndpointConfig(
-                endpoint_id="inline-session",
-                api_key="",
-                api_base="",
-            )
-            fallback_resolved = ResolvedModelConfig(
-                backend=backend,
-                requested_model=parent_task.model,
-                selected_model=parent_task.model,
-                model_id=parent_task.model,
-                endpoint_options=[EndpointOption(endpoint=fallback_endpoint, model_id=parent_task.model)],
-                context_length=self._metadata_token_limit(
-                    parent_task.metadata,
-                    "model_context_window",
-                    minimum=1,
-                ),
-                max_output_tokens=self._metadata_token_limit(
-                    parent_task.metadata,
-                    "model_max_output_tokens",
-                    minimum=0,
-                ),
-                native_multimodal=parent_task.native_multimodal,
-            )
-            return self.llm_client, parent_task.model, {}, fallback_resolved
-
-        if not backend:
-            raise ValueError("Sub-agent backend is required when settings_file is configured.")
-
-        llm_client, resolved = self.llm_builder(
-            self.settings_file,
+        if requested_backend is not None:
+            raise ValueError("Sub-agent model resolution requires model_provider when backend is explicit.")
+        if requested_model != parent_task.model:
+            raise ValueError("Sub-agent model resolution requires model_provider when its model differs from the parent model.")
+        fallback_resolved = ResolvedModelConfig(
             backend=backend,
-            model=requested_model,
-            timeout_seconds=self.sub_agent_timeout_seconds,
+            requested_model=parent_task.model,
+            selected_model=parent_task.model,
+            model_id=parent_task.model,
+            endpoint_options=[],
+            context_length=self._metadata_token_limit(
+                parent_task.metadata,
+                "model_context_window",
+                minimum=1,
+            ),
+            max_output_tokens=self._metadata_token_limit(
+                parent_task.metadata,
+                "model_max_output_tokens",
+                minimum=0,
+            ),
+            native_multimodal=parent_task.native_multimodal,
         )
-        return self._resolved_sub_agent_client(llm_client, resolved)
+        return self.llm_client, parent_task.model, {}, fallback_resolved
 
     @staticmethod
     def _resolved_sub_agent_client(
@@ -2738,8 +2607,6 @@ class AgentRuntime:
     ) -> ExecutionContext:
         del base_ctx
         metadata = dict(snapshot.execution_metadata)
-        if snapshot.event_sink is not None:
-            metadata["_vv_agent_emit_event"] = snapshot.event_sink
         if snapshot.run_context is not None:
             metadata["_vv_agent_run_context"] = snapshot.run_context
         if snapshot.parent_run_id:
@@ -2750,8 +2617,8 @@ class AgentRuntime:
         metadata.update(snapshot.tool_policy_metadata())
         return ExecutionContext(
             cancellation_token=snapshot.cancellation_token,
-            stream_callback=snapshot.stream_callback,
-            state_store=snapshot.state_store,
+            event_handler=snapshot.event_handler,
+            checkpoint_store=snapshot.checkpoint_store,
             metadata=metadata,
         )
 
@@ -2823,9 +2690,6 @@ class AgentRuntime:
             "windows_shell_priority",
             "bash_env",
             "allow_outside_workspace_paths",
-            "allow_outside_workspace",
-            "workspace_allow_outside_main",
-            "workspace_allow_outside",
             "language",
             "available_skills",
             "active_skills",
@@ -2884,7 +2748,6 @@ class AgentRuntime:
             no_tool_policy="continue",
             allow_interruption=False,
             use_workspace=parent_task.use_workspace,
-            has_sub_agents=False,
             sub_agents={},
             agent_type=parent_task.agent_type,
             native_multimodal=(
@@ -2963,7 +2826,6 @@ class AgentRuntime:
     def _build_child_ctx(
         ctx: ExecutionContext | None,
         *,
-        stream_callback: StreamCallback | None = None,
         cancellation_token: CancellationToken | None = None,
         child_run_id: str = "",
         child_session_id: str = "",
@@ -2977,7 +2839,7 @@ class AgentRuntime:
     ) -> ExecutionContext | None:
         from vv_agent.agent import RunContext
 
-        child_stream_callback = stream_callback if stream_callback is not None else (ctx.stream_callback if ctx else None)
+        child_event_handler = ctx.event_handler if ctx is not None else None
         parent_child_token = ctx.cancellation_token.child() if ctx is not None and ctx.cancellation_token else None
         child_token = cancellation_token or parent_child_token
         if cancellation_token is not None and parent_child_token is not None:
@@ -3021,12 +2883,12 @@ class AgentRuntime:
                 metadata=run_context_metadata,
             )
 
-        if ctx is None and child_token is None and child_stream_callback is None and not metadata:
+        if ctx is None and child_token is None and child_event_handler is None and not metadata:
             return None
         return ExecutionContext(
             cancellation_token=child_token,
-            stream_callback=child_stream_callback,
-            state_store=ctx.state_store if ctx is not None else None,
+            event_handler=child_event_handler,
+            checkpoint_store=ctx.checkpoint_store if ctx is not None else None,
             metadata=metadata,
         )
 
@@ -3037,7 +2899,6 @@ class AgentRuntime:
             "_vv_agent_approval_broker",
             "_vv_agent_approval_timeout_seconds",
             "_vv_agent_budget_limits",
-            "_vv_agent_emit_event",
             "_vv_agent_memory_providers",
             "_vv_agent_model_provider",
             "_vv_agent_model_settings",

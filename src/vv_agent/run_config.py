@@ -3,15 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal
 
 from vv_agent.approval import ApprovalBroker, ApprovalProvider
 from vv_agent.budget import HostCostMeter, RunBudgetLimits
 from vv_agent.checkpoint import CheckpointConfig, CheckpointExtension, ReconciliationProvider
-from vv_agent.config import ResolvedModelConfig
 from vv_agent.context_providers import ContextProvider
 from vv_agent.event_store import RunEventStore
-from vv_agent.llm.base import LLMClient
+from vv_agent.events import RunEvent
 from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
@@ -26,18 +25,17 @@ from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import Message, NoToolPolicy, _validate_no_tool_policy
 
 if TYPE_CHECKING:
+    from vv_agent.config import ResolvedModelConfig
     from vv_agent.memory.provider import MemoryProvider
+    from vv_agent.model import ModelProvider, ModelRef
 
-StreamHandler = Callable[[Any], None]
+RunEventObserver = Callable[[RunEvent], None]
 ToolRegistryFactory = Callable[[], ToolRegistry]
 ApprovalPolicy = Literal["default", "always", "never", "on_request"]
 _APPROVAL_POLICIES = frozenset({"default", "always", "never", "on_request"})
 CanUseTool = Callable[[str, dict[str, Any]], bool]
-RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
 BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
 InterruptionMessageProvider = Callable[[], list[Message]]
-DEFAULT_SETTINGS_FILE = "local_settings.py"
-DEFAULT_TIMEOUT_SECONDS = 90.0
 _MAX_U32 = (1 << 32) - 1
 
 
@@ -47,21 +45,6 @@ def _validate_bounded_int(value: object, field_name: str, *, minimum: int) -> in
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= _MAX_U32:
         raise ValueError(f"{field_name} must be between {minimum} and {_MAX_U32}")
     return value
-
-
-class LegacyModelProvider(Protocol):
-    def __call__(self, agent: Any, run_config: RunConfig) -> tuple[LLMClient, ResolvedModelConfig]: ...
-
-
-class RuntimeLLMBuilder(Protocol):
-    def __call__(
-        self,
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[LLMClient, ResolvedModelConfig]: ...
 
 
 @dataclass(slots=True)
@@ -172,8 +155,8 @@ def _merge_can_use_tool(
 
 @dataclass(slots=True)
 class RunConfig:
-    model: str | Any | None = None
-    model_provider: Any | None = None
+    model: str | ModelRef | ResolvedModelConfig | None = None
+    model_provider: ModelProvider | None = None
     model_settings: ModelSettings | None = None
     workspace: str | Path | Any | None = None
     workspace_backend: Any | None = None
@@ -188,7 +171,7 @@ class RunConfig:
     approval_broker: ApprovalBroker | None = None
     event_store: RunEventStore | None = None
     event_store_fail_closed: bool = False
-    stream: StreamHandler | None = None
+    stream: RunEventObserver | None = None
     hooks: list[RuntimeHook] = field(default_factory=list)
     after_cycle_hooks: list[AfterCycleHook] = field(default_factory=list)
     tracing: dict[str, Any] | None = None
@@ -197,10 +180,6 @@ class RunConfig:
     max_context_chars: int | None = None
     memory_providers: list[MemoryProvider] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
-    settings_file: str | Path | None = None
-    default_backend: str | None = None
-    llm_builder: RuntimeLLMBuilder | None = None
-    timeout_seconds: float | None = None
     tool_registry_factory: ToolRegistryFactory | None = None
     log_preview_chars: int | None = None
     debug_dump_dir: str | None = None
@@ -209,8 +188,6 @@ class RunConfig:
     before_cycle_messages: BeforeCycleMessageProvider | None = None
     interruption_messages: InterruptionMessageProvider | None = None
     sub_task_manager: Any | None = None
-    runtime_log_handler: RuntimeLogHandler | None = None
-    runtime_stream_callback: StreamHandler | None = None
     no_tool_policy: NoToolPolicy | None = None
     budget_limits: RunBudgetLimits | None = None
     host_cost_meter: HostCostMeter | None = None
@@ -222,6 +199,14 @@ class RunConfig:
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
         _validate_bounded_int(self.max_handoffs, "max_handoffs", minimum=0)
         _validate_no_tool_policy(self.no_tool_policy, "RunConfig.no_tool_policy")
+        if self.model_provider is not None:
+            missing = [
+                name
+                for name in ("resolve", "client", "default_settings", "default_model_ref")
+                if not callable(getattr(self.model_provider, name, None))
+            ]
+            if missing:
+                raise TypeError(f"RunConfig.model_provider is missing required methods: {', '.join(missing)}")
         if self.budget_limits is not None and not isinstance(self.budget_limits, RunBudgetLimits):
             if not isinstance(self.budget_limits, dict):
                 raise TypeError("RunConfig.budget_limits must be RunBudgetLimits, an object, or None")

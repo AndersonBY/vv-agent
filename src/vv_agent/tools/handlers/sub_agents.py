@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 from vv_agent.runtime.sub_task_identity import assigned_sub_task_identity, normalize_identity_string
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import is_string_keyed_dict, to_json, trim_portable_whitespace
+from vv_agent.tools.handlers.common import to_json, trim_portable_whitespace
 from vv_agent.types import AgentStatus, SubTaskRequest, ToolExecutionResult, ToolResultStatus
 from vv_agent.workspace import (
     INVALID_EXCLUDE_FILES_PATTERN_CODE,
@@ -26,29 +26,12 @@ def _resolve_agent_name(arguments: dict[str, Any]) -> tuple[str | None, ToolExec
     return trim_portable_whitespace(raw), None
 
 
-def _coerce_bool(value: Any, *, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        if value in (0, 1):
-            return bool(value)
-        return default
-    if isinstance(value, str):
-        normalized = trim_portable_whitespace(value).lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return default
-
-
 def _error(message: str, *, error_code: str, details: dict[str, Any] | None = None) -> ToolExecutionResult:
     payload: dict[str, Any] = {"ok": False, "error": message, "error_code": error_code}
     if details:
         payload["details"] = details
     return ToolExecutionResult(
         tool_call_id="",
-        status="error",
         status_code=ToolResultStatus.ERROR,
         error_code=error_code,
         content=to_json(payload),
@@ -59,7 +42,6 @@ def _error(message: str, *, error_code: str, details: dict[str, Any] | None = No
 def _success(payload: dict[str, Any]) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
         status_code=ToolResultStatus.SUCCESS,
         content=to_json(payload),
         metadata=payload,
@@ -86,14 +68,27 @@ def _run_with_assigned_identity(
 def _extract_shared_flags(
     arguments: dict[str, Any],
 ) -> tuple[bool, str | None, ToolExecutionResult | None]:
-    include_main_summary = _coerce_bool(arguments.get("include_main_summary"), default=False)
+    include_main_summary = arguments.get("include_main_summary", False)
+    if not isinstance(include_main_summary, bool):
+        return (
+            False,
+            None,
+            _error(
+                "`include_main_summary` must be a boolean",
+                error_code="invalid_tool_arguments",
+            ),
+        )
     exclude_files_pattern = None
     if "exclude_files_pattern" in arguments:
         raw_exclude_files_pattern = arguments["exclude_files_pattern"]
         if not isinstance(raw_exclude_files_pattern, str):
-            return False, None, _error(
-                "`exclude_files_pattern` must be a string",
-                error_code="invalid_exclude_files_pattern",
+            return (
+                False,
+                None,
+                _error(
+                    "`exclude_files_pattern` must be a string",
+                    error_code="invalid_exclude_files_pattern",
+                ),
             )
         exclude_files_pattern = trim_portable_whitespace(raw_exclude_files_pattern) or None
     return include_main_summary, exclude_files_pattern, None
@@ -177,16 +172,11 @@ def _format_single_sync_result(outcome: Any) -> ToolExecutionResult:
         return _success(payload)
 
     error_code = (
-        outcome.error_code
-        if isinstance(outcome.error_code, str) and trim_portable_whitespace(outcome.error_code)
-        else None
-    ) or (
-        "sub_task_wait_user" if outcome.status == AgentStatus.WAIT_USER else "sub_task_failed"
-    )
+        outcome.error_code if isinstance(outcome.error_code, str) and trim_portable_whitespace(outcome.error_code) else None
+    ) or ("sub_task_wait_user" if outcome.status == AgentStatus.WAIT_USER else "sub_task_failed")
     payload["error_code"] = error_code
     return ToolExecutionResult(
         tool_call_id="",
-        status="error",
         status_code=ToolResultStatus.ERROR,
         error_code=error_code,
         content=to_json(payload),
@@ -225,7 +215,12 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
     )
     if argument_error is not None:
         return argument_error
-    wait_for_completion = _coerce_bool(arguments.get("wait_for_completion"), default=True)
+    wait_for_completion = arguments.get("wait_for_completion", True)
+    if not isinstance(wait_for_completion, bool):
+        return _error(
+            "`wait_for_completion` must be a boolean",
+            error_code="invalid_tool_arguments",
+        )
     parent_lineage = _parent_lineage_metadata(context)
 
     task_description = task_description or ""
@@ -310,49 +305,48 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
             }
         )
 
-    assert isinstance(raw_tasks, list)
+    if not isinstance(raw_tasks, list):
+        return _error("`tasks` must be a non-empty array", error_code="invalid_tasks_payload")
 
-    requests: list[tuple[int, SubTaskRequest | None, str | None]] = []
+    requests: list[tuple[int, SubTaskRequest]] = []
     for index, raw_item in enumerate(raw_tasks):
-        if not is_string_keyed_dict(raw_item):
-            requests.append((index, None, "Task item must be an object"))
-            continue
-        raw_item_description = raw_item.get("task_description")
-        if "task_description" in raw_item and not isinstance(raw_item_description, str):
-            requests.append((index, None, "`task_description` must be a string"))
-            continue
-        item_description = trim_portable_whitespace(raw_item_description or "")
+        if not isinstance(raw_item, dict):
+            return _error(
+                f"`tasks[{index}]` must be an object",
+                error_code="invalid_tasks_payload",
+            )
+        item = cast(dict[str, Any], raw_item)
+        raw_description = item.get("task_description")
+        if not isinstance(raw_description, str):
+            return _error(
+                f"`tasks[{index}].task_description` must be a string",
+                error_code="invalid_tasks_payload",
+            )
+        item_description = trim_portable_whitespace(raw_description)
         if not item_description:
-            requests.append((index, None, "`task_description` is required"))
-            continue
-        raw_output_requirements = raw_item.get("output_requirements")
-        if "output_requirements" in raw_item and not isinstance(raw_output_requirements, str):
-            requests.append((index, None, "`output_requirements` must be a string"))
-            continue
+            return _error(
+                f"`tasks[{index}].task_description` is required",
+                error_code="invalid_tasks_payload",
+            )
+        raw_output_requirements = item.get("output_requirements", "")
+        if not isinstance(raw_output_requirements, str):
+            return _error(
+                f"`tasks[{index}].output_requirements` must be a string",
+                error_code="invalid_tasks_payload",
+            )
         requests.append(
             (
                 index,
                 _build_single_request(
                     agent_name=agent_name,
                     task_description=item_description,
-                    output_requirements=trim_portable_whitespace(raw_output_requirements or ""),
+                    output_requirements=trim_portable_whitespace(raw_output_requirements),
                     include_main_summary=include_main_summary,
                     exclude_files_pattern=exclude_files_pattern,
                     metadata={"batch_index": index, **parent_lineage},
                 ),
-                None,
             )
         )
-
-    valid_requests = [(index, request) for index, request, error in requests if request is not None and error is None]
-    if not valid_requests:
-        payload = {
-            "summary": {"total": len(raw_tasks), "accepted": 0, "failed": len(raw_tasks)},
-            "results": [{"index": index, "status": AgentStatus.FAILED.value, "error": error} for index, _, error in requests],
-            "task_ids": [],
-            "wait_for_completion": wait_for_completion,
-        }
-        return _error("No valid sub-tasks were provided", error_code="invalid_tasks_payload", details=payload)
 
     try:
         manager_workspace_backend = _manager_workspace_backend(context.workspace_backend, exclude_files_pattern)
@@ -363,17 +357,12 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
         )
 
     if wait_for_completion:
-        outcome_map = _run_requests_in_parallel_if_possible(context=context, requests=valid_requests)
+        outcome_map = _run_requests_in_parallel_if_possible(context=context, requests=requests)
         results: list[dict[str, Any]] = []
         completed = 0
         failed = 0
 
-        for index, _, error in requests:
-            if error is not None:
-                failed += 1
-                results.append({"index": index, "status": AgentStatus.FAILED.value, "error": error})
-                continue
-
+        for index, _ in requests:
             outcome = outcome_map[index]
             if outcome.status == AgentStatus.COMPLETED:
                 completed += 1
@@ -404,12 +393,7 @@ def create_sub_task(context: ToolContext, arguments: dict[str, Any]) -> ToolExec
     if context.sub_task_manager is None:
         return _error("Sub-task manager is not available for async mode", error_code="sub_task_manager_unavailable")
 
-    for index, request, error in requests:
-        if error is not None or request is None:
-            failed += 1
-            results.append({"index": index, "status": AgentStatus.FAILED.value, "error": error})
-            continue
-
+    for index, request in requests:
         task_id, session_id = _build_async_identity(context, agent_name)
 
         def run_batch_async(

@@ -4,10 +4,20 @@ import json
 from pathlib import Path
 
 import pytest
+from support import ModelMapProvider
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
-from vv_agent.llm import ScriptedLLM
+from vv_agent.events import (
+    AssistantDeltaEvent,
+    ModelToolCallProgressEvent,
+    ModelToolCallStartedEvent,
+    RunEvent,
+    SubRunCompletedEvent,
+    SubRunStartedEvent,
+)
+from vv_agent.llm import LLMClient, ScriptedLLM
+from vv_agent.model import ModelRef
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.context import ExecutionContext
@@ -32,6 +42,26 @@ def _fake_resolved(*, backend: str, model: str) -> ResolvedModelConfig:
         model_id=model,
         endpoint_options=[option],
     )
+
+
+def _shared_model_provider(
+    *,
+    parent_llm: LLMClient,
+    child_llm: LLMClient,
+    child_model: str = "kimi-k2.5",
+    child_backend: str = "moonshot",
+) -> ModelMapProvider:
+    return ModelMapProvider(
+        routes={
+            "parent-model": (parent_llm, _fake_resolved(backend="moonshot", model="parent-model")),
+            child_model: (child_llm, _fake_resolved(backend=child_backend, model=child_model)),
+        },
+        default_model="parent-model",
+    )
+
+
+def _parent_client(provider: ModelMapProvider) -> LLMClient:
+    return provider.client(provider.resolve(ModelRef.named("parent-model")))
 
 
 def test_sub_agent_session_helpers_expose_registered_session() -> None:
@@ -103,36 +133,21 @@ def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
         ]
     )
 
-    builder_calls: list[tuple[str, str, str]] = []
-    settings_file = tmp_path / "local_settings.py"
-    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
-
-    def fake_llm_builder(
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        del timeout_seconds
-        builder_calls.append((str(settings_path), backend, model))
-        sub_llm = ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="sub done",
-                    tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub-result"})],
-                )
-            ]
-        )
-        return sub_llm, _fake_resolved(backend=backend, model=model)
+    sub_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="sub done",
+                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub-result"})],
+            )
+        ]
+    )
+    provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = AgentRuntime(
-        llm_client=parent_llm,
+        llm_client=_parent_client(provider),
+        model_provider=provider,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="moonshot",
-        llm_builder=fake_llm_builder,
         tool_registry_factory=build_default_registry,
     )
     task = AgentTask(
@@ -153,8 +168,7 @@ def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "parent done"
-    assert len(builder_calls) == 1
-    assert builder_calls[0] == (str(settings_file.resolve()), "moonshot", "kimi-k2.5")
+    assert provider.resolved_models == ["parent-model", "kimi-k2.5"]
 
     first_tool_payload = json.loads(result.cycles[0].tool_results[0].content)
     assert first_tool_payload["status"] == "completed"
@@ -188,43 +202,22 @@ def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> N
         ]
     )
 
-    settings_file = tmp_path / "local_settings.py"
-    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
-    sub_answers = iter(["sub-A", "sub-B"])
-    builder_calls: list[int] = []
-
-    def fake_llm_builder(
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        del settings_path, timeout_seconds
-        builder_calls.append(1)
-        sub_llm = ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="sub done",
-                    tool_calls=[
-                        ToolCall(
-                            id="s1",
-                            name=TASK_FINISH_TOOL_NAME,
-                            arguments={"message": next(sub_answers)},
-                        )
-                    ],
-                )
-            ]
-        )
-        return sub_llm, _fake_resolved(backend=backend, model=model)
+    sub_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="sub done",
+                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": answer})],
+            )
+            for answer in ("sub-A", "sub-B")
+        ]
+    )
+    provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = AgentRuntime(
-        llm_client=parent_llm,
+        llm_client=_parent_client(provider),
+        model_provider=provider,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="moonshot",
-        llm_builder=fake_llm_builder,
         tool_registry_factory=build_default_registry,
     )
     task = AgentTask(
@@ -245,7 +238,7 @@ def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> N
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "batch done"
-    assert len(builder_calls) == 2
+    assert provider.resolved_models == ["parent-model", "kimi-k2.5", "kimi-k2.5"]
 
     batch_payload = json.loads(result.cycles[0].tool_results[0].content)
     assert batch_payload["summary"] == {"total": 2, "completed": 2, "failed": 0}
@@ -289,41 +282,22 @@ def test_create_sub_task_batch_uses_execution_backend_parallel_map(tmp_path: Pat
         ]
     )
 
-    settings_file = tmp_path / "local_settings.py"
-    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
-    sub_answers = iter(["sub-A", "sub-B"])
-
-    def fake_llm_builder(
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        del settings_path, timeout_seconds
-        sub_llm = ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="sub done",
-                    tool_calls=[
-                        ToolCall(
-                            id="s1",
-                            name=TASK_FINISH_TOOL_NAME,
-                            arguments={"message": next(sub_answers)},
-                        )
-                    ],
-                )
-            ]
-        )
-        return sub_llm, _fake_resolved(backend=backend, model=model)
+    sub_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="sub done",
+                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": answer})],
+            )
+            for answer in ("sub-A", "sub-B")
+        ]
+    )
+    provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = AgentRuntime(
-        llm_client=parent_llm,
+        llm_client=_parent_client(provider),
+        model_provider=provider,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="moonshot",
-        llm_builder=fake_llm_builder,
         tool_registry_factory=build_default_registry,
         execution_backend=backend,
     )
@@ -345,6 +319,7 @@ def test_create_sub_task_batch_uses_execution_backend_parallel_map(tmp_path: Pat
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
     assert backend.parallel_map_calls == 1
+    assert provider.resolved_models == ["parent-model", "kimi-k2.5", "kimi-k2.5"]
 
 
 def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> None:
@@ -485,7 +460,7 @@ def test_sub_task_metadata_generates_prompt_cache_sections_for_default_prompt(tm
 
 
 def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: Path) -> None:
-    captured_events: list[tuple[str, dict[str, object]]] = []
+    captured_events: list[RunEvent] = []
 
     parent_llm = ScriptedLLM(
         steps=[
@@ -509,36 +484,23 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
         ]
     )
 
-    settings_file = tmp_path / "local_settings.py"
-    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
-
-    def fake_llm_builder(
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        del settings_path, timeout_seconds
-        sub_llm = ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="sub finish",
-                    tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
-                )
-            ]
-        )
-        return sub_llm, _fake_resolved(backend=backend, model=model)
+    sub_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="sub finish",
+                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
+            )
+        ]
+    )
+    provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = AgentRuntime(
-        llm_client=parent_llm,
+        llm_client=_parent_client(provider),
+        model_provider=provider,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="moonshot",
-        llm_builder=fake_llm_builder,
         tool_registry_factory=build_default_registry,
-        log_handler=lambda event, payload: captured_events.append((event, dict(payload))),
+        event_handler=captured_events.append,
     )
     task = AgentTask(
         task_id="parent_session_events",
@@ -557,6 +519,7 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
+    assert provider.resolved_models == ["parent-model", "kimi-k2.5"]
 
     payload = json.loads(result.cycles[0].tool_results[0].content)
     task_id = payload["task_id"]
@@ -564,29 +527,18 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
     assert task_id
     assert session_id == task_id
 
-    session_created = [item for item in captured_events if item[0] == "sub_agent_session_created"]
-    assert session_created
-    assert session_created[0][1]["task_id"] == task_id
-    assert session_created[0][1]["session_id"] == session_id
-
-    cycle_events = [event for event in captured_events if event[0] == "sub_agent_cycle_started"]
-    assert cycle_events
-    assert all(event_payload.get("task_id") == task_id for _, event_payload in cycle_events)
-    assert all(event_payload.get("session_id") == session_id for _, event_payload in cycle_events)
-
-    session_run_events = [event for event in captured_events if event[0] == "sub_agent_session_run_start"]
-    assert session_run_events
-    assert session_run_events[0][1]["task_id"] == task_id
-    assert session_run_events[0][1]["session_id"] == session_id
+    child_lifecycle = [event for event in captured_events if isinstance(event, SubRunStartedEvent | SubRunCompletedEvent)]
+    assert [event.type for event in child_lifecycle] == ["sub_run_started", "sub_run_completed"]
+    assert all(event.task_id == task_id for event in child_lifecycle)
+    assert all(event.session_id == session_id for event in child_lifecycle)
 
 
 def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> None:
     contract = json.loads(
-        (Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent_v1.json").read_text(
-            encoding="utf-8"
-        )
+        (Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent.json").read_text(encoding="utf-8")
     )
-    assert "stream_sink" in contract["capability_projection"]["inherited"]
+    assert "event_sink" in contract["capability_projection"]["inherited"]
+    assert contract["stream_forwarding"]["raw_callback"] is False
     parent_llm = ScriptedLLM(
         steps=[
             LLMResponse(
@@ -653,24 +605,14 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
                 tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
             )
 
-    settings_file = tmp_path / "local_settings.py"
-    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
-
-    def fake_llm_builder(settings_path, *, backend, model, timeout_seconds=90.0):
-        del settings_path, timeout_seconds
-        return StreamingSubLLM(), _fake_resolved(backend=backend, model=model)
-
-    captured_logs: list[tuple[str, dict[str, object]]] = []
-    parent_stream_events: list[dict[str, object]] = []
+    parent_events: list[RunEvent] = []
+    provider = _shared_model_provider(parent_llm=parent_llm, child_llm=StreamingSubLLM())
     runtime = AgentRuntime(
-        llm_client=parent_llm,
+        llm_client=_parent_client(provider),
+        model_provider=provider,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="moonshot",
-        llm_builder=fake_llm_builder,
         tool_registry_factory=build_default_registry,
-        log_handler=lambda event, payload: captured_logs.append((event, dict(payload))),
     )
     task = AgentTask(
         task_id="parent_stream_events",
@@ -687,36 +629,31 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
         },
     )
 
-    result = runtime.run(task, ctx=ExecutionContext(stream_callback=parent_stream_events.append))
+    result = runtime.run(task, ctx=ExecutionContext(event_handler=parent_events.append))
 
     assert result.status == AgentStatus.COMPLETED
-    event_names = [name for name, _ in captured_logs]
-    assert "sub_agent_assistant_delta" in event_names
-    assert "sub_agent_tool_call_started" in event_names
-    assert "sub_agent_tool_call_progress" in event_names
-
-    progress_payload = next(payload for name, payload in captured_logs if name == "sub_agent_tool_call_progress")
-    assert progress_payload["tool_call_id"] == "sub-tool-1"
-    assert progress_payload["function_name"] == "bash"
-    assert progress_payload["estimated_tokens"] == 12
-    assert progress_payload["sub_agent_name"] == "research-sub"
-    assert progress_payload["task_id"]
-    assert progress_payload["session_id"] == progress_payload["task_id"]
-
-    delta_payload = next(payload for name, payload in captured_logs if name == "sub_agent_assistant_delta")
-    assert delta_payload["task_id"] != "spoofed-task"
-    assert delta_payload["session_id"] == delta_payload["task_id"]
-    assert delta_payload["sub_agent_name"] == "research-sub"
-
-    assert [event["event"] for event in parent_stream_events] == [
-        "assistant_delta",
-        "tool_call_started",
-        "tool_call_progress",
+    assert provider.resolved_models == ["parent-model", "kimi-k2.5"]
+    child_stream_events = [
+        event
+        for event in parent_events
+        if isinstance(event, AssistantDeltaEvent | ModelToolCallStartedEvent | ModelToolCallProgressEvent)
     ]
-    assert parent_stream_events[-1]["sub_agent_name"] == "research-sub"
-    assert parent_stream_events[0]["task_id"] != "spoofed-task"
-    assert parent_stream_events[0]["session_id"] == parent_stream_events[0]["task_id"]
-    assert parent_stream_events[0]["sub_agent_name"] == "research-sub"
+    assert [event.type for event in child_stream_events] == [
+        "assistant_delta",
+        "model_tool_call_started",
+        "model_tool_call_progress",
+    ]
+    started = next(event for event in parent_events if isinstance(event, SubRunStartedEvent))
+    assert all(event.run_id == started.run_id for event in child_stream_events)
+    assert all(event.session_id == started.session_id for event in child_stream_events)
+    assert all(event.agent_name == "research-sub" for event in child_stream_events)
+    delta = next(event for event in child_stream_events if isinstance(event, AssistantDeltaEvent))
+    assert delta.delta == "checking"
+    assert delta.metadata == {}
+    progress = next(event for event in child_stream_events if isinstance(event, ModelToolCallProgressEvent))
+    assert progress.tool_call_id == "sub-tool-1"
+    assert progress.tool_name == "bash"
+    assert progress.estimated_tokens == 12
 
 
 def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_path: Path) -> None:
@@ -759,9 +696,7 @@ def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_pa
     tool_result = result.cycles[0].tool_results[0]
     assert tool_result.error_code == "sub_task_failed"
     payload = json.loads(tool_result.content)
-    assert payload["error"] == (
-        "Sub-agent model resolution requires a model provider or settings_file when backend is explicit."
-    )
+    assert payload["error"] == "Sub-agent model resolution requires model_provider when backend is explicit."
 
 
 def test_steer_sub_agent_session_targets_registered_session() -> None:

@@ -24,9 +24,8 @@ from vv_agent.app_server.protocol import (
 )
 from vv_agent.app_server.server import AppServer
 from vv_agent.app_server.transport import ChannelTransport
-from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
-from vv_agent.llm import ScriptedLLM
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.run_config import RunConfig
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -196,33 +195,21 @@ class AppServerClient:
 
 
 def run_debug_message(message: str) -> list[dict[str, object]]:
-    llm = ScriptedLLM(
-        steps=[
+    provider = ScriptedModelProvider.new(
+        "debug",
+        "debug-model",
+        [
             LLMResponse(
                 content="done",
                 tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
             )
-        ]
+        ],
     )
-
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
-        return (
-            llm,
-            ResolvedModelConfig(
-                backend="debug",
-                requested_model="debug-model",
-                selected_model="debug-model",
-                model_id="debug-model",
-                endpoint_options=[EndpointOption(endpoint=endpoint, model_id="debug-model")],
-            ),
-        )
 
     client = AppServerClient.for_host(
         DefaultAppServerHost(
             agent=Agent(name="assistant", instructions="Answer.", model="debug-model"),
-            run_config=RunConfig(model_provider=model_provider, max_cycles=1),
+            run_config=RunConfig(model_provider=provider, max_cycles=1),
         ),
         connection_id="debug",
     )

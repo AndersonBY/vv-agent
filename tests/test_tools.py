@@ -23,7 +23,7 @@ from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.tools.handlers import search as search_handler
 from vv_agent.tools.handlers import workspace_io
 from vv_agent.tools.registry import ToolNotFoundError
-from vv_agent.types import ToolCall, ToolDirective
+from vv_agent.types import ToolCall, ToolDirective, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
 TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
@@ -44,12 +44,45 @@ def tool_context(tmp_path: Path) -> ToolContext:
     )
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "invalid_path"),
+    [
+        ("read_image", {"path": 123}, "/path"),
+        ("compress_memory", {"core_information": 123}, "/core_information"),
+        (
+            "create_sub_task",
+            {"agent_id": "researcher", "task_description": "inspect", "include_main_summary": "true"},
+            "/include_main_summary",
+        ),
+        (
+            "sub_task_status",
+            {"task_ids": ["sub-1"], "workspace_file_limit": "20"},
+            "/workspace_file_limit",
+        ),
+    ],
+)
+def test_builtin_tools_reject_non_schema_argument_types(
+    registry,
+    tool_context: ToolContext,
+    tool_name: str,
+    arguments: dict[str, object],
+    invalid_path: str,
+) -> None:
+    result = registry.execute(
+        ToolCall(id=f"invalid_{tool_name}", name=tool_name, arguments=arguments),
+        tool_context,
+    )
+
+    payload = json.loads(result.content)
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == "invalid_tool_arguments"
+    assert [issue["instance_path"] for issue in payload["issues"]] == [invalid_path]
+
+
 def test_edit_file_is_registered_in_default_tools(registry) -> None:
     tool_names = registry.list_tool_names()
-    old_tool_name = "file" + "_str_replace"
 
     assert EDIT_FILE_TOOL_NAME in tool_names
-    assert old_tool_name not in tool_names
 
     edit_schema = registry.get_schema(EDIT_FILE_TOOL_NAME)
     edit_description = edit_schema["function"]["description"]
@@ -64,55 +97,6 @@ def test_edit_file_is_registered_in_default_tools(registry) -> None:
     assert set(properties) == {"path", "old_string", "new_string", "replace_all"}
 
 
-def test_legacy_edit_tool_name_is_removed(registry, tool_context: ToolContext) -> None:
-    old_tool_name = "file" + "_str_replace"
-    legacy_args = {"path": "edit.txt", "old" + "_str": "a", "new" + "_str": "b"}
-    call = ToolCall(id="call_removed_replace", name=old_tool_name, arguments=legacy_args)
-
-    with pytest.raises(ToolNotFoundError):
-        registry.execute(call, tool_context)
-
-
-def test_old_search_tool_names_are_not_registered(registry, tool_context: ToolContext) -> None:
-    with pytest.raises(ToolNotFoundError):
-        registry.execute(
-            ToolCall(id="old_grep", name="workspace_grep", arguments={"pattern": "token"}),
-            tool_context,
-        )
-
-    with pytest.raises(ToolNotFoundError):
-        registry.execute(
-            ToolCall(id="old_list", name="list_files", arguments={}),
-            tool_context,
-        )
-
-
-def test_edit_file_rejects_legacy_argument_names(registry, tool_context: ToolContext) -> None:
-    target = tool_context.workspace / "legacy.txt"
-    target.write_text("hello", encoding="utf-8")
-    registry.execute(
-        ToolCall(id="read_legacy", name=READ_FILE_TOOL_NAME, arguments={"path": "legacy.txt"}),
-        tool_context,
-    )
-
-    old_key = "old" + "_str"
-    new_key = "new" + "_str"
-    result = registry.execute(
-        ToolCall(
-            id="edit_legacy",
-            name=EDIT_FILE_TOOL_NAME,
-            arguments={"path": "legacy.txt", old_key: "hello", new_key: "hi"},
-        ),
-        tool_context,
-    )
-
-    payload = json.loads(result.content)
-    assert result.status == "error"
-    assert result.error_code == "invalid_arguments"
-    assert payload["error_code"] == "invalid_arguments"
-    assert "old_string" in payload["message"]
-
-
 def test_edit_file_rejects_missing_path(registry, tool_context: ToolContext) -> None:
     result = registry.execute(
         ToolCall(
@@ -124,12 +108,9 @@ def test_edit_file_rejects_missing_path(registry, tool_context: ToolContext) -> 
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
-    assert result.error_code == "invalid_arguments"
-    assert payload["error_code"] == "invalid_arguments"
-    assert "path" in payload["message"]
-    assert "old_string" in payload["message"]
-    assert "new_string" in payload["message"]
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == "invalid_tool_arguments"
+    assert payload["issues"] == [{"instance_path": "", "schema_path": "/required", "rule": "required"}]
 
 
 def test_edit_file_rejects_empty_old_string(registry, tool_context: ToolContext) -> None:
@@ -146,7 +127,7 @@ def test_edit_file_rejects_empty_old_string(registry, tool_context: ToolContext)
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert result.error_code == "old_string_empty"
     assert payload["error_code"] == "old_string_empty"
     assert "old_string" in payload["message"]
@@ -171,7 +152,7 @@ def test_edit_file_requires_unique_old_string_by_default(registry, tool_context:
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert result.error_code == "old_string_not_unique"
     assert payload["error_code"] == "old_string_not_unique"
     assert payload["match_count"] == 2
@@ -193,18 +174,16 @@ def test_edit_file_rejects_missing_new_string(registry, tool_context: ToolContex
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
-    assert result.error_code == "invalid_arguments"
-    assert payload["error_code"] == "invalid_arguments"
-    assert "old_string" in payload["message"]
-    assert "new_string" in payload["message"]
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == "invalid_tool_arguments"
+    assert payload["issues"] == [{"instance_path": "", "schema_path": "/required", "rule": "required"}]
     assert target.read_text(encoding="utf-8") == "hello"
 
 
 def test_workspace_write_and_read(registry, tool_context: ToolContext) -> None:
     write_call = ToolCall(id="call1", name=WRITE_FILE_TOOL_NAME, arguments={"path": "notes/test.txt", "content": "hello"})
     write_result = registry.execute(write_call, tool_context)
-    assert write_result.status == "success"
+    assert write_result.status_code is ToolResultStatus.SUCCESS
 
     read_call = ToolCall(id="call2", name=READ_FILE_TOOL_NAME, arguments={"path": "notes/test.txt"})
     read_result = registry.execute(read_call, tool_context)
@@ -225,7 +204,7 @@ def test_read_file_allows_absolute_path_when_enabled(registry, tool_context: Too
     read_result = registry.execute(read_call, tool_context)
     payload = json.loads(read_result.content)
 
-    assert read_result.status == "success"
+    assert read_result.status_code is ToolResultStatus.SUCCESS
     assert payload["content"] == "outside"
 
 
@@ -248,14 +227,14 @@ def test_find_files_allows_absolute_path_when_enabled(registry, tool_context: To
     list_result = registry.execute(list_call, tool_context)
     payload = json.loads(list_result.content)
 
-    assert list_result.status == "success"
+    assert list_result.status_code is ToolResultStatus.SUCCESS
     assert str(target) in payload["files"]
 
 
 def test_write_file_append_with_optional_newlines(registry, tool_context: ToolContext) -> None:
     base_call = ToolCall(id="call_write_base", name=WRITE_FILE_TOOL_NAME, arguments={"path": "notes/log.txt", "content": "line1"})
     base_result = registry.execute(base_call, tool_context)
-    assert base_result.status == "success"
+    assert base_result.status_code is ToolResultStatus.SUCCESS
 
     append_call = ToolCall(
         id="call_write_append",
@@ -478,10 +457,15 @@ def test_find_files_rejects_pattern_argument(registry, tool_context: ToolContext
     )
     payload = json.loads(result.content)
 
-    assert result.status == "error"
-    assert result.error_code == "invalid_arguments"
-    assert payload["error_code"] == "invalid_arguments"
-    assert "pattern" in payload["message"]
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == "invalid_tool_arguments"
+    assert payload["issues"] == [
+        {
+            "instance_path": "",
+            "schema_path": "/additionalProperties",
+            "rule": "additionalProperties",
+        }
+    ]
 
 
 def test_find_files_supports_offset_sort_and_sensitive_filter(registry, tool_context: ToolContext) -> None:
@@ -639,7 +623,7 @@ def test_search_files_defaults_to_files_with_matches(registry, tool_context: Too
         tool_context,
     )
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.metadata["output_mode"] == "files_with_matches"
     assert result.metadata["files"] == ["a.txt", "b.txt"]
     assert "matches" not in result.metadata
@@ -902,21 +886,28 @@ def test_search_files_supports_files_with_matches_mode(registry, tool_context: T
     assert payload["summary"]["total_matches"] == 2
 
 
-def test_search_files_ignores_removed_max_results_alias(registry, tool_context: ToolContext) -> None:
+def test_search_files_rejects_unknown_arguments(registry, tool_context: ToolContext) -> None:
     (tool_context.workspace / "a.txt").write_text("hit one\nhit two", encoding="utf-8")
 
     result = registry.execute(
         ToolCall(
-            id="call_removed_max_results",
+            id="call_unknown_argument",
             name=SEARCH_FILES_TOOL_NAME,
-            arguments={"pattern": "hit", "output_mode": "content", "max_results": 1},
+            arguments={"pattern": "hit", "output_mode": "content", "unexpected": 1},
         ),
         tool_context,
     )
 
-    assert len(result.metadata["matches"]) == 2
-    assert result.metadata["head_limit"] == 250
-    assert "max_results" not in result.metadata
+    payload = json.loads(result.content)
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == "invalid_tool_arguments"
+    assert payload["issues"] == [
+        {
+            "instance_path": "",
+            "schema_path": "/additionalProperties",
+            "rule": "additionalProperties",
+        }
+    ]
 
 
 def test_search_files_supports_count_mode(registry, tool_context: ToolContext) -> None:
@@ -992,7 +983,7 @@ def test_search_files_caps_structured_payload_without_duplication(
     assert payload["truncated"] is True
     assert len(payload["matches"]) == 2
     assert "Showing first 2 rows." in result.content
-    assert "\"matches\"" not in result.content
+    assert '"matches"' not in result.content
 
 
 def test_search_files_excludes_hidden_by_default(registry, tool_context: ToolContext) -> None:
@@ -1294,7 +1285,7 @@ def test_search_files_rejects_unknown_file_type(registry, tool_context: ToolCont
     )
     result = registry.execute(call, tool_context)
 
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert "Unsupported file type" in result.content
     assert "Unsupported file type" in result.metadata["error"]
 
@@ -1325,7 +1316,7 @@ def test_edit_file_requires_full_read_before_edit(registry, tool_context: ToolCo
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert result.error_code == "file_not_read"
     assert payload["error_code"] == "file_not_read"
     assert target.read_text(encoding="utf-8") == "hello world"
@@ -1353,7 +1344,7 @@ def test_edit_file_accepts_partial_read_baseline(registry, tool_context: ToolCon
     )
 
     payload = json.loads(result.content)
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert payload["ok"] is True
     assert target.read_text(encoding="utf-8") == "line1\nchanged\nline3"
 
@@ -1378,7 +1369,7 @@ def test_edit_file_rejects_file_changed_since_read(registry, tool_context: ToolC
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert result.error_code == "file_changed_since_read"
     assert payload["error_code"] == "file_changed_since_read"
     assert target.read_text(encoding="utf-8") == "hello user"
@@ -1410,8 +1401,8 @@ def test_edit_file_allows_consecutive_edits_after_full_read(registry, tool_conte
         tool_context,
     )
 
-    assert first.status == "success"
-    assert second.status == "success"
+    assert first.status_code is ToolResultStatus.SUCCESS
+    assert second.status_code is ToolResultStatus.SUCCESS
     assert target.read_text(encoding="utf-8") == "one two gamma"
 
 
@@ -1424,7 +1415,7 @@ def test_edit_file_accepts_full_write_file_baseline(registry, tool_context: Tool
         ),
         tool_context,
     )
-    assert write_result.status == "success"
+    assert write_result.status_code is ToolResultStatus.SUCCESS
 
     result = registry.execute(
         ToolCall(
@@ -1440,7 +1431,7 @@ def test_edit_file_accepts_full_write_file_baseline(registry, tool_context: Tool
     )
 
     payload = json.loads(result.content)
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert payload["ok"] is True
     assert (tool_context.workspace / "write_only.txt").read_text(encoding="utf-8") == "created by read_file"
 
@@ -1457,7 +1448,7 @@ def test_edit_file_rejects_append_to_unknown_existing_file_baseline(registry, to
         ),
         tool_context,
     )
-    assert append_result.status == "success"
+    assert append_result.status_code is ToolResultStatus.SUCCESS
 
     result = registry.execute(
         ToolCall(
@@ -1469,7 +1460,7 @@ def test_edit_file_rejects_append_to_unknown_existing_file_baseline(registry, to
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert result.error_code == "file_not_read"
     assert payload["error_code"] == "file_not_read"
     assert target.read_text(encoding="utf-8") == "known? append"
@@ -1491,7 +1482,7 @@ def test_edit_file_accepts_append_to_known_existing_file_baseline(registry, tool
         ),
         tool_context,
     )
-    assert append_result.status == "success"
+    assert append_result.status_code is ToolResultStatus.SUCCESS
 
     result = registry.execute(
         ToolCall(
@@ -1502,7 +1493,7 @@ def test_edit_file_accepts_append_to_known_existing_file_baseline(registry, tool
         tool_context,
     )
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert target.read_text(encoding="utf-8") == "before changed"
 
 
@@ -1529,7 +1520,7 @@ def test_edit_file_replace_all_replaces_every_match(registry, tool_context: Tool
     )
 
     payload = json.loads(result.content)
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert payload["replaced_count"] == 2
     assert target.read_text(encoding="utf-8") == "hi world\nhi agent"
 
@@ -1578,7 +1569,7 @@ def test_edit_file_preserves_crlf_when_old_string_uses_lf(registry, tool_context
         tool_context,
     )
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert target.read_bytes() == b"first\r\nSECOND\r\nTHIRD\r\n"
     assert result.metadata["line_ending"] == "crlf"
 
@@ -1594,7 +1585,7 @@ def test_write_file_create_new_file_without_read(registry, tool_context: ToolCon
     )
 
     payload = json.loads(result.content)
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert payload["written_chars"] == 7
     assert result.metadata["changed_files"] == ["new.txt"]
     assert (tool_context.workspace / "new.txt").read_text(encoding="utf-8") == "created"
@@ -1614,7 +1605,7 @@ def test_write_file_overwrite_existing_requires_read_baseline(registry, tool_con
     )
 
     payload = json.loads(result.content)
-    assert result.status == "error"
+    assert result.status_code is ToolResultStatus.ERROR
     assert result.error_code == "file_not_read"
     assert payload["error_code"] == "file_not_read"
     assert target.read_text(encoding="utf-8") == "original"
@@ -1637,7 +1628,7 @@ def test_write_file_overwrite_existing_after_full_read_succeeds(registry, tool_c
         tool_context,
     )
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.metadata["changed_files"] == ["overwrite_after_read.txt"]
     assert target.read_text(encoding="utf-8") == "changed"
 
@@ -1655,7 +1646,7 @@ def test_write_file_append_returns_changed_files_metadata(registry, tool_context
         tool_context,
     )
 
-    assert result.status == "success"
+    assert result.status_code is ToolResultStatus.SUCCESS
     assert result.metadata["changed_files"] == ["append.txt"]
     assert result.metadata["operation"] == "write_file"
     assert result.metadata["append"] is True
@@ -1687,7 +1678,7 @@ def test_todo_finish_guard(registry, tool_context: ToolContext) -> None:
     finish_result = registry.execute(finish_call, tool_context)
     payload = json.loads(finish_result.content)
 
-    assert finish_result.status == "error"
+    assert finish_result.status_code is ToolResultStatus.ERROR
     assert finish_result.directive == ToolDirective.CONTINUE
     assert payload["error_code"] == "todo_incomplete"
 

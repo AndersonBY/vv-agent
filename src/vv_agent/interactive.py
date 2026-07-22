@@ -14,11 +14,7 @@ from typing import Any, Protocol, cast, overload
 
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider
-from vv_agent.config import (
-    ResolvedModelConfig,
-    build_openai_llm_from_local_settings,
-    project_resolved_model_limits,
-)
+from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
 from vv_agent.context_providers import (
     ContextFragment,
     ContextProvider,
@@ -26,8 +22,9 @@ from vv_agent.context_providers import (
     assemble_context_fragments,
     collect_context_fragments,
 )
-from vv_agent.llm.base import LLMClient
+from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.memory.provider import MemoryProvider
+from vv_agent.model import ModelProvider, ModelRef
 from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig, ToolPolicy
@@ -42,10 +39,8 @@ from vv_agent.sessions import MemorySession, Session
 from vv_agent.tools import ToolRegistry, build_default_registry
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message, NoToolPolicy, SubAgentConfig
 
-LLMBuilder = Callable[..., tuple[LLMClient, ResolvedModelConfig]]
-RuntimeLogHandler = Callable[[str, dict[str, Any]], None]
+RunEventObserver = Callable[[RunEvent], None]
 SessionEventHandler = Callable[[str, dict[str, Any]], None]
-StreamCallback = Callable[[Any], None]
 ToolRegistryFactory = Callable[[], ToolRegistry]
 BeforeCycleMessageProvider = Callable[[int, list[Message], dict[str, Any]], list[Message]]
 InterruptionMessageProvider = Callable[[], list[Message]]
@@ -158,7 +153,6 @@ class InteractiveAgentDefinition:
     enable_todo_management: bool = True
     agent_type: str | None = None
     native_multimodal: bool = False
-    enable_sub_agents: bool = False
     sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)
     skill_directories: list[str] = field(default_factory=list)
     extra_tool_names: list[str] = field(default_factory=list)
@@ -168,29 +162,20 @@ class InteractiveAgentDefinition:
     bash_env: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     system_prompt: str | None = None
-    system_prompt_template: str | None = None
     context_providers: list[ContextProvider] = field(default_factory=list)
     memory_providers: list[MemoryProvider] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        if self.system_prompt_template is not None:
-            raise ValueError("system_prompt_template is not supported; use system_prompt instead")
 
 
 @dataclass(slots=True)
 class AgentSessionOptions:
-    settings_file: Path
-    default_backend: str
+    model_provider: ModelProvider
     workspace: Path = field(default_factory=lambda: Path("./workspace"))
-    timeout_seconds: float = 90.0
     log_preview_chars: int | None = None
-    llm_builder: LLMBuilder | None = None
     tool_registry_factory: ToolRegistryFactory | None = None
-    log_handler: RuntimeLogHandler | None = None
+    stream: RunEventObserver | None = None
     runtime_hooks: list[RuntimeHook] = field(default_factory=list)
     execution_backend: ExecutionBackend | None = None
     cancellation_token: CancellationToken | None = None
-    stream_callback: StreamCallback | None = None
     debug_dump_dir: str | None = None
     approval_provider: ApprovalProvider | None = None
     approval_timeout_seconds: float | None = None
@@ -206,7 +191,7 @@ class AgentSessionOptions:
 
 
 class AgentSessionRun(RunResult):
-    """Compatibility name for interactive runs without dropping RunResult data."""
+    """Interactive run result with durable-session persistence callbacks."""
 
     __slots__ = ("_after_persist", "_on_persist_failure")
 
@@ -623,7 +608,7 @@ class AgentSession:
                 "initial_messages": None,
                 "before_cycle_messages": self._before_cycle_messages,
                 "interruption_messages": self._interruption_messages,
-                "log_handler": self._session_log_handler,
+                "event_handler": self._session_event_handler,
                 "cancellation_token": self._active_cancellation_token,
                 "approval_broker": approval_broker,
                 "active_handle_callback": self._set_active_run_handle,
@@ -746,13 +731,14 @@ class AgentSession:
             self._emit("session_steer_interrupt", prompt=prompt)
         return [Message(role="user", content=prompt) for prompt in prompts]
 
-    def _session_log_handler(self, event: str, payload: dict[str, Any]) -> None:
-        self._sync_background_command_watchers(event, payload)
-        self._emit(event, **payload)
+    def _session_event_handler(self, event: RunEvent) -> None:
+        self._sync_background_command_watchers(event)
+        self._emit(event.type, **event.to_dict())
 
-    def _sync_background_command_watchers(self, event: str, payload: dict[str, Any]) -> None:
-        if event != "tool_result" or not isinstance(payload, dict):
+    def _sync_background_command_watchers(self, event: RunEvent) -> None:
+        if not isinstance(event, DiagnosticEvent) or event.code != "tool_result":
             return
+        payload = event.details
         tool_name = str(payload.get("tool_name") or "").strip().lower()
         if tool_name not in {"bash", "check_background_command"}:
             return
@@ -997,7 +983,6 @@ class InteractiveAgentClient:
             no_tool_policy=definition.no_tool_policy,
             allow_interruption=definition.allow_interruption,
             use_workspace=definition.use_workspace,
-            has_sub_agents=definition.enable_sub_agents,
             sub_agents=dict(definition.sub_agents),
             agent_type=definition.agent_type,
             native_multimodal=definition.native_multimodal,
@@ -1014,7 +999,7 @@ class InteractiveAgentClient:
         task_name: str | None = None,
         workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
-        log_handler: RuntimeLogHandler | None = None,
+        event_handler: RunEventObserver | None = None,
         initial_messages: list[Message] | None = None,
         before_cycle_messages: BeforeCycleMessageProvider | None = None,
         interruption_messages: InterruptionMessageProvider | None = None,
@@ -1032,7 +1017,7 @@ class InteractiveAgentClient:
                 agent=agent,
                 workspace=workspace,
                 shared_state=shared_state,
-                log_handler=log_handler,
+                event_handler=event_handler,
                 initial_messages=initial_messages,
                 before_cycle_messages=before_cycle_messages,
                 interruption_messages=interruption_messages,
@@ -1046,14 +1031,10 @@ class InteractiveAgentClient:
         definition = self._apply_startup_shell_defaults(agent)
         effective_workspace = self._resolve_workspace(workspace)
         run_name = task_name or "inline"
-        backend = definition.backend or self.options.default_backend
-        llm_builder = self.options.llm_builder or build_openai_llm_from_local_settings
-        llm, resolved = llm_builder(
-            self.options.settings_file,
-            backend=backend,
-            model=definition.model,
-            timeout_seconds=self.options.timeout_seconds,
-        )
+        backend = str(definition.backend or "").strip()
+        model_ref = ModelRef.backend(backend, definition.model) if backend else ModelRef.named(definition.model)
+        resolved = self.options.model_provider.resolve(model_ref)
+        llm = self.options.model_provider.client(resolved)
         if self.options.debug_dump_dir:
             cast(_SupportsDebugDumpDir, llm).debug_dump_dir = self.options.debug_dump_dir
 
@@ -1092,12 +1073,9 @@ class InteractiveAgentClient:
             metadata=dict(task.metadata),
         )
 
-        def model_provider(agent: Agent[Any], run_config: RunConfig) -> tuple[LLMClient, ResolvedModelConfig]:
-            del agent, run_config
-            return llm, resolved
-
         run_config = RunConfig(
-            model_provider=model_provider,
+            model=model_ref,
+            model_provider=self.options.model_provider,
             workspace=effective_workspace,
             session=session,
             max_cycles=task.max_cycles,
@@ -1111,10 +1089,6 @@ class InteractiveAgentClient:
             hooks=list(self.options.runtime_hooks),
             log_preview_chars=self.options.log_preview_chars,
             debug_dump_dir=self.options.debug_dump_dir,
-            settings_file=self.options.settings_file,
-            default_backend=backend,
-            llm_builder=llm_builder,
-            timeout_seconds=self.options.timeout_seconds,
             context_providers=context_providers,
             memory_providers=memory_providers,
             metadata=dict(task.metadata),
@@ -1123,16 +1097,12 @@ class InteractiveAgentClient:
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
             sub_task_manager=sub_task_manager,
-            runtime_log_handler=self._compose_log_handlers(self.options.log_handler, log_handler),
-            runtime_stream_callback=self.options.stream_callback,
+            stream=self._compose_event_handlers(self.options.stream, event_handler),
         )
         handle = Runner._start_compiled(sdk_agent, prompt, task=task, run_config=run_config)
         if active_handle_callback is not None:
             active_handle_callback(handle)
         try:
-            if log_handler is not None:
-                for event in handle.events():
-                    log_handler(event.type, event.to_dict())
             result = handle.result()
         finally:
             if active_handle_callback is not None:
@@ -1146,7 +1116,7 @@ class InteractiveAgentClient:
         agent: Agent,
         workspace: str | Path | None = None,
         shared_state: dict[str, Any] | None = None,
-        log_handler: RuntimeLogHandler | None = None,
+        event_handler: RunEventObserver | None = None,
         initial_messages: list[Message] | None = None,
         before_cycle_messages: BeforeCycleMessageProvider | None = None,
         interruption_messages: InterruptionMessageProvider | None = None,
@@ -1159,6 +1129,7 @@ class InteractiveAgentClient:
     ) -> AgentSessionRun:
         effective_workspace = self._resolve_workspace(workspace)
         run_config = RunConfig(
+            model_provider=self.options.model_provider,
             workspace=effective_workspace,
             session=session,
             tool_policy=self.options.tool_policy,
@@ -1171,10 +1142,6 @@ class InteractiveAgentClient:
             hooks=list(self.options.runtime_hooks),
             log_preview_chars=self.options.log_preview_chars,
             debug_dump_dir=self.options.debug_dump_dir,
-            settings_file=self.options.settings_file,
-            default_backend=self.options.default_backend,
-            llm_builder=self.options.llm_builder or build_openai_llm_from_local_settings,
-            timeout_seconds=self.options.timeout_seconds,
             context_providers=list(self.options.context_providers),
             memory_providers=list(self.options.memory_providers),
             metadata={"session_id": session_id} if session_id else {},
@@ -1183,16 +1150,12 @@ class InteractiveAgentClient:
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
             sub_task_manager=sub_task_manager,
-            runtime_log_handler=self._compose_log_handlers(self.options.log_handler, log_handler),
-            runtime_stream_callback=self.options.stream_callback,
+            stream=self._compose_event_handlers(self.options.stream, event_handler),
         )
         handle = Runner.start(agent, prompt, run_config=run_config)
         if active_handle_callback is not None:
             active_handle_callback(handle)
         try:
-            if log_handler is not None:
-                for event in handle.events():
-                    log_handler(event.type, event.to_dict())
             result = handle.result()
         finally:
             if active_handle_callback is not None:
@@ -1260,17 +1223,20 @@ class InteractiveAgentClient:
         return Path(target).expanduser().resolve()
 
     @staticmethod
-    def _compose_log_handlers(
-        first: RuntimeLogHandler | None,
-        second: RuntimeLogHandler | None,
-    ) -> RuntimeLogHandler | None:
+    def _compose_event_handlers(
+        first: RunEventObserver | None,
+        second: RunEventObserver | None,
+    ) -> RunEventObserver | None:
         handlers = [handler for handler in (first, second) if handler is not None]
         if not handlers:
             return None
 
-        def _handler(event: str, payload: dict[str, Any]) -> None:
+        def _handler(event: RunEvent) -> None:
             for handler in handlers:
-                handler(event, payload)
+                try:
+                    handler(event)
+                except BaseException:
+                    logger.exception("Interactive run event observer failed")
 
         return _handler
 

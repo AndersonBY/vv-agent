@@ -20,7 +20,6 @@ def check_background_command(context: ToolContext, arguments: dict[str, Any]) ->
     if status == "running":
         return ToolExecutionResult(
             tool_call_id="",
-            status="success",
             status_code=ToolResultStatus.RUNNING,
             content=to_json(result),
             metadata=select_metadata(
@@ -35,7 +34,6 @@ def check_background_command(context: ToolContext, arguments: dict[str, Any]) ->
     if status in {"completed"}:
         return ToolExecutionResult(
             tool_call_id="",
-            status="success",
             status_code=ToolResultStatus.SUCCESS,
             content=to_json(result),
             metadata=select_metadata(

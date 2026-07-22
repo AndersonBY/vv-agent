@@ -23,17 +23,17 @@ def main() -> None:
     agent = Agent(
         name="temporary-tool-demo",
         instructions="Use temporary_lookup when it is available, then call task_finish.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[temporary_lookup],
     )
-    enabled = os.getenv("V_AGENT_TEMP_TOOL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    enabled = os.getenv("VV_AGENT_TEMP_TOOL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         context={"enable_temp_tool": enabled},
     )
-    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "Use temporary_lookup for key alpha if the tool exists.")
+    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Use temporary_lookup for key alpha if the tool exists.")
     result = Runner.run_sync(agent, prompt, run_config=config)
     print(result.final_output)
 

@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Any
 
+from support import FixedModelProvider, ModelMapProvider
+
 from vv_agent import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
@@ -25,8 +27,8 @@ def _resolved(*, backend: str = "test", model: str = "test-model") -> ResolvedMo
     )
 
 
-def _llm_builder(*_: Any, **__: Any):
-    return (
+def _model_provider() -> FixedModelProvider:
+    return FixedModelProvider(
         ScriptedLLM(
             steps=[
                 LLMResponse(
@@ -39,13 +41,11 @@ def _llm_builder(*_: Any, **__: Any):
     )
 
 
-def test_interactive_session_emits_v1_events_from_run_handle(tmp_path) -> None:
+def test_interactive_session_emits_current_events_from_run_handle(tmp_path) -> None:
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=_model_provider(),
             workspace=tmp_path,
-            llm_builder=_llm_builder,
         )
     )
     session = client.create_session(
@@ -73,15 +73,10 @@ def test_interactive_session_steering_queue_reaches_run_handle_runtime(tmp_path)
             tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
         )
 
-    def llm_builder(*_: Any, **__: Any):
-        return ScriptedLLM(steps=[respond]), _resolved()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[respond]), _resolved()),
             workspace=tmp_path,
-            llm_builder=llm_builder,
         )
     )
     session = client.create_session(
@@ -108,16 +103,12 @@ def test_interactive_session_derives_each_run_from_host_cancellation_token(tmp_p
 
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[respond]), _resolved()),
             workspace=tmp_path,
             cancellation_token=parent_token,
-            llm_builder=lambda *_args, **_kwargs: (ScriptedLLM(steps=[respond]), _resolved()),
         )
     )
-    session = client.create_session(
-        agent=InteractiveAgentDefinition(description="assistant", model="test-model", max_cycles=2)
-    )
+    session = client.create_session(agent=InteractiveAgentDefinition(description="assistant", model="test-model", max_cycles=2))
     result_queue: queue.Queue[Any] = queue.Queue()
 
     def run_prompt() -> None:
@@ -162,15 +153,10 @@ def test_active_run_handle_steer_queues_session_context(tmp_path) -> None:
 
     steps.extend([first_step, second_step])
 
-    def llm_builder(*_: Any, **__: Any):
-        return ScriptedLLM(steps=steps), _resolved()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=steps), _resolved()),
             workspace=tmp_path,
-            llm_builder=llm_builder,
         )
     )
     session = client.create_session(
@@ -226,15 +212,10 @@ def test_active_run_handle_follow_up_queues_next_session_turn(tmp_path) -> None:
 
     steps.extend([first_step, second_step])
 
-    def llm_builder(*_: Any, **__: Any):
-        return ScriptedLLM(steps=steps), _resolved()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=FixedModelProvider(ScriptedLLM(steps=steps), _resolved()),
             workspace=tmp_path,
-            llm_builder=llm_builder,
         )
     )
     session = client.create_session(
@@ -266,13 +247,12 @@ def _wait_for_active_handle(session) -> Any:
     raise AssertionError("session did not expose an active run handle")
 
 
-def test_interactive_sub_agent_uses_bridge_llm_builder_for_child_model(tmp_path) -> None:
-    builder_calls: list[tuple[str, str]] = []
-
-    def llm_builder(*_: Any, backend: str, model: str, **__: Any):
-        builder_calls.append((backend, model))
-        if model == "parent-model":
-            return (
+def test_interactive_sub_agent_uses_model_provider_for_child_model(tmp_path) -> None:
+    parent_resolved = _resolved(model="parent-model")
+    child_resolved = _resolved(model="child-model")
+    model_provider = ModelMapProvider(
+        routes={
+            "parent-model": (
                 ScriptedLLM(
                     steps=[
                         LLMResponse(
@@ -292,35 +272,42 @@ def test_interactive_sub_agent_uses_bridge_llm_builder_for_child_model(tmp_path)
                         LLMResponse(
                             content="finish parent",
                             tool_calls=[
-                                ToolCall(id="parent-call-2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})
+                                ToolCall(
+                                    id="parent-call-2",
+                                    name=TASK_FINISH_TOOL_NAME,
+                                    arguments={"message": "parent done"},
+                                )
                             ],
                         ),
                     ]
                 ),
-                _resolved(backend=backend, model=model),
-            )
-        if model == "child-model":
-            return (
+                parent_resolved,
+            ),
+            "child-model": (
                 ScriptedLLM(
                     steps=[
                         LLMResponse(
                             content="finish child",
                             tool_calls=[
-                                ToolCall(id="child-call-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "child done"})
+                                ToolCall(
+                                    id="child-call-1",
+                                    name=TASK_FINISH_TOOL_NAME,
+                                    arguments={"message": "child done"},
+                                )
                             ],
                         )
                     ]
                 ),
-                _resolved(backend=backend, model=model),
-            )
-        raise AssertionError(f"Unexpected model: {model}")
+                child_resolved,
+            ),
+        },
+        default_model="parent-model",
+    )
 
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=model_provider,
             workspace=tmp_path,
-            llm_builder=llm_builder,
         )
     )
     session = client.create_session(
@@ -329,7 +316,6 @@ def test_interactive_sub_agent_uses_bridge_llm_builder_for_child_model(tmp_path)
             description="parent",
             model="parent-model",
             max_cycles=4,
-            enable_sub_agents=True,
             sub_agents={
                 "child": SubAgentConfig(
                     description="child worker",
@@ -344,7 +330,8 @@ def test_interactive_sub_agent_uses_bridge_llm_builder_for_child_model(tmp_path)
 
     assert run.result.status == AgentStatus.COMPLETED
     assert run.result.final_answer == "parent done"
-    assert builder_calls == [("test", "parent-model"), ("test", "child-model")]
+    assert model_provider.resolved_models[0] == "parent-model"
+    assert model_provider.resolved_models[-1] == "child-model"
     sub_task_payload = json.loads(run.result.cycles[0].tool_results[0].content)
     assert sub_task_payload["status"] == "completed"
     assert sub_task_payload["final_answer"] == "child done"

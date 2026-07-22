@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from vv_agent.tools.argument_validation import assert_valid_tool_schema, close_object_schemas
 from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
 from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, ToolExposure
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
@@ -31,7 +32,6 @@ class ToolRegistry:
                 name=spec.name,
                 handler=spec.handler,
                 schema=deepcopy(schema) if schema else None,
-                idempotency=spec.idempotency,
                 tool_metadata=spec.tool_metadata,
             )
 
@@ -40,10 +40,15 @@ class ToolRegistry:
             self.register(spec)
 
     def register_schema(self, tool_name: str, schema: dict[str, Any]) -> None:
-        self._schemas[tool_name] = deepcopy(schema)
+        closed_schema = close_object_schemas(schema)
+        function_schema = closed_schema.get("function")
+        if not isinstance(function_schema, dict) or not isinstance(function_schema.get("parameters"), dict):
+            raise ValueError(f"Tool schema must contain function.parameters: {tool_name}")
+        assert_valid_tool_schema(function_schema["parameters"])
+        self._schemas[tool_name] = closed_schema
         executor = self._executors.get(tool_name)
         if isinstance(executor, RegistryToolExecutor):
-            executor.schema = deepcopy(schema)
+            executor.schema = deepcopy(closed_schema)
             executor.sync_description_from_schema()
 
     def register_schemas(self, schemas: dict[str, dict[str, Any]]) -> None:
@@ -74,13 +79,9 @@ class ToolRegistry:
             raise ToolNotFoundError(name)
         return executor
 
-    def tool_idempotency(self, name: str) -> Any:
-        executor = self.get_executor(name)
-        return getattr(executor, "idempotency", self.get(name).idempotency)
-
     def tool_metadata(self, name: str) -> ToolMetadata | None:
         executor = self.get_executor(name)
-        return getattr(executor, "tool_metadata", self.get(name).tool_metadata)
+        return executor.tool_metadata
 
     def mark_policy_managed_by_handler(self, name: str) -> None:
         executor = self.get_executor(name)
@@ -128,7 +129,6 @@ class ToolRegistry:
         description: str,
         parameters: dict[str, Any] | None = None,
         *,
-        idempotency: Any = "unknown",
         tool_metadata: ToolMetadata | dict[str, Any] | None = None,
     ) -> None:
         """Register a custom tool in one step (schema + handler)."""
@@ -140,21 +140,16 @@ class ToolRegistry:
                 "parameters": parameters or {"type": "object", "properties": {}, "required": []},
             },
         }
-        normalized_tool_metadata, normalized_idempotency = normalize_tool_metadata(
-            tool_metadata,
-            legacy_idempotency=idempotency,
-        )
+        normalized_tool_metadata = normalize_tool_metadata(tool_metadata)
         self.register_schema(name, schema)
         self.register(
             ToolSpec(
                 name=name,
                 handler=handler,
-                idempotency=normalized_idempotency,
                 tool_metadata=normalized_tool_metadata,
             )
         )
         self._planner_extra_tool_names.add(name)
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
-        tool = self.get(call.name)
-        return tool.handler(context, call.arguments)
+        return self.get_executor(call.name).execute(call, context)

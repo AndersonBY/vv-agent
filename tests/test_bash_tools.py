@@ -212,10 +212,7 @@ def test_bash_tool_uses_context_shell_defaults(tmp_path: Path, monkeypatch) -> N
         ToolCall(
             id="c5",
             name=BASH_TOOL_NAME,
-            arguments={
-                "command": "echo ok",
-                "shell": "cmd",
-            },
+            arguments={"command": "echo ok"},
         ),
         context,
     )

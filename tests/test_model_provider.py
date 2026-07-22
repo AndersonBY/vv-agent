@@ -145,7 +145,7 @@ def test_model_ref_and_provider_backend_validation_match_rust_contract() -> None
 
 
 def test_model_ref_wire_matches_shared_closed_contract() -> None:
-    fixture_path = Path(__file__).parent / "fixtures" / "parity" / "model_ref_v1.json"
+    fixture_path = Path(__file__).parent / "fixtures" / "parity" / "model_ref.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
 
     refs = [ModelRef.from_dict(payload) for payload in fixture["valid"]]

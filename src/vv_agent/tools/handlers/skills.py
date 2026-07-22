@@ -78,7 +78,6 @@ def activate_skill(context: ToolContext, arguments: dict[str, Any]) -> ToolExecu
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
         status_code=ToolResultStatus.SUCCESS,
         content=to_json(response_data),
         metadata={"skill_name": entry.name},

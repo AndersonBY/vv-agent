@@ -3,6 +3,7 @@ from __future__ import annotations
 from threading import Event
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig, Runner
 from vv_agent.background_task import BackgroundAgentTask, BackgroundAgentTaskHandle
@@ -45,10 +46,7 @@ def test_agent_background_task_starts_non_blocking_and_returns_pollable_handle()
                 tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "background draft"})],
             )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return BlockingLLM(), _resolved()
-
+    llm = BlockingLLM()
     agent = Agent(name="drafter", instructions="Draft the report.", model="background-model")
     task = agent.as_background_task(name="draft_report", description="Draft in the background.")
 
@@ -58,7 +56,7 @@ def test_agent_background_task_starts_non_blocking_and_returns_pollable_handle()
         Runner,
         None,
         {"task_description": "draft the parity report"},
-        run_config=RunConfig(model_provider=model_provider),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved())),
     )
 
     try:
@@ -86,3 +84,11 @@ def test_background_task_rejects_missing_task_description() -> None:
 
     with pytest.raises(ValueError, match="requires task_description"):
         task.start(Runner, None, {})
+
+
+@pytest.mark.parametrize("legacy_field", ["task", "input"])
+def test_background_task_rejects_removed_task_description_aliases(legacy_field: str) -> None:
+    task = Agent(name="worker", instructions="Work.", model="m").as_background_task()
+
+    with pytest.raises(ValueError, match="requires task_description"):
+        task.start(Runner, None, {legacy_field: "run the background task"})

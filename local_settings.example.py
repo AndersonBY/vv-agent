@@ -9,14 +9,19 @@ LLM_SETTINGS = {
         "moonshot": {
             "default_endpoint": "moonshot-official",
             "models": {
-                "kimi-k2.6": {
-                    "id": "kimi-k2.6",
+                "kimi-k3": {
+                    "id": "kimi-k3",
                     "endpoints": [
                         {
                             "endpoint_id": "moonshot-official",
-                            "model_id": "kimi-k2.6",
+                            "model_id": "kimi-k3",
                         }
                     ],
+                    "context_length": 1048576,
+                    "max_output_tokens": 131072,
+                    "native_multimodal": True,
+                    "function_call_available": True,
+                    "response_format_available": True,
                 },
             },
         },
@@ -45,11 +50,3 @@ LLM_SETTINGS = {
         },
     ],
 }
-
-# Optional: default model/backend for memory-compression summary.
-# Priority in runtime:
-# 1) AgentTask.metadata (memory_summary_backend / memory_summary_model)
-# 2) local_settings.py constants below
-# 3) fallback to runtime default_backend + task.model
-DEFAULT_USER_MEMORY_SUMMARIZE_BACKEND = "moonshot"
-DEFAULT_USER_MEMORY_SUMMARIZE_MODEL = "kimi-k2.6"

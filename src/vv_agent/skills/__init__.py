@@ -4,7 +4,6 @@ from vv_agent.skills.normalize import SkillEntry, normalize_skill_list
 from vv_agent.skills.parser import discover_skill_dirs, find_skill_md, parse_frontmatter, read_properties, read_skill
 from vv_agent.skills.prompt import (
     MAX_SKILLS_PROMPT_CHARS,
-    metadata_to_prompt_entries,
     render_skills_xml,
     skill_entry_to_xml,
     to_available_skills_xml,
@@ -35,7 +34,6 @@ __all__ = [
     "ValidationMode",
     "discover_skill_dirs",
     "find_skill_md",
-    "metadata_to_prompt_entries",
     "normalize_skill_list",
     "normalize_validation_mode",
     "parse_frontmatter",

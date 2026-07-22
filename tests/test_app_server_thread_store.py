@@ -213,8 +213,8 @@ def test_duplicate_run_event_rejects_conflicting_projection() -> None:
     assert store.read_thread(thread.thread_id).items == [original]
 
 
-def test_opening_legacy_database_adds_thread_lifecycle_columns(tmp_path: Path) -> None:
-    db_path = tmp_path / "legacy.sqlite"
+def test_opening_unversioned_database_is_rejected_without_mutation(tmp_path: Path) -> None:
+    db_path = tmp_path / "unversioned.sqlite"
     connection = sqlite3.connect(db_path)
     connection.executescript(
         """
@@ -236,7 +236,53 @@ def test_opening_legacy_database_adds_thread_lifecycle_columns(tmp_path: Path) -
     connection.commit()
     connection.close()
 
-    thread = ThreadStore(db_path).read_thread("thread_1").thread
+    with pytest.raises(RuntimeError, match="schema version 0 does not match required version 1"):
+        ThreadStore(db_path)
 
-    assert thread.status == "idle"
-    assert thread.active_turn_id is None
+    connection = sqlite3.connect(db_path)
+    try:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(threads)")}
+        assert columns == {
+            "id",
+            "thread_id",
+            "agent_key",
+            "cwd",
+            "created_at",
+            "updated_at",
+            "archived_at",
+            "metadata_json",
+        }
+        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 0
+    finally:
+        connection.close()
+
+
+def test_opening_wrong_schema_version_is_rejected(tmp_path: Path) -> None:
+    db_path = tmp_path / "wrong-version.sqlite"
+    ThreadStore(db_path)
+    connection = sqlite3.connect(db_path)
+    connection.execute("PRAGMA user_version = 2")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="schema version 2 does not match required version 1"):
+        ThreadStore(db_path)
+
+
+def test_opening_malformed_current_schema_is_rejected(tmp_path: Path) -> None:
+    db_path = tmp_path / "malformed.sqlite"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        PRAGMA user_version = 1;
+        CREATE TABLE threads (id INTEGER PRIMARY KEY);
+        CREATE TABLE turns (id INTEGER PRIMARY KEY);
+        CREATE TABLE items (id INTEGER PRIMARY KEY);
+        CREATE UNIQUE INDEX items_run_event_id_unique ON items(id);
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(RuntimeError, match="table threads does not match the current schema"):
+        ThreadStore(db_path)

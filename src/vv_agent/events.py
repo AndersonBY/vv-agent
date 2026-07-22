@@ -35,6 +35,7 @@ ReservedOutputSource = Literal[
     "framework_fallback",
     "framework_fallback_capped_by_model_capability",
 ]
+DiagnosticLevel = Literal["debug", "info", "warning", "error"]
 _APPROVAL_ACTIONS = frozenset({"allow", "allow_session", "deny", "timeout"})
 _MEMORY_COMPACT_TRIGGER_VALUES = frozenset({"micro_threshold", "full_threshold", "prompt_too_long"})
 _MEMORY_COMPACT_MODE_VALUES = frozenset({"none", "micro", "structural", "summary", "emergency"})
@@ -46,7 +47,8 @@ _RESERVED_OUTPUT_SOURCE_VALUES = frozenset(
         "framework_fallback_capped_by_model_capability",
     }
 )
-_MEMORY_COMPACT_STARTED_ADDITIVE_FIELDS = (
+_DIAGNOSTIC_LEVEL_VALUES = frozenset({"debug", "info", "warning", "error"})
+_MEMORY_COMPACT_STARTED_FIELDS = (
     "trigger",
     "configured_threshold",
     "effective_threshold",
@@ -57,25 +59,160 @@ _MEMORY_COMPACT_STARTED_ADDITIVE_FIELDS = (
     "reserved_output_source",
     "autocompact_buffer_tokens",
 )
-_MEMORY_COMPACT_COMPLETED_ADDITIVE_FIELDS = ("mode", "changed")
+_MEMORY_COMPACT_COMPLETED_FIELDS = ("mode", "changed")
 _JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
 _TOOL_STATUS_VALUES = frozenset({"success", "error", "wait_response", "running", "pending_compress"})
 _TOOL_DIRECTIVE_VALUES = frozenset({"continue", "finish", "wait_user"})
-_TOOL_COMPLETED_ADDITIVE_FIELDS = frozenset({"directive", "error_code", "execution_started", "duration_ms"})
-
-
-class _MissingToolLifecycleField:
-    __slots__ = ()
-
-
-_MISSING_TOOL_LIFECYCLE_FIELD = _MissingToolLifecycleField()
-
-
-class _MissingMemoryCompactionField:
-    __slots__ = ()
-
-
-_MISSING_MEMORY_COMPACTION_FIELD = _MissingMemoryCompactionField()
+_COMMON_EVENT_FIELDS = frozenset(
+    {
+        "version",
+        "type",
+        "event_id",
+        "run_id",
+        "trace_id",
+        "created_at",
+        "session_id",
+        "parent_event_id",
+        "parent_run_id",
+        "cycle_index",
+        "agent_name",
+        "metadata",
+    }
+)
+_EVENT_FIELDS: dict[str, frozenset[str]] = {
+    "run_started": frozenset({"input"}),
+    "agent_started": frozenset(),
+    "cycle_started": frozenset(),
+    "llm_started": frozenset({"model"}),
+    "run_state_changed": frozenset({"state"}),
+    "diagnostic": frozenset({"level", "code", "details"}),
+    "memory_compact_started": frozenset(
+        {
+            "message_count",
+            "estimated_tokens",
+            *_MEMORY_COMPACT_STARTED_FIELDS,
+        }
+    ),
+    "memory_compact_completed": frozenset({"before_count", "after_count", "summary_tokens", *_MEMORY_COMPACT_COMPLETED_FIELDS}),
+    "assistant_delta": frozenset({"delta", "content_chars", "estimated_tokens"}),
+    "reasoning_delta": frozenset({"delta", "reasoning_chars", "estimated_tokens"}),
+    "model_tool_call_started": frozenset({"tool_call_id", "tool_name", "tool_call_index", "arguments_chars", "estimated_tokens"}),
+    "model_tool_call_progress": frozenset(
+        {"tool_call_id", "tool_name", "tool_call_index", "arguments_chars", "estimated_tokens"}
+    ),
+    "tool_call_planned": frozenset({"tool_name", "tool_call_id", "arguments", "tool_metadata"}),
+    "tool_call_started": frozenset({"tool_name", "tool_call_id", "arguments", "tool_metadata"}),
+    "tool_call_completed": frozenset(
+        {
+            "tool_name",
+            "tool_call_id",
+            "status",
+            "directive",
+            "error_code",
+            "execution_started",
+            "duration_ms",
+            "tool_metadata",
+        }
+    ),
+    "approval_requested": frozenset({"request_id", "tool_name", "tool_call_id", "message"}),
+    "approval_resolved": frozenset({"request_id", "tool_name", "tool_call_id", "action"}),
+    "sub_run_started": frozenset({"parent_tool_call_id", "status", "child_session_id", "task_id"}),
+    "sub_run_completed": frozenset(
+        {
+            "parent_tool_call_id",
+            "status",
+            "child_session_id",
+            "task_id",
+            "final_output",
+            "wait_reason",
+            "error",
+            "completion_reason",
+            "completion_tool_name",
+            "partial_output",
+            "token_usage",
+            "budget_usage",
+            "budget_exhaustion",
+        }
+    ),
+    "handoff_started": frozenset({"source_agent", "target_agent", "tool_call_id", "status", "child_session_id"}),
+    "handoff_completed": frozenset(
+        {"source_agent", "target_agent", "tool_call_id", "status", "child_session_id", "child_run_id"}
+    ),
+    "session_persisted": frozenset(),
+    "run_completed": frozenset(
+        {
+            "final_output",
+            "status",
+            "completion_reason",
+            "completion_tool_name",
+            "partial_output",
+            "budget_usage",
+            "budget_exhaustion",
+        }
+    ),
+    "run_failed": frozenset(
+        {
+            "error",
+            "status",
+            "completion_reason",
+            "completion_tool_name",
+            "partial_output",
+            "budget_usage",
+            "budget_exhaustion",
+        }
+    ),
+    "run_cancelled": frozenset({"reason", "completion_reason", "partial_output", "budget_usage", "budget_exhaustion"}),
+    "budget_snapshot": frozenset({"enforcement_boundary", "budget_usage"}),
+    "budget_exhausted": frozenset({"enforcement_boundary", "budget_usage", "budget_exhaustion"}),
+    "checkpoint_created": frozenset({"checkpoint_key", "resume_attempt"}),
+    "checkpoint_resumed": frozenset({"checkpoint_key", "resume_attempt"}),
+    "operation_replayed": frozenset({"checkpoint_key", "operation_id", "operation_kind", "receipt_state"}),
+    "operation_ambiguous": frozenset({"checkpoint_key", "operation_id", "operation_kind", "risk", "idempotency_support"}),
+    "reconciliation_required": frozenset(
+        {"checkpoint_key", "operation_id", "operation_kind", "interruption_reason", "resume_observation"}
+    ),
+    "model_retry_duplicate_risk": frozenset({"checkpoint_key", "operation_id", "operation_kind", "risk"}),
+    "reconciliation_resolved": frozenset({"checkpoint_key", "operation_id", "operation_kind", "decision"}),
+}
+_EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
+    "run_started": frozenset({"input"}),
+    "llm_started": frozenset({"model"}),
+    "assistant_delta": frozenset({"delta", "cycle_index"}),
+    "reasoning_delta": frozenset({"delta", "cycle_index"}),
+    "model_tool_call_started": frozenset({"tool_call_id", "tool_name", "cycle_index"}),
+    "model_tool_call_progress": frozenset({"tool_call_id", "tool_name", "cycle_index"}),
+    "tool_call_planned": frozenset({"tool_name", "tool_call_id", "arguments"}),
+    "tool_call_started": frozenset({"tool_name", "tool_call_id", "arguments"}),
+    "tool_call_completed": frozenset(
+        {"tool_name", "tool_call_id", "status", "directive", "error_code", "execution_started", "duration_ms"}
+    ),
+    "approval_requested": frozenset({"request_id", "tool_name", "tool_call_id", "message"}),
+    "approval_resolved": frozenset({"request_id", "tool_name", "tool_call_id", "action"}),
+    "memory_compact_started": frozenset({"message_count", *_MEMORY_COMPACT_STARTED_FIELDS}),
+    "memory_compact_completed": frozenset({"before_count", "after_count", *_MEMORY_COMPACT_COMPLETED_FIELDS}),
+    "sub_run_started": frozenset({"parent_tool_call_id", "status"}),
+    "sub_run_completed": frozenset({"parent_tool_call_id", "status"}),
+    "handoff_started": frozenset({"source_agent", "target_agent", "tool_call_id", "status"}),
+    "handoff_completed": frozenset({"source_agent", "target_agent", "tool_call_id", "status"}),
+    "run_state_changed": frozenset({"state"}),
+    "diagnostic": frozenset({"level", "code", "details"}),
+    "run_completed": frozenset({"status"}),
+    "run_failed": frozenset({"error"}),
+    "run_cancelled": frozenset({"reason"}),
+    "budget_snapshot": frozenset({"enforcement_boundary", "budget_usage"}),
+    "budget_exhausted": frozenset({"enforcement_boundary", "budget_usage", "budget_exhaustion"}),
+    "checkpoint_created": frozenset({"checkpoint_key", "resume_attempt", "cycle_index"}),
+    "checkpoint_resumed": frozenset({"checkpoint_key", "resume_attempt", "cycle_index"}),
+    "operation_replayed": frozenset({"checkpoint_key", "operation_id", "operation_kind", "receipt_state", "cycle_index"}),
+    "operation_ambiguous": frozenset(
+        {"checkpoint_key", "operation_id", "operation_kind", "risk", "idempotency_support", "cycle_index"}
+    ),
+    "reconciliation_required": frozenset(
+        {"checkpoint_key", "operation_id", "operation_kind", "interruption_reason", "resume_observation", "cycle_index"}
+    ),
+    "model_retry_duplicate_risk": frozenset({"checkpoint_key", "operation_id", "operation_kind", "risk", "cycle_index"}),
+    "reconciliation_resolved": frozenset({"checkpoint_key", "operation_id", "operation_kind", "decision", "cycle_index"}),
+}
 
 
 class _StreamEventCommon(TypedDict):
@@ -152,6 +289,41 @@ def _completion_text(value: Any, field_name: str) -> str | None:
     return value
 
 
+def _diagnostic_level(value: Any) -> DiagnosticLevel:
+    if not isinstance(value, str) or value not in _DIAGNOSTIC_LEVEL_VALUES:
+        raise ValueError(f"Unsupported diagnostic level: {value!r}")
+    return cast(DiagnosticLevel, value)
+
+
+def _diagnostic_json_value(value: Any, path: str) -> Any:
+    if value is None or isinstance(value, str | bool):
+        return value
+    if isinstance(value, int):
+        if not -_JSON_SAFE_INTEGER_MAX <= value <= _JSON_SAFE_INTEGER_MAX:
+            raise ValueError(f"Run event {path} integer exceeds the JSON-safe range")
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError(f"Run event {path} number must be finite")
+        return value
+    if isinstance(value, list):
+        return [_diagnostic_json_value(item, f"{path}[]") for item in value]
+    if isinstance(value, dict):
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"Run event {path} object keys must be strings")
+            normalized[key] = _diagnostic_json_value(item, f"{path}.{key}")
+        return normalized
+    raise ValueError(f"Run event {path} must contain JSON values")
+
+
+def _diagnostic_details(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("Run event diagnostic details must be an object")
+    return cast(dict[str, Any], _diagnostic_json_value(value, "diagnostic.details"))
+
+
 def _budget_usage(value: Any) -> BudgetUsageSnapshot | None:
     if value is None:
         return None
@@ -176,16 +348,7 @@ def event_created_at() -> float:
     return time.time()
 
 
-def _canonical_tool_status(status: Any) -> str:
-    normalized = str(status or "").strip().lower()
-    if normalized == "completed":
-        return "success"
-    if normalized not in _TOOL_STATUS_VALUES:
-        raise ValueError(f"Unsupported tool event status: {status!r}")
-    return normalized
-
-
-def _wire_tool_status(value: Any) -> str:
+def _tool_status(value: Any) -> str:
     if not isinstance(value, str) or value not in _TOOL_STATUS_VALUES:
         raise ValueError(f"Unsupported tool event status: {value!r}")
     return value
@@ -234,13 +397,10 @@ def _event_tool_metadata(value: ToolMetadata | dict[str, Any] | None) -> ToolMet
         raise ValueError(f"Invalid run event tool_metadata: {exc}") from exc
 
 
-def _canonical_approval_action(action: Any) -> ApprovalAction | None:
-    if action is None:
-        return None
-    normalized = str(action).strip().lower()
-    if normalized not in _APPROVAL_ACTIONS:
+def _approval_action(action: Any) -> ApprovalAction:
+    if not isinstance(action, str) or action not in _APPROVAL_ACTIONS:
         raise ValueError(f"Unsupported approval action: {action!r}")
-    return cast(ApprovalAction, normalized)
+    return cast(ApprovalAction, action)
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,19 +657,21 @@ class RunStateChangedEvent(RunEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryCompactedEvent(RunEvent):
-    before_count: int | None = None
-    after_count: int | None = None
+class DiagnosticEvent(RunEvent):
+    level: DiagnosticLevel = "info"
+    code: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
 
     def __init__(
         self,
         *,
         run_id: str,
         trace_id: str,
+        level: DiagnosticLevel | str,
+        code: str,
+        details: dict[str, Any],
         cycle_index: int | None = None,
         agent_name: str | None = None,
-        before_count: int | None = None,
-        after_count: int | None = None,
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
@@ -519,7 +681,7 @@ class MemoryCompactedEvent(RunEvent):
     ) -> None:
         _set_run_event_fields(
             self,
-            type="memory_compacted",
+            type="diagnostic",
             run_id=run_id,
             trace_id=trace_id,
             cycle_index=cycle_index,
@@ -531,15 +693,13 @@ class MemoryCompactedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "before_count", before_count)
-        object.__setattr__(self, "after_count", after_count)
+        object.__setattr__(self, "level", _diagnostic_level(level))
+        object.__setattr__(self, "code", _required_event_text(code, "code"))
+        object.__setattr__(self, "details", _diagnostic_details(details))
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
-        if self.before_count is not None:
-            payload["before_count"] = self.before_count
-        if self.after_count is not None:
-            payload["after_count"] = self.after_count
+        payload.update(level=self.level, code=self.code, details=dict(self.details))
         return payload
 
 
@@ -556,7 +716,6 @@ class MemoryCompactStarted(RunEvent):
     reserved_output_tokens: int | None = None
     reserved_output_source: ReservedOutputSource | None = None
     autocompact_buffer_tokens: int | None = None
-    _present_additive_fields: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __init__(
         self,
@@ -565,17 +724,17 @@ class MemoryCompactStarted(RunEvent):
         trace_id: str = "",
         cycle_index: int | None = None,
         agent_name: str | None = None,
-        message_count: int = 0,
+        message_count: int,
         estimated_tokens: int | None = None,
-        trigger: MemoryCompactTrigger | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        configured_threshold: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        effective_threshold: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        microcompact_threshold: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        model_context_window: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        model_max_output_tokens: int | None | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        reserved_output_tokens: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        reserved_output_source: ReservedOutputSource | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        autocompact_buffer_tokens: int | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        trigger: MemoryCompactTrigger,
+        configured_threshold: int,
+        effective_threshold: int,
+        microcompact_threshold: int,
+        model_context_window: int,
+        model_max_output_tokens: int | None,
+        reserved_output_tokens: int,
+        reserved_output_source: ReservedOutputSource,
+        autocompact_buffer_tokens: int,
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
@@ -599,64 +758,31 @@ class MemoryCompactStarted(RunEvent):
         )
         object.__setattr__(self, "message_count", message_count)
         object.__setattr__(self, "estimated_tokens", estimated_tokens)
-        values: dict[str, Any] = {
-            "trigger": trigger,
-            "configured_threshold": configured_threshold,
-            "effective_threshold": effective_threshold,
-            "microcompact_threshold": microcompact_threshold,
-            "model_context_window": model_context_window,
-            "model_max_output_tokens": model_max_output_tokens,
-            "reserved_output_tokens": reserved_output_tokens,
-            "reserved_output_source": reserved_output_source,
-            "autocompact_buffer_tokens": autocompact_buffer_tokens,
-        }
-        present_fields = {
-            field_name for field_name, value in values.items() if not isinstance(value, _MissingMemoryCompactionField)
-        }
-        trigger_value = None if isinstance(trigger, _MissingMemoryCompactionField) else _memory_compact_trigger(trigger)
-        source_value = (
-            None
-            if isinstance(reserved_output_source, _MissingMemoryCompactionField)
-            else _reserved_output_source(reserved_output_source)
+        object.__setattr__(self, "trigger", _memory_compact_trigger(trigger))
+        object.__setattr__(self, "configured_threshold", _memory_compact_counter(configured_threshold, "configured_threshold"))
+        object.__setattr__(self, "effective_threshold", _memory_compact_counter(effective_threshold, "effective_threshold"))
+        object.__setattr__(
+            self, "microcompact_threshold", _memory_compact_counter(microcompact_threshold, "microcompact_threshold")
         )
-        object.__setattr__(self, "trigger", trigger_value)
-        for field_name in (
-            "configured_threshold",
-            "effective_threshold",
-            "microcompact_threshold",
-            "model_context_window",
-            "model_max_output_tokens",
-            "reserved_output_tokens",
-            "autocompact_buffer_tokens",
-        ):
-            value = values[field_name]
-            object.__setattr__(
-                self,
-                field_name,
-                None
-                if isinstance(value, _MissingMemoryCompactionField)
-                else (
-                    _optional_stream_counter(value, field_name)
-                    if field_name == "model_max_output_tokens"
-                    else _memory_compact_counter(value, field_name)
-                ),
-            )
-        object.__setattr__(self, "reserved_output_source", source_value)
-        object.__setattr__(self, "_present_additive_fields", frozenset(present_fields))
-
-    def has_additive_field(self, field_name: str) -> bool:
-        if field_name not in _MEMORY_COMPACT_STARTED_ADDITIVE_FIELDS:
-            raise ValueError(f"Unknown memory compact started field: {field_name}")
-        return field_name in self._present_additive_fields
+        object.__setattr__(self, "model_context_window", _memory_compact_counter(model_context_window, "model_context_window"))
+        object.__setattr__(
+            self, "model_max_output_tokens", _optional_stream_counter(model_max_output_tokens, "model_max_output_tokens")
+        )
+        object.__setattr__(
+            self, "reserved_output_tokens", _memory_compact_counter(reserved_output_tokens, "reserved_output_tokens")
+        )
+        object.__setattr__(self, "reserved_output_source", _reserved_output_source(reserved_output_source))
+        object.__setattr__(
+            self, "autocompact_buffer_tokens", _memory_compact_counter(autocompact_buffer_tokens, "autocompact_buffer_tokens")
+        )
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["message_count"] = self.message_count
         if self.estimated_tokens is not None:
             payload["estimated_tokens"] = self.estimated_tokens
-        for field_name in _MEMORY_COMPACT_STARTED_ADDITIVE_FIELDS:
-            if self.has_additive_field(field_name):
-                payload[field_name] = getattr(self, field_name)
+        for field_name in _MEMORY_COMPACT_STARTED_FIELDS:
+            payload[field_name] = getattr(self, field_name)
         return payload
 
 
@@ -667,7 +793,6 @@ class MemoryCompactCompleted(RunEvent):
     summary_tokens: int | None = None
     mode: MemoryCompactMode | None = None
     changed: bool | None = None
-    _present_additive_fields: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __init__(
         self,
@@ -676,11 +801,11 @@ class MemoryCompactCompleted(RunEvent):
         trace_id: str = "",
         cycle_index: int | None = None,
         agent_name: str | None = None,
-        before_count: int = 0,
-        after_count: int = 0,
+        before_count: int,
+        after_count: int,
         summary_tokens: int | None = None,
-        mode: MemoryCompactMode | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
-        changed: bool | _MissingMemoryCompactionField = _MISSING_MEMORY_COMPACTION_FIELD,
+        mode: MemoryCompactMode,
+        changed: bool,
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
@@ -705,25 +830,8 @@ class MemoryCompactCompleted(RunEvent):
         object.__setattr__(self, "before_count", before_count)
         object.__setattr__(self, "after_count", after_count)
         object.__setattr__(self, "summary_tokens", summary_tokens)
-        present_fields: set[str] = set()
-        if isinstance(mode, _MissingMemoryCompactionField):
-            mode_value = None
-        else:
-            present_fields.add("mode")
-            mode_value = _memory_compact_mode(mode)
-        if isinstance(changed, _MissingMemoryCompactionField):
-            changed_value = None
-        else:
-            present_fields.add("changed")
-            changed_value = _memory_compact_changed(changed)
-        object.__setattr__(self, "mode", mode_value)
-        object.__setattr__(self, "changed", changed_value)
-        object.__setattr__(self, "_present_additive_fields", frozenset(present_fields))
-
-    def has_additive_field(self, field_name: str) -> bool:
-        if field_name not in _MEMORY_COMPACT_COMPLETED_ADDITIVE_FIELDS:
-            raise ValueError(f"Unknown memory compact completed field: {field_name}")
-        return field_name in self._present_additive_fields
+        object.__setattr__(self, "mode", _memory_compact_mode(mode))
+        object.__setattr__(self, "changed", _memory_compact_changed(changed))
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -731,9 +839,8 @@ class MemoryCompactCompleted(RunEvent):
         payload["after_count"] = self.after_count
         if self.summary_tokens is not None:
             payload["summary_tokens"] = self.summary_tokens
-        for field_name in _MEMORY_COMPACT_COMPLETED_ADDITIVE_FIELDS:
-            if self.has_additive_field(field_name):
-                payload[field_name] = getattr(self, field_name)
+        for field_name in _MEMORY_COMPACT_COMPLETED_FIELDS:
+            payload[field_name] = getattr(self, field_name)
         return payload
 
 
@@ -1151,12 +1258,11 @@ class ToolCallCompletedEvent(RunEvent):
     tool_name: str = ""
     tool_call_id: str = ""
     status: str = ""
-    directive: str | None = None
+    directive: str = "continue"
     error_code: str | None = None
-    execution_started: bool | None = None
+    execution_started: bool = False
     duration_ms: int | None = None
     tool_metadata: ToolMetadata | None = None
-    _present_additive_fields: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     def __init__(
         self,
@@ -1166,10 +1272,10 @@ class ToolCallCompletedEvent(RunEvent):
         tool_name: str,
         tool_call_id: str,
         status: str,
-        directive: str | _MissingToolLifecycleField = _MISSING_TOOL_LIFECYCLE_FIELD,
-        error_code: str | None | _MissingToolLifecycleField = _MISSING_TOOL_LIFECYCLE_FIELD,
-        execution_started: bool | _MissingToolLifecycleField = _MISSING_TOOL_LIFECYCLE_FIELD,
-        duration_ms: int | None | _MissingToolLifecycleField = _MISSING_TOOL_LIFECYCLE_FIELD,
+        directive: str,
+        error_code: str | None,
+        execution_started: bool,
+        duration_ms: int | None,
         tool_metadata: ToolMetadata | dict[str, Any] | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
@@ -1196,28 +1302,11 @@ class ToolCallCompletedEvent(RunEvent):
         )
         object.__setattr__(self, "tool_name", _required_event_text(tool_name, "tool_name"))
         object.__setattr__(self, "tool_call_id", _required_event_text(tool_call_id, "tool_call_id"))
-        object.__setattr__(self, "status", _canonical_tool_status(status))
-        present_fields: set[str] = set()
-        if not isinstance(directive, _MissingToolLifecycleField):
-            present_fields.add("directive")
-            directive_value = _tool_directive(directive)
-        else:
-            directive_value = None
-        if not isinstance(error_code, _MissingToolLifecycleField):
-            present_fields.add("error_code")
-            error_code_value = _tool_error_code(error_code)
-        else:
-            error_code_value = None
-        if not isinstance(execution_started, _MissingToolLifecycleField):
-            present_fields.add("execution_started")
-            execution_started_value = _tool_execution_started(execution_started)
-        else:
-            execution_started_value = None
-        if not isinstance(duration_ms, _MissingToolLifecycleField):
-            present_fields.add("duration_ms")
-            duration_ms_value = _tool_duration_ms(duration_ms)
-        else:
-            duration_ms_value = None
+        object.__setattr__(self, "status", _tool_status(status))
+        directive_value = _tool_directive(directive)
+        error_code_value = _tool_error_code(error_code)
+        execution_started_value = _tool_execution_started(execution_started)
+        duration_ms_value = _tool_duration_ms(duration_ms)
         if execution_started_value is False and duration_ms_value is not None:
             raise ValueError("Run event duration_ms must be null when execution_started is false")
         object.__setattr__(self, "directive", directive_value)
@@ -1225,21 +1314,16 @@ class ToolCallCompletedEvent(RunEvent):
         object.__setattr__(self, "execution_started", execution_started_value)
         object.__setattr__(self, "duration_ms", duration_ms_value)
         object.__setattr__(self, "tool_metadata", _event_tool_metadata(tool_metadata))
-        object.__setattr__(self, "_present_additive_fields", frozenset(present_fields))
-
-    def has_additive_field(self, field_name: str) -> bool:
-        if field_name not in _TOOL_COMPLETED_ADDITIVE_FIELDS:
-            raise ValueError(f"Unknown tool lifecycle field: {field_name}")
-        return field_name in self._present_additive_fields
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["tool_name"] = self.tool_name
         payload["tool_call_id"] = self.tool_call_id
         payload["status"] = self.status
-        for field_name in ("directive", "error_code", "execution_started", "duration_ms"):
-            if self.has_additive_field(field_name):
-                payload[field_name] = getattr(self, field_name)
+        payload["directive"] = self.directive
+        payload["error_code"] = self.error_code
+        payload["execution_started"] = self.execution_started
+        payload["duration_ms"] = self.duration_ms
         if self.tool_metadata is not None:
             payload["tool_metadata"] = self.tool_metadata.to_dict()
         return payload
@@ -1260,7 +1344,7 @@ class ApprovalRequestedEvent(RunEvent):
         tool_name: str,
         tool_call_id: str,
         message: str,
-        request_id: str = "",
+        request_id: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1284,9 +1368,9 @@ class ApprovalRequestedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "request_id", request_id)
-        object.__setattr__(self, "tool_name", tool_name)
-        object.__setattr__(self, "tool_call_id", tool_call_id)
+        object.__setattr__(self, "request_id", _required_event_text(request_id, "request_id"))
+        object.__setattr__(self, "tool_name", _required_event_text(tool_name, "tool_name"))
+        object.__setattr__(self, "tool_call_id", _required_event_text(tool_call_id, "tool_call_id"))
         object.__setattr__(self, "message", message)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1303,8 +1387,7 @@ class ApprovalResolvedEvent(RunEvent):
     request_id: str = ""
     tool_name: str = ""
     tool_call_id: str = ""
-    action: ApprovalAction | None = None
-    approved: bool | None = None
+    action: ApprovalAction = "deny"
 
     def __init__(
         self,
@@ -1313,9 +1396,8 @@ class ApprovalResolvedEvent(RunEvent):
         trace_id: str,
         tool_name: str,
         tool_call_id: str,
-        action: ApprovalAction | str | None = None,
-        approved: bool | None = None,
-        request_id: str = "",
+        action: ApprovalAction | str,
+        request_id: str,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -1339,84 +1421,17 @@ class ApprovalResolvedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "request_id", request_id)
-        object.__setattr__(self, "tool_name", tool_name)
-        object.__setattr__(self, "tool_call_id", tool_call_id)
-        metadata_action = metadata.get("action") if isinstance(metadata, dict) else None
-        resolved_action = _canonical_approval_action(action if action is not None else metadata_action)
-        resolved_approved = approved
-        if resolved_action is None and approved is not None:
-            resolved_action = "allow" if approved else "deny"
-        if resolved_action is not None:
-            action_approved = resolved_action in {"allow", "allow_session"}
-            if approved is not None and approved is not action_approved:
-                raise ValueError(f"Approval action {resolved_action!r} conflicts with approved={approved!r}")
-            resolved_approved = action_approved
-        object.__setattr__(self, "action", resolved_action)
-        object.__setattr__(self, "approved", resolved_approved)
+        object.__setattr__(self, "request_id", _required_event_text(request_id, "request_id"))
+        object.__setattr__(self, "tool_name", _required_event_text(tool_name, "tool_name"))
+        object.__setattr__(self, "tool_call_id", _required_event_text(tool_call_id, "tool_call_id"))
+        object.__setattr__(self, "action", _approval_action(action))
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["request_id"] = self.request_id
         payload["tool_name"] = self.tool_name
         payload["tool_call_id"] = self.tool_call_id
-        if self.action is not None:
-            payload["action"] = self.action
-        if self.approved is not None:
-            payload["approved"] = self.approved
-        return payload
-
-
-ToolStartedEvent = ToolCallStartedEvent
-ToolFinishedEvent = ToolCallCompletedEvent
-ToolApprovalRequestedEvent = ApprovalRequestedEvent
-
-
-@dataclass(frozen=True, slots=True)
-class HandoffEvent(RunEvent):
-    source_agent: str = ""
-    target_agent: str = ""
-    tool_call_id: str = ""
-
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        trace_id: str,
-        source_agent: str,
-        target_agent: str,
-        tool_call_id: str,
-        cycle_index: int | None = None,
-        session_id: str | None = None,
-        parent_event_id: str | None = None,
-        parent_run_id: str | None = None,
-        event_id: str | None = None,
-        created_at: float | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        _set_run_event_fields(
-            self,
-            type="handoff",
-            run_id=run_id,
-            trace_id=trace_id,
-            cycle_index=cycle_index,
-            agent_name=source_agent,
-            session_id=session_id,
-            parent_event_id=parent_event_id,
-            parent_run_id=parent_run_id,
-            event_id=event_id,
-            created_at=created_at,
-            metadata=metadata,
-        )
-        object.__setattr__(self, "source_agent", source_agent)
-        object.__setattr__(self, "target_agent", target_agent)
-        object.__setattr__(self, "tool_call_id", tool_call_id)
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = RunEvent.to_dict(self)
-        payload["source_agent"] = self.source_agent
-        payload["target_agent"] = self.target_agent
-        payload["tool_call_id"] = self.tool_call_id
+        payload["action"] = self.action
         return payload
 
 
@@ -2411,11 +2426,6 @@ def new_trace_id() -> str:
 
 
 def _common_event_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
-    created_at = payload.get("created_at")
-    if created_at is None:
-        created_at_ms = payload.get("created_at_ms")
-        if isinstance(created_at_ms, int | float):
-            created_at = created_at_ms / 1000.0
     return {
         "run_id": payload["run_id"],
         "trace_id": payload["trace_id"],
@@ -2423,7 +2433,7 @@ def _common_event_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
         "parent_event_id": payload.get("parent_event_id"),
         "parent_run_id": payload.get("parent_run_id"),
         "event_id": payload.get("event_id"),
-        "created_at": created_at,
+        "created_at": payload["created_at"],
         "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
     }
 
@@ -2442,6 +2452,28 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
     if payload.get("version") != RUN_EVENT_VERSION:
         raise ValueError(f"Unsupported run event version: {payload.get('version')!r}")
 
+    event_type = payload.get("type")
+    if not isinstance(event_type, str) or event_type not in _EVENT_FIELDS:
+        raise ValueError(f"Unsupported run event type: {event_type!r}")
+    allowed_fields = _COMMON_EVENT_FIELDS | _EVENT_FIELDS[event_type]
+    unknown_fields = set(payload) - allowed_fields
+    if unknown_fields:
+        names = ", ".join(sorted(unknown_fields))
+        raise ValueError(f"Run event {event_type} contains unknown fields: {names}")
+    required_fields = {
+        "version",
+        "type",
+        "event_id",
+        "run_id",
+        "trace_id",
+        "created_at",
+        *_EVENT_REQUIRED_FIELDS.get(event_type, ()),
+    }
+    missing_fields = required_fields - set(payload)
+    if missing_fields:
+        names = ", ".join(sorted(missing_fields))
+        raise ValueError(f"Run event {event_type} is missing required fields: {names}")
+
     for field_name in ("type", "event_id", "run_id", "trace_id"):
         value = payload.get(field_name)
         if not isinstance(value, str) or not value.strip():
@@ -2452,10 +2484,8 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         if value is not None and not isinstance(value, str):
             raise ValueError(f"Run event {field_name} must be a string or null")
 
-    created_at = payload.get("created_at")
-    created_at_ms = payload.get("created_at_ms")
-    timestamp = created_at if created_at is not None else created_at_ms
-    if isinstance(timestamp, bool) or not isinstance(timestamp, int | float) or not isfinite(timestamp) or timestamp < 0:
+    created_at = payload["created_at"]
+    if isinstance(created_at, bool) or not isinstance(created_at, int | float) or not isfinite(created_at) or created_at < 0:
         raise ValueError("Run event created_at must be a finite non-negative number")
 
     cycle_index = payload.get("cycle_index")
@@ -2464,6 +2494,10 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
 
     if "metadata" in payload and not isinstance(payload["metadata"], dict):
         raise ValueError("Run event metadata must be an object")
+    if payload["type"] == "diagnostic":
+        _diagnostic_level(payload.get("level"))
+        _required_event_text(payload.get("code"), "code")
+        _diagnostic_details(payload.get("details"))
     tool_lifecycle_types = {"tool_call_planned", "tool_call_started", "tool_call_completed"}
     if payload["type"] in tool_lifecycle_types:
         _required_event_text(payload.get("tool_call_id"), "tool_call_id")
@@ -2475,20 +2509,24 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
     if payload["type"] in {"tool_call_planned", "tool_call_started"} and not isinstance(payload.get("arguments"), dict):
         raise ValueError("Run event tool arguments must be an object")
     if payload["type"] == "tool_call_completed":
-        _wire_tool_status(payload.get("status"))
-        if "directive" in payload:
-            _tool_directive(payload["directive"])
-        if "error_code" in payload:
-            _tool_error_code(payload["error_code"])
-        if "execution_started" in payload:
-            _tool_execution_started(payload["execution_started"])
-        if "duration_ms" in payload:
-            _tool_duration_ms(payload["duration_ms"])
+        _tool_status(payload.get("status"))
+        _tool_directive(payload["directive"])
+        _tool_error_code(payload["error_code"])
+        _tool_execution_started(payload["execution_started"])
+        _tool_duration_ms(payload["duration_ms"])
         if payload.get("execution_started") is False and payload.get("duration_ms") is not None:
             raise ValueError("Run event duration_ms must be null when execution_started is false")
+    if payload["type"] in {"approval_requested", "approval_resolved"}:
+        _required_event_text(payload.get("request_id"), "request_id")
+        _required_event_text(payload.get("tool_call_id"), "tool_call_id")
+        _required_event_text(payload.get("tool_name"), "tool_name")
+    if payload["type"] == "approval_resolved":
+        _approval_action(payload["action"])
     if payload["type"] == "memory_compact_started":
-        if "trigger" in payload:
-            _memory_compact_trigger(payload["trigger"])
+        _memory_compact_counter(payload["message_count"], "message_count")
+        if "estimated_tokens" in payload:
+            _optional_stream_counter(payload["estimated_tokens"], "estimated_tokens")
+        _memory_compact_trigger(payload["trigger"])
         for field_name in (
             "configured_threshold",
             "effective_threshold",
@@ -2498,18 +2536,18 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             "reserved_output_tokens",
             "autocompact_buffer_tokens",
         ):
-            if field_name in payload:
-                if field_name == "model_max_output_tokens":
-                    _optional_stream_counter(payload[field_name], field_name)
-                else:
-                    _memory_compact_counter(payload[field_name], field_name)
-        if "reserved_output_source" in payload:
-            _reserved_output_source(payload["reserved_output_source"])
+            if field_name == "model_max_output_tokens":
+                _optional_stream_counter(payload[field_name], field_name)
+            else:
+                _memory_compact_counter(payload[field_name], field_name)
+        _reserved_output_source(payload["reserved_output_source"])
     if payload["type"] == "memory_compact_completed":
-        if "mode" in payload:
-            _memory_compact_mode(payload["mode"])
-        if "changed" in payload:
-            _memory_compact_changed(payload["changed"])
+        _memory_compact_counter(payload["before_count"], "before_count")
+        _memory_compact_counter(payload["after_count"], "after_count")
+        if "summary_tokens" in payload:
+            _optional_stream_counter(payload["summary_tokens"], "summary_tokens")
+        _memory_compact_mode(payload["mode"])
+        _memory_compact_changed(payload["changed"])
     if payload["type"] in {"assistant_delta", "reasoning_delta"}:
         _stream_delta(payload.get("delta"))
     typed_stream_events = {
@@ -2616,42 +2654,37 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             state=str(payload.get("state") or ""),
             **_with_cycle_and_agent(payload, common),
         )
-    if event_type == "memory_compacted":
-        return MemoryCompactedEvent(
-            before_count=payload.get("before_count") if isinstance(payload.get("before_count"), int) else None,
-            after_count=payload.get("after_count") if isinstance(payload.get("after_count"), int) else None,
+    if event_type == "diagnostic":
+        return DiagnosticEvent(
+            level=payload["level"],
+            code=payload["code"],
+            details=payload["details"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "memory_compact_started":
-        message_count = payload.get("message_count")
         estimated_tokens = payload.get("estimated_tokens")
         return MemoryCompactStarted(
-            message_count=message_count if isinstance(message_count, int) else 0,
+            message_count=payload["message_count"],
             estimated_tokens=estimated_tokens if isinstance(estimated_tokens, int) else None,
-            trigger=payload.get("trigger", _MISSING_MEMORY_COMPACTION_FIELD),
-            configured_threshold=payload.get("configured_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
-            effective_threshold=payload.get("effective_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
-            microcompact_threshold=payload.get("microcompact_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
-            model_context_window=payload.get("model_context_window", _MISSING_MEMORY_COMPACTION_FIELD),
-            model_max_output_tokens=payload.get("model_max_output_tokens", _MISSING_MEMORY_COMPACTION_FIELD),
-            reserved_output_tokens=payload.get("reserved_output_tokens", _MISSING_MEMORY_COMPACTION_FIELD),
-            reserved_output_source=payload.get("reserved_output_source", _MISSING_MEMORY_COMPACTION_FIELD),
-            autocompact_buffer_tokens=payload.get(
-                "autocompact_buffer_tokens",
-                _MISSING_MEMORY_COMPACTION_FIELD,
-            ),
+            trigger=payload["trigger"],
+            configured_threshold=payload["configured_threshold"],
+            effective_threshold=payload["effective_threshold"],
+            microcompact_threshold=payload["microcompact_threshold"],
+            model_context_window=payload["model_context_window"],
+            model_max_output_tokens=payload["model_max_output_tokens"],
+            reserved_output_tokens=payload["reserved_output_tokens"],
+            reserved_output_source=payload["reserved_output_source"],
+            autocompact_buffer_tokens=payload["autocompact_buffer_tokens"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "memory_compact_completed":
-        before_count = payload.get("before_count")
-        after_count = payload.get("after_count")
         summary_tokens = payload.get("summary_tokens")
         return MemoryCompactCompleted(
-            before_count=before_count if isinstance(before_count, int) else 0,
-            after_count=after_count if isinstance(after_count, int) else 0,
+            before_count=payload["before_count"],
+            after_count=payload["after_count"],
             summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
-            mode=payload.get("mode", _MISSING_MEMORY_COMPACTION_FIELD),
-            changed=payload.get("changed", _MISSING_MEMORY_COMPACTION_FIELD),
+            mode=payload["mode"],
+            changed=payload["changed"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "assistant_delta":
@@ -2688,15 +2721,15 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "tool_call_completed":
-        additive_fields = {
-            field_name: payload[field_name] for field_name in _TOOL_COMPLETED_ADDITIVE_FIELDS if field_name in payload
-        }
         return ToolCallCompletedEvent(
             tool_name=payload["tool_name"],
             tool_call_id=payload["tool_call_id"],
             status=payload["status"],
+            directive=payload["directive"],
+            error_code=payload["error_code"],
+            execution_started=payload["execution_started"],
+            duration_ms=payload["duration_ms"],
             tool_metadata=payload.get("tool_metadata"),
-            **additive_fields,
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "approval_requested":
@@ -2704,7 +2737,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             request_id=str(payload.get("request_id") or ""),
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
-            message=str(payload.get("message") or payload.get("preview") or ""),
+            message=payload["message"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "approval_resolved":
@@ -2712,24 +2745,8 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             request_id=str(payload.get("request_id") or ""),
             tool_name=str(payload.get("tool_name") or ""),
             tool_call_id=str(payload.get("tool_call_id") or ""),
-            action=payload.get("action") if isinstance(payload.get("action"), str) else None,
-            approved=payload.get("approved") if isinstance(payload.get("approved"), bool) else None,
+            action=payload["action"],
             **_with_cycle_and_agent(payload, common),
-        )
-    if event_type == "handoff":
-        return HandoffEvent(
-            source_agent=str(payload.get("source_agent") or payload.get("agent_name") or ""),
-            target_agent=str(payload.get("target_agent") or ""),
-            tool_call_id=str(payload.get("tool_call_id") or ""),
-            run_id=common["run_id"],
-            trace_id=common["trace_id"],
-            cycle_index=payload.get("cycle_index") if isinstance(payload.get("cycle_index"), int) else None,
-            session_id=common["session_id"],
-            parent_event_id=common["parent_event_id"],
-            parent_run_id=common["parent_run_id"],
-            event_id=common["event_id"],
-            created_at=common["created_at"],
-            metadata=common["metadata"],
         )
     if event_type == "sub_run_started":
         return SubRunStartedEvent(
@@ -2899,7 +2916,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
     raise ValueError(f"Unsupported run event type: {event_type!r}")
 
 
-def event_from_stream_payload(
+def _project_provider_stream_payload(
     payload: dict[str, Any],
     *,
     run_id: str,
@@ -2907,13 +2924,11 @@ def event_from_stream_payload(
     agent_name: str,
     session_id: str | None = None,
     parent_run_id: str | None = None,
-    preserve_metadata: bool = False,
 ) -> RunEvent | None:
-    raw_type = payload.get("event") or payload.get("type")
-    cycle_index = payload.get("cycle_index") if preserve_metadata else payload.get("cycle")
+    raw_type = payload.get("event")
+    cycle_index = payload.get("cycle")
     if isinstance(cycle_index, bool) or not isinstance(cycle_index, int) or cycle_index < 1:
         return None
-    metadata = dict(payload) if preserve_metadata else None
     common: _StreamEventCommon = {
         "run_id": run_id,
         "trace_id": trace_id,
@@ -2921,7 +2936,7 @@ def event_from_stream_payload(
         "session_id": session_id,
         "parent_run_id": parent_run_id,
         "cycle_index": cycle_index,
-        "metadata": metadata,
+        "metadata": None,
     }
     try:
         if raw_type == "assistant_delta":
@@ -2966,331 +2981,4 @@ def event_from_stream_payload(
             )
     except ValueError:
         return None
-    return None
-
-
-def _runtime_session_id(payload: dict[str, Any], fallback: str | None) -> str | None:
-    if fallback:
-        return fallback
-    payload_session_id = payload.get("session_id")
-    if isinstance(payload_session_id, str) and payload_session_id:
-        return payload_session_id
-    return fallback
-
-
-def _runtime_event_identity(payload: dict[str, Any]) -> dict[str, Any]:
-    event_id = payload.get("event_id")
-    if not isinstance(event_id, str) or not event_id.strip():
-        event_id = None
-    created_at = payload.get("created_at")
-    if isinstance(created_at, bool) or not isinstance(created_at, int | float) or not isfinite(created_at) or created_at < 0:
-        created_at = None
-    return {"event_id": event_id, "created_at": created_at}
-
-
-def event_from_runtime_log(
-    event: str,
-    payload: dict[str, Any],
-    *,
-    run_id: str,
-    trace_id: str,
-    agent_name: str,
-    user_input: str,
-    session_id: str | None = None,
-) -> RunEvent | None:
-    cycle_index = payload.get("cycle")
-    if isinstance(cycle_index, bool) or not isinstance(cycle_index, int):
-        cycle_index = payload.get("cycle_index")
-    if isinstance(cycle_index, bool) or not isinstance(cycle_index, int):
-        cycle_index = None
-    session_id = _runtime_session_id(payload, session_id)
-
-    if event == "run_started":
-        return RunStartedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            input=user_input,
-            metadata=dict(payload),
-        )
-    if event == "agent_started":
-        return AgentStartedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            metadata=dict(payload),
-        )
-    if event == "cycle_started":
-        return CycleStartedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            metadata=dict(payload),
-        )
-    if event == "llm_started":
-        return LLMStartedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            model=str(payload.get("model") or ""),
-            metadata=dict(payload),
-        )
-    if event == "cycle_llm_response":
-        return None
-    if event == "cycle_failed":
-        return RunFailedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            error=str(payload.get("error") or "cycle failed"),
-            metadata=dict(payload),
-        )
-    if event == "memory_compacted":
-        before_count = payload.get("before_count")
-        after_count = payload.get("after_count")
-        return MemoryCompactedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            before_count=before_count if isinstance(before_count, int) else None,
-            after_count=after_count if isinstance(after_count, int) else None,
-            metadata=dict(payload),
-        )
-    if event == "memory_compact_started":
-        message_count = payload.get("message_count")
-        estimated_tokens = payload.get("estimated_tokens")
-        return MemoryCompactStarted(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            message_count=message_count if isinstance(message_count, int) else 0,
-            estimated_tokens=estimated_tokens if isinstance(estimated_tokens, int) else None,
-            trigger=payload.get("trigger", _MISSING_MEMORY_COMPACTION_FIELD),
-            configured_threshold=payload.get("configured_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
-            effective_threshold=payload.get("effective_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
-            microcompact_threshold=payload.get("microcompact_threshold", _MISSING_MEMORY_COMPACTION_FIELD),
-            model_context_window=payload.get("model_context_window", _MISSING_MEMORY_COMPACTION_FIELD),
-            model_max_output_tokens=payload.get("model_max_output_tokens", _MISSING_MEMORY_COMPACTION_FIELD),
-            reserved_output_tokens=payload.get("reserved_output_tokens", _MISSING_MEMORY_COMPACTION_FIELD),
-            reserved_output_source=payload.get("reserved_output_source", _MISSING_MEMORY_COMPACTION_FIELD),
-            autocompact_buffer_tokens=payload.get(
-                "autocompact_buffer_tokens",
-                _MISSING_MEMORY_COMPACTION_FIELD,
-            ),
-            **_runtime_event_identity(payload),
-            metadata=dict(payload),
-        )
-    if event == "memory_compact_completed":
-        before_count = payload.get("before_count")
-        after_count = payload.get("after_count")
-        summary_tokens = payload.get("summary_tokens")
-        return MemoryCompactCompleted(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            before_count=before_count if isinstance(before_count, int) else 0,
-            after_count=after_count if isinstance(after_count, int) else 0,
-            summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
-            mode=payload.get("mode", _MISSING_MEMORY_COMPACTION_FIELD),
-            changed=payload.get("changed", _MISSING_MEMORY_COMPACTION_FIELD),
-            **_runtime_event_identity(payload),
-            metadata=dict(payload),
-        )
-    if event == "tool_call_planned":
-        arguments = payload.get("arguments", payload.get("tool_arguments"))
-        return ToolCallPlannedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            tool_name=str(payload.get("tool_name") or ""),
-            tool_call_id=str(payload.get("tool_call_id") or ""),
-            arguments=arguments if isinstance(arguments, dict) else None,
-            tool_metadata=payload.get("tool_metadata"),
-            metadata=dict(payload),
-        )
-    if event == "tool_result":
-        metadata = payload.get("metadata")
-        if isinstance(metadata, dict) and metadata.get("mode") == "approval_requested":
-            return ApprovalRequestedEvent(
-                run_id=run_id,
-                trace_id=trace_id,
-                agent_name=agent_name,
-                session_id=session_id,
-                cycle_index=cycle_index,
-                request_id=str(metadata.get("request_id") or ""),
-                tool_name=str(metadata.get("tool_name") or payload.get("tool_name") or ""),
-                tool_call_id=str(payload.get("tool_call_id") or ""),
-                message=str(metadata.get("message") or payload.get("content") or ""),
-                metadata=dict(payload),
-            )
-        if isinstance(metadata, dict) and metadata.get("mode") == "handoff":
-            return HandoffEvent(
-                run_id=run_id,
-                trace_id=trace_id,
-                source_agent=str(metadata.get("handoff_from") or agent_name),
-                target_agent=str(metadata.get("handoff_to") or metadata.get("agent") or ""),
-                tool_call_id=str(payload.get("tool_call_id") or ""),
-                session_id=session_id,
-                cycle_index=cycle_index,
-                metadata=dict(metadata),
-            )
-        additive_fields = {
-            field_name: payload[field_name] for field_name in _TOOL_COMPLETED_ADDITIVE_FIELDS if field_name in payload
-        }
-        return ToolCallCompletedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            tool_name=str(payload.get("tool_name") or ""),
-            tool_call_id=str(payload.get("tool_call_id") or ""),
-            status=str(payload.get("status") or ""),
-            tool_metadata=payload.get("tool_metadata"),
-            **additive_fields,
-            metadata=dict(payload),
-        )
-    if event in {"tool_started", "tool_call_started"}:
-        arguments = payload.get("arguments", payload.get("tool_arguments"))
-        return ToolCallStartedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            tool_name=str(payload.get("tool_name") or ""),
-            tool_call_id=str(payload.get("tool_call_id") or ""),
-            arguments=arguments if isinstance(arguments, dict) else None,
-            tool_metadata=payload.get("tool_metadata"),
-            metadata=dict(payload),
-        )
-    if event == "run_state_changed":
-        return RunStateChangedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            state=str(payload.get("state") or ""),
-            metadata=dict(payload),
-        )
-    if event == "session_persisted":
-        return SessionPersistedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id or "",
-            cycle_index=cycle_index,
-            metadata=dict(payload),
-        )
-    if event == "budget_snapshot":
-        usage = _budget_usage(payload.get("budget_usage"))
-        if usage is None:
-            raise ValueError("budget_snapshot runtime log requires budget_usage")
-        return BudgetSnapshotEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            enforcement_boundary=BudgetEnforcementBoundary(payload.get("enforcement_boundary")),
-            budget_usage=usage,
-        )
-    if event == "budget_exhausted":
-        usage = _budget_usage(payload.get("budget_usage"))
-        exhaustion = _budget_exhaustion(payload.get("budget_exhaustion"))
-        if usage is None or exhaustion is None:
-            raise ValueError("budget_exhausted runtime log requires budget usage and exhaustion")
-        return BudgetExhaustedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            enforcement_boundary=BudgetEnforcementBoundary(payload.get("enforcement_boundary")),
-            budget_usage=usage,
-            budget_exhaustion=exhaustion,
-        )
-    if event == "run_completed":
-        return RunCompletedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            final_output=payload.get("final_output", payload.get("final_answer")),
-            status="completed",
-            completion_reason=_completion_reason(payload.get("completion_reason")),
-            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
-            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
-            budget_usage=_budget_usage(payload.get("budget_usage")),
-            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
-            metadata=dict(payload),
-        )
-    if event == "run_wait_user":
-        return RunCompletedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            final_output=payload.get("wait_reason"),
-            status="wait_user",
-            completion_reason=_completion_reason(payload.get("completion_reason")) or CompletionReason.WAIT_USER,
-            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
-            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
-            budget_usage=_budget_usage(payload.get("budget_usage")),
-            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
-            metadata=dict(payload),
-        )
-    if event in {"run_failed", "run_max_cycles"}:
-        return RunFailedEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            error=str(payload.get("error") or event),
-            status=(str(payload["status"]) if payload.get("status") is not None else None),
-            completion_reason=(
-                _completion_reason(payload.get("completion_reason"))
-                or (CompletionReason.MAX_CYCLES if event == "run_max_cycles" else CompletionReason.FAILED)
-            ),
-            completion_tool_name=_completion_text(payload.get("completion_tool_name"), "completion_tool_name"),
-            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
-            budget_usage=_budget_usage(payload.get("budget_usage")),
-            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
-            metadata=dict(payload),
-        )
-    if event == "run_cancelled":
-        return RunCancelledEvent(
-            run_id=run_id,
-            trace_id=trace_id,
-            agent_name=agent_name,
-            session_id=session_id,
-            cycle_index=cycle_index,
-            reason=str(payload.get("reason") or payload.get("error") or "run cancelled"),
-            completion_reason=_completion_reason(payload.get("completion_reason")) or CompletionReason.CANCELLED,
-            partial_output=_completion_text(payload.get("partial_output"), "partial_output"),
-            budget_usage=_budget_usage(payload.get("budget_usage")),
-            budget_exhaustion=_budget_exhaustion(payload.get("budget_exhaustion")),
-            metadata=dict(payload),
-        )
     return None

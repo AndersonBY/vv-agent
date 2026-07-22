@@ -21,14 +21,21 @@ from vv_agent.budget import (
     RunBudgetLimits,
     UnavailableMetricPolicy,
 )
-from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.events import DiagnosticEvent
+from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptStep
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.runtime import CancellationToken
 from vv_agent.runtime.backends import InlineBackend, ThreadBackend
 from vv_agent.tools import ToolOutputText
 from vv_agent.types import CacheUsage, CacheUsageStatus, LLMResponse, TokenUsage, ToolCall, UsageSource
 
-FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_budget_v1.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_budget.json"
+MODEL = "budget-model"
+
+
+def _provider(steps: list[ScriptStep]) -> ScriptedModelProvider:
+    return ScriptedModelProvider.from_steps("test", MODEL, steps)
 
 
 class _Clock:
@@ -60,11 +67,7 @@ def _usage(total: int, uncached: int | None) -> TokenUsage:
         total_tokens=total,
         usage_source=UsageSource.PROVIDER_REPORTED,
         cache_usage=CacheUsage(
-            status=(
-                CacheUsageStatus.PROVIDER_REPORTED
-                if uncached is not None
-                else CacheUsageStatus.ACCOUNTING_MISSING
-            ),
+            status=(CacheUsageStatus.PROVIDER_REPORTED if uncached is not None else CacheUsageStatus.ACCOUNTING_MISSING),
             uncached_input_tokens=uncached,
         ),
     )
@@ -189,13 +192,13 @@ def test_named_tool_budget_matches_exact_name() -> None:
     )
     evaluator.run_start()
 
-    assert evaluator.preflight_tools(["search_v2"]) is None
+    assert evaluator.preflight_tools(["lookup_records"]) is None
     exhaustion = evaluator.preflight_tools(["search", "search"])
 
     assert exhaustion is not None
     assert exhaustion.dimension is BudgetDimension.TOOL_CALLS_BY_NAME
     assert exhaustion.tool_name == "search"
-    assert evaluator.snapshot().tool_calls_by_name == {"search_v2": 1}
+    assert evaluator.snapshot().tool_calls_by_name == {"lookup_records": 1}
 
 
 def test_host_meter_overshoot_and_non_monotonic_reading() -> None:
@@ -280,10 +283,7 @@ def _scripted_response(step: dict[str, Any]) -> LLMResponse:
         raw["usage"] = usage_payload
     return LLMResponse(
         content=step["assistant_output"],
-        tool_calls=[
-            ToolCall(id=call["id"], name=call["name"], arguments=dict(call["arguments"]))
-            for call in step["tool_calls"]
-        ],
+        tool_calls=[ToolCall(id=call["id"], name=call["name"], arguments=dict(call["arguments"])) for call in step["tool_calls"]],
         raw=raw,
     )
 
@@ -309,13 +309,7 @@ def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_pat
         tool_execution_count += 1
         return ToolOutputText(text="fixture tool result")
 
-    tool_names = sorted(
-        {
-            call["name"]
-            for step in case["steps"]
-            for call in step["tool_calls"]
-        }
-    )
+    tool_names = sorted({call["name"] for step in case["steps"] for call in step["tool_calls"]})
     tools = [
         FunctionTool(
             name=name,
@@ -325,9 +319,7 @@ def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_pat
         )
         for name in tool_names
     ]
-    meter = _Meter(
-        [HostCost.from_dict(reading) for reading in case["host_cost_readings"]]
-    )
+    meter = _Meter([HostCost.from_dict(reading) for reading in case["host_cost_readings"]])
     cancellation = CancellationToken()
     if case["pre_cancelled"]:
         cancellation.cancel("cancelled by fixture")
@@ -337,7 +329,7 @@ def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_pat
         Agent(
             name="run-budget-contract",
             instructions="Execute the deterministic budget fixture.",
-            model=ScriptedLLM(steps=scripted_steps),
+            model=MODEL,
             tools=tools,
             no_tool_policy=case["no_tool_policy"],
         ),
@@ -348,6 +340,7 @@ def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_pat
             budget_limits=limits,
             host_cost_meter=meter if case["host_cost_readings"] else None,
             cancellation_token=cancellation,
+            model_provider=_provider(scripted_steps),
         ),
     )
 
@@ -375,19 +368,13 @@ def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_pat
         assert result.budget_usage.tool_calls == expected["tool_calls"]
     if "unavailable_dimensions" in expected:
         assert result.budget_usage is not None
-        assert [item.to_dict() for item in result.budget_usage.unavailable_dimensions] == expected[
-            "unavailable_dimensions"
-        ]
+        assert [item.to_dict() for item in result.budget_usage.unavailable_dimensions] == expected["unavailable_dimensions"]
     expected_exhaustion = expected["budget_exhaustion"]
-    assert (
-        result.budget_exhaustion.to_dict() if result.budget_exhaustion is not None else None
-    ) == expected_exhaustion
+    assert (result.budget_exhaustion.to_dict() if result.budget_exhaustion is not None else None) == expected_exhaustion
     if expected_exhaustion is not None:
         assert [event.type for event in result.events[-2:]] == ["budget_exhausted", "run_failed"]
     if "budget_event_types" in expected:
-        assert [event.type for event in result.events if event.type.startswith("budget_")] == expected[
-            "budget_event_types"
-        ]
+        assert [event.type for event in result.events if event.type.startswith("budget_")] == expected["budget_event_types"]
 
 
 def test_budget_exhaustion_precedes_output_guardrails(tmp_path: Path) -> None:
@@ -399,25 +386,26 @@ def test_budget_exhaustion_precedes_output_guardrails(tmp_path: Path) -> None:
         guardrail_calls += 1
         return GuardrailResult.block("must not replace budget failure")
 
+    provider = _provider(
+        [
+            LLMResponse(
+                content="draft over budget",
+                raw={
+                    "usage": {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 0,
+                        "total_tokens": 12,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    }
+                },
+            )
+        ]
+    )
     result = Runner.run_sync(
         Agent(
             name="budget-before-guardrail",
             instructions="Return the scripted draft.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="draft over budget",
-                        raw={
-                            "usage": {
-                                "prompt_tokens": 12,
-                                "completion_tokens": 0,
-                                "total_tokens": 12,
-                                "prompt_tokens_details": {"cached_tokens": 0},
-                            }
-                        },
-                    )
-                ]
-            ),
+            model=MODEL,
             no_tool_policy="finish",
             output_guardrails=[should_not_run],
         ),
@@ -425,6 +413,7 @@ def test_budget_exhaustion_precedes_output_guardrails(tmp_path: Path) -> None:
         run_config=RunConfig(
             workspace=tmp_path,
             budget_limits=RunBudgetLimits(max_total_tokens=10),
+            model_provider=provider,
         ),
     )
 
@@ -454,7 +443,7 @@ def test_completed_llm_cancellation_wins_without_losing_budget_usage(tmp_path: P
         Agent(
             name="cancel-after-llm",
             instructions="Return the scripted response.",
-            model=ScriptedLLM(steps=[complete_then_cancel]),
+            model=MODEL,
             no_tool_policy="finish",
         ),
         "run",
@@ -462,6 +451,7 @@ def test_completed_llm_cancellation_wins_without_losing_budget_usage(tmp_path: P
             workspace=tmp_path,
             budget_limits=RunBudgetLimits(max_total_tokens=10),
             cancellation_token=cancellation,
+            model_provider=_provider([complete_then_cancel]),
         ),
     )
 
@@ -493,26 +483,27 @@ def test_post_tool_host_cost_exhaustion_precedes_tool_finish(tmp_path: Path) -> 
             HostCost(unit="credits", amount_microunits=120),
         ]
     )
+    provider = _provider(
+        [
+            LLMResponse(
+                content="costly tool draft",
+                tool_calls=[ToolCall(id="finish-call", name="finish_work", arguments={})],
+                raw={
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    }
+                },
+            )
+        ]
+    )
     result = Runner.run_sync(
         Agent(
             name="budget-before-tool-finish",
             instructions="Call the scripted tool.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="costly tool draft",
-                        tool_calls=[ToolCall(id="finish-call", name="finish_work", arguments={})],
-                        raw={
-                            "usage": {
-                                "prompt_tokens": 1,
-                                "completion_tokens": 1,
-                                "total_tokens": 2,
-                                "prompt_tokens_details": {"cached_tokens": 0},
-                            }
-                        },
-                    )
-                ]
-            ),
+            model=MODEL,
             tools=[
                 FunctionTool(
                     name="finish_work",
@@ -530,6 +521,7 @@ def test_post_tool_host_cost_exhaustion_precedes_tool_finish(tmp_path: Path) -> 
                 max_host_cost=HostCost(unit="credits", amount_microunits=100),
             ),
             host_cost_meter=meter,
+            model_provider=provider,
         ),
     )
 
@@ -550,8 +542,8 @@ def test_completed_tool_cancellation_wins_without_losing_budget_usage(tmp_path: 
         tool_calls += 1
         return ToolOutputText(text="tool side effect completed")
 
-    def cancel_after_tool_result(event: str, _payload: dict[str, Any]) -> None:
-        if event == "tool_result":
+    def cancel_after_tool_result(event: Any) -> None:
+        if isinstance(event, DiagnosticEvent) and event.code == "tool_result":
             cancellation.cancel("cancelled after completed tool call")
 
     meter = _Meter(
@@ -563,26 +555,27 @@ def test_completed_tool_cancellation_wins_without_losing_budget_usage(tmp_path: 
             HostCost(unit="credits", amount_microunits=120),
         ]
     )
+    provider = _provider(
+        [
+            LLMResponse(
+                content="tool draft",
+                tool_calls=[ToolCall(id="work-call", name="do_work", arguments={})],
+                raw={
+                    "usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 0,
+                        "total_tokens": 2,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    }
+                },
+            )
+        ]
+    )
     result = Runner.run_sync(
         Agent(
             name="cancel-after-tool",
             instructions="Call the scripted tool.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="tool draft",
-                        tool_calls=[ToolCall(id="work-call", name="do_work", arguments={})],
-                        raw={
-                            "usage": {
-                                "prompt_tokens": 2,
-                                "completion_tokens": 0,
-                                "total_tokens": 2,
-                                "prompt_tokens_details": {"cached_tokens": 0},
-                            }
-                        },
-                    )
-                ]
-            ),
+            model=MODEL,
             tools=[
                 FunctionTool(
                     name="do_work",
@@ -601,7 +594,8 @@ def test_completed_tool_cancellation_wins_without_losing_budget_usage(tmp_path: 
             ),
             host_cost_meter=meter,
             cancellation_token=cancellation,
-            runtime_log_handler=cancel_after_tool_result,
+            stream=cancel_after_tool_result,
+            model_provider=provider,
         ),
     )
 
@@ -626,25 +620,26 @@ def test_inline_and_thread_backends_share_budget_enforcement(
     backend_factory: Any,
     tmp_path: Path,
 ) -> None:
+    provider = _provider(
+        [
+            LLMResponse(
+                content="backend draft",
+                raw={
+                    "usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 0,
+                        "total_tokens": 2,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    }
+                },
+            )
+        ]
+    )
     result = Runner.run_sync(
         Agent(
             name="backend-budget",
             instructions="Return the scripted response.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="backend draft",
-                        raw={
-                            "usage": {
-                                "prompt_tokens": 2,
-                                "completion_tokens": 0,
-                                "total_tokens": 2,
-                                "prompt_tokens_details": {"cached_tokens": 0},
-                            }
-                        },
-                    )
-                ]
-            ),
+            model=MODEL,
             no_tool_policy="finish",
         ),
         "run",
@@ -652,6 +647,7 @@ def test_inline_and_thread_backends_share_budget_enforcement(
             workspace=tmp_path,
             execution_backend=backend_factory(),
             budget_limits=RunBudgetLimits(max_total_tokens=1),
+            model_provider=provider,
         ),
     )
 
@@ -661,33 +657,35 @@ def test_inline_and_thread_backends_share_budget_enforcement(
 
 
 def test_per_run_budget_replaces_configured_runner_default_as_a_whole(tmp_path: Path) -> None:
+    provider = _provider(
+        [
+            LLMResponse(
+                content="within per-run limit",
+                raw={
+                    "usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 0,
+                        "total_tokens": 2,
+                        "prompt_tokens_details": {"cached_tokens": 0},
+                    }
+                },
+            )
+        ]
+    )
     configured = Runner.configured(
         RunConfig(
+            model_provider=provider,
             budget_limits=RunBudgetLimits(
                 max_total_tokens=1,
                 max_tool_calls=0,
-            )
+            ),
         )
     )
     result = configured.run_sync(
         Agent(
             name="budget-precedence",
             instructions="Return the scripted response.",
-            model=ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="within per-run limit",
-                        raw={
-                            "usage": {
-                                "prompt_tokens": 2,
-                                "completion_tokens": 0,
-                                "total_tokens": 2,
-                                "prompt_tokens_details": {"cached_tokens": 0},
-                            }
-                        },
-                    )
-                ]
-            ),
+            model=MODEL,
             no_tool_policy="finish",
         ),
         "run",

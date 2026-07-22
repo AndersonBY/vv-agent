@@ -6,19 +6,19 @@ to the Python implementation and shows the supported public entry point.
 
 ## Opt In
 
-Checkpoint v2 is disabled unless a `CheckpointConfig` is attached to the run.
-Existing checkpoint v1 codecs and distributed behavior remain available.
-Checkpoint v1 and `vv-agent.distributed-run.v1` writers and fixtures do not gain
-the checkpoint-v2 tool metadata or metadata-policy fields.
+Durable execution is disabled unless a `CheckpointConfig` is attached to the
+run. Enabled records require `schema_version=vv-agent.checkpoint.v2` and
+`run_definition_schema=vv-agent.run-definition.v1`; no other record shape is
+read or repaired.
 
 ```python
 from vv_agent import Agent, CheckpointConfig, RunConfig, Runner
 from vv_agent.checkpoint import ResumePolicy
-from vv_agent.runtime.stores.sqlite import SqliteStateStore
+from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 
-store = SqliteStateStore(".vv-agent-state/checkpoints.db")
+store = SqliteCheckpointStore(".vv-agent-state/checkpoints.db")
 config = RunConfig(
-    model="kimi-k2.6",
+    model="kimi-k3",
     workspace="./workspace",
     checkpoint_config=CheckpointConfig(
         key="tenant-7/task-42",
@@ -48,9 +48,9 @@ Before the first model or tool operation, Runner persists a credential-redacted
 RFC 8785 run definition. It includes the compiled prompt, effective model
 settings, model-visible tools in request order, tool policies and idempotency,
 budgets, output schema, metadata that changes behavior, and extension versions.
-Each frozen tool retains the legacy `idempotency` projection and adds
-`tool_metadata`, either the normalized typed declaration or null. The effective
-policy freezes `denied_side_effects`, `denied_capability_tags`,
+Each frozen tool contains one `tool_metadata` field, either the normalized typed
+declaration or null. The effective policy freezes `denied_side_effects`,
+`denied_capability_tags`,
 `deny_terminal_tools`, and `denied_cost_dimensions` alongside the existing
 name, predicate, and approval controls.
 
@@ -67,15 +67,9 @@ instructions, input guardrails, context providers, or session reads again.
 Current schemas and capability versions are still checked before external work.
 Resume also compares the current effective tool declarations and metadata
 denials with the stored definition before claim or external operations. Generic
-tool metadata is never promoted into the typed declaration.
-
-Definitions written by contract 0.7.1 do not contain these additive nested
-fields. Resume first verifies the digest against the stored definition, then
-adds null/empty/false defaults only to an in-memory comparison copy. It never
-rewrites the stored definition or its original digest. A current non-default
-declaration or denial therefore still produces
-`checkpoint_definition_mismatch` before external work, while default current
-values remain compatible with the exact legacy bytes.
+tool metadata is never promoted into the typed declaration. Missing or unknown
+fields fail before external work; resume never synthesizes defaults into a
+stored definition.
 
 ## Operation Journal
 
@@ -128,6 +122,14 @@ For a normal terminal, Runner orders work as follows:
 Terminal records remain replayable after acknowledgement. Session and event
 stores reject reuse of the same identity with different payload bytes.
 
+Distributed workers return only the closed tagged
+`vv-agent.distributed-worker-response.v1` object: `pending`, `committed`,
+`terminal_candidate`, or `terminal_replay`. The response is an observation, so
+the scheduler reloads the authoritative checkpoint after every response,
+timeout, or transport error. A candidate still needs controller-side terminal
+finalization; a replay is already durable and must exactly match the retained
+result. The old `finished` and terminal Boolean fields are rejected.
+
 ## Scope And Limits
 
 Checkpoint v2 provides durable resume with explicit ambiguity. It does not make
@@ -136,10 +138,8 @@ never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,
 encryption, retention, and checkpoint redaction remain host responsibilities.
 
-Leaving typed tool metadata absent and all four metadata-denial fields at their
-defaults preserves the prior run definition comparison, model-visible schema,
-and execution behavior. Leaving checkpoint v2 disabled preserves the existing
-v1 persistence and distributed wire behavior.
+Leaving durable execution disabled uses the ordinary non-checkpoint runtime.
+There is no alternate checkpoint decoder or distributed envelope reader.
 
 Checkpoint-enabled roots currently reject handoffs. Agent-as-tool and
 background children do not inherit the parent checkpoint config, key,
@@ -154,11 +154,11 @@ preserved.
 ## Verification
 
 ```bash
-uv run pytest tests/test_checkpoint_v2.py
-uv run pytest tests/test_checkpoint_runner_v2.py
+uv run pytest tests/test_checkpoint.py
+uv run pytest tests/test_checkpoint_runner.py
 uv run pytest tests/test_checkpoint_fault_matrix.py
 uv run pytest tests/test_checkpoint_resume_events.py
-uv run pytest tests/test_run_definition_producer.py tests/test_distributed_checkpoint_v2.py
+uv run pytest tests/test_run_definition_producer.py tests/test_distributed_checkpoint.py
 ```
 
 The fault suite covers F1-F8 deterministic persistence boundaries and a real

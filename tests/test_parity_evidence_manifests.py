@@ -15,7 +15,7 @@ from vv_agent.prompt import PromptSection, SystemPromptBuilder, build_system_pro
 from vv_agent.tools import ToolExposure, build_default_registry
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
-CANONICAL_FIXTURES = ("public_api_v1.json", "prompt_bundle_v1.json", "builtin_tools_v1.json")
+CANONICAL_FIXTURES = ("public_api.json", "prompt_bundle.json", "builtin_tools.json")
 EXPECTED_DOMAINS = (
     "agent",
     "runner",
@@ -522,11 +522,6 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::ToolContext",
             },
             {
-                "id": "tools.call_context",
-                "python": "vv_agent.ToolCallContext",
-                "rust": "vv_agent::ToolCallContext",
-            },
-            {
                 "id": "tools.orchestrator",
                 "python": "vv_agent.tools.ToolOrchestrator",
                 "rust": "vv_agent::ToolOrchestrator",
@@ -720,6 +715,12 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "python": "vv_agent.ToolCallPlannedEvent",
                 "rust": "vv_agent::RunEventPayload::ToolCallPlanned",
             },
+            {
+                "adaptation": "Python exports a concrete event class; Rust exports a RunEventPayload variant.",
+                "id": "events.diagnostic",
+                "python": "vv_agent.DiagnosticEvent",
+                "rust": "vv_agent::RunEventPayload::Diagnostic",
+            },
         ],
     },
     {
@@ -819,31 +820,6 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::RuntimeRecipe",
             },
             {
-                "id": "runtime_backend.state_store",
-                "python": "vv_agent.runtime.state.StateStore",
-                "rust": "vv_agent::StateStore",
-            },
-            {
-                "id": "runtime_backend.in_memory_state_store",
-                "python": "vv_agent.runtime.state.InMemoryStateStore",
-                "rust": "vv_agent::InMemoryStateStore",
-            },
-            {
-                "id": "runtime_backend.sqlite_state_store",
-                "python": "vv_agent.runtime.stores.sqlite.SqliteStateStore",
-                "rust": "vv_agent::SqliteStateStore",
-            },
-            {
-                "id": "runtime_backend.redis_state_store",
-                "python": "vv_agent.runtime.stores.redis.RedisStateStore",
-                "rust": "vv_agent::RedisStateStore",
-            },
-            {
-                "id": "runtime_backend.checkpoint",
-                "python": "vv_agent.runtime.Checkpoint",
-                "rust": "vv_agent::Checkpoint",
-            },
-            {
                 "id": "runtime_backend.agent_runtime",
                 "python": "vv_agent.runtime.AgentRuntime",
                 "rust": "vv_agent::AgentRuntime",
@@ -859,14 +835,29 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::ToolCallRunner",
             },
             {
-                "id": "runtime_backend.checkpoint_v2",
-                "python": "vv_agent.runtime.CheckpointV2",
-                "rust": "vv_agent::CheckpointV2",
+                "id": "runtime_backend.checkpoint",
+                "python": "vv_agent.runtime.Checkpoint",
+                "rust": "vv_agent::Checkpoint",
             },
             {
-                "id": "runtime_backend.checkpoint_store_v2",
-                "python": "vv_agent.runtime.CheckpointStoreV2",
-                "rust": "vv_agent::CheckpointStoreV2",
+                "id": "runtime_backend.checkpoint_store",
+                "python": "vv_agent.runtime.CheckpointStore",
+                "rust": "vv_agent::CheckpointStore",
+            },
+            {
+                "id": "runtime_backend.in_memory_checkpoint_store",
+                "python": "vv_agent.runtime.InMemoryCheckpointStore",
+                "rust": "vv_agent::InMemoryCheckpointStore",
+            },
+            {
+                "id": "runtime_backend.sqlite_checkpoint_store",
+                "python": "vv_agent.runtime.stores.sqlite.SqliteCheckpointStore",
+                "rust": "vv_agent::SqliteCheckpointStore",
+            },
+            {
+                "id": "runtime_backend.redis_checkpoint_store",
+                "python": "vv_agent.runtime.stores.redis.RedisCheckpointStore",
+                "rust": "vv_agent::RedisCheckpointStore",
             },
             {
                 "id": "runtime_backend.idempotent_event_store",
@@ -1043,8 +1034,6 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _field("before_cycle_messages", "before_cycle_messages", "before_cycle_messages"),
             _field("interruption_messages", "interruption_messages", "interruption_messages"),
             _field("sub_task_manager", "sub_task_manager", "sub_task_manager"),
-            _field("runtime_log_handler", "runtime_log_handler", "runtime_log_handler"),
-            _field("runtime_stream_callback", "runtime_stream_callback", "runtime_stream_callback"),
             _field("metadata", "metadata", "metadata"),
             _field(
                 "trace_sink",
@@ -1071,30 +1060,6 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 adaptation="Python accepts a callback; Rust exposes independent typed RunHandle event streams.",
                 rust_kind="method",
                 rust_target="vv_agent::RunHandle",
-            ),
-            _field(
-                "settings_file",
-                "settings_file",
-                "model_provider",
-                adaptation="Python can construct a provider from a settings path at run time; Rust receives a ModelProvider.",
-            ),
-            _field(
-                "default_backend",
-                "default_backend",
-                "model_provider",
-                adaptation="Python's settings adapter carries the backend selector; Rust's ModelProvider owns it.",
-            ),
-            _field(
-                "llm_builder",
-                "llm_builder",
-                "model_provider",
-                adaptation="Python supports a legacy builder callback; Rust uses the ModelProvider interface.",
-            ),
-            _field(
-                "timeout_seconds",
-                "timeout_seconds",
-                "model_provider",
-                adaptation="Python's legacy settings adapter carries timeout; Rust's provider/client owns transport timeout.",
             ),
             _field("budget_limits", "budget_limits", "budget_limits"),
             _field("host_cost_meter", "host_cost_meter", "host_cost_meter"),
@@ -1377,7 +1342,6 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 rust_kind="method",
                 rust_target="vv_agent::ToolExecutor",
             ),
-            _field("idempotency", "idempotency", "idempotency", rust_kind="method"),
             _field("tool_metadata", "tool_metadata", "tool_metadata", rust_kind="method"),
             _operation(
                 "to_spec",
@@ -1734,8 +1698,7 @@ def _signature_projection(value: Any) -> dict[str, Any]:
                 "kind": parameter.kind.name.lower(),
                 "name": parameter.name,
                 "required": parameter.default is inspect.Parameter.empty
-                and parameter.kind
-                not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD),
+                and parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD),
             }
             for parameter in signature.parameters.values()
         ],
@@ -1916,9 +1879,9 @@ def _build_builtin_tools_manifest() -> dict[str, Any]:
 
 def _fixture_payloads() -> dict[str, dict[str, Any]]:
     return {
-        "builtin_tools_v1.json": _build_builtin_tools_manifest(),
-        "prompt_bundle_v1.json": _build_prompt_bundle_manifest(),
-        "public_api_v1.json": _build_public_api_manifest(),
+        "builtin_tools.json": _build_builtin_tools_manifest(),
+        "prompt_bundle.json": _build_prompt_bundle_manifest(),
+        "public_api.json": _build_public_api_manifest(),
     }
 
 
@@ -1939,9 +1902,7 @@ def _resolve_python_export(path: str) -> Any:
         attributes = parts[split_index:]
         public_names = getattr(module, "__all__", None)
         if public_names is not None:
-            assert attributes[0] in public_names, (
-                f"{path} exists but is absent from {module_name}.__all__"
-            )
+            assert attributes[0] in public_names, f"{path} exists but is absent from {module_name}.__all__"
         value: Any = module
         for attribute in attributes:
             value = getattr(value, attribute)
@@ -1973,7 +1934,7 @@ def _verify_fixture_python_member(surface: dict[str, Any], member: dict[str, Any
 
 
 def test_public_api_manifest_resolves_real_python_exports() -> None:
-    fixture = _load_fixture("public_api_v1.json")
+    fixture = _load_fixture("public_api.json")
     assert fixture == _build_public_api_manifest()
     assert tuple(domain["id"] for domain in fixture["domains"]) == EXPECTED_DOMAINS
 
@@ -1984,7 +1945,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 151
+    assert len(capability_ids) == 149
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -1994,7 +1955,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 254
+        == 247
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS
@@ -2010,7 +1971,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
 
 
 def test_prompt_bundle_manifest_uses_real_prompt_producers() -> None:
-    fixture = _load_fixture("prompt_bundle_v1.json")
+    fixture = _load_fixture("prompt_bundle.json")
     assert fixture == _build_prompt_bundle_manifest()
     assert {scenario["producer"] for scenario in fixture["scenarios"]} == {
         "SystemPromptBuilder",
@@ -2019,7 +1980,7 @@ def test_prompt_bundle_manifest_uses_real_prompt_producers() -> None:
 
 
 def test_builtin_tools_manifest_uses_real_default_registry() -> None:
-    fixture = _load_fixture("builtin_tools_v1.json")
+    fixture = _load_fixture("builtin_tools.json")
     assert fixture == _build_builtin_tools_manifest()
     assert len(fixture["tools"]) == 16
     assert all(tool["model_visible"] for tool in fixture["tools"])

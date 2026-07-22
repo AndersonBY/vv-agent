@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -12,16 +11,14 @@ import pytest
 
 import vv_agent.cli as cli
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.events import DiagnosticEvent, RunStartedEvent
 from vv_agent.types import AgentResult, AgentStatus
 
-CONTRACT_PATH = Path(__file__).with_name("test_cli_contract_v1.json")
-CONTRACT_SHA256 = "7fa3ce692deea100e77d52e4167fdd123bb18f9ff0adadeefd10609b519d2561"
+CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "cli_contract.json"
 
 
 def _contract() -> dict[str, Any]:
-    payload = CONTRACT_PATH.read_bytes()
-    assert hashlib.sha256(payload).hexdigest() == CONTRACT_SHA256
-    return json.loads(payload)
+    return json.loads(CONTRACT_PATH.read_bytes())
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -61,40 +58,32 @@ def _result(*, status: AgentStatus, error: str | None = None) -> AgentResult:
 def test_cli_contract_fixture_is_reviewable() -> None:
     contract = _contract()
 
-    assert contract["contract"] == "vv-agent-cli-v1"
+    assert contract["contract"] == "vv-agent-cli"
     assert contract["scope"] == "direct-task"
 
 
 def test_cli_contract_fixture_matches_rust_copy_when_available() -> None:
     explicit_rust_root = os.environ.get("VV_AGENT_RS_REPO")
     rust_root = Path(explicit_rust_root or Path(__file__).resolve().parents[2] / "vv-agent-rs")
-    rust_copy = rust_root / "crates" / "vv-agent" / "tests" / "cli_contract_v1.json"
+    rust_copy = rust_root / "crates" / "vv-agent" / "tests" / "cli_contract.json"
 
     if explicit_rust_root is None and not rust_copy.exists():
         return
     assert CONTRACT_PATH.read_bytes() == rust_copy.read_bytes()
 
 
-def test_settings_file_precedence_uses_explicit_then_primary_then_legacy() -> None:
-    environment = {
-        "VV_AGENT_LOCAL_SETTINGS": "primary.json",
-        "V_AGENT_LOCAL_SETTINGS": "legacy.py",
-    }
+def test_settings_file_precedence_uses_explicit_then_environment_then_default() -> None:
+    environment = {"VV_AGENT_LOCAL_SETTINGS": "primary.json"}
 
     explicit = cli._parse_task_args(
         ["--prompt", "task", "--settings-file", "explicit.toml"],
         environ=environment,
     )
     primary = cli._parse_task_args(["--prompt", "task"], environ=environment)
-    legacy = cli._parse_task_args(
-        ["--prompt", "task"],
-        environ={"VV_AGENT_LOCAL_SETTINGS": "  ", "V_AGENT_LOCAL_SETTINGS": "legacy.py"},
-    )
     language_default = cli._parse_task_args(["--prompt", "task"], environ={})
 
     assert explicit.settings_file == "explicit.toml"
     assert primary.settings_file == "primary.json"
-    assert legacy.settings_file == "legacy.py"
     assert language_default.settings_file == _contract()["settings_file_resolution"]["language_defaults"]["python"]
 
 
@@ -152,7 +141,10 @@ def test_task_cli_returns_clean_error_without_traceback(
     def fail_config(*_args: Any, **_kwargs: Any) -> Any:
         raise cli.ConfigError("settings file not found: missing.json")
 
-    monkeypatch.setattr(cli, "build_openai_llm_from_local_settings", fail_config)
+    class FailingProvider:
+        from_settings_file = staticmethod(fail_config)
+
+    monkeypatch.setattr(cli, "VvLlmModelProvider", FailingProvider)
 
     exit_code = cli._run_task_cli(["--prompt", "inspect", "this", "repository"])
     captured = capsys.readouterr()
@@ -164,19 +156,33 @@ def test_task_cli_returns_clean_error_without_traceback(
 
 
 def test_verbose_runtime_logs_stay_on_stderr(capsys: pytest.CaptureFixture[str]) -> None:
-    handler = cli._build_cli_log_handler(enabled=True)
+    handler = cli._build_cli_event_handler(enabled=True)
     assert handler is not None
 
-    handler("run_started", {"task_id": "task_fixed", "model": "test-model", "max_cycles": 1})
     handler(
-        "cycle_llm_response",
-        {"cycle": 1, "tool_call_names": ["read_file", "write_file"], "assistant_preview": None},
+        RunStartedEvent(
+            run_id="task_fixed",
+            trace_id="trace_fixed",
+            input="inspect",
+        )
+    )
+    handler(
+        DiagnosticEvent(
+            run_id="task_fixed",
+            trace_id="trace_fixed",
+            cycle_index=1,
+            level="debug",
+            code="cycle_llm_response",
+            details={"tool_call_names": ["read_file", "write_file"], "assistant_preview": None},
+        )
     )
     captured = capsys.readouterr()
 
     assert captured.out == ""
-    assert "[run] start task=task_fixed model=test-model max_cycles=1" in captured.err
-    assert 'tool_calls=["read_file","write_file"] assistant=null' in captured.err
+    assert "[run_started]" in captured.err
+    assert '"run_id":"task_fixed"' in captured.err
+    assert "[diagnostic:debug] cycle_llm_response" in captured.err
+    assert '"tool_call_names":["read_file","write_file"]' in captured.err
     timestamp = captured.err.split("]", 1)[0].removeprefix("[")
     assert timestamp.endswith("Z")
     assert "T" in timestamp

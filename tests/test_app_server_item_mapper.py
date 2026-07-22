@@ -20,7 +20,7 @@ from vv_agent.events import (
 from vv_agent.tools.metadata import ToolMetadata
 
 _TOOL_METADATA_CONTRACT = json.loads(
-    (Path(__file__).parent / "fixtures" / "parity" / "tool_metadata_v1.json").read_text(encoding="utf-8")
+    (Path(__file__).parent / "fixtures" / "parity" / "tool_metadata.json").read_text(encoding="utf-8")
 )
 
 
@@ -71,6 +71,10 @@ def test_tool_call_events_map_to_started_and_completed_items() -> None:
         tool_name="bash",
         tool_call_id="call_1",
         status="success",
+        directive="continue",
+        error_code=None,
+        execution_started=True,
+        duration_ms=1,
         event_id="evt_4",
         created_at=4,
     )
@@ -98,6 +102,10 @@ def test_tool_call_events_map_to_started_and_completed_items() -> None:
         tool_name="bash",
         tool_call_id="call_2",
         status="error",
+        directive="continue",
+        error_code="tool_error",
+        execution_started=True,
+        duration_ms=1,
     )
     failed_projection = map_run_event(failed, thread_id="thread_1", turn_id="turn_1")
     assert failed_projection.item is not None
@@ -123,16 +131,14 @@ def test_planned_tool_call_is_not_projected_as_an_app_server_item() -> None:
     assert projection == projection.__class__()
 
 
-def test_typed_tool_metadata_and_completed_observations_are_projected_without_legacy_fabrication() -> None:
+def test_typed_tool_metadata_and_completed_observations_are_projected() -> None:
     projection_contract = _TOOL_METADATA_CONTRACT["app_server_projection"]
     assert "toolMetadata" in projection_contract["tool_call_started"]
     assert all(
         field_name in projection_contract["tool_call_completed"]
         for field_name in ("directive", "errorCode", "executionStarted", "durationMs", "toolMetadata")
     )
-    producer_case = next(
-        case for case in _TOOL_METADATA_CONTRACT["producer_cases"] if case["name"] == "executed_tool"
-    )
+    producer_case = next(case for case in _TOOL_METADATA_CONTRACT["producer_cases"] if case["name"] == "executed_tool")
     metadata = ToolMetadata.from_dict(producer_case["tool_metadata"])
     started = ToolCallStartedEvent(
         run_id="run_1",
@@ -158,19 +164,8 @@ def test_typed_tool_metadata_and_completed_observations_are_projected_without_le
         event_id="evt_typed_completed",
         created_at=4,
     )
-    legacy = ToolCallCompletedEvent(
-        run_id="run_1",
-        trace_id="trace_1",
-        tool_name="lookup",
-        tool_call_id="call_legacy",
-        status="success",
-        event_id="evt_legacy_completed",
-        created_at=5,
-    )
-
     started_projection = map_run_event(started, thread_id="thread_1", turn_id="turn_1")
     completed_projection = map_run_event(completed, thread_id="thread_1", turn_id="turn_1")
-    legacy_projection = map_run_event(legacy, thread_id="thread_1", turn_id="turn_1")
 
     assert started_projection.item is not None
     assert started_projection.item.payload["toolMetadata"] == {
@@ -180,9 +175,10 @@ def test_typed_tool_metadata_and_completed_observations_are_projected_without_le
         "capabilityTags": ["source.inspect"],
         "costDimensions": ["workspace.bytes_read"],
     }
-    assert started_projection.additional_notifications[0][1]["payload"]["toolMetadata"] == started_projection.item.payload[
-        "toolMetadata"
-    ]
+    assert (
+        started_projection.additional_notifications[0][1]["payload"]["toolMetadata"]
+        == started_projection.item.payload["toolMetadata"]
+    )
     assert started_projection.additional_notifications[0][1]["delta"] == {"path": "README.md"}
     assert completed_projection.item is not None
     assert completed_projection.item.payload == {
@@ -200,12 +196,6 @@ def test_typed_tool_metadata_and_completed_observations_are_projected_without_le
             "capabilityTags": ["source.inspect"],
             "costDimensions": ["workspace.bytes_read"],
         },
-    }
-    assert legacy_projection.item is not None
-    assert legacy_projection.item.payload == {
-        "toolName": "lookup",
-        "toolCallId": "call_legacy",
-        "status": "success",
     }
 
 

@@ -22,12 +22,12 @@ def print_event(event: RunEvent) -> None:
 
 
 def _host() -> DefaultAppServerHost:
-    settings_file = Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"))
-    backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
-    workspace = Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
-    verbose = os.getenv("V_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
-    max_cycles = int(os.getenv("V_AGENT_EXAMPLE_MAX_CYCLES", "3"))
+    settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
+    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+    model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
+    workspace = Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")).resolve()
+    verbose = os.getenv("VV_AGENT_EXAMPLE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    max_cycles = int(os.getenv("VV_AGENT_EXAMPLE_MAX_CYCLES", "3"))
 
     workspace.mkdir(parents=True, exist_ok=True)
     return DefaultAppServerHost(
@@ -69,7 +69,7 @@ def _drain_until(transport: ChannelTransport, label: str, method: str) -> None:
 
 def main() -> None:
     prompt = os.getenv(
-        "V_AGENT_EXAMPLE_PROMPT",
+        "VV_AGENT_EXAMPLE_PROMPT",
         "请把这句话翻译成英文: notification opt-out 可以让客户端跳过不需要的状态通知。",
     )
     first = ChannelTransport(connection_id="conn_1")

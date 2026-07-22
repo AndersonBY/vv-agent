@@ -10,6 +10,45 @@ from typing import Any
 
 from vv_agent.app_server.protocol import ThreadItem
 
+_THREAD_STORE_SCHEMA_VERSION = 1
+_TABLE_COLUMNS = {
+    "threads": (
+        ("id", "INTEGER", 0, None, 1),
+        ("thread_id", "TEXT", 1, None, 0),
+        ("agent_key", "TEXT", 1, None, 0),
+        ("cwd", "TEXT", 0, None, 0),
+        ("created_at", "REAL", 1, None, 0),
+        ("updated_at", "REAL", 1, None, 0),
+        ("archived_at", "REAL", 0, None, 0),
+        ("status", "TEXT", 1, "'idle'", 0),
+        ("active_turn_id", "TEXT", 0, None, 0),
+        ("metadata_json", "TEXT", 1, None, 0),
+    ),
+    "turns": (
+        ("id", "INTEGER", 0, None, 1),
+        ("turn_id", "TEXT", 1, None, 0),
+        ("thread_id", "TEXT", 1, None, 0),
+        ("run_id", "TEXT", 0, None, 0),
+        ("status", "TEXT", 1, None, 0),
+        ("started_at", "REAL", 1, None, 0),
+        ("completed_at", "REAL", 0, None, 0),
+        ("input_json", "TEXT", 1, None, 0),
+        ("result_json", "TEXT", 1, None, 0),
+    ),
+    "items": (
+        ("id", "INTEGER", 0, None, 1),
+        ("item_id", "TEXT", 1, None, 0),
+        ("thread_id", "TEXT", 1, None, 0),
+        ("turn_id", "TEXT", 1, None, 0),
+        ("run_event_id", "TEXT", 0, None, 0),
+        ("type", "TEXT", 1, None, 0),
+        ("status", "TEXT", 1, None, 0),
+        ("payload_json", "TEXT", 1, None, 0),
+        ("created_at", "REAL", 1, None, 0),
+        ("updated_at", "REAL", 1, None, 0),
+    ),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ThreadRecord:
@@ -49,7 +88,11 @@ class ThreadStore:
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.Lock()
-        self._initialize()
+        try:
+            self._initialize()
+        except BaseException:
+            self._connection.close()
+            raise
 
     def create_thread(self, *, agent_key: str, cwd: str | None = None, metadata: dict[str, Any] | None = None) -> ThreadRecord:
         with self._lock:
@@ -256,8 +299,35 @@ class ThreadStore:
 
     def _initialize(self) -> None:
         with self._lock:
-            self._connection.executescript(
-                """
+            version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
+            existing_tables = {
+                str(row[0])
+                for row in self._connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+            if not existing_tables:
+                if version != 0:
+                    raise RuntimeError(
+                        f"App Server thread-store schema version {version} does not match required version "
+                        f"{_THREAD_STORE_SCHEMA_VERSION}"
+                    )
+                self._create_schema()
+            elif version != _THREAD_STORE_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"App Server thread-store schema version {version} does not match required version "
+                    f"{_THREAD_STORE_SCHEMA_VERSION}"
+                )
+
+            self._validate_schema()
+            self._connection.execute("UPDATE threads SET status = 'idle', active_turn_id = NULL WHERE status = 'running'")
+            self._connection.commit()
+
+    def _create_schema(self) -> None:
+        self._connection.executescript(
+            f"""
+                PRAGMA user_version = {_THREAD_STORE_SCHEMA_VERSION};
+
                 CREATE TABLE IF NOT EXISTS threads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     thread_id TEXT NOT NULL UNIQUE,
@@ -295,25 +365,57 @@ class ThreadStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
-                """
-            )
-            self._ensure_column("threads", "status", "TEXT NOT NULL DEFAULT 'idle'")
-            self._ensure_column("threads", "active_turn_id", "TEXT")
-            self._ensure_column("items", "run_event_id", "TEXT")
-            self._connection.execute(
-                """
+
                 CREATE UNIQUE INDEX IF NOT EXISTS items_run_event_id_unique
                 ON items(run_event_id)
-                WHERE run_event_id IS NOT NULL
-                """
-            )
-            self._connection.execute("UPDATE threads SET status = 'idle', active_turn_id = NULL WHERE status = 'running'")
-            self._connection.commit()
+                WHERE run_event_id IS NOT NULL;
+            """
+        )
 
-    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
-        columns = {str(row["name"]) for row in self._connection.execute(f"PRAGMA table_info({table})")}
-        if column not in columns:
-            self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+    def _validate_schema(self) -> None:
+        objects = {
+            (str(row[0]), str(row[1]))
+            for row in self._connection.execute(
+                "SELECT type, name FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'index', 'view', 'trigger')"
+            )
+        }
+        expected_objects = {("table", table) for table in _TABLE_COLUMNS} | {("index", "items_run_event_id_unique")}
+        if objects != expected_objects:
+            raise RuntimeError(
+                "App Server thread-store schema objects do not match the current schema: "
+                f"expected={sorted(expected_objects)}, actual={sorted(objects)}"
+            )
+
+        for table, expected in _TABLE_COLUMNS.items():
+            actual = tuple(
+                (str(row["name"]), str(row["type"]), int(row["notnull"]), row["dflt_value"], int(row["pk"]))
+                for row in self._connection.execute(f"PRAGMA table_info({table})")
+            )
+            if actual != expected:
+                raise RuntimeError(
+                    f"App Server thread-store table {table} does not match the current schema: "
+                    f"expected={expected}, actual={actual}"
+                )
+
+        expected_unique_indexes = {
+            "threads": {("thread_id", False)},
+            "turns": {("turn_id", False)},
+            "items": {("item_id", False), ("run_event_id", True)},
+        }
+        for table, expected in expected_unique_indexes.items():
+            actual: set[tuple[str, bool]] = set()
+            for row in self._connection.execute(f"PRAGMA index_list({table})"):
+                if not bool(row["unique"]):
+                    continue
+                columns = tuple(str(column["name"]) for column in self._connection.execute(f"PRAGMA index_info({row['name']})"))
+                if len(columns) == 1:
+                    actual.add((columns[0], bool(row["partial"])))
+            if actual != expected:
+                raise RuntimeError(
+                    f"App Server thread-store unique indexes for {table} do not match the current schema: "
+                    f"expected={sorted(expected)}, actual={sorted(actual)}"
+                )
 
     def _next_id(self, table: str, column: str, prefix: str) -> str:
         row = self._connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()

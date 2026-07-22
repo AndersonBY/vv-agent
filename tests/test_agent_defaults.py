@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import Agent, ApprovalPolicy, RunConfig, Runner, ToolPolicy, function_tool
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -61,20 +62,24 @@ def test_dynamic_instructions_receive_agent_and_complete_run_context(tmp_path: P
     agent = Agent(
         name="assistant",
         instructions=instructions,
-        model=ScriptedLLM(steps=[finish]),
+        model="m",
         metadata={"tenant": "acme"},
     )
     result = Runner.run_sync(
         agent,
         "go",
-        run_config=RunConfig(workspace=tmp_path, context={"request_id": "req-1"}),
+        run_config=RunConfig(
+            model_provider=FixedModelProvider(ScriptedLLM(steps=[finish]), _resolved()),
+            workspace=tmp_path,
+            context={"request_id": "req-1"},
+        ),
     )
 
     assert result.final_output == "done"
     assert observed["same_agent"] is True
     assert str(observed["run_id"]).startswith("run_")
     assert observed["agent_name"] == "assistant"
-    assert observed["model"] == "direct"
+    assert observed["model"] == "m"
     assert observed["workspace"] == tmp_path
     assert cast(dict[str, object], observed["metadata"])["tenant"] == "acme"
     assert observed["app_state"] == {"request_id": "req-1"}
@@ -92,24 +97,29 @@ def test_agent_hooks_run_before_per_run_hooks(tmp_path: Path) -> None:
             order.append(self.name)
             return None
 
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            )
+        ]
+    )
     agent = Agent(
         name="assistant",
         instructions="Finish.",
-        model=ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="",
-                    tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-                )
-            ]
-        ),
+        model="m",
         hooks=[OrderedHook("agent")],
     )
 
     result = Runner.run_sync(
         agent,
         "go",
-        run_config=RunConfig(workspace=tmp_path, hooks=[OrderedHook("run")]),
+        run_config=RunConfig(
+            model_provider=FixedModelProvider(llm, _resolved()),
+            workspace=tmp_path,
+            hooks=[OrderedHook("run")],
+        ),
     )
 
     assert result.final_output == "done"
@@ -135,14 +145,10 @@ def test_agent_max_cycles_applies_when_run_config_only_supplies_provider() -> No
             calls += 1
             return LLMResponse(content=f"cycle {calls}")
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return NoToolLLM(), _resolved()
-
     result = Runner.run_sync(
         Agent(name="bounded", instructions="Try twice.", model="m", max_cycles=2),
         "go",
-        run_config=RunConfig(model_provider=model_provider),
+        run_config=RunConfig(model_provider=FixedModelProvider(NoToolLLM(), _resolved())),
     )
 
     assert result.status == AgentStatus.MAX_CYCLES
@@ -153,9 +159,9 @@ def test_run_config_max_cycles_overrides_agent_default() -> None:
     llm = ScriptedLLM(steps=[LLMResponse(content="one"), LLMResponse(content="two")])
 
     result = Runner.run_sync(
-        Agent(name="bounded", instructions="Try more.", model=llm, max_cycles=3),
+        Agent(name="bounded", instructions="Try more.", model="m", max_cycles=3),
         "go",
-        run_config=RunConfig(max_cycles=1),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved()), max_cycles=1),
     )
 
     assert result.status == AgentStatus.MAX_CYCLES
@@ -166,9 +172,9 @@ def test_explicit_framework_default_max_cycles_still_overrides_agent_default() -
     llm = ScriptedLLM(steps=[LLMResponse(content=f"cycle {index}") for index in range(10)])
 
     result = Runner.run_sync(
-        Agent(name="bounded", instructions="Try more.", model=llm, max_cycles=3),
+        Agent(name="bounded", instructions="Try more.", model="m", max_cycles=3),
         "go",
-        run_config=RunConfig(max_cycles=10),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved()), max_cycles=10),
     )
 
     assert result.status == AgentStatus.MAX_CYCLES
@@ -206,19 +212,21 @@ def test_agent_tool_policy_is_default_and_run_config_policy_overrides_it() -> No
     agent = Agent(
         name="policy",
         instructions="Use policy.",
-        model=agent_llm,
+        model="m",
         tools=[lookup],
         tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME]),
     )
-    Runner.run_sync(agent, "agent policy")
+    Runner.run_sync(agent, "agent policy", run_config=RunConfig(model_provider=FixedModelProvider(agent_llm, _resolved())))
     assert agent_llm.tool_names == [TASK_FINISH_TOOL_NAME]
 
     run_llm = CapturingLLM()
-    agent.model = run_llm
     Runner.run_sync(
         agent,
         "run policy",
-        run_config=RunConfig(tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "lookup"])),
+        run_config=RunConfig(
+            model_provider=FixedModelProvider(run_llm, _resolved()),
+            tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "lookup"]),
+        ),
     )
     assert run_llm.tool_names == [TASK_FINISH_TOOL_NAME, "lookup"]
 

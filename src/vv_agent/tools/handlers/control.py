@@ -5,7 +5,7 @@ from typing import Any
 from vv_agent.constants import TODO_INCOMPLETE_ERROR_CODE
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import get_todo_list, to_json, trim_portable_whitespace
-from vv_agent.types import ToolDirective, ToolExecutionResult
+from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
 
 
 def task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
@@ -25,7 +25,7 @@ def task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutio
     if require_all_done and incomplete_todos:
         return ToolExecutionResult(
             tool_call_id="",
-            status="error",
+            status_code=ToolResultStatus.ERROR,
             error_code=TODO_INCOMPLETE_ERROR_CODE,
             content=to_json(
                 {
@@ -43,7 +43,7 @@ def task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutio
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json({"ok": True, "message": message}),
         directive=ToolDirective.FINISH,
         metadata=metadata,
@@ -81,7 +81,7 @@ def ask_user(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionRe
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=to_json(payload),
         directive=ToolDirective.WAIT_USER,
         metadata=payload,

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from vv_agent import constants as constants_module
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.events import DiagnosticEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.runtime import (
     AfterLLMEvent,
@@ -67,7 +68,6 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
                 return None
             return ToolExecutionResult(
                 tool_call_id=event.call.id,
-                status="error",
                 status_code=ToolResultStatus.ERROR,
                 error_code="blocked_by_hook",
                 content='{"ok":false,"error":"blocked"}',
@@ -91,37 +91,29 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
             ),
         ]
     )
-    runtime_events: list[tuple[str, dict[str, object]]] = []
     lifecycle_events = []
     runtime = AgentRuntime(
         llm_client=llm,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
         hooks=[BlockTodoHook()],
-        log_handler=lambda event, payload: runtime_events.append((event, payload)),
     )
     task = AgentTask(task_id="hook_tool_short_circuit", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
 
     result = runtime.run(
         task,
         ctx=ExecutionContext(
+            event_handler=lifecycle_events.append,
             metadata={
                 "_vv_agent_agent_name": "hook-agent",
-                "_vv_agent_emit_event": lifecycle_events.append,
                 "_vv_agent_run_id": "run-hook",
                 "_vv_agent_trace_id": "trace-hook",
-            }
+            },
         ),
     )
     assert result.status == AgentStatus.COMPLETED
     assert result.cycles[0].tool_results[0].error_code == "blocked_by_hook"
-    assert not any(
-        event == "tool_started" and payload.get("tool_call_id") == "c1"
-        for event, payload in runtime_events
-    )
-    blocked_lifecycle = [
-        event for event in lifecycle_events if getattr(event, "tool_call_id", None) == "c1"
-    ]
+    blocked_lifecycle = [event for event in lifecycle_events if getattr(event, "tool_call_id", None) == "c1"]
     assert [event.type for event in blocked_lifecycle] == [
         "tool_call_planned",
         "tool_call_completed",
@@ -165,20 +157,18 @@ def test_runtime_completed_event_contains_after_hook_result(tmp_path: Path) -> N
     result = runtime.run(
         AgentTask(task_id="hook_completed_event", model="m", system_prompt="sys", user_prompt="go", max_cycles=2),
         ctx=ExecutionContext(
+            event_handler=lifecycle_events.append,
             metadata={
                 "_vv_agent_agent_name": "hook-agent",
-                "_vv_agent_emit_event": lifecycle_events.append,
                 "_vv_agent_run_id": "run-hook",
                 "_vv_agent_trace_id": "trace-hook",
-            }
+            },
         ),
     )
 
     assert result.final_answer == "finished-by-hook"
     completed = next(
-        event
-        for event in lifecycle_events
-        if event.type == "tool_call_completed" and event.tool_call_id == "hook-finalized"
+        event for event in lifecycle_events if event.type == "tool_call_completed" and event.tool_call_id == "hook-finalized"
     )
     assert completed.directive == ToolDirective.FINISH.value
     assert completed.metadata["content"] == "hook content"
@@ -290,10 +280,10 @@ def test_runtime_hook_can_replace_llm_response(tmp_path: Path) -> None:
 
 
 def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
-    events: list[tuple[str, dict[str, object]]] = []
+    events: list[object] = []
 
-    def track(event: str, payload: dict[str, object]) -> None:
-        events.append((event, payload))
+    def track(event: object) -> None:
+        events.append(event)
 
     def _noop(context: ToolContext, arguments: dict[str, object]) -> ToolExecutionResult:
         del context, arguments
@@ -337,7 +327,7 @@ def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
         llm_client=llm,
         tool_registry=registry,
         default_workspace=tmp_path,
-        log_handler=track,
+        event_handler=track,
     )
     task = AgentTask(
         task_id="steer_skip",
@@ -352,4 +342,4 @@ def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
     assert result.status == AgentStatus.COMPLETED
     assert result.cycles[0].tool_results[1].error_code == "skipped_due_to_steering"
     assert any(message.content == "STEER_NOW" for message in result.messages)
-    assert any(name == "run_steered" for name, _ in events)
+    assert any(isinstance(event, DiagnosticEvent) and event.code == "run_steered" for event in events)

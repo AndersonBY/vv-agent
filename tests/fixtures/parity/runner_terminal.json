@@ -1,0 +1,80 @@
+{
+  "version": "v1",
+  "success_with_session": {
+    "tail": [
+      "session_persisted",
+      "run_completed"
+    ],
+    "terminal": "run_completed",
+    "status": "completed",
+    "completion_reason": "tool_finish"
+  },
+  "output_guardrail_block": {
+    "tail": [
+      "session_persisted",
+      "run_failed"
+    ],
+    "terminal": "run_failed",
+    "status": "failed",
+    "completion_reason": "failed",
+    "partial_output": "blocked final output candidate",
+    "error": "blocked final output",
+    "later_guardrails_run": false
+  },
+  "cancellation": {
+    "terminal": "run_cancelled",
+    "terminal_count": 1,
+    "completion_reason": "cancelled"
+  },
+  "max_cycles": {
+    "terminal": "run_failed",
+    "status": "max_cycles",
+    "completion_reason": "max_cycles",
+    "partial_output": "unfinished draft"
+  },
+  "budget_exhausted": {
+    "events_tail": [
+      "budget_exhausted",
+      "run_failed"
+    ],
+    "terminal": "run_failed",
+    "terminal_count": 1,
+    "status": "failed",
+    "completion_reason": "budget_exhausted",
+    "completion_tool_name": null,
+    "partial_output": "draft over budget",
+    "error": "Run budget exhausted.",
+    "budget_fixture": "run_budget.json"
+  },
+  "event_store_fail_closed": {
+    "error": "run event store append failed: store down",
+    "panics": false
+  },
+  "reconciliation_required": {
+    "events_tail": [
+      "operation_ambiguous",
+      "reconciliation_required"
+    ],
+    "terminal": null,
+    "terminal_count": 0,
+    "status": "reconciliation_required",
+    "completion_reason": null,
+    "error": null,
+    "checkpoint_retained": true
+  },
+  "checkpoint_terminal_order": {
+    "order": [
+      "runtime_candidate_result",
+      "output_guardrail",
+      "session_add_items_once",
+      "session_persisted_observation",
+      "terminal_event_outbox_pending",
+      "checkpoint_terminal_finalize",
+      "terminal_event_outbox_delivered",
+      "terminal_event_delivery_recorded",
+      "terminal_acknowledge_retained"
+    ],
+    "terminal_deleted_on_acknowledgement": false,
+    "explicit_retention_cleanup_required": true
+  }
+}

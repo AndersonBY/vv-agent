@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import cast
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig
 from vv_agent.app_server import AppServer, ChannelTransport
@@ -159,14 +160,10 @@ def test_resume_snapshot_runtime_error_rolls_back_new_subscription_and_closed_st
 def _server_with_steps(steps: list[ScriptStep]) -> tuple[AppServer, ChannelTransport]:
     llm = ScriptedLLM(steps=steps)
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     transport = ChannelTransport(connection_id="conn_1")
     host = DefaultAppServerHost(
         agent=Agent(name="assistant", instructions="Answer.", model="test-model"),
-        run_config=RunConfig(model_provider=model_provider, max_cycles=1),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model()), max_cycles=1),
     )
     return AppServer(transport=transport, host=host), transport
 

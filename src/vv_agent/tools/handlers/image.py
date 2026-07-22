@@ -33,7 +33,6 @@ def read_image(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
         }
         return ToolExecutionResult(
             tool_call_id="",
-            status="success",
             status_code=ToolResultStatus.SUCCESS,
             content=to_json(payload),
             image_url=raw_path,
@@ -86,7 +85,6 @@ def read_image(context: ToolContext, arguments: dict[str, Any]) -> ToolExecution
     }
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
         status_code=ToolResultStatus.SUCCESS,
         content=to_json(payload),
         image_url=image_url,

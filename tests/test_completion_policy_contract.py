@@ -11,21 +11,19 @@ from vv_agent import (
     CompletionReason,
     FunctionTool,
     GuardrailResult,
-    ModelSettings,
     NoToolPolicy,
     RunConfig,
     Runner,
-    TaskTokenUsage,
-    ToolPolicy,
     output_guardrail,
 )
 from vv_agent.agent import ToolUseBehavior
-from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptStep
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.tools import ToolOutputText
-from vv_agent.types import AgentResult, AgentStatus, LLMResponse, SubTaskOutcome, ToolCall
+from vv_agent.types import LLMResponse, ToolCall
 
-FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "completion_policy_v1.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "completion_policy.json"
 
 
 def _contract() -> dict[str, Any]:
@@ -44,6 +42,10 @@ def _response(step: dict[str, Any]) -> LLMResponse:
             for call in step["tool_calls"]
         ],
     )
+
+
+def _provider(steps: list[ScriptStep]) -> ScriptedModelProvider:
+    return ScriptedModelProvider.from_steps("test", "test-model", steps)
 
 
 @pytest.mark.parametrize("case", _contract()["cases"], ids=lambda case: case["name"])
@@ -80,13 +82,18 @@ def test_public_completion_policy_matrix(case: dict[str, Any], tmp_path: Path) -
     agent = Agent(
         name="completion-contract",
         instructions="Execute the scripted completion contract.",
-        model=ScriptedLLM(steps=scripted_steps),
+        model="test-model",
         tools=tools,
         no_tool_policy=cast(NoToolPolicy | None, case["agent_policy"]),
         tool_use_behavior=cast(ToolUseBehavior, case["tool_use_behavior"]),
         stop_at_tool_names=list(case.get("stop_at_tool_names", [])),
     )
-    configured = Runner.configured(RunConfig(no_tool_policy=cast(NoToolPolicy | None, case["runner_default_policy"])))
+    configured = Runner.configured(
+        RunConfig(
+            model_provider=_provider(scripted_steps),
+            no_tool_policy=cast(NoToolPolicy | None, case["runner_default_policy"]),
+        )
+    )
     result = configured.run_sync(
         agent,
         "run the completion fixture",
@@ -140,61 +147,6 @@ def test_completion_reason_inventory_matches_public_enum() -> None:
     assert contract["rules"]["completion_policy_does_not_change_tool_availability"] is True
 
 
-def test_completion_fields_preserve_legacy_positional_construction() -> None:
-    tool_policy = ToolPolicy()
-    agent = Agent(
-        "legacy-agent",
-        "Preserve the original positional field order.",
-        None,
-        ModelSettings(),
-        [],
-        [],
-        [],
-        [],
-        None,
-        [],
-        None,
-        tool_policy,
-    )
-    run_config = RunConfig(None, None, None, None, None, None, None, None, tool_policy)
-    usage = TaskTokenUsage()
-    result = AgentResult(
-        AgentStatus.COMPLETED,
-        [],
-        [],
-        "legacy answer",
-        None,
-        None,
-        {"legacy": True},
-        usage,
-    )
-    sub_task = SubTaskOutcome(
-        "task-1",
-        "worker",
-        AgentStatus.COMPLETED,
-        None,
-        "legacy child answer",
-        None,
-        None,
-        None,
-        2,
-        [],
-        {"model": "resolved"},
-    )
-
-    assert agent.tool_policy is tool_policy
-    assert agent.no_tool_policy is None
-    assert run_config.tool_policy is tool_policy
-    assert run_config.no_tool_policy is None
-    assert result.final_answer == "legacy answer"
-    assert result.shared_state == {"legacy": True}
-    assert result.token_usage is usage
-    assert result.completion_reason is None
-    assert sub_task.cycles == 2
-    assert sub_task.resolved == {"model": "resolved"}
-    assert sub_task.completion_reason is None
-
-
 def test_input_guardrail_failure_emits_the_canonical_reason() -> None:
     expected = next(
         case for case in _contract()["terminal_precedence_cases"] if case["name"] == "input_guardrail_fails_before_llm"
@@ -207,10 +159,11 @@ def test_input_guardrail_failure_emits_the_canonical_reason() -> None:
         Agent(
             name="blocked-input",
             instructions="This model must not run.",
-            model=ScriptedLLM(steps=[]),
+            model="test-model",
             input_guardrails=[block_input],
         ),
         "blocked",
+        run_config=RunConfig(model_provider=_provider([])),
     )
 
     assert result.status.value == expected["expected_status"]
@@ -232,8 +185,14 @@ def test_output_guardrail_rewrites_wait_output_but_preserves_completion_observat
         Agent(
             name="guardrail-wait-contract",
             instructions="Ask the scripted question.",
-            model=ScriptedLLM(
-                steps=[
+            model="test-model",
+            output_guardrails=[rewrite_wait_output],
+        ),
+        "ask",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            model_provider=_provider(
+                [
                     LLMResponse(
                         content=candidate["partial_output"],
                         tool_calls=[
@@ -246,10 +205,7 @@ def test_output_guardrail_rewrites_wait_output_but_preserves_completion_observat
                     )
                 ]
             ),
-            output_guardrails=[rewrite_wait_output],
         ),
-        "ask",
-        run_config=RunConfig(workspace=tmp_path),
     )
 
     expected = case["expected_observation"]
@@ -267,9 +223,10 @@ def test_ordinary_llm_failure_returns_typed_terminal() -> None:
         Agent(
             name="llm-failure-contract",
             instructions="This scripted queue is intentionally empty.",
-            model=ScriptedLLM(steps=[]),
+            model="test-model",
         ),
         "go",
+        run_config=RunConfig(model_provider=_provider([])),
     )
     terminals = [event for event in result.events if event.type in {"run_completed", "run_failed", "run_cancelled"}]
 

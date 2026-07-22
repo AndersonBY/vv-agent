@@ -31,7 +31,6 @@ def builtin_error(
         host_metadata.update(metadata)
     return ToolExecutionResult(
         tool_call_id="",
-        status="error",
         status_code=ToolResultStatus.ERROR,
         error_code=error_code,
         content=to_json(payload),

@@ -1,0 +1,113 @@
+{
+  "contract": "vv-agent-cli",
+  "scope": "direct-task",
+  "settings_file_resolution": {
+    "precedence": [
+      "--settings-file",
+      "VV_AGENT_LOCAL_SETTINGS",
+      "language_default"
+    ],
+    "blank_environment_values": "ignored",
+    "language_defaults": {
+      "python": "local_settings.py",
+      "rust": "local_settings.json"
+    }
+  },
+  "prompt": {
+    "argv": [
+      "--prompt",
+      "inspect",
+      "this",
+      "repository",
+      "--backend",
+      "deepseek"
+    ],
+    "value": "inspect this repository",
+    "join": "single-space between separate argv tokens"
+  },
+  "argument_projection": {
+    "argv": [
+      "--prompt",
+      "inspect",
+      "this",
+      "repository",
+      "--max-cycles",
+      "0",
+      "--agent-type",
+      "computer",
+      "--temperature",
+      "0.25",
+      "--top-p",
+      "0.8",
+      "--max-tokens",
+      "2048"
+    ],
+    "task": {
+      "user_prompt": "inspect this repository",
+      "max_cycles": 1,
+      "agent_type": "computer",
+      "model_settings": {
+        "temperature": 0.25,
+        "top_p": 0.8,
+        "max_tokens": 2048
+      }
+    }
+  },
+  "resolved_model_projection": {
+    "resolved": {
+      "context_length": 1000000,
+      "max_output_tokens": 384000,
+      "function_call_available": true,
+      "response_format_available": true,
+      "native_multimodal": true
+    },
+    "task": {
+      "native_multimodal": true,
+      "metadata": {
+        "model_context_window": 1000000,
+        "model_max_output_tokens": 384000,
+        "function_call_available": true,
+        "response_format_available": true,
+        "native_multimodal": true
+      }
+    }
+  },
+  "process_outcomes": {
+    "help": {
+      "exit_code": 0,
+      "stdout": "help_text",
+      "stderr": "empty"
+    },
+    "completed_result": {
+      "exit_code": 0,
+      "stdout": "result_json",
+      "stderr": "empty"
+    },
+    "verbose_result": {
+      "exit_code": 0,
+      "stdout": "result_json",
+      "stderr": "runtime_log_lines"
+    },
+    "failed_result": {
+      "exit_code": 0,
+      "stdout": "result_json",
+      "stderr": "empty"
+    },
+    "cancelled_result": {
+      "representation": "failed result with cancellation error",
+      "exit_code": 0,
+      "stdout": "result_json",
+      "stderr": "empty"
+    },
+    "usage_error": {
+      "exit_code": 1,
+      "stdout": "empty",
+      "stderr": "error_text"
+    },
+    "configuration_or_runtime_error": {
+      "exit_code": 1,
+      "stdout": "empty",
+      "stderr": "error_text_without_traceback"
+    }
+  }
+}

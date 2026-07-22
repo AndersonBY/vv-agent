@@ -2,18 +2,17 @@
 
 This module provides ``run_single_cycle`` which:
 1. Rebuilds an AgentRuntime from a ``RuntimeRecipe``
-2. Loads the previous checkpoint from the shared StateStore
+2. Resolves and loads the checkpoint through the worker capability registry
 3. Executes exactly one cycle via the runtime's cycle executor
-4. Saves the updated checkpoint (or returns the terminal result)
+4. Atomically commits progress or returns a terminal candidate
 """
 
 from __future__ import annotations
 
+import logging
 import time
-import uuid
 from copy import deepcopy
 from pathlib import Path
-from threading import Event, Lock, Thread
 from typing import Any
 
 from vv_agent.agent import RunContext
@@ -23,18 +22,17 @@ from vv_agent.checkpoint import (
     compute_run_definition_digest,
     validate_checkpoint_extension,
 )
-from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.events import RunEvent
+from vv_agent.model import ModelRef, VvLlmModelProvider
 from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.backends.distributed import (
-    DEFAULT_CYCLE_NAME,
-    DISTRIBUTED_RUN_SCHEMA_VERSION_V2,
     ClaimMode,
     DistributedCapabilityRegistry,
     DistributedRunEnvelope,
+    DistributedWorkerResponse,
     RuntimeRecipe,
     _policy_with_task_metadata_denials,
 )
-from vv_agent.runtime.checkpoint_codec_v2 import run_definition_comparison_copy
 from vv_agent.runtime.checkpoint_resume import (
     CheckpointReconciliationRequired,
     CheckpointResumeController,
@@ -51,171 +49,10 @@ from vv_agent.runtime.run_definition import (
     _redact_credential_slots,
     _tool_definitions,
 )
-from vv_agent.runtime.state import CheckpointConflictError, _LeaseOperationClock, build_state_store
-from vv_agent.runtime.state_v2 import CheckpointV2
+from vv_agent.runtime.state import Checkpoint
 from vv_agent.runtime.sub_task_manager import SubTaskManager
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason
 from vv_agent.workspace import LocalWorkspaceBackend
-
-_MAX_U64 = (1 << 64) - 1
-
-
-def _lease_expiry_at(*, now_ms: int, lease_duration_ms: int, deadline_unix_ms: int | None) -> int:
-    if deadline_unix_ms is None:
-        lease_expires_at_ms = now_ms + lease_duration_ms
-    else:
-        lease_expires_at_ms = now_ms + min(lease_duration_ms, deadline_unix_ms - now_ms)
-    if lease_expires_at_ms > _MAX_U64:
-        raise OverflowError("checkpoint lease overflow")
-    return lease_expires_at_ms
-
-
-def _lease_heartbeat_interval_seconds(lease_duration_ms: int) -> float:
-    return min(lease_duration_ms / 3000, 30.0)
-
-
-class _LeaseHeartbeat:
-    def __init__(
-        self,
-        *,
-        store: Any,
-        envelope: DistributedRunEnvelope,
-        claim_token: str,
-        expected_revision: int,
-    ) -> None:
-        self._store = store
-        self._envelope = envelope
-        self._claim_token = claim_token
-        self._expected_revision = expected_revision
-        self._stopped = Event()
-        self._state_lock = Lock()
-        self._error: BaseException | None = None
-        self._error_renew_started_during_commit = False
-        self._commit_started = False
-        self._commit_succeeded = False
-        self._known_lease_expires_at_ms: int | None = None
-        self._interval_seconds = _lease_heartbeat_interval_seconds(envelope.lease_duration_ms)
-        self._thread = Thread(target=self._run, name=f"vv-agent-lease-{envelope.job_id}", daemon=True)
-
-    def start(self) -> None:
-        try:
-            self._load_claim_lease_expiry()
-            effective_lease_ms = self._renew_once()
-        except BaseException as exc:
-            self._record_error(exc, renew_started_during_commit=False)
-            self._stopped.set()
-            self.raise_if_failed()
-            return
-        self._interval_seconds = _lease_heartbeat_interval_seconds(effective_lease_ms)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stopped.set()
-        if self._thread.ident is not None:
-            self._thread.join()
-
-    def begin_commit(self) -> None:
-        with self._state_lock:
-            error = self._error
-            if error is None:
-                self._commit_started = True
-        if error is not None:
-            raise CheckpointConflictError(f"checkpoint lease heartbeat failed: {error}") from error
-
-    def mark_commit_succeeded(self) -> None:
-        with self._state_lock:
-            if not self._commit_started:
-                raise RuntimeError("checkpoint commit phase has not started")
-            self._commit_succeeded = True
-
-    def raise_if_failed(self) -> None:
-        with self._state_lock:
-            error = self._error
-            suppress_commit_rejection = bool(
-                error is not None
-                and self._commit_succeeded
-                and self._error_renew_started_during_commit
-                and isinstance(error, CheckpointConflictError)
-                and str(error) == "claim is no longer active"
-            )
-        if error is not None and not suppress_commit_rejection:
-            raise CheckpointConflictError(f"checkpoint lease heartbeat failed: {error}") from error
-
-    def _record_error(self, error: BaseException, *, renew_started_during_commit: bool) -> None:
-        with self._state_lock:
-            if self._error is None:
-                self._error = error
-                self._error_renew_started_during_commit = renew_started_during_commit
-
-    def _run(self) -> None:
-        interval_seconds = self._interval_seconds
-        while not self._stopped.wait(interval_seconds):
-            try:
-                effective_lease_ms = self._renew_once()
-                interval_seconds = _lease_heartbeat_interval_seconds(effective_lease_ms)
-                self._interval_seconds = interval_seconds
-            except BaseException:  # the worker must observe heartbeat infrastructure failures
-                self._stopped.set()
-                return
-
-    def _renew_once(self) -> int:
-        renew_started_during_commit = False
-        try:
-            now_ms = time.time_ns() // 1_000_000
-            clock = _LeaseOperationClock(now_ms)
-            self._envelope.ensure_not_expired(now_ms=now_ms)
-            lease_expires_at_ms = _lease_expiry_at(
-                now_ms=now_ms,
-                lease_duration_ms=self._envelope.lease_duration_ms,
-                deadline_unix_ms=self._envelope.deadline_unix_ms,
-            )
-            with self._state_lock:
-                renew_started_during_commit = self._commit_started
-                known_lease_expires_at_ms = self._known_lease_expires_at_ms
-            renewed = self._store.renew_checkpoint_claim(
-                self._envelope.task.task_id,
-                claim_token=self._claim_token,
-                expected_revision=self._expected_revision,
-                lease_expires_at_ms=lease_expires_at_ms,
-                now_ms=now_ms,
-            )
-            observed_at_ms = max(clock.now_ms(), time.time_ns() // 1_000_000)
-            if not renewed:
-                if observed_at_ms >= lease_expires_at_ms or (
-                    known_lease_expires_at_ms is not None and observed_at_ms >= known_lease_expires_at_ms
-                ):
-                    raise CheckpointConflictError("claim lease expired")
-                raise CheckpointConflictError("claim is no longer active")
-            if observed_at_ms >= lease_expires_at_ms or (
-                known_lease_expires_at_ms is not None and observed_at_ms >= known_lease_expires_at_ms
-            ):
-                raise CheckpointConflictError("claim lease expired")
-            with self._state_lock:
-                self._known_lease_expires_at_ms = lease_expires_at_ms
-            return lease_expires_at_ms - observed_at_ms
-        except BaseException as exc:
-            self._record_error(exc, renew_started_during_commit=renew_started_during_commit)
-            raise
-
-    def _load_claim_lease_expiry(self) -> None:
-        checkpoint = self._store.load_checkpoint(self._envelope.task.task_id)
-        if (
-            checkpoint is None
-            or checkpoint.revision != self._expected_revision
-            or checkpoint.claim_token != self._claim_token
-            or checkpoint.claimed_cycle != self._envelope.cycle_index
-            or checkpoint.lease_expires_at_ms is None
-        ):
-            raise CheckpointConflictError("claim is no longer active")
-        with self._state_lock:
-            self._known_lease_expires_at_ms = checkpoint.lease_expires_at_ms
-
-
-def _build_state_store(recipe: RuntimeRecipe) -> Any:
-    """Rebuild the exact durable store selected by the scheduler."""
-    if recipe.state_store is None:
-        raise ValueError("distributed RuntimeRecipe is missing state_store")
-    return build_state_store(recipe.state_store)
 
 
 def _resolve_many(
@@ -244,10 +81,10 @@ def _validate_reference(
         raise _definition_mismatch(f"distributed capability {slot!r} does not match the run definition")
 
 
-def _validate_v2_task_and_capabilities(
+def _validate_task_and_capabilities(
     *,
     envelope: DistributedRunEnvelope,
-    checkpoint: CheckpointV2,
+    checkpoint: Checkpoint,
     registry: DistributedCapabilityRegistry,
     extensions: list[Any],
 ) -> None:
@@ -256,7 +93,7 @@ def _validate_v2_task_and_capabilities(
     stored_digest = compute_run_definition_digest(checkpoint.run_definition)
     if checkpoint.run_definition_digest != stored_digest:
         raise _definition_mismatch("distributed run definition digest does not match the embedded definition")
-    definition = run_definition_comparison_copy(checkpoint.run_definition)
+    definition = checkpoint.run_definition
     if checkpoint.checkpoint_key != config.key:
         raise _definition_mismatch("distributed checkpoint key does not match the durable checkpoint")
     if checkpoint.task_id != envelope.task.task_id:
@@ -422,12 +259,12 @@ def _validate_v2_task_and_capabilities(
             raise _definition_mismatch(f"distributed checkpoint extension {namespace!r} does not match the run definition")
 
 
-def _resolve_v2_checkpoint_capabilities(
+def _resolve_checkpoint_capabilities(
     envelope: DistributedRunEnvelope,
     registry: DistributedCapabilityRegistry,
 ) -> tuple[Any, Any | None, list[Any], Any | None, Any]:
     capabilities = envelope.recipe.capabilities
-    registry.validate(capabilities, require_checkpoint_v2=True)
+    registry.validate(capabilities)
     assert capabilities.checkpoint_store_ref is not None
     store = registry.resolve("checkpoint_store", capabilities.checkpoint_store_ref)
     config = envelope.checkpoint_config
@@ -470,10 +307,10 @@ def _resolve_v2_checkpoint_capabilities(
     return store, event_store, extensions, reconciliation_provider, event_sink
 
 
-def _effective_v2_claim_mode(
+def _effective_claim_mode(
     *,
     envelope: DistributedRunEnvelope,
-    checkpoint: CheckpointV2,
+    checkpoint: Checkpoint,
     transport_redelivered: bool,
     transport_retry_count: int,
     now_ms: int,
@@ -502,13 +339,15 @@ def _rebuild_runtime(
 
     if capabilities.llm_client_ref is not None:
         llm = capability_registry.resolve("llm_client", capabilities.llm_client_ref)
+        model_provider = None
     else:
-        llm, _resolved = build_openai_llm_from_local_settings(
-            recipe.settings_file,
-            backend=recipe.backend,
-            model=recipe.model,
-            timeout_seconds=recipe.timeout_seconds,
+        model_provider = (
+            VvLlmModelProvider.from_settings_file(recipe.settings_file)
+            .with_default_backend(recipe.backend)
+            .with_timeout_seconds(recipe.timeout_seconds)
         )
+        resolved = model_provider.resolve(ModelRef.named(recipe.model))
+        llm = model_provider.client(resolved)
     tool_registry = capability_registry.resolve_toolset(capabilities.toolset_ref)
     distributed_tool_policy = capabilities.tool_policy
     if task is not None:
@@ -534,9 +373,14 @@ def _rebuild_runtime(
     if host_cost_meter is not None and not callable(getattr(host_cost_meter, "read", None)):
         raise TypeError("distributed host_cost_meter capability must provide read()")
 
-    def log_handler(event: str, payload: dict[str, Any]) -> None:
+    def event_handler(event: RunEvent) -> None:
+        if event_sink is not None:
+            event_sink(event)
         for observer in observers:
-            observer(event, dict(payload))
+            try:
+                observer(event)
+            except BaseException:
+                logging.getLogger(__name__).exception("Distributed run event observer failed")
 
     workspace_backend = (
         capability_registry.resolve("workspace_backend", capabilities.workspace_backend_ref)
@@ -545,12 +389,11 @@ def _rebuild_runtime(
     )
     runtime = AgentRuntime(
         llm_client=llm,
+        model_provider=model_provider,
         tool_registry=tool_registry,
         default_workspace=workspace,
-        log_handler=log_handler if observers else None,
+        event_handler=event_handler if event_sink is not None or observers else None,
         log_preview_chars=recipe.log_preview_chars,
-        settings_file=recipe.settings_file,
-        default_backend=recipe.backend,
         hooks=hooks,
         after_cycle_hooks=after_cycle_hooks,
         workspace_backend=workspace_backend,
@@ -561,9 +404,7 @@ def _rebuild_runtime(
         "_vv_agent_disallowed_tools": list(tool_policy.disallowed_tools),
         "_vv_agent_tool_policy_approval": tool_policy.approval,
     }
-    denied_side_effects = [
-        getattr(value, "value", value) for value in getattr(tool_policy, "denied_side_effects", [])
-    ]
+    denied_side_effects = [getattr(value, "value", value) for value in getattr(tool_policy, "denied_side_effects", [])]
     if denied_side_effects:
         metadata["_vv_agent_denied_side_effects"] = denied_side_effects
     denied_capability_tags = list(getattr(tool_policy, "denied_capability_tags", []))
@@ -576,8 +417,6 @@ def _rebuild_runtime(
         metadata["_vv_agent_denied_cost_dimensions"] = denied_cost_dimensions
     if tool_policy.can_use_tool is not None:
         metadata["_vv_agent_tool_policy_can_use_tool"] = tool_policy.can_use_tool
-    if event_sink is not None:
-        metadata["_vv_agent_emit_event"] = event_sink
     if capabilities.approval_provider_ref is not None:
         approval_broker_ref = capabilities.approval_broker_ref
         assert approval_broker_ref is not None
@@ -608,6 +447,7 @@ def _rebuild_runtime(
     )
     context = ExecutionContext(
         cancellation_token=cancellation_token,
+        event_handler=event_handler if event_sink is not None or observers else None,
         metadata=metadata,
     )
     sub_task_manager = (
@@ -621,48 +461,45 @@ def _rebuild_runtime(
     return runtime, context, sub_task_manager, tool_policy, host_cost_meter
 
 
-def _run_single_cycle_v2(
+def _run_single_cycle(
     *,
     envelope: DistributedRunEnvelope,
     capability_registry: DistributedCapabilityRegistry,
     transport_redelivered: bool,
     transport_retry_count: int,
-) -> dict[str, Any]:
-    store, event_store, extensions, reconciliation_provider, event_sink = _resolve_v2_checkpoint_capabilities(
+) -> DistributedWorkerResponse:
+    store, event_store, extensions, reconciliation_provider, event_sink = _resolve_checkpoint_capabilities(
         envelope, capability_registry
     )
     config = envelope.checkpoint_config
     assert config is not None
-    existing = store.load_checkpoint_v2(config.key)
+    existing = store.load_checkpoint(config.key)
     if existing is None:
         raise CheckpointError(
             f"checkpoint key {config.key!r} does not exist",
             code="checkpoint_not_found",
         )
-    _validate_v2_task_and_capabilities(
+    _validate_task_and_capabilities(
         envelope=envelope,
         checkpoint=existing,
         registry=capability_registry,
         extensions=extensions,
     )
     if existing.terminal_result is not None:
-        return {
-            "finished": True,
-            "result": existing.terminal_result.to_dict(),
-            "checkpoint_revision": existing.revision,
-            "terminal_replay": True,
-        }
+        return DistributedWorkerResponse.terminal_replay(
+            checkpoint_revision=existing.revision,
+            result=existing.terminal_result,
+        )
     if existing.cycle_index >= envelope.cycle_index:
         if existing.cycle_index != envelope.cycle_index or existing.claim_token is not None:
             raise CheckpointError(
                 "distributed envelope cycle does not match the durable checkpoint",
                 code="checkpoint_cycle_conflict",
             )
-        return {
-            "finished": False,
-            "checkpoint_revision": existing.revision,
-            "committed_cycle": existing.cycle_index,
-        }
+        return DistributedWorkerResponse.committed(
+            checkpoint_revision=existing.revision,
+            committed_cycle=existing.cycle_index,
+        )
     expected_cycle = existing.claimed_cycle or (existing.cycle_index + 1)
     if envelope.cycle_index != expected_cycle:
         raise CheckpointError(
@@ -672,7 +509,7 @@ def _run_single_cycle_v2(
 
     now_ms = time.time_ns() // 1_000_000
     envelope.ensure_not_expired(now_ms=now_ms)
-    claim_mode = _effective_v2_claim_mode(
+    claim_mode = _effective_claim_mode(
         envelope=envelope,
         checkpoint=existing,
         transport_redelivered=transport_redelivered,
@@ -693,7 +530,7 @@ def _run_single_cycle_v2(
         task.metadata["_vv_agent_disallowed_tools"] = list(tool_policy.disallowed_tools)
     else:
         task.metadata.pop("_vv_agent_disallowed_tools", None)
-    ctx.state_store = store
+    ctx.checkpoint_store = store
     ctx.metadata["_vv_agent_run_id"] = envelope.root_run_id
     ctx.metadata["_vv_agent_trace_id"] = envelope.trace_id
     ctx.metadata["trace_id"] = envelope.trace_id
@@ -725,13 +562,11 @@ def _run_single_cycle_v2(
     replayed = controller.admit()
     if replayed is not None:
         controller.close()
-        retained = store.load_checkpoint_v2(config.key)
-        return {
-            "finished": True,
-            "result": replayed.to_dict(),
-            "checkpoint_revision": retained.revision if retained is not None else existing.revision,
-            "terminal_replay": True,
-        }
+        retained = store.load_checkpoint(config.key)
+        return DistributedWorkerResponse.terminal_replay(
+            checkpoint_revision=(retained.revision if retained is not None else existing.revision),
+            result=replayed,
+        )
     controller.set_next_claim_mode(claim_mode)
 
     budget_controller: _RunBudgetController | None = None
@@ -744,7 +579,6 @@ def _run_single_cycle_v2(
             ),
             task=task,
             ctx=ctx,
-            emit_log=runtime._emit_log,
         )
     ctx.metadata["_vv_agent_checkpoint_controller"] = controller
     ctx.metadata["_vv_agent_checkpoint_budget_snapshot"] = (
@@ -854,20 +688,19 @@ def _run_single_cycle_v2(
                 cycles=cycles,
                 shared_state=shared_state,
             )
-            committed = store.load_checkpoint_v2(config.key)
+            committed = store.load_checkpoint(config.key)
             if committed is None:
                 raise CheckpointError(
                     "checkpoint disappeared after distributed cycle commit",
                     code="checkpoint_not_found",
                 )
-            return {
-                "finished": False,
-                "checkpoint_revision": committed.revision,
-                "committed_cycle": committed.cycle_index,
-            }
+            return DistributedWorkerResponse.committed(
+                checkpoint_revision=committed.revision,
+                committed_cycle=committed.cycle_index,
+            )
 
         controller.assert_heartbeat_healthy()
-        current = store.load_checkpoint_v2(config.key)
+        current = store.load_checkpoint(config.key)
         if current is None:
             raise CheckpointError(
                 "checkpoint disappeared before returning the terminal candidate",
@@ -884,261 +717,34 @@ def _run_single_cycle_v2(
                 "worker terminal candidate must not finalize the checkpoint",
                 code="checkpoint_store_conflict",
             )
-        return {
-            "finished": True,
-            "result": result.to_dict(),
-            "checkpoint_revision": current.revision,
-            "terminal_candidate": True,
-        }
+        return DistributedWorkerResponse.terminal_candidate(
+            checkpoint_revision=current.revision,
+            result=result,
+        )
     finally:
         controller.close()
 
 
 def run_single_cycle(
     *,
-    envelope_dict: dict[str, Any] | None = None,
+    envelope_dict: dict[str, Any],
     capability_registry: DistributedCapabilityRegistry | None = None,
-    task_dict: dict[str, Any] | None = None,
-    recipe_dict: dict[str, Any] | None = None,
-    cycle_index: int | None = None,
     transport_redelivered: bool = False,
     transport_retry_count: int = 0,
 ) -> dict[str, Any]:
     """Execute a single agent cycle on a Celery worker.
 
-    Returns a dict with:
-    - ``finished``: bool — whether the agent reached a terminal state
-    - ``result``: dict — serialised AgentResult (only when finished)
+    Returns one closed ``vv-agent.distributed-worker-response.v1`` payload.
     """
-    if envelope_dict is None:
-        if task_dict is None or recipe_dict is None or cycle_index is None:
-            raise TypeError("run_single_cycle requires envelope_dict")
-        task = AgentTask.from_dict(task_dict)
-        recipe = RuntimeRecipe.from_dict(recipe_dict)
-        envelope = DistributedRunEnvelope.for_cycle(
-            task=task,
-            recipe=recipe,
-            cycle_index=cycle_index,
-            cycle_name=DEFAULT_CYCLE_NAME,
-        )
-    else:
-        envelope = DistributedRunEnvelope.from_dict(envelope_dict)
-        task = envelope.task
-        recipe = envelope.recipe
-        cycle_index = envelope.cycle_index
+    envelope = DistributedRunEnvelope.from_dict(envelope_dict)
 
     if not isinstance(transport_redelivered, bool):
         raise TypeError("transport_redelivered must be a boolean")
     if isinstance(transport_retry_count, bool) or not isinstance(transport_retry_count, int) or transport_retry_count < 0:
         raise TypeError("transport_retry_count must be a non-negative integer")
-    if envelope.schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION_V2:
-        return _run_single_cycle_v2(
-            envelope=envelope,
-            capability_registry=capability_registry or DistributedCapabilityRegistry(),
-            transport_redelivered=transport_redelivered,
-            transport_retry_count=transport_retry_count,
-        )
-
-    # Load checkpoint saved by the scheduler (or previous cycle).
-    store = _build_state_store(recipe)
-    existing = store.load_checkpoint(task.task_id)
-    if existing is not None and existing.terminal_result is not None:
-        return {
-            "finished": True,
-            "result": existing.terminal_result.to_dict(),
-            "checkpoint_revision": existing.revision,
-        }
-    envelope.ensure_not_expired()
-    registry = capability_registry or DistributedCapabilityRegistry()
-    runtime, ctx, sub_task_manager, tool_policy, host_cost_meter = _rebuild_runtime(
-        recipe,
-        registry,
-        task=task,
-    )
-    heartbeat_store = _build_state_store(recipe)
-    if tool_policy.allowed_tools is None:
-        task.metadata.pop("_vv_agent_allowed_tools", None)
-    else:
-        task.metadata["_vv_agent_allowed_tools"] = list(tool_policy.allowed_tools)
-    if tool_policy.disallowed_tools:
-        task.metadata["_vv_agent_disallowed_tools"] = list(tool_policy.disallowed_tools)
-    else:
-        task.metadata.pop("_vv_agent_disallowed_tools", None)
-    ctx.state_store = store
-    ctx.metadata["_vv_agent_run_id"] = envelope.run_id
-    run_context = ctx.metadata.get("_vv_agent_run_context")
-    if isinstance(run_context, RunContext):
-        run_context.run_id = envelope.run_id
-
-    now_ms = time.time_ns() // 1_000_000
-    envelope.ensure_not_expired(now_ms=now_ms)
-    lease_expires_at_ms = _lease_expiry_at(
-        now_ms=now_ms,
-        lease_duration_ms=envelope.lease_duration_ms,
-        deadline_unix_ms=envelope.deadline_unix_ms,
-    )
-    claim_token = uuid.uuid4().hex
-    try:
-        checkpoint = store.claim_checkpoint(
-            task.task_id,
-            cycle_index,
-            claim_token=claim_token,
-            lease_expires_at_ms=lease_expires_at_ms,
-            now_ms=now_ms,
-        )
-    except CheckpointConflictError as exc:
-        raise CheckpointConflictError(f"retryable distributed delivery conflict: {exc}") from exc
-    if checkpoint is None:
-        return {
-            "finished": True,
-            "result": AgentResult(
-                status=AgentStatus.FAILED,
-                completion_reason=CompletionReason.FAILED,
-                messages=[],
-                cycles=[],
-                error=f"No checkpoint found for task {task.task_id}",
-                shared_state={},
-            ).to_dict(),
-        }
-
-    budget_controller: _RunBudgetController | None = None
-    if envelope.budget_limits is not None and envelope.budget_limits.has_limits:
-        budget_controller = _RunBudgetController(
-            evaluator=BudgetEvaluator(
-                envelope.budget_limits,
-                host_cost_meter=host_cost_meter,
-                initial_usage=checkpoint.budget_usage,
-            ),
-            task=task,
-            ctx=ctx,
-            emit_log=runtime._emit_log,
-        )
-
-    # Build the cycle executor closure on the worker side.
-    workspace_path = Path(recipe.workspace).resolve()
-    memory_manager = runtime._build_memory_manager(
-        task=task,
-        workspace_path=workspace_path,
-    )
-    cycle_executor = runtime._build_cycle_executor(
-        task=task,
-        workspace_path=workspace_path,
-        workspace_backend=runtime._workspace_backend or LocalWorkspaceBackend(workspace_path),
-        memory_manager=memory_manager,
-        before_cycle_messages=None,
-        interruption_messages=None,
-        sub_task_manager=sub_task_manager,
-        budget_controller=budget_controller,
-    )
-
-    messages = checkpoint.messages
-    cycles = checkpoint.cycles
-    shared_state = checkpoint.shared_state
-
-    # Execute exactly one cycle.
-    heartbeat = _LeaseHeartbeat(
-        store=heartbeat_store,
+    return _run_single_cycle(
         envelope=envelope,
-        claim_token=claim_token,
-        expected_revision=checkpoint.revision,
-    )
-    try:
-        heartbeat.start()
-        result: AgentResult | None = None
-        if budget_controller is not None and checkpoint.cycle_index == 0:
-            cancelled = bool(ctx.cancellation_token is not None and ctx.cancellation_token.cancelled)
-            if cancelled:
-                result = AgentResult(
-                    status=AgentStatus.FAILED,
-                    completion_reason=CompletionReason.CANCELLED,
-                    messages=messages,
-                    cycles=cycles,
-                    error=ctx.cancellation_token.reason or "Operation was cancelled",
-                    shared_state=shared_state,
-                    budget_usage=budget_controller.snapshot,
-                )
-            else:
-                exhaustion = budget_controller.run_start()
-                if exhaustion is not None:
-                    result = runtime._budget_failure_result(
-                        messages=messages,
-                        cycles=cycles,
-                        shared_state=shared_state,
-                        controller=budget_controller,
-                        exhaustion=exhaustion,
-                    )
-        if result is None:
-            result = cycle_executor(
-                cycle_index,
-                messages,
-                cycles,
-                shared_state,
-                ctx,
-            )
-        if budget_controller is not None and result is not None and budget_controller.exhaustion is None:
-            cancelled = bool(
-                result.status == AgentStatus.FAILED and ctx.cancellation_token is not None and ctx.cancellation_token.cancelled
-            )
-            operation_failed = bool(
-                result.status == AgentStatus.FAILED
-                and result.completion_reason not in {CompletionReason.BUDGET_EXHAUSTED, CompletionReason.CANCELLED}
-            )
-            exhaustion = budget_controller.terminal(
-                suppress_exhaustion=cancelled or operation_failed,
-            )
-            if exhaustion is not None and not cancelled and not operation_failed:
-                result = runtime._budget_failure_result(
-                    messages=messages,
-                    cycles=cycles,
-                    shared_state=shared_state,
-                    controller=budget_controller,
-                    exhaustion=exhaustion,
-                )
-        if budget_controller is not None and result is not None:
-            result.budget_usage = budget_controller.snapshot
-            result.budget_exhaustion = budget_controller.exhaustion
-        if result is not None:
-            checkpoint.cycle_index = cycle_index
-            checkpoint.status = result.status
-            checkpoint.messages = result.messages
-            checkpoint.cycles = result.cycles
-            checkpoint.shared_state = result.shared_state
-            checkpoint.terminal_result = result
-            checkpoint.budget_usage = result.budget_usage
-            expected_revision = checkpoint.revision
-            heartbeat.begin_commit()
-            if not store.commit_checkpoint(
-                checkpoint,
-                claim_token=claim_token,
-                expected_revision=expected_revision,
-            ):
-                raise CheckpointConflictError(
-                    f"checkpoint changed while terminal cycle {cycle_index} was running for task {task.task_id}"
-                )
-            heartbeat.mark_commit_succeeded()
-            outcome = {
-                "finished": True,
-                "result": result.to_dict(),
-                "checkpoint_revision": expected_revision + 1,
-            }
-        else:
-            checkpoint.cycle_index = cycle_index
-            checkpoint.status = AgentStatus.RUNNING
-            checkpoint.messages = messages
-            checkpoint.cycles = cycles
-            checkpoint.shared_state = shared_state
-            checkpoint.budget_usage = budget_controller.snapshot if budget_controller is not None else None
-            expected_revision = checkpoint.revision
-            heartbeat.begin_commit()
-            if not store.commit_checkpoint(
-                checkpoint,
-                claim_token=claim_token,
-                expected_revision=expected_revision,
-            ):
-                raise CheckpointConflictError(f"checkpoint changed while cycle {cycle_index} was running for task {task.task_id}")
-            heartbeat.mark_commit_succeeded()
-            outcome = {"finished": False}
-    finally:
-        heartbeat.stop()
-    heartbeat.raise_if_failed()
-    return outcome
+        capability_registry=capability_registry or DistributedCapabilityRegistry(),
+        transport_redelivered=transport_redelivered,
+        transport_retry_count=transport_retry_count,
+    ).to_dict()

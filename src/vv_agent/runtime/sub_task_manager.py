@@ -21,8 +21,6 @@ SessionRegistrar = Callable[[str, Any], None]
 SessionUnregistrar = Callable[[str, Any | None], None]
 SubTaskRunnerCallable = Callable[[], SubTaskOutcome]
 SessionEventForwarder = Callable[[str, dict[str, Any]], None]
-
-_TURN_LOG_HANDLER_METADATA_KEY = "_vv_agent_runtime_log_handler"
 _TURN_EXECUTION_METADATA_ALLOWLIST = frozenset(
     {
         "_vv_agent_approval_provider",
@@ -40,10 +38,8 @@ _TURN_EXECUTION_METADATA_ALLOWLIST = frozenset(
 @dataclass(frozen=True, slots=True)
 class _SubTaskTurnSnapshot:
     cancellation_token: Any | None = None
-    stream_callback: Callable[[dict[str, Any]], None] | None = None
-    event_sink: Callable[[Any], None] | None = None
-    parent_log_handler: SessionEventForwarder | None = None
-    state_store: Any | None = None
+    event_handler: Callable[[Any], None] | None = None
+    checkpoint_store: Any | None = None
     run_context: Any | None = None
     execution_metadata: dict[str, Any] = field(default_factory=dict)
     trace_id: str | None = None
@@ -71,15 +67,11 @@ class _SubTaskTurnSnapshot:
         if self.denied_side_effects:
             metadata["_vv_agent_denied_side_effects"] = list(self.denied_side_effects)
         if self.denied_capability_tags:
-            metadata["_vv_agent_denied_capability_tags"] = list(
-                self.denied_capability_tags
-            )
+            metadata["_vv_agent_denied_capability_tags"] = list(self.denied_capability_tags)
         if self.deny_terminal_tools:
             metadata["_vv_agent_deny_terminal_tools"] = True
         if self.denied_cost_dimensions:
-            metadata["_vv_agent_denied_cost_dimensions"] = list(
-                self.denied_cost_dimensions
-            )
+            metadata["_vv_agent_denied_cost_dimensions"] = list(self.denied_cost_dimensions)
         return metadata
 
 
@@ -107,8 +99,6 @@ class _ContinuationAdmissionState:
     active: bool
     execution_token: object | None
     updated_at: str | None
-    use_turn_event_handler: bool
-    turn_event_handler: SessionEventForwarder | None
 
 
 def _now_iso() -> str:
@@ -163,8 +153,6 @@ class ManagedSubTask:
     manager_listener_generation: int | None = None
     forward_listener_generation: int | None = None
     initial_event_forwarder: SessionEventForwarder | None = None
-    turn_event_handler: SessionEventForwarder | None = None
-    use_turn_event_handler: bool = False
     active: bool = False
     execution_token: object | None = None
     generation_token: object = field(default_factory=object, repr=False)
@@ -342,16 +330,12 @@ class SubTaskManager:
                             payload=payload,
                         )
 
-                session.subscribe(
-                    manager_listener
-                )
+                session.subscribe(manager_listener)
                 record.manager_listener_attached = True
                 record.manager_listener_generation = session_generation
 
             if event_forwarder is not None:
                 record.initial_event_forwarder = event_forwarder
-                record.turn_event_handler = None
-                record.use_turn_event_handler = False
 
             if record.forward_listener_generation != session_generation:
                 manager_ref = weakref.ref(self)
@@ -374,9 +358,7 @@ class SubTaskManager:
                             payload=payload,
                         )
 
-                session.subscribe(
-                    forward_listener
-                )
+                session.subscribe(forward_listener)
                 record.forward_listener_attached = True
                 record.forward_listener_generation = session_generation
 
@@ -604,9 +586,7 @@ class SubTaskManager:
             latest_cycle["cycle_index"] = outcome.cycles
         record.latest_cycle = latest_cycle
 
-        summary_text = (
-            _preview_text(outcome.final_answer) or _preview_text(outcome.wait_reason) or _preview_text(outcome.error)
-        )
+        summary_text = _preview_text(outcome.final_answer) or _preview_text(outcome.wait_reason) or _preview_text(outcome.error)
         if summary_text:
             record.recent_activity = summary_text
 
@@ -630,8 +610,6 @@ class SubTaskManager:
             active=record.active,
             execution_token=record.execution_token,
             updated_at=record.updated_at,
-            use_turn_event_handler=record.use_turn_event_handler,
-            turn_event_handler=record.turn_event_handler,
         )
         record.task_title = prompt
         record.outcome = None
@@ -642,13 +620,9 @@ class SubTaskManager:
             record.parent_run_id = snapshot.parent_run_id
             record.parent_tool_call_id = snapshot.parent_tool_call_id
             record.initial_event_forwarder = None
-            record.turn_event_handler = snapshot.parent_log_handler
-            record.use_turn_event_handler = True
         else:
             record.parent_run_id = record.initial_parent_run_id
             record.parent_tool_call_id = record.initial_parent_tool_call_id
-            record.turn_event_handler = None
-            record.use_turn_event_handler = True
         record.updated_at = _now_iso()
         return previous
 
@@ -667,14 +641,10 @@ class SubTaskManager:
         record.active = previous.active
         record.execution_token = previous.execution_token
         record.updated_at = previous.updated_at
-        record.use_turn_event_handler = previous.use_turn_event_handler
-        record.turn_event_handler = previous.turn_event_handler
 
     @staticmethod
     def _release_event_forwarders(record: ManagedSubTask) -> None:
         record.initial_event_forwarder = None
-        record.turn_event_handler = None
-        record.use_turn_event_handler = True
 
     @classmethod
     def _rollback_failed_admission(
@@ -730,9 +700,6 @@ class SubTaskManager:
         task_metadata = getattr(context, "task_metadata", None)
         if not isinstance(task_metadata, dict):
             task_metadata = {}
-        tool_context_metadata = getattr(context, "metadata", None)
-        if not isinstance(tool_context_metadata, dict):
-            tool_context_metadata = {}
 
         def normalized_string(*values: Any) -> str | None:
             for value in values:
@@ -766,19 +733,13 @@ class SubTaskManager:
             "_vv_agent_denied_cost_dimensions",
             task_metadata.get("_vv_agent_denied_cost_dimensions"),
         )
-        event_sink = runtime_metadata.get("_vv_agent_emit_event")
-        parent_log_handler = tool_context_metadata.get(_TURN_LOG_HANDLER_METADATA_KEY)
         return _SubTaskTurnSnapshot(
             cancellation_token=getattr(execution_context, "cancellation_token", None),
-            stream_callback=getattr(execution_context, "stream_callback", None),
-            event_sink=event_sink if callable(event_sink) else None,
-            parent_log_handler=parent_log_handler if callable(parent_log_handler) else None,
-            state_store=getattr(execution_context, "state_store", None),
+            event_handler=getattr(execution_context, "event_handler", None),
+            checkpoint_store=getattr(execution_context, "checkpoint_store", None),
             run_context=run_context,
             execution_metadata={
-                key: runtime_metadata[key]
-                for key in _TURN_EXECUTION_METADATA_ALLOWLIST
-                if key in runtime_metadata
+                key: runtime_metadata[key] for key in _TURN_EXECUTION_METADATA_ALLOWLIST if key in runtime_metadata
             },
             trace_id=normalized_string(
                 runtime_metadata.get("_vv_agent_trace_id"),
@@ -793,15 +754,9 @@ class SubTaskManager:
                 runtime_metadata.get("_vv_agent_run_id"),
             ),
             parent_tool_call_id=normalized_string(getattr(context, "tool_call_id", None)),
-            allowed_tools=(
-                tuple(item for item in allowed if isinstance(item, str))
-                if isinstance(allowed, list)
-                else None
-            ),
+            allowed_tools=(tuple(item for item in allowed if isinstance(item, str)) if isinstance(allowed, list) else None),
             disallowed_tools=(
-                tuple(item for item in disallowed if isinstance(item, str))
-                if isinstance(disallowed, list)
-                else None
+                tuple(item for item in disallowed if isinstance(item, str)) if isinstance(disallowed, list) else None
             ),
             can_use_tool=can_use_tool if callable(can_use_tool) else None,
             approval=approval if approval in {"always", "never", "on_request"} else None,
@@ -815,9 +770,7 @@ class SubTaskManager:
                 if isinstance(denied_capability_tags, list)
                 else ()
             ),
-            deny_terminal_tools=(
-                deny_terminal_tools if isinstance(deny_terminal_tools, bool) else False
-            ),
+            deny_terminal_tools=(deny_terminal_tools if isinstance(deny_terminal_tools, bool) else False),
             denied_cost_dimensions=(
                 tuple(item for item in denied_cost_dimensions if isinstance(item, str))
                 if isinstance(denied_cost_dimensions, list)
@@ -842,25 +795,11 @@ class SubTaskManager:
                 or record.session_generation != session_generation
             ):
                 return
-            if record.use_turn_event_handler:
-                handler = record.turn_event_handler
-                if handler is None:
-                    return
-                forwarded_event = f"sub_agent_{event}"
-                forwarded_payload = dict(payload)
-                forwarded_payload.setdefault("task_id", record.task_id)
-                forwarded_payload.setdefault("session_id", record.session_id)
-                forwarded_payload.setdefault("sub_agent_name", record.agent_name)
-                if record.parent_run_id:
-                    forwarded_payload.setdefault("parent_run_id", record.parent_run_id)
-                if record.parent_tool_call_id:
-                    forwarded_payload.setdefault("parent_tool_call_id", record.parent_tool_call_id)
-            else:
-                handler = record.initial_event_forwarder
-                if handler is None:
-                    return
-                forwarded_event = event
-                forwarded_payload = dict(payload)
+            handler = record.initial_event_forwarder
+            if handler is None:
+                return
+            forwarded_event = event
+            forwarded_payload = dict(payload)
 
         try:
             handler(forwarded_event, forwarded_payload)

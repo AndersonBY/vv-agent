@@ -17,7 +17,9 @@ from vv_agent.app_server.client import run_debug_message
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.app_server.protocol import ModelSummary
 from vv_agent.app_server.schema import generate_json_schema, generate_typescript
-from vv_agent.config import ConfigError, ResolvedModelConfig, build_openai_llm_from_local_settings
+from vv_agent.config import ConfigError, ResolvedModelConfig
+from vv_agent.events import DiagnosticEvent, RunEvent
+from vv_agent.model import ModelRef, VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
@@ -62,86 +64,19 @@ class _TaskArgumentParser(argparse.ArgumentParser):
         raise _TaskCliUsageError(f"{message}\n\n{self.format_help().rstrip()}")
 
 
-def _cli_payload_text(payload: Mapping[str, Any], key: str) -> str:
-    if key not in payload:
-        return ""
-    value = payload[key]
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-
-def _build_cli_log_handler(*, enabled: bool):
+def _build_cli_event_handler(*, enabled: bool):
     if not enabled:
         return None
 
-    def handler(event: str, payload: dict[str, Any]) -> None:
+    def handler(event: RunEvent) -> None:
         now = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-        if event == "run_started":
-            print(
-                f"[{now}] [run] start task={_cli_payload_text(payload, 'task_id')} "
-                f"model={_cli_payload_text(payload, 'model')} "
-                f"max_cycles={_cli_payload_text(payload, 'max_cycles')}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return
-        if event == "cycle_started":
-            print(
-                f"[{now}] [cycle {_cli_payload_text(payload, 'cycle')}] start "
-                f"messages={_cli_payload_text(payload, 'message_count')}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return
-        if event == "cycle_llm_response":
-            tool_names = payload.get("tool_call_names", payload.get("tool_calls"))
-            tool_names_text = "" if tool_names is None else _cli_payload_text({"tool_call_names": tool_names}, "tool_call_names")
-            print(
-                f"[{now}] [cycle {_cli_payload_text(payload, 'cycle')}] llm "
-                f"tool_calls={tool_names_text} "
-                f"assistant={_cli_payload_text(payload, 'assistant_preview')}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return
-        if event == "tool_result":
-            print(
-                f"[{now}] [cycle {_cli_payload_text(payload, 'cycle')}] "
-                f"tool={_cli_payload_text(payload, 'tool_name')} "
-                f"status={_cli_payload_text(payload, 'status')} "
-                f"directive={_cli_payload_text(payload, 'directive')} "
-                f"preview={_cli_payload_text(payload, 'content_preview')}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return
-        if event == "run_completed":
-            print(
-                f"[{now}] [run] completed: {_cli_payload_text(payload, 'final_answer')}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return
-        if event == "run_wait_user":
-            print(
-                f"[{now}] [run] wait_user: {_cli_payload_text(payload, 'wait_reason')}",
-                file=sys.stderr,
-                flush=True,
-            )
-            return
-        if event == "run_max_cycles":
-            print(f"[{now}] [run] max_cycles reached", file=sys.stderr, flush=True)
-            return
-        if event == "cycle_failed":
-            print(
-                f"[{now}] [cycle {_cli_payload_text(payload, 'cycle')}] failed: {_cli_payload_text(payload, 'error')}",
-                file=sys.stderr,
-                flush=True,
-            )
+        payload = event.to_dict()
+        if isinstance(event, DiagnosticEvent):
+            details_json = json.dumps(event.details, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            print(f"[{now}] [diagnostic:{event.level}] {event.code} {details_json}", file=sys.stderr, flush=True)
             return
         payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        print(f"[{now}] [{event}] {payload_json}", file=sys.stderr, flush=True)
+        print(f"[{now}] [{event.type}] {payload_json}", file=sys.stderr, flush=True)
 
     return handler
 
@@ -166,10 +101,7 @@ def _build_app_server_parser() -> _AppServerArgumentParser:
     parser = _AppServerArgumentParser(
         prog="vv-agent app-server",
         description="Run the vv-agent App Server. Use --listen stdio for JSONL over stdin/stdout.",
-        epilog=(
-            "Schema commands: generate-json-schema (alias: schema) and generate-ts. "
-            "Model settings are resolved before the server starts."
-        ),
+        epilog=("Schema commands: schema and generate-ts. Model settings are resolved before the server starts."),
     )
     parser.add_argument(
         "--listen",
@@ -222,7 +154,7 @@ def _parse_app_server_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _run_app_server_cli(argv: list[str]) -> None:
-    if argv and argv[0] in {"generate-json-schema", "schema", "generate-ts"}:
+    if argv and argv[0] in {"schema", "generate-ts"}:
         parser = argparse.ArgumentParser(prog=f"vv-agent app-server {argv[0]}")
         parser.add_argument("--out", required=True, help="Directory for generated protocol files")
         args = parser.parse_args(argv[1:])
@@ -257,32 +189,24 @@ def _build_app_server_host(
     max_cycles: int,
     timeout_seconds: float = _APP_SERVER_DEFAULT_TIMEOUT_SECONDS,
 ) -> DefaultAppServerHost:
-    llm, resolved = build_openai_llm_from_local_settings(
-        settings_file,
-        backend=backend,
-        model=model,
-        timeout_seconds=timeout_seconds,
+    provider = (
+        VvLlmModelProvider.from_settings_file(settings_file).with_default_backend(backend).with_timeout_seconds(timeout_seconds)
     )
-
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, resolved
+    model_ref = ModelRef.named(model)
+    resolved = provider.resolve(model_ref)
 
     return DefaultAppServerHost(
         agent=Agent(
             name="assistant",
             instructions="You are the vv-agent App Server assistant. Complete user requests with available tools.",
-            model=resolved.model_id,
+            model=model_ref,
         ),
         run_config=RunConfig(
-            model=resolved.model_id,
-            model_provider=model_provider,
+            model=model_ref,
+            model_provider=provider,
             workspace=workspace,
             max_cycles=max_cycles,
             approval_timeout_seconds=_APP_SERVER_APPROVAL_TIMEOUT_SECONDS,
-            settings_file=settings_file,
-            default_backend=backend,
-            timeout_seconds=timeout_seconds,
         ),
         models=[
             ModelSummary(
@@ -343,11 +267,7 @@ def _non_blank_environment_value(environ: Mapping[str, str], name: str) -> str |
 
 
 def _default_task_settings_file(environ: Mapping[str, str]) -> str:
-    return (
-        _non_blank_environment_value(environ, "VV_AGENT_LOCAL_SETTINGS")
-        or _non_blank_environment_value(environ, "V_AGENT_LOCAL_SETTINGS")
-        or "local_settings.py"
-    )
+    return _non_blank_environment_value(environ, "VV_AGENT_LOCAL_SETTINGS") or "local_settings.py"
 
 
 def _parse_u32(value: str) -> int:
@@ -394,11 +314,11 @@ def _build_task_parser(*, environ: Mapping[str, str]) -> _TaskArgumentParser:
     )
     parser.add_argument("--prompt", nargs="+", required=True, help="Task prompt")
     parser.add_argument("--backend", default="moonshot", help="Provider backend key in LLM_SETTINGS")
-    parser.add_argument("--model", default="kimi-k2.6", help="Model key in provider models")
+    parser.add_argument("--model", default="kimi-k3", help="Model key in provider models")
     parser.add_argument(
         "--settings-file",
         default=_default_task_settings_file(environ),
-        help="Path to local settings (default: VV_AGENT_LOCAL_SETTINGS, V_AGENT_LOCAL_SETTINGS, or local_settings.py)",
+        help="Path to local settings (default: VV_AGENT_LOCAL_SETTINGS or local_settings.py)",
     )
     parser.add_argument("--workspace", default="./workspace", help="Workspace directory")
     parser.add_argument("--max-cycles", type=_parse_u32, default=80, help="Max runtime cycles")
@@ -499,19 +419,17 @@ def _run_task_cli(argv: list[str]) -> int:
     try:
         args = _parse_task_args(argv)
 
-        llm, resolved = build_openai_llm_from_local_settings(
-            Path(args.settings_file),
-            backend=args.backend,
-            model=args.model,
-        )
+        provider = VvLlmModelProvider.from_settings_file(Path(args.settings_file)).with_default_backend(args.backend)
+        model_ref = ModelRef.named(args.model)
+        resolved = provider.resolve(model_ref)
+        llm = provider.client(resolved)
 
         runtime = AgentRuntime(
             llm_client=llm,
+            model_provider=provider,
             tool_registry=build_default_registry(),
             default_workspace=Path(args.workspace),
-            log_handler=_build_cli_log_handler(enabled=args.verbose),
-            settings_file=Path(args.settings_file),
-            default_backend=args.backend,
+            event_handler=_build_cli_event_handler(enabled=args.verbose),
             tool_registry_factory=build_default_registry,
         )
 

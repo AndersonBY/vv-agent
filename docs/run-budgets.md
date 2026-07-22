@@ -74,18 +74,17 @@ and elapsed counters. A parent host meter is not propagated implicitly. Share a
 host-scoped meter explicitly when parent and child work must consume one global
 ledger.
 
-Distributed workers persist `budget_usage` in the existing checkpoint and add
-only each active monotonic worker segment. Queue time is excluded. This is an
-additive checkpoint-v1 field and does not claim exact resume or exactly-once
-external effects.
+Distributed workers persist `budget_usage` in the current checkpoint and add
+only each active monotonic worker segment. Queue time is excluded. Checkpoint
+state does not claim exactly-once behavior for external effects.
 
 ## Verification
 
 ```bash
 uv run pytest tests/test_run_budget.py
-uv run pytest tests/test_distributed_contract.py tests/test_checkpoint_contract.py
+uv run pytest tests/test_distributed_checkpoint.py tests/test_checkpoint.py
 uv run pytest tests/test_app_server_contract_parity.py
 ```
 
 The normative cross-language behavior is pinned by `contract.lock.json` and
-the vendored `run_budget_v1.json` and `budget_events_v1.jsonl` fixtures.
+the vendored `run_budget.json` and `budget_events.jsonl` fixtures.

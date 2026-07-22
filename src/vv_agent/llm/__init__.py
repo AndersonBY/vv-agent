@@ -1,6 +1,6 @@
 from vv_agent.llm.base import LLMClient, LlmError, LlmRequest, LlmRequestError, ScriptExhaustedError
 from vv_agent.llm.scripted import ScriptedLLM
-from vv_agent.llm.vv_llm_client import EndpointTarget, VVLlmClient, VvLlmClient
+from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 
 __all__ = [
     "EndpointTarget",
@@ -10,6 +10,5 @@ __all__ = [
     "LlmRequestError",
     "ScriptExhaustedError",
     "ScriptedLLM",
-    "VVLlmClient",
     "VvLlmClient",
 ]

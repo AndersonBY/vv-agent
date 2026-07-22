@@ -18,7 +18,7 @@ def list_documents() -> list[str]:
 summarizer = Agent(
     name="summarizer",
     instructions="Summarize the requested document id in one sentence and finish with task_finish.",
-    model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+    model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
 )
 
 
@@ -26,16 +26,16 @@ def main() -> None:
     coordinator = Agent(
         name="batch-coordinator",
         instructions="Use list_documents, call summarize_doc for each item, then combine the results.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[
             list_documents,
             summarizer.as_tool(name="summarize_doc", description="Summarize one document id."),
         ],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         max_cycles=10,
     )
     result = Runner.run_sync(coordinator, "Summarize all available documents.", run_config=config)

@@ -13,7 +13,7 @@ from typing import Any
 
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
-from vv_agent.types import ToolExecutionResult
+from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 FILE_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "py": (".py", ".pyw", ".pyi"),
@@ -174,7 +174,7 @@ def _smart_case_defaults_to_case_insensitive(pattern: str) -> bool:
 def _result_error(message: str) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_call_id="",
-        status="error",
+        status_code=ToolResultStatus.ERROR,
         content=message,
         metadata={"error": message},
     )
@@ -193,8 +193,7 @@ def _sensitive_candidate_paths(raw_paths: list[str], file_type: str | None) -> l
     return [
         raw_path.replace("\\", "/")
         for raw_path in raw_paths
-        if _matches_file_type(raw_path.replace("\\", "/"), file_type)
-        and is_sensitive_path(raw_path.replace("\\", "/"))
+        if _matches_file_type(raw_path.replace("\\", "/"), file_type) and is_sensitive_path(raw_path.replace("\\", "/"))
     ]
 
 
@@ -322,11 +321,7 @@ def _search_files_local_rg(
     if not base_path.exists() or not base_path.is_dir():
         return None
     base_is_workspace_root = _is_workspace_root(path)
-    ignored_root_names = (
-        _collect_ignored_root_names(base_path)
-        if base_is_workspace_root and not include_ignored
-        else []
-    )
+    ignored_root_names = _collect_ignored_root_names(base_path) if base_is_workspace_root and not include_ignored else []
 
     command = [
         rg_executable,
@@ -561,12 +556,7 @@ def _truncate_result_text(result_text: str, *, total_matches: int, files_with_ma
 
 
 def _estimate_match_row_size(row: dict[str, Any]) -> int:
-    return (
-        len(str(row.get("path") or ""))
-        + len(str(row.get("line") or ""))
-        + len(str(row.get("text") or ""))
-        + 32
-    )
+    return len(str(row.get("path") or "")) + len(str(row.get("line") or "")) + len(str(row.get("text") or "")) + 32
 
 
 def _estimate_file_path_size(path: str) -> int:
@@ -603,9 +593,7 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
 
     output_mode = str(arguments.get("output_mode", "files_with_matches"))
     if output_mode not in _OUTPUT_MODES:
-        return _result_error(
-            f"Invalid `output_mode`: {output_mode}. Supported: {', '.join(sorted(_OUTPUT_MODES))}"
-        )
+        return _result_error(f"Invalid `output_mode`: {output_mode}. Supported: {', '.join(sorted(_OUTPUT_MODES))}")
 
     try:
         head_limit = _to_int(arguments.get("head_limit", 250), name="head_limit", min_value=0)
@@ -669,8 +657,7 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
     rg_result: tuple[int, int, list[str], dict[str, int], list[dict[str, Any]]] | None = None
     local_root = getattr(backend, "root", None)
     can_exclude_sensitive_in_rg = include_sensitive or all(
-        _sensitive_path_is_covered_by_rg_excludes(candidate)
-        for candidate in sensitive_candidates
+        _sensitive_path_is_covered_by_rg_excludes(candidate) for candidate in sensitive_candidates
     )
     if isinstance(local_root, Path) and not explicit_file_target and can_exclude_sensitive_in_rg:
         rg_result = _search_files_local_rg(
@@ -899,7 +886,7 @@ def search_files(context: ToolContext, arguments: dict[str, Any]) -> ToolExecuti
 
     return ToolExecutionResult(
         tool_call_id="",
-        status="success",
+        status_code=ToolResultStatus.SUCCESS,
         content=truncated_text,
         metadata=metadata,
     )

@@ -17,10 +17,11 @@ from vv_agent import (
     function_tool,
 )
 from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.result import RunResult
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures/parity/output_validation_v1.json"
+FIXTURE_PATH = Path(__file__).parent / "fixtures/parity/output_validation.json"
 
 
 def _fixture_cases() -> dict[str, dict[str, Any]]:
@@ -39,13 +40,21 @@ def _run(
     agent = Agent(
         name="output-validation-agent",
         instructions="Return the requested value.",
-        model=model,
+        model="test-model",
         **agent_kwargs,
     )
     return Runner.run_sync(
         agent,
         "return a value",
-        run_config=RunConfig(no_tool_policy="finish", max_cycles=1),
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider(
+                backend="test",
+                default_model="test-model",
+                llm=model,
+            ),
+            no_tool_policy="finish",
+            max_cycles=1,
+        ),
     )
 
 
@@ -135,9 +144,7 @@ def test_invalid_output_without_repair_is_persisted_as_typed_failure() -> None:
     assert result.raw_result.error == "output_validation_failed: format_invalid: expected a valid marker"
     assert result.partial_output == "invalid"
     assert result.events[-1].type == "run_failed"
-    assert result.events[-1].to_dict()["error"] == (
-        "output_validation_failed: format_invalid: expected a valid marker"
-    )
+    assert result.events[-1].to_dict()["error"] == ("output_validation_failed: format_invalid: expected a valid marker")
 
 
 def test_one_tools_free_repair_is_revalidated_without_an_extra_model_call() -> None:
@@ -324,14 +331,7 @@ def test_approved_finish_validates_repaired_output_before_terminal_commit() -> N
     agent = Agent(
         name="output-validation-agent",
         instructions="Finish with the guarded tool.",
-        model=ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="draft",
-                    tool_calls=[ToolCall(id="finish", name="guarded_finish", arguments={})],
-                )
-            ]
-        ),
+        model="test-model",
         tools=[guarded_finish],
         tool_use_behavior="stop_on_first_tool",
         output_validation_enabled=True,
@@ -339,7 +339,22 @@ def test_approved_finish_validates_repaired_output_before_terminal_commit() -> N
         output_repair=repair,
     )
 
-    interrupted = Runner.run_sync(agent, "finish after approval")
+    interrupted = Runner.run_sync(
+        agent,
+        "finish after approval",
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.from_steps(
+                "test",
+                "test-model",
+                [
+                    LLMResponse(
+                        content="draft",
+                        tool_calls=[ToolCall(id="finish", name="guarded_finish", arguments={})],
+                    )
+                ],
+            )
+        ),
+    )
     assert interrupted.status is AgentStatus.WAIT_USER
     assert validator_calls == 0
     state = interrupted.into_state()

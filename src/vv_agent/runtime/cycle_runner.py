@@ -6,7 +6,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from vv_agent.events import MemoryCompactTrigger, RunEvent
+from vv_agent.events import MemoryCompactTrigger, RunEvent, _project_provider_stream_payload
 from vv_agent.llm.base import LLMClient, LlmRequest, complete_llm_request
 from vv_agent.memory import CompactionExhaustedError, MemoryManager
 from vv_agent.memory.manager import CompactionMode
@@ -41,12 +41,10 @@ class CycleRunner:
         llm_client: LLMClient,
         tool_registry: ToolRegistry,
         hook_manager: RuntimeHookManager | None = None,
-        runtime_event_handler: Callable[[RunEvent], None] | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.tool_registry = tool_registry
         self.hook_manager = hook_manager or RuntimeHookManager()
-        self.runtime_event_handler = runtime_event_handler
 
     def run_cycle(
         self,
@@ -154,18 +152,36 @@ class CycleRunner:
             if ctx is not None:
                 ctx.check_cancelled()
 
-            parent_stream_callback = ctx.stream_callback if ctx is not None else None
-            stream_callback = parent_stream_callback
-            if parent_stream_callback is not None:
+            stream_callback = None
+            if ctx is not None and ctx.event_handler is not None:
+                metadata = ctx.metadata
+                run_id = str(metadata.get("_vv_agent_run_id") or task.task_id)
+                trace_id = str(metadata.get("_vv_agent_trace_id") or metadata.get("trace_id") or run_id)
+                agent_name = str(metadata.get("_vv_agent_agent_name") or task.metadata.get("agent_name") or task.task_id)
+                session_id = self._optional_identity(metadata.get("_vv_agent_session_id"))
+                parent_run_id = self._optional_identity(metadata.get("_vv_agent_parent_run_id"))
+                event_handler = ctx.event_handler
 
                 def stream_callback(
                     payload: dict[str, Any],
-                    _parent_stream_callback: Callable[[dict[str, Any]], None] = parent_stream_callback,
                     _cycle_index: int = cycle_index,
+                    _run_id: str = run_id,
+                    _trace_id: str = trace_id,
+                    _agent_name: str = agent_name,
+                    _session_id: str | None = session_id,
+                    _parent_run_id: str | None = parent_run_id,
+                    _event_handler: Callable[[RunEvent], None] = event_handler,
                 ) -> None:
-                    enriched = dict(payload)
-                    enriched["cycle"] = _cycle_index
-                    _parent_stream_callback(enriched)
+                    event = _project_provider_stream_payload(
+                        {**payload, "cycle": _cycle_index},
+                        run_id=_run_id,
+                        trace_id=_trace_id,
+                        agent_name=_agent_name,
+                        session_id=_session_id,
+                        parent_run_id=_parent_run_id,
+                    )
+                    if event is not None:
+                        _event_handler(event)
 
             try:
                 llm_response = self._complete_llm(
@@ -358,6 +374,11 @@ class CycleRunner:
         return invoke()
 
     @staticmethod
+    def _optional_identity(value: Any) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    @staticmethod
     def _effective_model_settings(task: AgentTask, ctx: ExecutionContext | None) -> ModelSettings | None:
         metadata = getattr(ctx, "metadata", None)
         if isinstance(metadata, dict):
@@ -406,7 +427,7 @@ class CycleRunner:
     ) -> None:
         providers = self._memory_providers_from_context(ctx)
         emit_event = self._event_emitter_from_context(ctx)
-        if not providers and emit_event is None and self.runtime_event_handler is None:
+        if not providers and emit_event is None:
             return
         event = MemoryCompactStarted(
             **self._memory_event_context(ctx),
@@ -463,7 +484,6 @@ class CycleRunner:
             )
         if emit_event is not None:
             emit_event(event)
-        self._notify_runtime_event_handler(event)
 
     def _emit_memory_compact_completed(
         self,
@@ -478,7 +498,7 @@ class CycleRunner:
     ) -> None:
         providers = self._memory_providers_from_context(ctx)
         emit_event = self._event_emitter_from_context(ctx)
-        if not providers and emit_event is None and self.runtime_event_handler is None:
+        if not providers and emit_event is None:
             return
         event = MemoryCompactCompleted(
             **self._memory_event_context(ctx),
@@ -509,15 +529,6 @@ class CycleRunner:
             )
         if emit_event is not None:
             emit_event(event)
-        self._notify_runtime_event_handler(event)
-
-    def _notify_runtime_event_handler(self, event: RunEvent) -> None:
-        if self.runtime_event_handler is None:
-            return
-        try:
-            self.runtime_event_handler(event)
-        except BaseException as exc:
-            warnings.warn(f"Runtime log observer failed: {exc}", RuntimeWarning, stacklevel=2)
 
     def _call_before_memory_providers(
         self,
@@ -622,11 +633,7 @@ class CycleRunner:
 
     @staticmethod
     def _event_emitter_from_context(ctx: ExecutionContext | None) -> Callable[[RunEvent], None] | None:
-        metadata = getattr(ctx, "metadata", None)
-        if not isinstance(metadata, dict):
-            return None
-        emitter = metadata.get("_vv_agent_emit_event")
-        return emitter if callable(emitter) else None
+        return ctx.event_handler if ctx is not None else None
 
     @staticmethod
     def _memory_event_context(ctx: ExecutionContext | None) -> dict[str, Any]:

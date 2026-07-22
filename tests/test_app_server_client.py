@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig, function_tool
 from vv_agent.app_server import (
@@ -65,14 +66,10 @@ def _client(*, final_output: str = "done") -> AppServerClient:
         ],
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, resolved
-
     return AppServerClient.for_host(
         DefaultAppServerHost(
             agent=Agent(name="assistant", instructions="Finish.", model="test-model"),
-            run_config=RunConfig(model_provider=model_provider, max_cycles=2),
+            run_config=RunConfig(model_provider=FixedModelProvider(llm, resolved), max_cycles=2),
             models=[ModelSummary(id="test-model", provider="test", supports_tools=True)],
         )
     )
@@ -113,10 +110,6 @@ def _approval_client(calls: list[str]) -> AppServerClient:
         ],
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, resolved
-
     return AppServerClient.for_host(
         DefaultAppServerHost(
             agent=Agent(
@@ -125,7 +118,7 @@ def _approval_client(calls: list[str]) -> AppServerClient:
                 model="test-model",
                 tools=[dangerous_tool],
             ),
-            run_config=RunConfig(model_provider=model_provider, max_cycles=3),
+            run_config=RunConfig(model_provider=FixedModelProvider(llm, resolved), max_cycles=3),
         )
     )
 

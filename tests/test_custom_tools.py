@@ -86,7 +86,12 @@ def test_register_tool_default_parameters() -> None:
 
     registry.register_tool(name="_noop", handler=_noop, description="No-op tool.")
     schema = registry.get_schema("_noop")
-    assert schema["function"]["parameters"] == {"type": "object", "properties": {}, "required": []}
+    assert schema["function"]["parameters"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
     registry = _register_custom_workflow_tool()
     task = AgentTask(
         task_id="custom_schema",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from support import FixedModelProvider
+
 from vv_agent import Agent, ApprovalRequestedEvent, RunConfig, Runner, build_default_registry, function_tool
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -97,14 +99,10 @@ def test_allow_session_skips_same_function_tool_but_other_tool_still_requests() 
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved()
-
     handle = Runner.start(
         Agent(name="approval", instructions="Call tools.", model="m", tools=[alpha, beta]),
         "go",
-        run_config=RunConfig(model_provider=model_provider, approval_provider=provider),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved()), approval_provider=provider),
     )
     requested: list[str] = []
     for event in handle.events():
@@ -146,15 +144,11 @@ def test_allow_session_is_honored_by_executor_orchestrator_path() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved()
-
     handle = Runner.start(
         Agent(name="approval", instructions="Call executor.", model="m"),
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved()),
             approval_provider=provider,
             tool_registry_factory=registry_factory,
         ),

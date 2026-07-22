@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
-
+from vv_agent.events import AssistantDeltaEvent, RunEvent
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
@@ -54,16 +53,13 @@ class TestStreamCallback:
             max_cycles=1,
             no_tool_policy="finish",
         )
-        received: list[dict[str, Any]] = []
-        ctx = ExecutionContext(stream_callback=received.append)
+        received: list[RunEvent] = []
+        ctx = ExecutionContext(event_handler=received.append)
         result = runtime.run(task, ctx=ctx)
         assert result.status == AgentStatus.COMPLETED
-        assert received == [
-            {"event": "assistant_delta", "content_delta": "Hello", "cycle": 1},
-            {"event": "assistant_delta", "content_delta": " ", "cycle": 1},
-            {"event": "assistant_delta", "content_delta": "world", "cycle": 1},
-            {"event": "assistant_delta", "content_delta": "!", "cycle": 1},
-        ]
+        deltas = [event for event in received if isinstance(event, AssistantDeltaEvent)]
+        assert [event.delta for event in deltas] == ["Hello", " ", "world", "!"]
+        assert all(event.run_id == "stream-test" and event.cycle_index == 1 for event in deltas)
         assert result.final_answer == "Hello world!"
 
     def test_no_stream_callback_still_works(self):
@@ -99,9 +95,8 @@ class TestStreamCallback:
             max_cycles=1,
             no_tool_policy="finish",
         )
-        received: list[dict[str, Any]] = []
-        ctx = ExecutionContext(stream_callback=received.append)
+        received: list[RunEvent] = []
+        ctx = ExecutionContext(event_handler=received.append)
         result = runtime.run(task, ctx=ctx)
         assert result.status == AgentStatus.COMPLETED
-        # ScriptedLLM doesn't call stream_callback
-        assert received == []
+        assert not any(isinstance(event, AssistantDeltaEvent) for event in received)

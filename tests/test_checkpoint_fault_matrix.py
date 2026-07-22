@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from support import FactoryModelProvider
 
 from vv_agent import (
     Agent,
@@ -18,19 +19,18 @@ from vv_agent import (
     RunConfig,
     Runner,
     ToolContext,
-    ToolIdempotency,
     function_tool,
 )
 from vv_agent.checkpoint import OperationState, ResumePolicy
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
-from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent, CheckpointStoreV2
-from vv_agent.runtime.state import InMemoryStateStore
-from vv_agent.runtime.stores.sqlite import SqliteStateStore
+from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent, CheckpointStore
+from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
 
 
-class FaultStore(InMemoryStateStore):
+class FaultStore(InMemoryCheckpointStore):
     def __init__(self, fault: str) -> None:
         super().__init__()
         self.fault = fault
@@ -42,26 +42,18 @@ class FaultStore(InMemoryStateStore):
         self.tripped = True
         raise SystemExit(f"fault:{self.fault}")
 
-    def progress_checkpoint_v2(
+    def progress_checkpoint(
         self,
         checkpoint: Any,
         *,
         claim_token: str,
         expected_revision: int,
     ) -> bool:
-        model_state = (
-            checkpoint.model_call_journal[-1].state
-            if checkpoint.model_call_journal
-            else None
-        )
-        tool_state = (
-            checkpoint.tool_journal[-1].state
-            if checkpoint.tool_journal
-            else None
-        )
+        model_state = checkpoint.model_call_journal[-1].state if checkpoint.model_call_journal else None
+        tool_state = checkpoint.tool_journal[-1].state if checkpoint.tool_journal else None
         if self.fault == "before_model_receipt" and model_state is OperationState.SUCCEEDED:
             self._trip()
-        result = super().progress_checkpoint_v2(
+        result = super().progress_checkpoint(
             checkpoint,
             claim_token=claim_token,
             expected_revision=expected_revision,
@@ -72,7 +64,7 @@ class FaultStore(InMemoryStateStore):
             self._trip()
         return result
 
-    def commit_checkpoint_v2(
+    def commit_checkpoint(
         self,
         checkpoint: Any,
         *,
@@ -81,7 +73,7 @@ class FaultStore(InMemoryStateStore):
     ) -> bool:
         if self.fault == "before_cycle_commit":
             self._trip()
-        result = super().commit_checkpoint_v2(
+        result = super().commit_checkpoint(
             checkpoint,
             claim_token=claim_token,
             expected_revision=expected_revision,
@@ -90,7 +82,7 @@ class FaultStore(InMemoryStateStore):
             self._trip()
         return result
 
-    def acknowledge_terminal_v2(
+    def acknowledge_terminal(
         self,
         checkpoint_key: str,
         *,
@@ -98,7 +90,7 @@ class FaultStore(InMemoryStateStore):
     ) -> bool:
         if self.fault == "before_terminal_ack":
             self._trip()
-        return super().acknowledge_terminal_v2(
+        return super().acknowledge_terminal(
             checkpoint_key,
             expected_revision=expected_revision,
         )
@@ -122,22 +114,15 @@ def _resolved() -> ResolvedModelConfig:
 
 def _provider(
     factory: Callable[[], ScriptedLLM],
-) -> Callable[[Agent, RunConfig], tuple[ScriptedLLM, ResolvedModelConfig]]:
-    def resolve(
-        agent: Agent,
-        run_config: RunConfig,
-    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        del agent, run_config
-        return factory(), _resolved()
-
-    return resolve
+) -> FactoryModelProvider:
+    return FactoryModelProvider(factory=factory, resolved=_resolved())
 
 
 def _config(
-    store: CheckpointStoreV2,
+    store: CheckpointStore,
     *,
     key: str,
-    provider: Callable[[Agent, RunConfig], tuple[ScriptedLLM, ResolvedModelConfig]],
+    provider: FactoryModelProvider,
     max_cycles: int = 2,
     capability_refs: dict[str, dict[str, str]] | None = None,
 ) -> RunConfig:
@@ -154,9 +139,9 @@ def _config(
     )
 
 
-def _expire_claim(store: InMemoryStateStore, key: str) -> None:
+def _expire_claim(store: InMemoryCheckpointStore, key: str) -> None:
     with store._lock:
-        store._store_v2[key].lease_expires_at_ms = 1
+        store._store[key].lease_expires_at_ms = 1
 
 
 def _finish_response(message: str) -> LLMResponse:
@@ -173,7 +158,7 @@ def _finish_response(message: str) -> LLMResponse:
 
 
 def test_f1_crash_before_model_intent_resumes_with_one_model_call() -> None:
-    store = InMemoryStateStore()
+    store = InMemoryCheckpointStore()
     model_calls = 0
 
     class CrashBeforeIntent(BaseRuntimeHook):
@@ -211,7 +196,7 @@ def test_f1_crash_before_model_intent_resumes_with_one_model_call() -> None:
 
     with pytest.raises(SystemExit, match="before_model_intent"):
         Runner.run_sync(agent, "run F1", run_config=config)
-    crashed = store.load_checkpoint_v2("fault-f1")
+    crashed = store.load_checkpoint("fault-f1")
     assert crashed is not None
     assert crashed.model_call_journal == []
 
@@ -270,7 +255,7 @@ def test_f4_planned_tool_is_invoked_after_resume() -> None:
     store = FaultStore("after_tool_planned")
     tool_calls = 0
 
-    @function_tool(name="fault_f4_write", idempotency=ToolIdempotency.SUPPORTED)
+    @function_tool(name="fault_f4_write", tool_metadata={"idempotency": "supported"})
     def write(context: ToolContext) -> str:
         nonlocal tool_calls
         assert context.idempotency_key is not None
@@ -318,7 +303,7 @@ def test_f6_durable_tool_receipt_replays_without_external_calls() -> None:
     model_calls = 0
     tool_calls = 0
 
-    @function_tool(name="fault_f6_write", idempotency=ToolIdempotency.SUPPORTED)
+    @function_tool(name="fault_f6_write", tool_metadata={"idempotency": "supported"})
     def write(context: ToolContext) -> str:
         nonlocal tool_calls
         assert context.idempotency_key is not None
@@ -381,7 +366,7 @@ def test_f7_committed_cycle_resumes_at_next_cycle() -> None:
 
     with pytest.raises(SystemExit, match="after_cycle_commit"):
         Runner.run_sync(agent, "run F7", run_config=config)
-    committed = store.load_checkpoint_v2("fault-f7")
+    committed = store.load_checkpoint("fault-f7")
     assert committed is not None
     assert committed.cycle_index == 1
     assert committed.claim_token is None
@@ -447,7 +432,7 @@ def test_committed_budget_usage_is_cumulative_after_resume() -> None:
 
     with pytest.raises(SystemExit, match="after_cycle_commit"):
         Runner.run_sync(agent, "run budget resume", run_config=first_config)
-    committed = store.load_checkpoint_v2("budget-resume")
+    committed = store.load_checkpoint("budget-resume")
     assert committed is not None
     assert committed.budget_usage is not None
     assert committed.budget_usage.total_tokens == 20
@@ -506,7 +491,7 @@ def test_f8_terminal_commit_replays_before_ack_without_external_calls() -> None:
 
     with pytest.raises(SystemExit, match="before_terminal_ack"):
         Runner.run_sync(agent, "run F8", run_config=config)
-    terminal = store.load_checkpoint_v2("fault-f8")
+    terminal = store.load_checkpoint("fault-f8")
     assert terminal is not None
     assert terminal.terminal_result is not None
     assert terminal.terminal_acknowledged is False
@@ -524,7 +509,7 @@ def test_f8_terminal_commit_replays_before_ack_without_external_calls() -> None:
     assert replay.status is AgentStatus.COMPLETED
     assert replay.final_output == "durable terminal"
     assert model_calls == 1
-    acknowledged = store.load_checkpoint_v2("fault-f8")
+    acknowledged = store.load_checkpoint("fault-f8")
     assert acknowledged is not None
     assert acknowledged.terminal_acknowledged is True
 
@@ -544,36 +529,25 @@ def test_sigkill_after_tool_side_effect_requires_reconciliation(
 
         from vv_agent import Agent, CheckpointConfig, RunConfig, Runner, ToolIdempotency, function_tool
         from vv_agent.checkpoint import ResumePolicy
-        from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
         from vv_agent.llm import ScriptedLLM
-        from vv_agent.runtime.stores.sqlite import SqliteStateStore
+        from vv_agent.model import ScriptedModelProvider
+        from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
         from vv_agent.types import LLMResponse, ToolCall
 
         database = Path(sys.argv[1])
         side_effect = Path(sys.argv[2])
 
-        def provider(agent, run_config):
-            del agent, run_config
-            endpoint = EndpointConfig(
-                endpoint_id="test",
-                api_key="test-key",
-                api_base="https://example.invalid/v1",
-            )
-            resolved = ResolvedModelConfig(
-                backend="test",
-                requested_model="test-model",
-                selected_model="test-model",
-                model_id="test-model",
-                endpoint_options=[EndpointOption(endpoint=endpoint, model_id="test-model")],
-                function_call_available=True,
-            )
-            response = LLMResponse(
-                content="",
-                tool_calls=[ToolCall(id="call-sigkill", name="sigkill_write", arguments={"value": "once"})],
-            )
-            return ScriptedLLM(steps=[response]), resolved
+        response = LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="call-sigkill", name="sigkill_write", arguments={"value": "once"})],
+        )
+        provider = ScriptedModelProvider(
+            backend="test",
+            default_model="test-model",
+            llm=ScriptedLLM(steps=[response]),
+        )
 
-        @function_tool(name="sigkill_write", idempotency=ToolIdempotency.UNKNOWN)
+        @function_tool(name="sigkill_write", tool_metadata={"idempotency": "unknown"})
         def sigkill_write(value: str) -> str:
             side_effect.write_text(value, encoding="utf-8")
             os.kill(os.getpid(), signal.SIGKILL)
@@ -594,7 +568,7 @@ def test_sigkill_after_tool_side_effect_requires_reconciliation(
                 checkpoint_config=CheckpointConfig(
                     key="sigkill-case",
                     resume_policy=ResumePolicy.RESUME_IF_PRESENT,
-                    store=SqliteStateStore(database),
+                    store=SqliteCheckpointStore(database),
                 ),
             ),
         )
@@ -609,13 +583,13 @@ def test_sigkill_after_tool_side_effect_requires_reconciliation(
 
     assert completed.returncode == -signal.SIGKILL
     assert side_effect.read_text(encoding="utf-8") == "once"
-    store = SqliteStateStore(database)
-    crashed = store.load_checkpoint_v2("sigkill-case")
+    store = SqliteCheckpointStore(database)
+    crashed = store.load_checkpoint("sigkill-case")
     assert crashed is not None
     assert crashed.tool_journal[0].state is OperationState.STARTED
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "UPDATE checkpoints_v2 SET lease_expires_at_ms = 1 WHERE checkpoint_key = ?",
+            "UPDATE checkpoints SET lease_expires_at_ms = 1 WHERE checkpoint_key = ?",
             ("sigkill-case",),
         )
 
@@ -630,7 +604,7 @@ def test_sigkill_after_tool_side_effect_requires_reconciliation(
 
         return ScriptedLLM(steps=[complete])
 
-    @function_tool(name="sigkill_write", idempotency=ToolIdempotency.UNKNOWN)
+    @function_tool(name="sigkill_write", tool_metadata={"idempotency": "unknown"})
     def sigkill_write(value: str) -> str:
         nonlocal tool_calls
         tool_calls += 1

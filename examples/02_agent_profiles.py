@@ -12,7 +12,7 @@ profiles = {
     "researcher": Agent(
         name="researcher",
         instructions="Collect facts first, then call task_finish with a sourced summary.",
-        model="kimi-k2.6",
+        model="kimi-k3",
         model_settings=ModelSettings(temperature=0.2),
     ),
     "translator": Agent(
@@ -25,15 +25,15 @@ profiles = {
 
 
 def main() -> None:
-    profile = os.getenv("V_AGENT_EXAMPLE_PROFILE", "researcher")
+    profile = os.getenv("VV_AGENT_EXAMPLE_PROFILE", "researcher")
     agent = profiles.get(profile, profiles["researcher"])
-    backend = os.getenv("V_AGENT_EXAMPLE_BACKEND", "minimax" if profile == "translator" else "moonshot")
+    backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "minimax" if profile == "translator" else "moonshot")
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
         default_backend=backend,
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
     )
-    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "Explain what this package is for.")
+    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Explain what this package is for.")
     result = Runner.run_sync(agent, prompt, run_config=config)
     print(result.final_output)
 

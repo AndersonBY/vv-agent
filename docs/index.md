@@ -12,7 +12,7 @@ history.
 | `parity-contract.md` | Python producer mapping and local adoption commands for the canonical `vv-agent-contract` release. |
 | `development.md` | Local setup, test commands, linting, live-test workflow, and change hygiene. |
 | `model-settings.md` | `LLM_SETTINGS`, local key files, model defaults, and exact model resolution rules. |
-| `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and v1 event producers. |
+| `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and typed event producers. |
 | `run-budgets.md` | Token, tool, wall-time, and host-cost limits; observations, resume, and distributed behavior. |
 | `output-validation.md` | Default-off typed output validation, one tools-free repair callback, and failure semantics. |
 | `checkpoint-resume.md` | Opt-in checkpoint v2, immutable run definitions, operation journals, ambiguity, and durable terminal ordering. |

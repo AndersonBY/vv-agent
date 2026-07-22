@@ -25,15 +25,15 @@ def main() -> None:
     agent = Agent(
         name="image-reporter",
         instructions="Use image_info, then produce a Markdown report with task_finish.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[image_info],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
     )
-    prompt = os.getenv("V_AGENT_EXAMPLE_PROMPT", "Inspect ./example.png and report what metadata is available.")
+    prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Inspect ./example.png and report what metadata is available.")
     result = Runner.run_sync(agent, prompt, run_config=config)
     print(result.final_output)
 

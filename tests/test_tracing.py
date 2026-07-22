@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import (
     Agent,
@@ -24,16 +24,14 @@ from vv_agent import (
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
+from vv_agent.model import ModelRef
 from vv_agent.types import LLMResponse, ToolCall
 
-TRACE_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "runner_trace_spans_v1.json"
-TRACE_CONTRACT_SHA256 = "c44cd892fb2cff47c34c53e7fec861bc9cc4fb07b34bcfb993706ddfb3b1530d"
+TRACE_CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "runner_trace_spans.json"
 
 
 def _trace_contract() -> dict[str, Any]:
-    payload = TRACE_CONTRACT_PATH.read_bytes()
-    assert hashlib.sha256(payload).hexdigest() == TRACE_CONTRACT_SHA256
-    return json.loads(payload)
+    return json.loads(TRACE_CONTRACT_PATH.read_bytes())
 
 
 class CapturingTraceProcessor(TraceProcessor):
@@ -79,28 +77,22 @@ def _resolved() -> ResolvedModelConfig:
 def test_runner_emits_run_and_tool_trace_spans(tmp_path: Path) -> None:
     processor = CapturingTraceProcessor()
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="done",
-                        tool_calls=[
-                            ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})
-                        ],
-                    )
-                ]
-            ),
-            _resolved(),
-        )
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Answer.", model="m"),
         "go",
         run_config=RunConfig(
             workspace=tmp_path,
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(
+                ScriptedLLM(
+                    steps=[
+                        LLMResponse(
+                            content="done",
+                            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                        )
+                    ]
+                ),
+                _resolved(),
+            ),
             tracing={"workflow_name": "trace-test", "processors": [processor]},
         ),
     )
@@ -123,8 +115,10 @@ def test_runner_emits_run_and_tool_trace_spans(tmp_path: Path) -> None:
 def test_runner_closes_trace_spans_when_provider_resolution_fails(tmp_path: Path) -> None:
     processor = CapturingTraceProcessor()
 
-    def failing_provider(_agent: Agent, _run_config: RunConfig):
-        raise RuntimeError("provider unavailable")
+    class FailingModelProvider(FixedModelProvider):
+        def resolve(self, model: ModelRef) -> ResolvedModelConfig:
+            del model
+            raise RuntimeError("provider unavailable")
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
         Runner.run_sync(
@@ -132,7 +126,7 @@ def test_runner_closes_trace_spans_when_provider_resolution_fails(tmp_path: Path
             "go",
             run_config=RunConfig(
                 workspace=tmp_path,
-                model_provider=failing_provider,
+                model_provider=FailingModelProvider(ScriptedLLM(steps=[]), _resolved()),
                 tracing={"processors": [processor]},
             ),
         )
@@ -149,29 +143,23 @@ def test_typed_output_failure_occurs_after_persistence_and_completed_event(tmp_p
     event_store = RecordingRunEventStore()
     session = MemorySession("typed-output-session")
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="done",
-                        tool_calls=[
-                            ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "[]"})
-                        ],
-                    )
-                ]
-            ),
-            _resolved(),
-        )
-
     with pytest.raises(ValueError, match="Expected final output JSON object"):
         Runner.run_sync(
             Agent(name="assistant", instructions="Return JSON.", model="m", output_type=dict),
             "go",
             run_config=RunConfig(
                 workspace=tmp_path,
-                model_provider=model_provider,
+                model_provider=FixedModelProvider(
+                    ScriptedLLM(
+                        steps=[
+                            LLMResponse(
+                                content="done",
+                                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "[]"})],
+                            )
+                        ]
+                    ),
+                    _resolved(),
+                ),
                 session=session,
                 event_store=event_store,
                 tracing={"processors": [processor]},
@@ -180,9 +168,7 @@ def test_typed_output_failure_occurs_after_persistence_and_completed_event(tmp_p
 
     assert session.get_items()
     terminal_sequence = [
-        event.type
-        for event in event_store.events
-        if isinstance(event, (SessionPersistedEvent, RunCompletedEvent))
+        event.type for event in event_store.events if isinstance(event, (SessionPersistedEvent, RunCompletedEvent))
     ]
     assert terminal_sequence == ["session_persisted", "run_completed"]
     completed = next(event for event in event_store.events if isinstance(event, RunCompletedEvent))
@@ -209,19 +195,24 @@ def test_trace_processor_failures_are_isolated_from_the_run(tmp_path: Path) -> N
             Agent(
                 name="assistant",
                 instructions="Answer.",
-                model=ScriptedLLM(
-                    steps=[
-                        LLMResponse(
-                            content="done",
-                            tool_calls=[
-                                ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})
-                            ],
-                        )
-                    ]
-                ),
+                model="m",
             ),
             "go",
-            run_config=RunConfig(workspace=tmp_path, tracing={"processors": [BrokenProcessor()]}),
+            run_config=RunConfig(
+                workspace=tmp_path,
+                model_provider=FixedModelProvider(
+                    ScriptedLLM(
+                        steps=[
+                            LLMResponse(
+                                content="done",
+                                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                            )
+                        ]
+                    ),
+                    _resolved(),
+                ),
+                tracing={"processors": [BrokenProcessor()]},
+            ),
         )
 
     assert result.status.value == _trace_contract()["sink_failure"]["run_status"]

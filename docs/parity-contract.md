@@ -1,231 +1,155 @@
 # Python Contract Integration
 
-`vv-agent` implements the Python side of the canonical contract published by
+`vv-agent` is the Python implementation of the language-neutral contract in
 [`AndersonBY/vv-agent-contract`](https://github.com/AndersonBY/vv-agent-contract).
-The normative behavior and change workflow no longer live in this repository.
+Normative behavior, fixtures, versioning, and adoption workflow live only in
+that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` is the machine-readable adoption record. It pins:
+`contract.lock.json` selects contract `2.0.0` at revision
+`8ef7153e9b1f26b90a9fad85bbfcb4642d6462fa`. The central support matrix is
+`in-progress`; it must not become `verified` until Python, Rust, and the central
+cross-repository workflow all pass against final implementation revisions.
 
-- semantic contract version;
-- exact central Git revision;
-- immutable release artifact URL and SHA-256;
-- local vendored snapshot path;
-- canonical `SHA256SUMS` digest.
+The lock records the exact release artifact, artifact digest, vendored fixture
+path, and canonical fixture-manifest digest. `tests/fixtures/parity/` is a
+generated snapshot, not an editable source.
 
-`tests/fixtures/parity/` is generated from that release. It is committed for
-offline and reproducible tests, but it is not an editable source of truth.
+## Required Workflow
 
-The current lock selects contract `0.10.1` at revision
-`9e6f356eb20ed81e0e1a66f87ef07445d2324b4b`. The central support matrix records
-contract `0.10.1` and both implementations as `verified`, backed by recording
-cross-repository conformance run
-[`29825576929`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29825576929).
-The verified Python revision is
-`d428cd5877ebea015bf4eb21c621a871ac827bb1`; the matching Rust revision is
-`ff86efe4e5f60e1b0a5d81a4156df35538726f47`. This document maps the Python
-producers; the central matrix remains the authoritative verification record.
+For any shared public, model-visible, runtime, persistence, or wire change:
 
-## Required Reading
+1. Read this repository's lock and `../vv-agent-contract/AGENTS.md`.
+2. Read the central parity, versioning, and change-workflow documents.
+3. Change canonical docs and fixtures in `vv-agent-contract` first.
+4. Sync both implementation snapshots with `scripts/contract_snapshot.py`.
+5. Update real Python and Rust producers, not only fixture parsers.
+6. Run both full repository gates and central cross-repository CI.
 
-For shared public, model-visible, runtime, persistence, or wire changes, read:
-
-1. `contract.lock.json` in this repository;
-2. `../vv-agent-contract/AGENTS.md`;
-3. `../vv-agent-contract/docs/parity-contract.md`;
-4. `../vv-agent-contract/docs/change-workflow.md`;
-5. sibling `../vv-agent-rs/docs/parity-contract.md`.
-
-If the sibling checkout is unavailable, use the exact repository and revision
-from the lock. Do not infer the current contract from a floating `main` branch.
+Never edit a vendored parity fixture or digest directly.
 
 ## Snapshot Commands
 
-Offline verification of the committed snapshot:
-
 ```bash
 python3 scripts/contract_snapshot.py check
-```
-
-Stronger verification against the sibling canonical checkout:
-
-```bash
 python3 scripts/contract_snapshot.py check --source ../vv-agent-contract
 ```
 
-Synchronization is allowed only after the canonical version is committed and
-its deterministic release zip exists:
+After an immutable central release exists:
 
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-<version>.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v<version>/vv-agent-contract-<version>.zip
+  --artifact /path/to/vv-agent-contract-2.0.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v2.0.0/vv-agent-contract-2.0.0.zip
 ```
-
-Never repair a contract failure by editing a file under
-`tests/fixtures/parity/` or changing only a digest.
 
 ## Python Producer Map
 
-| Contract surface | Python producer or evidence |
+| Contract surface | Python producer and evidence |
 | --- | --- |
-| Public API inventory | `src/vv_agent/__init__.py`, `tests/test_parity_evidence_manifests.py` |
-| System prompt | `src/vv_agent/prompt/`, `tests/test_prompt_builder.py` |
-| Built-in tool specification | `src/vv_agent/constants/workspace.py`, `src/vv_agent/tools/registry.py`, `tests/test_tool_schema_contract.py` |
-| Typed tool metadata and schema isolation | `src/vv_agent/tools/metadata.py`, `src/vv_agent/tools/base.py`, `src/vv_agent/tools/function.py`, `src/vv_agent/tools/executor.py`, `src/vv_agent/tools/registry.py`, `tests/test_tool_metadata_contract.py`, `tests/test_run_definition_producer.py`, `tests/test_function_tool.py`, `tests/test_tool_schema_contract.py`, `tests/test_parity_evidence_manifests.py` |
-| Metadata-denial policy and delegation | `src/vv_agent/run_config.py`, `src/vv_agent/types.py`, `src/vv_agent/runner.py`, `src/vv_agent/runtime/compiler.py`, `src/vv_agent/runtime/tool_planner.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/sub_task_manager.py`, `tests/test_tool_orchestrator.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_handoffs.py` |
-| Tool execution telemetry and event wire v1 | `src/vv_agent/tools/orchestrator.py`, `src/vv_agent/runtime/tool_call_runner.py`, `src/vv_agent/events.py`, `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py`, `tests/test_events_v1.py`, `tests/test_run_events_v1_invalid.py`, `tests/test_runner.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_runner_trace_v1.py`, `tests/test_checkpoint_runner_v2.py` |
-| Agent, Runner, result, live control | `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `src/vv_agent/run_handle.py` |
-| Optional output validation and repair | `src/vv_agent/output_validation.py`, `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `tests/test_output_validation_contract.py` |
-| Delegation and background tasks | `src/vv_agent/background_task.py`, `src/vv_agent/handoffs.py`, `src/vv_agent/runtime/sub_task_manager.py` |
-| Sessions and stores | `src/vv_agent/sessions/`, `src/vv_agent/runtime/stores/`, `tests/test_session_store_parity.py` |
-| Events and tracing | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `src/vv_agent/tracing.py` |
-| Model stream projection | `src/vv_agent/events.py`, `src/vv_agent/runner.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/app_server/item_mapper.py`, `tests/test_runner_events_producer_parity.py`, `tests/test_configured_sub_agent_parity.py` |
+| Public API | `src/vv_agent/__init__.py`, `tests/test_parity_evidence_manifests.py` |
+| Prompt bundle | `src/vv_agent/prompt/`, `tests/test_prompt_builder.py` |
+| Built-in tools | `src/vv_agent/constants/workspace.py`, `src/vv_agent/tools/registry.py`, `tests/test_tool_schema_contract.py`, `tests/test_builtin_tool_behavior_contract.py` |
+| Tool metadata and policy | `src/vv_agent/tools/metadata.py`, `src/vv_agent/run_config.py`, `src/vv_agent/runtime/tool_planner.py`, `tests/test_tool_metadata_contract.py`, `tests/test_tool_policy.py` |
+| Tool execution lifecycle | `src/vv_agent/tools/orchestrator.py`, `src/vv_agent/runtime/tool_call_runner.py`, `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py` |
+| Agent, Runner, result, and live control | `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `src/vv_agent/run_handle.py`, `src/vv_agent/result.py` |
+| Typed events | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `tests/test_events_contract.py`, `tests/test_event_validation.py`, `tests/test_runner_events_producer_parity.py` |
+| LLM stream projection | `src/vv_agent/llm/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_llm_interface.py`, `tests/test_runner_events_producer_parity.py` |
+| Configured children | `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/sub_task_manager.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_sub_agent_runtime.py` |
+| Sessions | `src/vv_agent/sessions/`, `src/vv_agent/interactive.py`, `tests/test_session_store_parity.py`, `tests/test_interactive_lifecycle_contract.py` |
+| Memory and compaction | `src/vv_agent/memory/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_memory_lifecycle_contract.py`, `tests/test_memory_provider.py` |
 | Token and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py` |
-| Assistant reasoning history | `src/vv_agent/types.py`, `src/vv_agent/memory/manager.py`, `src/vv_agent/memory/message_sanitizer.py`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_runner.py`, `tests/test_message_sanitizer.py`, `tests/test_sub_task_status.py` |
-| Memory capacity and compaction lifecycle | `src/vv_agent/types.py`, `src/vv_agent/interactive.py`, `src/vv_agent/runtime/compiler.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/cycle_runner.py`, `src/vv_agent/memory/manager.py`, `src/vv_agent/memory/token_utils.py`, `src/vv_agent/events.py`, `tests/test_memory_lifecycle_contract.py`, `tests/test_memory_provider.py`, `tests/test_events_v1.py`, `tests/test_run_events_v1_invalid.py`, `tests/test_compiler.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_interactive_session_api.py` |
 | Run budgets | `src/vv_agent/budget.py`, `src/vv_agent/runtime/engine.py`, `tests/test_run_budget.py` |
-| After-cycle lifecycle hooks | `src/vv_agent/runtime/lifecycle.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/run_definition.py`, `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/backends/celery_tasks.py`, `tests/test_after_cycle_hooks.py`, `tests/test_distributed_checkpoint_v2.py` |
-| Durable checkpoint/resume v2 | `src/vv_agent/checkpoint.py`, `src/vv_agent/runtime/checkpoint_codec_v2.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/run_definition.py`, `tests/test_run_definition_producer.py`, `tests/test_checkpoint_v2.py`, `tests/test_checkpoint_runner_v2.py`, `tests/test_checkpoint_fault_matrix.py` |
-| Distributed runtime | `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/backends/celery_tasks.py`, `src/vv_agent/runtime/checkpoint_codec.py`, `tests/test_distributed_checkpoint_v2.py` |
-| App Server | `src/vv_agent/app_server/item_mapper.py`, `src/vv_agent/app_server/`, `tests/test_app_server_item_mapper.py`, `tests/test_app_server_contract_parity.py` |
-| Real closure tests | `tests/test_parity_evidence_manifests.py`, `tests/test_runner_events_producer_parity.py` |
+| Durable checkpoint and resume | `src/vv_agent/checkpoint.py`, `src/vv_agent/runtime/checkpoint_codec.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/run_definition.py`, `tests/test_checkpoint.py`, `tests/test_checkpoint_runner.py`, `tests/test_checkpoint_fault_matrix.py` |
+| Distributed execution | `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/backends/celery_tasks.py`, `tests/test_distributed_checkpoint.py` |
+| App Server | `src/vv_agent/app_server/`, `tests/test_app_server_contract_parity.py`, `tests/test_app_server_item_mapper.py` |
+| Output validation | `src/vv_agent/output_validation.py`, `src/vv_agent/runner.py`, `tests/test_output_validation_contract.py` |
 
-A fixture parser or private helper test cannot replace a real public producer
-test. A field that is declared but ignored by a planner, executor, provider, or
-store remains a contract failure.
+A parser-only test cannot prove producer parity. Every declared field must be
+consumed by the planner, runtime, adapter, store, or protocol projection that
+owns its behavior.
 
-## Memory Capacity And Compaction Mapping
+## Current Boundaries
 
-The omitted `AgentTask`, `MemoryManager`, and interactive compaction threshold
-is `250000`. Explicit values and durable task/checkpoint records retain their
-stored value; decoding or resuming an older record does not rewrite it to the
-new default.
+### Events
 
-The compiler records resolved context capability as `model_context_window` and
-resolved output capability as `model_max_output_tokens`. The latter is not an
-implicit request limit and is never copied into `reserved_output_tokens`.
-Runtime reserve resolution uses effective `ModelSettings.max_tokens`, then
-explicit task metadata, then the `16000` framework fallback. Only that fallback
-may be capped downward by a smaller model output capability. Context resolution
-uses positive explicit task metadata, resolved capability, then `200000`;
-non-positive metadata is absent. The derived prompt capacity subtracts the
-reserve and `13000` autocompact buffer. A known derived capacity of zero from a
-positive context remains zero.
+The public runtime accepts and emits only typed `RunEvent` values. Runtime
+producers create semantic lifecycle events directly. Provider stream payloads
+remain inside the LLM adapter and are projected to typed assistant, reasoning,
+and model-tool-call events at that boundary; malformed or unknown provider
+payloads are dropped.
 
-`CycleRunner` microcompacts eligible old tool results before evaluating the
-optional warning against recalculated usage. It emits the typed trigger and
-resolved capacity snapshot on every new `memory_compact_started` event, then
-the strongest applied mode and a message-content comparison on
-`memory_compact_completed`. Provider callbacks, runtime payloads, and Runner
-journal events reuse the same `event_id` and `created_at`. The v1 decoder keeps
-all additive fields absent when reading legacy events, while rejecting known
-fields with invalid types or unknown enum values. This resolution is mechanical
-and does not inspect task category, answer semantics, or semantic progress.
+Task-neutral observations use `DiagnosticEvent(level, code, details)`. A
+diagnostic cannot replace lifecycle, approval, budget, cancellation, tool, or
+terminal state. Child event forwarding preserves the original event identity
+and parent/run/trace/session relationships.
 
-Checkpoint resume rebuilds execution from the frozen run definition's
-`run_metadata`; current caller metadata or an empty system-message metadata map
-does not erase behavior-affecting values captured before the checkpoint.
+RunEvent `v1` is a strict current discriminator. Readers reject missing, stale,
+unknown, and malformed fields; there is no alternate event decoder.
 
-## Tool Metadata And Telemetry Mapping
+### Model Capacity
 
-Python exports `ToolMetadata` and `ToolSideEffect` from `vv_agent` and accepts
-`tool_metadata` on `FunctionTool`, `@function_tool`, `ToolSpec`, executors, and
-`ToolRegistry.register_tool()`. The actual collection field is
-`cost_dimensions` (plural); `metadata.cost_dimension` (singular) is only the
-typed denial source reported after an exact cost-dimension match. `side_effect`
-is a closed coarse enum, `capability_tags` and `cost_dimensions` are opaque
-exact-match labels, and `terminal` only declares that a tool may return
-`finish` or `wait_user`. None of these fields grants permission, measures cost,
-or ends a run automatically.
+The configured automatic compaction threshold is `250000`. Resolved model
+capacity is projected to `model_context_window` and
+`model_max_output_tokens`. Output capability is never copied into request
+settings and never creates an implicit `max_tokens` value.
 
-The legacy `idempotency` input remains supported. Typed `unknown` may inherit a
-non-`unknown` legacy value; conflicting non-`unknown` declarations fail before
-model or tool operations. When typed metadata is absent, event metadata stays
-absent even though the legacy idempotency remains effective for execution and
-the legacy run-definition projection.
+Output reservation order is explicit `ModelSettings.max_tokens`, explicit task
+`reserved_output_tokens`, then the `16000` planning fallback. The fallback is
+capacity planning only, not a model output limit. Configured children inherit
+the same explicit `ModelProvider` and resolve their own model.
 
-`ToolPolicy` adds `denied_side_effects`, `denied_capability_tags`,
-`deny_terminal_tools`, and `denied_cost_dimensions`; `SubAgentConfig` exposes
-the same four narrowing fields. Lists union and normalize across Agent, Runner,
-per-run, and delegated-child layers, while the boolean uses logical OR.
-Distributed envelopes serialize the already-effective policy. Planning and
-executor dispatch both enforce the denials, which compose with every older
-policy check and return `tool_not_allowed`.
+### Tools
 
-The real executor sequence is `tool_call_planned`, optional approval,
-`tool_call_started` only at the effect boundary, and `tool_call_completed` once
-a result exists. Parse failures have no lifecycle; denials, approval
-short-circuits, unknown tools, and durable receipt replay have planned plus
-completed without started. Completed writers add `directive`, `error_code`,
-`execution_started`, and `duration_ms`; v1 readers preserve missing legacy
-fields as absent. Optional typed metadata is carried by all three events but is
-omitted when undeclared. Generic metadata cannot fabricate it.
+`ToolExecutionResult.status_code` is the only result status. The current values
+are `SUCCESS`, `ERROR`, `WAIT_RESPONSE`, `RUNNING`, and `PENDING_COMPRESS`.
+Unknown fields are rejected.
 
-App Server intentionally drops planned events. Started/completed tool items add
-camel-case `toolMetadata`, and completed items add `directive`, `errorCode`,
-`executionStarted`, and `durationMs` only when present on the event. Checkpoint
-v2 freezes `tool_metadata` plus all four policy fields and compares them before
-external operations. A 0.7.1 definition is digest-checked first and defaulted
-only in an in-memory comparison copy; stored bytes and digest are not rewritten.
-Checkpoint v1 and distributed wire v1 writers remain unchanged.
+`ToolMetadata` is the only typed capability declaration and contains
+`side_effect`, `idempotency`, `terminal`, `capability_tags`, and
+`cost_dimensions`. Generic host metadata is separate and cannot populate this
+declaration. Metadata policy is denial-only across parent and delegated layers.
 
-Typed metadata is separate from generic tool metadata and never enters the
-model-visible function schema. With no declaration and empty new policy fields,
-public schemas, planning, dispatch, event metadata presence, and runtime results
-retain the previous behavior.
+The executor sequence is `tool_call_planned`, optional approval,
+`tool_call_started` immediately before effects may begin, and
+`tool_call_completed` after a result exists. Durable journals, not telemetry,
+own ambiguity and replay decisions.
 
-## Output Validation Mapping
+### Persistence
 
-Python registers `output_validator` and optional `output_repair` callbacks on
-`Agent`; `output_validation_enabled` remains false unless the host opts in.
-`OutputValidationResult` is the typed valid/invalid outcome, while
-`OutputValidationContext` exposes only run identity, agent identity, and the
-existing `output_type`. A callback receives `(final_output,
-validation_context)` in canonical order.
+Checkpoint records require `vv-agent.checkpoint.v2`; run definitions require
+`vv-agent.run-definition.v1`; distributed envelopes require their one current
+discriminator. Readers reject every other shape before claim or external work.
+There is no namespace probe, alternate decoder, field synthesis, or in-place
+repair.
 
-The Runner preserves the existing `output_type` coercion path. When validation
-is enabled, an output-type failure can be sent to the one permitted repair, and
-the replacement must pass both coercion and the same host validator. Python
-maps the canonical empty repair-tool list to the immutable empty tuple `()`.
-It does not call the primary model or construct a second tool registry.
-
-The optional validator and at-most-once repair run on the terminal candidate
-before session persistence, checkpoint finalization, and terminal-event
-emission. Typed rejection returns
-`RunResult.error_code == "output_validation_failed"` and commits one failed
-terminal; successful repair commits one completed terminal containing the
-replacement. Terminal checkpoint replay reuses the validated result without
-calling either host callback again. Registered-but-disabled and accepted
-validators preserve the prior event and trace observation. Real producer
-coverage lives in `tests/test_output_validation_contract.py` and
-`tests/test_checkpoint_runner_v2.py`.
+Distributed worker responses use only the closed
+`vv-agent.distributed-worker-response.v1` wire. Python owns the typed value and
+strict reader in `runtime/backends/distributed.py`, Celery workers produce it in
+`celery_tasks.py`, and the scheduler consumes it in `celery.py`. `pending`,
+`committed`, `terminal_candidate`, and `terminal_replay` are the only variants;
+the replaced `finished` and terminal boolean combination is rejected. A
+candidate accepts reconciliation-required or terminal/interrupted results; a
+replay rejects reconciliation-required and must equal the retained durable
+result. The scheduler reloads the authoritative checkpoint after every response
+or transport failure. Public `AgentResult` readers require all 13 current
+fields, reject unknown fields, and require absent optional budget/error fields
+to be omitted rather than encoded as null.
 
 ## Python Adaptations
 
-The following are API-shape adaptations, not behavioral differences:
+The following language-shape differences are allowed only while observable
+behavior remains identical:
 
-- dataclasses, protocols, decorators, and exceptions map to Rust structs,
-  traits, builders, and `Result`;
-- synchronous convenience wrappers may coexist with async internals;
-- Python `output_type` coercion maps to Rust typed deserialization;
-- Python exposes synchronous `output_validator` and `output_repair` callbacks
-  and an immutable empty repair-tool tuple. These are API-shape adaptations of
-  the language-neutral callback lifecycle, not permission to diverge from its
-  at-most-once behavior.
-- Celery adapters map to Rust Apalis adapters through the same distributed
-  envelope, checkpoint, lease, and terminal-state contract;
-- Python settings-file model controls map to the equivalent Rust
-  `ModelProvider` capability.
-- Python exposes copied snapshots through frozen dataclasses and a protocol
-  callback; Rust uses immutable structs and a trait object. Both compose
-  runner-default hooks before per-run hooks, persist only cumulative denials,
-  and resolve distributed `after_cycle_hook_refs` before checkpoint claim.
-
-Add a new adaptation only when both implementations preserve input, output,
-safety, persistence, cancellation, and lifecycle semantics.
+- Python dataclasses, protocols, decorators, and exceptions map to Rust structs,
+  traits, builders, and `Result`.
+- Python synchronous entry points may wrap asynchronous internals.
+- Python output coercion maps to Rust typed deserialization.
+- Celery maps to Apalis through the same envelope, lease, checkpoint, and
+  terminal contract.
+- Python settings-file resolution maps to Rust's explicit `ModelProvider`.
 
 ## Completion Gate
 
@@ -234,9 +158,9 @@ python3 scripts/contract_snapshot.py check --source ../vv-agent-contract
 uv run pytest
 uv run ruff check .
 uv run ty check
+uv build
 ```
 
-Then run the Rust gate and the central
-`vv-agent-contract/.github/workflows/cross-repository.yml` workflow with exact
-contract, Python, and Rust refs. If either implementation is incomplete, keep
-the central support matrix at `pending-adoption` or `in-progress`.
+Then run the Rust gate and central cross-repository workflow with exact refs.
+Record final revisions and the workflow URL in the central support matrix only
+after every gate passes.

@@ -18,7 +18,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.config import build_vv_llm_from_local_settings
+from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.prompt import build_system_prompt
 from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
@@ -31,21 +32,24 @@ from vv_agent.workspace import (
 )
 
 
-def log_handler(event: str, payload: dict[str, Any]) -> None:
-    if event in {
+def event_handler(event: RunEvent) -> None:
+    name = event.code if isinstance(event, DiagnosticEvent) else event.type
+    if name in {
         "cycle_llm_response",
         "tool_result",
         "run_completed",
         "run_wait_user",
         "cycle_failed",
     }:
-        print(f"  [{event}] {payload}", flush=True)
+        payload = event.details if isinstance(event, DiagnosticEvent) else event.to_dict()
+        print(f"  [{name}] {payload}", flush=True)
 
 
 # ---------------------------------------------------------------------------
 # 自定义后端示例: PrefixedBackend
 # 在真实场景中可替换为 S3Backend / OSSBackend / RedisBackend 等
 # ---------------------------------------------------------------------------
+
 
 class PrefixedBackend:
     """在所有写入内容前自动添加前缀的演示后端.
@@ -67,7 +71,11 @@ class PrefixedBackend:
         return self._inner.read_bytes(path)
 
     def write_text(
-        self, path: str, content: str, *, append: bool = False,
+        self,
+        path: str,
+        content: str,
+        *,
+        append: bool = False,
     ) -> int:
         tagged = f"{self._prefix}{content}" if not append else content
         return self._inner.write_text(path, tagged, append=append)
@@ -89,6 +97,7 @@ class PrefixedBackend:
 # Helper: 构建 runtime + task 并执行
 # ---------------------------------------------------------------------------
 
+
 def _build_and_run(
     *,
     label: str,
@@ -99,15 +108,15 @@ def _build_and_run(
     verbose: bool,
     prompt: str,
 ) -> None:
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"[demo] {label}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     runtime = AgentRuntime(
         llm_client=llm_client,
         tool_registry=build_default_registry(),
         default_workspace=workspace,
-        log_handler=log_handler if verbose else None,
+        event_handler=event_handler if verbose else None,
         workspace_backend=workspace_backend,
     )
 
@@ -135,6 +144,7 @@ def _build_and_run(
 # main
 # ---------------------------------------------------------------------------
 
+
 def _load_dotenv(path: Path) -> None:
     """从 .env 文件加载环境变量 (不覆盖已有值)."""
     if not path.is_file():
@@ -157,22 +167,25 @@ def main() -> None:
     _load_dotenv(Path(__file__).parent / ".env")
 
     settings_file = Path(
-        os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py"),
+        os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"),
     )
-    backend_name = os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6")
+    backend_name = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
+    model = os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3")
     workspace = Path(
-        os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace"),
+        os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace"),
     ).resolve()
     verbose = os.getenv(
-        "V_AGENT_EXAMPLE_VERBOSE", "true",
+        "VV_AGENT_EXAMPLE_VERBOSE",
+        "true",
     ).strip().lower() in {"1", "true", "yes", "on"}
-    mode = os.getenv("V_AGENT_EXAMPLE_WS_MODE", "all").strip().lower()
+    mode = os.getenv("VV_AGENT_EXAMPLE_WS_MODE", "all").strip().lower()
 
     workspace.mkdir(parents=True, exist_ok=True)
 
-    llm, resolved = build_openai_llm_from_local_settings(
-        settings_file, backend=backend_name, model=model,
+    llm, resolved = build_vv_llm_from_local_settings(
+        settings_file,
+        backend=backend_name,
+        model=model,
     )
     common = dict(
         workspace=workspace,
@@ -186,10 +199,7 @@ def main() -> None:
         _build_and_run(
             label="方式 1: 默认 — 自动使用 LocalWorkspaceBackend",
             workspace_backend=None,
-            prompt=(
-                "在 workspace 中创建 hello.txt 写入 'Hello from default backend', "
-                "然后读取并输出内容。"
-            ),
+            prompt=("在 workspace 中创建 hello.txt 写入 'Hello from default backend', 然后读取并输出内容。"),
             **common,
         )
 
@@ -198,10 +208,7 @@ def main() -> None:
         _build_and_run(
             label="方式 2: MemoryWorkspaceBackend — 纯内存, 不落盘",
             workspace_backend=MemoryWorkspaceBackend(),
-            prompt=(
-                "在 workspace 中创建 memo.txt 写入 'Hello from memory backend', "
-                "然后读取并输出内容。"
-            ),
+            prompt=("在 workspace 中创建 memo.txt 写入 'Hello from memory backend', 然后读取并输出内容。"),
             **common,
         )
         # 验证: 文件不会出现在磁盘上
@@ -214,8 +221,7 @@ def main() -> None:
         if not s3_bucket:
             if mode == "s3":
                 print(
-                    "[跳过] S3 模式需要设置 S3_BUCKET 环境变量.\n"
-                    "       参见 examples/.env.example",
+                    "[跳过] S3 模式需要设置 S3_BUCKET 环境变量.\n       参见 examples/.env.example",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -235,10 +241,7 @@ def main() -> None:
             _build_and_run(
                 label="方式 3: S3WorkspaceBackend — S3 兼容存储",
                 workspace_backend=s3_backend,
-                prompt=(
-                    "在 workspace 中创建 s3_test.txt 写入 'Hello from S3 backend', "
-                    "然后读取并输出内容。"
-                ),
+                prompt=("在 workspace 中创建 s3_test.txt 写入 'Hello from S3 backend', 然后读取并输出内容。"),
                 **common,
             )
 
@@ -249,10 +252,7 @@ def main() -> None:
         _build_and_run(
             label="方式 4: PrefixedBackend — 自定义装饰器后端",
             workspace_backend=prefixed,
-            prompt=(
-                "在 workspace 中创建 tagged.txt 写入 'custom backend works', "
-                "然后读取并输出内容。"
-            ),
+            prompt=("在 workspace 中创建 tagged.txt 写入 'custom backend works', 然后读取并输出内容。"),
             **common,
         )
         # 验证: 文件内容带前缀

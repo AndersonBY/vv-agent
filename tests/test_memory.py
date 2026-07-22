@@ -366,7 +366,7 @@ def test_memory_compaction_preserves_session_memory_and_excludes_it_from_summary
     assert "preserve prior decisions" in request_messages[0].content
 
 
-def test_session_memory_projection_does_not_change_legacy_compaction_flag() -> None:
+def test_session_memory_projection_does_not_report_context_compression() -> None:
     session_memory = SessionMemory(SessionMemoryConfig(token_model="gpt-5.4"))
     session_memory.state.entries = [
         SessionMemoryEntry(

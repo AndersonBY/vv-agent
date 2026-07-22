@@ -12,7 +12,7 @@ Public SDK
   -> Agent / RunConfig / ModelSettings
   -> Runner
   -> RunHandle for live runs
-  -> RuntimeTask
+  -> AgentTask
   -> runtime.AgentRuntime
       -> CycleRunner
       -> MemoryManager
@@ -33,10 +33,10 @@ Interactive session SDK
       -> ExecutionBackend
   -> AgentSessionRun / AgentSessionState
 
-CLI / legacy runtime API
+CLI / low-level runtime API
   -> config.load_llm_settings_from_file
   -> config.resolve_model_endpoint
-  -> llm.VVLlmClient
+  -> llm.VvLlmClient
   -> runtime.AgentRuntime
       -> CycleRunner
       -> MemoryManager
@@ -46,7 +46,7 @@ CLI / legacy runtime API
   -> AgentResult
 ```
 
-The backward-compatible default remains tool-driven: `task_finish` ends the run
+The default control policy is tool-driven: `task_finish` ends the run
 and `ask_user` waits for input. Hosts can explicitly set `no_tool_policy` to
 `finish` or `wait_user` when a normal assistant response should be terminal.
 The runtime applies that declared control without classifying the response text
@@ -83,25 +83,20 @@ implementing providers instead of patching runtime internals:
   a complete cycle. It may steer the next cycle, add tool denials, or stop with
   failure; it cannot expand permissions or manufacture success/waiting states.
 
-Raw runtime logs remain available for compatibility, but typed `RunEvent` is
-the primary state contract for host UIs. The Runner records a known typed event
-before notifying the corresponding raw runtime observer, and isolates observer
-exceptions; event-store fail-open/fail-closed behavior remains independent.
+The public runtime event boundary is the closed `RunEvent` hierarchy. Runtime
+producers create lifecycle events directly, and LLM adapters project only valid
+assistant/reasoning deltas and model tool-call start/progress events before the
+payload leaves the adapter boundary. Model tool generation uses
+`model_tool_call_*`; actual tool execution uses `tool_call_planned`,
+`tool_call_started`, and `tool_call_completed`. Unknown or malformed provider
+payloads are dropped. Reasoning remains private telemetry and is not rendered
+as App Server answer text.
 
-Raw model stream callbacks are synchronous at-least-once observers, not a
-durable event store. The Runner projects only assistant/reasoning deltas and
-model tool-call start/progress into typed events with framework-owned identity
-and cycle fields. Model tool generation uses `model_tool_call_*`; actual tool
-execution continues to use `tool_call_started` / `tool_call_completed`.
-Reasoning remains private telemetry and is not rendered as App Server answer
-text. Unknown or malformed raw stream payloads stay raw-only.
-
-Token accounting keeps provider truth separate from compatibility values.
+Token accounting keeps provider truth separate from derived aggregates.
 `TokenUsage.usage_source` identifies provider-reported, estimated, or missing
 totals. `CacheUsage` distinguishes an explicit zero cache read from missing
 accounting and adapter-declared lack of support. `TaskTokenUsage` exposes a
-cache total only when every included cycle reports that metric; legacy numeric
-fields remain available but do not prove cache-accounting availability.
+cache total only when every included cycle reports that metric.
 
 ## Module Map
 
@@ -125,14 +120,13 @@ fields remain available but do not prove cache-accounting availability.
 | `src/vv_agent/result.py` | Public `RunResult` wrapper around runtime results. |
 | `src/vv_agent/sessions/` | Public `Session` protocol plus memory, SQLite, and Redis implementations. |
 | `src/vv_agent/tracing.py` | Public trace spans and processor protocol. |
-| `src/vv_agent/runtime/compiler.py` | Compile layer: `Agent + input + RunConfig -> RuntimeTask`. Import this submodule directly to avoid runtime package initialization cycles. |
+| `src/vv_agent/runtime/compiler.py` | Compile layer: `Agent + input + RunConfig -> AgentTask`. Import this submodule directly to avoid runtime package initialization cycles. |
 | `src/vv_agent/types.py` | Runtime protocol types: tasks, messages, tool calls, results, statuses, and token usage. |
 | `src/vv_agent/llm/` | LLM protocol adapters, scripted test clients, prompt cache behavior, and `vv-llm` client bridge. |
 | `src/vv_agent/runtime/` | Core loop, cycle execution, hooks, cancellation, backends, checkpoint stores, and sub-task coordination. |
 | `src/vv_agent/tools/` | Tool registry, OpenAI-compatible schemas, dispatcher, and built-in handlers. |
 | `src/vv_agent/memory/` | Token counting, compaction, micro-compaction, session memory, and post-compaction file restoration. |
 | `src/vv_agent/prompt/` | System prompt construction and prompt-cache section tracking. |
-| `src/vv_agent/sdk/` | Internal migration namespace for session/sub-task compatibility. New user code should import from `vv_agent` top level. |
 | `src/vv_agent/workspace/` | Local, memory, and S3-compatible workspace storage backends. |
 | `src/vv_agent/skills/` | Skill metadata parsing, validation, normalization, and prompt rendering. |
 
@@ -141,7 +135,8 @@ fields remain available but do not prove cache-accounting availability.
 - `InlineBackend`: default synchronous cycle execution.
 - `ThreadBackend`: non-blocking submission with futures.
 - `CeleryBackend`: distributed cycle execution. Distributed mode requires a
-  `RuntimeRecipe` and a shared `StateStore`; otherwise it falls back inline.
+  `RuntimeRecipe`, a declared checkpoint-store capability, and a shared
+  `CheckpointStore` resolved by each worker.
 
 Checkpoint stores live under `runtime/stores/` and support SQLite and Redis.
 Backends must preserve the same `AgentResult` and checkpoint payload shape as
@@ -159,7 +154,10 @@ Workers resolve all referenced capabilities before claiming state, then use a
 revision/token lease with heartbeat renewal and CAS commit. The scheduler
 accepts a result only after reconciling it with the durable checkpoint;
 terminal checkpoints are immutable and replayable until acknowledged. SQLite
-uses WAL, a bounded busy timeout, and in-place legacy-column migration.
+uses WAL, a bounded busy timeout, and the current checkpoint schema only.
+Worker replies use one closed tagged response with `pending`, `committed`,
+`terminal_candidate`, or `terminal_replay`; the scheduler rejects missing,
+unknown, mixed, and historical response shapes before applying them.
 Before entering the runtime cycle, a worker must complete one successful lease
 renewal; initial and renewed lease expiry never extends beyond the job deadline.
 Each periodic wait is derived from that renewal's actual deadline-clamped lease,
@@ -222,19 +220,13 @@ schema wording is part of the agent contract.
 
 Tag and cost-dimension lists trim only tab, LF, CR, and ASCII space, reject
 blank or over-128-code-point labels, deduplicate, sort by UTF-16 code units, and
-allow at most 32 normalized entries. Generic `FunctionTool.metadata` remains a
-separate compatibility mapping and is never promoted into `ToolMetadata`.
-Typed metadata is not added to `to_openai_schema()` or registry schema exports,
-so it does not change the model-visible tool contract.
-
-The legacy public `idempotency` input remains effective when typed metadata is
-absent. A typed `unknown` value may inherit a non-`unknown` legacy value; two
-different non-`unknown` declarations fail before model or tool work. When the
-typed declaration is present, its normalized effective value reaches the
-executor, event metadata, and checkpoint v2. With no typed declaration, the
-legacy value still reaches the executor and legacy run-definition field, while
-event metadata stays absent. `terminal=True` never causes a transition by
-itself; the existing result directive and completion policy remain authoritative.
+allow at most 32 normalized entries. Generic `FunctionTool.metadata` is a
+separate host-owned mapping and is never promoted into `ToolMetadata`. Typed
+metadata is not added to `to_openai_schema()` or registry schema exports, so it
+does not change the model-visible tool contract. `ToolMetadata.idempotency` is
+the only idempotency declaration and reaches execution, events, and durable run
+definitions. `terminal=True` never causes a transition by itself; the result
+directive and completion policy remain authoritative.
 
 `Agent.as_tool()` compiles a child agent into a callable tool. The child result
 is returned as the tool output and the parent agent keeps control. `handoff()`
@@ -267,14 +259,13 @@ result directive, nullable error code, `execution_started`, nullable monotonic
 leave a started event without completion; checkpoint v2's operation journal,
 not telemetry, owns ambiguity and recovery.
 
-With no typed declaration and empty metadata-denial fields, schema planning,
-dispatch, completion, and model-visible schemas retain their previous behavior.
-Telemetry observation does not change result, policy, approval, completion, or
-event-store failure semantics.
+When no typed declaration exists, metadata-denial fields do not match that
+tool. Telemetry observation does not change result, policy, approval,
+completion, or event-store failure semantics.
 
 `FunctionTool.needs_approval` and `ToolPolicy.approval="always"` interrupt tool
-execution with a wait-user directive before user code runs. The runtime log is
-converted to `ToolApprovalRequestedEvent`. `ToolPolicy.approval="never"` skips
+execution with a wait-user directive before user code runs. The runtime emits
+`ApprovalRequestedEvent` directly. `ToolPolicy.approval="never"` skips
 that approval gate for trusted runs. `approval="default"` is the unset merge
 sentinel, while explicit `approval="on_request"` overrides lower layers and
 follows the selected tool's static or dynamic approval declaration. `always`

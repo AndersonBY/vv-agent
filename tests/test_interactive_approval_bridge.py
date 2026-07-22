@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from threading import Event, Thread
 
+from support import FixedModelProvider
+
 from vv_agent import (
     AgentSessionOptions,
     ApprovalDecision,
@@ -65,16 +67,11 @@ def test_interactive_session_routes_approval_to_active_run_handle(tmp_path) -> N
         ]
     )
 
-    def model_provider(settings_file, **kwargs):
-        del settings_file, kwargs
-        return llm, _resolved_model()
-
     provider = AlwaysAskApprovalProvider()
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
-            llm_builder=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
+            workspace=tmp_path,
             tool_registry_factory=lambda: registry,
             approval_provider=provider,
             approval_timeout_seconds=_TEST_APPROVAL_TIMEOUT_SECONDS,
@@ -143,16 +140,11 @@ def test_allow_session_persists_across_automatic_follow_up(tmp_path) -> None:
         ]
     )
 
-    def model_provider(settings_file, **kwargs):
-        del settings_file, kwargs
-        return llm, _resolved_model()
-
     provider = AlwaysAskApprovalProvider()
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
-            llm_builder=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
+            workspace=tmp_path,
             tool_registry_factory=lambda: registry,
             approval_provider=provider,
             approval_timeout_seconds=_TEST_APPROVAL_TIMEOUT_SECONDS,
@@ -193,15 +185,10 @@ def test_interactive_session_exposes_active_run_handle_lifecycle(tmp_path) -> No
         ]
     )
 
-    def model_provider(settings_file, **kwargs):
-        del settings_file, kwargs
-        return llm, _resolved_model()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
-            llm_builder=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
+            workspace=tmp_path,
         )
     )
     session = client.create_session(

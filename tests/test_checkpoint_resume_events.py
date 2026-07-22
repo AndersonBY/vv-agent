@@ -16,7 +16,7 @@ from vv_agent.events import (
     event_from_dict,
 )
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "resume_events_v1.jsonl"
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "resume_events.jsonl"
 
 
 def _fixture_events() -> list[dict[str, object]]:

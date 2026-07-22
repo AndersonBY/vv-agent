@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from support import FixedModelProvider
 
 import vv_agent
 from vv_agent import (
@@ -47,6 +48,10 @@ def _resolved() -> ResolvedModelConfig:
             )
         ],
     )
+
+
+def _empty_model_provider() -> ScriptedModelProvider:
+    return ScriptedModelProvider.new("moonshot", "kimi-k2.6", [])
 
 
 def _completed_run(
@@ -138,9 +143,9 @@ def test_agent_session_requires_execute_run_to_accept_cancellation_token(tmp_pat
         initial_messages: list[Message],
         before_cycle_messages: Any,
         interruption_messages: Any,
-        log_handler: Any,
+        event_handler: Any,
     ) -> AgentSessionRun:
-        del session_id, agent, task_name, workspace, initial_messages, before_cycle_messages, interruption_messages, log_handler
+        del session_id, agent, task_name, workspace, initial_messages, before_cycle_messages, interruption_messages, event_handler
         return _completed_run(prompt=prompt, shared_state=shared_state)
 
     session = create_agent_session(
@@ -188,8 +193,7 @@ def test_agent_session_queues_steering_and_follow_up_prompts(tmp_path: Path) -> 
 def test_interactive_client_prepare_task_maps_definition_to_runtime_task(tmp_path: Path) -> None:
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="moonshot",
+            model_provider=_empty_model_provider(),
             workspace=tmp_path,
         )
     )
@@ -244,8 +248,7 @@ def test_interactive_client_prepare_task_maps_definition_to_runtime_task(tmp_pat
 def test_interactive_definition_uses_contract_memory_threshold_default(tmp_path: Path) -> None:
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="moonshot",
+            model_provider=_empty_model_provider(),
             workspace=tmp_path,
         )
     )
@@ -266,8 +269,7 @@ def test_interactive_task_uses_resolved_context_when_metadata_is_non_positive(
 ) -> None:
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="moonshot",
+            model_provider=_empty_model_provider(),
             workspace=tmp_path,
         )
     )
@@ -292,8 +294,7 @@ def test_interactive_task_uses_resolved_context_when_metadata_is_non_positive(
 def test_interactive_definition_preserves_explicit_zero_memory_threshold(tmp_path: Path) -> None:
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="moonshot",
+            model_provider=_empty_model_provider(),
             workspace=tmp_path,
         )
     )
@@ -315,8 +316,7 @@ def test_interactive_definition_preserves_explicit_zero_memory_threshold(tmp_pat
 def test_interactive_client_create_session_preserves_caller_session_id(tmp_path: Path) -> None:
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="moonshot",
+            model_provider=_empty_model_provider(),
             workspace=tmp_path,
         )
     )
@@ -403,13 +403,10 @@ def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> N
     provider = ScriptedModelProvider.from_callback("test", "parent-model", capture_request)
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=provider,
             workspace=tmp_path,
-            llm_builder=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("builder must not run")),
         )
     )
-    agent.model = provider.client(provider.resolve(provider.default_model_ref()))
     session = client.create_session(agent=agent, session_id="public-agent-session")
 
     run = session.prompt("preserve everything")
@@ -425,7 +422,7 @@ def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> N
     assert len(hook_calls) == 2
     assert len(dynamic_contexts) == 1
     agent_name, model, workspace, metadata = dynamic_contexts[0]
-    assert (agent_name, model, workspace) == ("interactive-agent", "direct", tmp_path.resolve())
+    assert (agent_name, model, workspace) == ("interactive-agent", "parent-model", tmp_path.resolve())
     assert metadata["agent_marker"] == "kept"
     assert metadata["session_id"] == "public-agent-session"
     assert metadata["trace_id"]
@@ -439,7 +436,7 @@ def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> N
 
 
 def test_interactive_client_preserves_public_agent_handoff(tmp_path: Path) -> None:
-    shared_llm = ScriptedModelProvider.new(
+    provider = ScriptedModelProvider.new(
         "test",
         "shared-model",
         [
@@ -464,18 +461,17 @@ def test_interactive_client_preserves_public_agent_handoff(tmp_path: Path) -> No
                 ],
             ),
         ],
-    ).llm
-    writer = Agent(name="writer", instructions="Write.", model=shared_llm)
+    )
+    writer = Agent(name="writer", instructions="Write.", model="shared-model")
     triage = Agent(
         name="triage",
         instructions="Transfer.",
-        model=shared_llm,
+        model="shared-model",
         handoffs=[handoff(agent=writer, description="Write the result.")],
     )
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="test",
+            model_provider=provider,
             workspace=tmp_path,
         )
     )
@@ -492,28 +488,14 @@ def test_interactive_client_preserves_public_agent_handoff(tmp_path: Path) -> No
     ]
 
 
-def test_interactive_definition_rejects_ignored_system_prompt_template() -> None:
-    with pytest.raises(ValueError, match="system_prompt_template is not supported"):
-        InteractiveAgentDefinition(
-            description="desktop agent",
-            model="kimi-k2.6",
-            system_prompt_template="ignored {description}",
-        )
-
-
 def test_interactive_client_requires_debug_dump_capable_llm(tmp_path: Path) -> None:
     class NoDebugDumpLLM:
         __slots__ = ()
 
-    def llm_builder(*_: Any, **__: Any) -> tuple[NoDebugDumpLLM, ResolvedModelConfig]:
-        return NoDebugDumpLLM(), _resolved()
-
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
-            settings_file=tmp_path / "settings.py",
-            default_backend="moonshot",
+            model_provider=FixedModelProvider(cast(Any, NoDebugDumpLLM()), _resolved()),
             workspace=tmp_path,
-            llm_builder=cast(Any, llm_builder),
             debug_dump_dir=str(tmp_path / "debug"),
         )
     )

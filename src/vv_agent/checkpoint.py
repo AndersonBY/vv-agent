@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -17,8 +18,8 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EXTENSION_NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.[a-z0-9._-]+$")
 _CAPABILITY_SLOT_RE = re.compile(r"^[a-z][a-z0-9_.:-]*$")
 _JSON_POINTER_ESCAPE_RE = re.compile(r"~(?:0|1)")
-RUN_DEFINITION_V1_SCHEMA = "vv-agent.run-definition.v1"
-OPERATION_REQUEST_V1_SCHEMA = "vv-agent.operation-request.v1"
+RUN_DEFINITION_SCHEMA = "vv-agent.run-definition.v1"
+OPERATION_REQUEST_SCHEMA = "vv-agent.operation-request.v1"
 CREDENTIAL_REDACTION_VALUE = "<credential-redacted>"
 
 _RUN_DEFINITION_REQUIRED_FIELDS = frozenset(
@@ -45,6 +46,69 @@ _RUN_DEFINITION_REQUIRED_FIELDS = frozenset(
         "capability_refs",
     }
 )
+_RUN_DEFINITION_AGENT_FIELDS = frozenset({"name", "type"})
+_RUN_DEFINITION_MODEL_FIELDS = frozenset({"backend", "model_id", "settings", "transport_timeout_seconds"})
+_RUN_DEFINITION_RUNTIME_CONTROL_FIELDS = frozenset(
+    {
+        "max_cycles",
+        "max_handoffs",
+        "no_tool_policy",
+        "memory_compact_threshold",
+        "memory_threshold_percentage",
+        "allow_interruption",
+        "native_multimodal",
+        "tool_use_behavior",
+        "stop_at_tool_names",
+    }
+)
+_RUN_DEFINITION_TOOL_FIELDS = frozenset({"schema", "tool_metadata", "timeout_seconds", "approval"})
+_RUN_DEFINITION_TOOL_SCHEMA_FIELDS = frozenset({"type", "function"})
+_RUN_DEFINITION_FUNCTION_SCHEMA_REQUIRED_FIELDS = frozenset({"name", "description", "parameters"})
+_RUN_DEFINITION_FUNCTION_SCHEMA_FIELDS = frozenset({*_RUN_DEFINITION_FUNCTION_SCHEMA_REQUIRED_FIELDS, "strict"})
+_RUN_DEFINITION_TOOL_METADATA_FIELDS = frozenset({"side_effect", "idempotency", "terminal", "capability_tags", "cost_dimensions"})
+_RUN_DEFINITION_TOOL_POLICY_FIELDS = frozenset(
+    {
+        "allowed_tools",
+        "disallowed_tools",
+        "approval",
+        "predicate_ref",
+        "approval_timeout_seconds",
+        "denied_side_effects",
+        "denied_capability_tags",
+        "deny_terminal_tools",
+        "denied_cost_dimensions",
+    }
+)
+_RUN_DEFINITION_CHECKPOINT_POLICY_FIELDS = frozenset(
+    {"ambiguous_model_policy", "ambiguous_tool_policy", "max_extension_state_bytes"}
+)
+_RUN_DEFINITION_BUDGET_FIELDS = frozenset(
+    {
+        "max_total_tokens",
+        "max_uncached_input_tokens",
+        "max_tool_calls",
+        "max_tool_calls_by_name",
+        "max_wall_time_ms",
+        "max_host_cost",
+        "unavailable_metric_policy",
+    }
+)
+_RUN_DEFINITION_EXTENSION_FIELDS = frozenset({"namespace", "version", "required"})
+_RUN_DEFINITION_MESSAGE_FIELDS = frozenset(
+    {
+        "role",
+        "content",
+        "name",
+        "tool_call_id",
+        "tool_calls",
+        "reasoning_content",
+        "image_url",
+        "metadata",
+    }
+)
+_RUN_DEFINITION_TOOL_CALL_FIELDS = frozenset({"id", "type", "function", "extra_content"})
+_RUN_DEFINITION_TOOL_CALL_REQUIRED_FIELDS = frozenset({"id", "type", "function"})
+_RUN_DEFINITION_TOOL_CALL_FUNCTION_FIELDS = frozenset({"name", "arguments"})
 
 
 class ResumePolicy(StrEnum):
@@ -108,9 +172,7 @@ class EventCursor:
             raise ValueError("unsupported event cursor schema_version")
         _validate_capability_ref(self.store_ref, "event cursor store_ref")
         _canonical_json(self.value, "event cursor value")
-        if self.last_event_id is not None and (
-            not isinstance(self.last_event_id, str) or not self.last_event_id.strip()
-        ):
+        if self.last_event_id is not None and (not isinstance(self.last_event_id, str) or not self.last_event_id.strip()):
             raise ValueError("event cursor last_event_id must be a non-empty string or None")
 
     def to_dict(self) -> dict[str, Any]:
@@ -164,9 +226,7 @@ class ResumeObservation:
         _positive_wire_integer(self.cycle_index, "resume observation cycle_index")
         if not isinstance(self.risk, str) or not self.risk:
             raise ValueError("resume observation risk must be non-empty")
-        if self.idempotency_support is not None and not isinstance(
-            self.idempotency_support, ToolIdempotency
-        ):
+        if self.idempotency_support is not None and not isinstance(self.idempotency_support, ToolIdempotency):
             object.__setattr__(
                 self,
                 "idempotency_support",
@@ -180,9 +240,7 @@ class ResumeObservation:
             "cycle_index": self.cycle_index,
             "state": self.state.value,
             "risk": self.risk,
-            "idempotency_support": (
-                self.idempotency_support.value if self.idempotency_support is not None else None
-            ),
+            "idempotency_support": (self.idempotency_support.value if self.idempotency_support is not None else None),
         }
 
     @classmethod
@@ -205,9 +263,7 @@ class ResumeObservation:
             state=OperationState(_required_string(payload, "state")),
             risk=_required_string(payload, "risk"),
             idempotency_support=(
-                ToolIdempotency(payload["idempotency_support"])
-                if payload.get("idempotency_support") is not None
-                else None
+                ToolIdempotency(payload["idempotency_support"]) if payload.get("idempotency_support") is not None else None
             ),
         )
 
@@ -363,9 +419,7 @@ class CheckpointConfig:
                 code="checkpoint_extension_namespace_duplicate",
             )
         self.required_extension_namespaces = sorted(normalized, key=utf16_sort_key)
-        if not isinstance(self.credential_slots, list) or not all(
-            isinstance(pointer, str) for pointer in self.credential_slots
-        ):
+        if not isinstance(self.credential_slots, list) or not all(isinstance(pointer, str) for pointer in self.credential_slots):
             raise CheckpointError(
                 "CheckpointConfig.credential_slots must be an array of strings",
                 code="checkpoint_credential_slots_invalid",
@@ -405,23 +459,21 @@ class CheckpointConfig:
                     code="checkpoint_capability_ref_invalid",
                 ) from exc
             normalized_refs[slot] = dict(reference)
-        self.capability_refs = dict(
-            sorted(normalized_refs.items(), key=lambda item: utf16_sort_key(item[0]))
-        )
+        self.capability_refs = dict(sorted(normalized_refs.items(), key=lambda item: utf16_sort_key(item[0])))
         if self.store is not None:
             required_methods = (
-                "create_checkpoint_v2",
-                "load_checkpoint_v2",
-                "claim_checkpoint_v2",
-                "progress_checkpoint_v2",
-                "suspend_checkpoint_v2",
-                "commit_checkpoint_v2",
-                "finalize_claimed_checkpoint_v2",
-                "finalize_checkpoint_v2",
-                "record_event_delivery_v2",
-                "renew_checkpoint_claim_v2",
-                "acknowledge_terminal_v2",
-                "delete_checkpoint_v2",
+                "create_checkpoint",
+                "load_checkpoint",
+                "claim_checkpoint",
+                "progress_checkpoint",
+                "suspend_checkpoint",
+                "commit_checkpoint",
+                "finalize_claimed_checkpoint",
+                "finalize_checkpoint",
+                "record_event_delivery",
+                "renew_checkpoint_claim",
+                "acknowledge_terminal",
+                "delete_checkpoint",
             )
             missing = [name for name in required_methods if not callable(getattr(self.store, name, None))]
             if missing:
@@ -437,9 +489,7 @@ def validate_extension_namespace(namespace: str) -> None:
     if len(namespace.encode("ascii", errors="ignore")) != len(namespace.encode("utf-8")):
         raise ValueError("checkpoint extension namespace must contain ASCII characters only")
     if len(namespace.encode("ascii")) > MAX_EXTENSION_NAMESPACE_BYTES:
-        raise ValueError(
-            f"checkpoint extension namespace must be at most {MAX_EXTENSION_NAMESPACE_BYTES} bytes"
-        )
+        raise ValueError(f"checkpoint extension namespace must be at most {MAX_EXTENSION_NAMESPACE_BYTES} bytes")
     if _EXTENSION_NAMESPACE_RE.fullmatch(namespace) is None:
         raise ValueError("checkpoint extension namespace is invalid")
 
@@ -498,7 +548,7 @@ def validate_run_definition(run_definition: Any) -> dict[str, Any]:
         )
     definition = dict(run_definition)
     schema = definition.get("schema_version")
-    if schema != RUN_DEFINITION_V1_SCHEMA:
+    if schema != RUN_DEFINITION_SCHEMA:
         raise CheckpointError(
             f"unsupported run definition schema: {schema!r}",
             code="checkpoint_definition_schema_unsupported",
@@ -508,10 +558,15 @@ def validate_run_definition(run_definition: Any) -> dict[str, Any]:
             "run_definition has missing or unknown top-level fields",
             code="checkpoint_definition_invalid",
         )
+    try:
+        _validate_run_definition_shape(definition)
+    except (TypeError, ValueError) as exc:
+        raise CheckpointError(
+            str(exc),
+            code="checkpoint_definition_invalid",
+        ) from exc
     credential_slots = definition.get("credential_slots")
-    if not isinstance(credential_slots, list) or not all(
-        isinstance(pointer, str) for pointer in credential_slots
-    ):
+    if not isinstance(credential_slots, list) or not all(isinstance(pointer, str) for pointer in credential_slots):
         raise CheckpointError(
             "run_definition credential_slots must be an array of strings",
             code="checkpoint_credential_slots_invalid",
@@ -550,6 +605,396 @@ def validate_run_definition(run_definition: Any) -> dict[str, Any]:
     return definition
 
 
+def _validate_run_definition_shape(definition: dict[str, Any]) -> None:
+    agent = _closed_definition_object(
+        definition["agent"],
+        _RUN_DEFINITION_AGENT_FIELDS,
+        "run_definition.agent",
+    )
+    _non_empty_definition_string(agent["name"], "run_definition.agent.name")
+    _optional_non_empty_definition_string(agent["type"], "run_definition.agent.type")
+    _definition_string(definition["root_input"], "run_definition.root_input")
+    _definition_string(definition["compiled_prompt"], "run_definition.compiled_prompt")
+
+    messages = _definition_array(definition["initial_messages"], "run_definition.initial_messages")
+    for index, message in enumerate(messages):
+        _validate_run_definition_message(message, index=index)
+    _open_definition_object(definition["initial_shared_state"], "run_definition.initial_shared_state")
+    _open_definition_object(definition["run_metadata"], "run_definition.run_metadata")
+    _optional_capability_ref(definition["context_ref"], "run_definition.context_ref")
+
+    model = _closed_definition_object(
+        definition["model"],
+        _RUN_DEFINITION_MODEL_FIELDS,
+        "run_definition.model",
+    )
+    _non_empty_definition_string(model["backend"], "run_definition.model.backend")
+    _non_empty_definition_string(model["model_id"], "run_definition.model.model_id")
+    settings = _open_definition_object(model["settings"], "run_definition.model.settings")
+    if "timeout_seconds" in settings:
+        raise ValueError("run_definition.model.settings must not contain transport timeout_seconds")
+    from vv_agent.model_settings import ModelSettings
+
+    parsed_settings = ModelSettings.from_dict(dict(settings))
+    if parsed_settings.to_dict() != dict(settings):
+        raise ValueError("run_definition.model.settings must use the complete current wire shape")
+    _optional_positive_definition_number(
+        model["transport_timeout_seconds"],
+        "run_definition.model.transport_timeout_seconds",
+    )
+
+    controls = _closed_definition_object(
+        definition["runtime_controls"],
+        _RUN_DEFINITION_RUNTIME_CONTROL_FIELDS,
+        "run_definition.runtime_controls",
+    )
+    _definition_integer(controls["max_cycles"], "run_definition.runtime_controls.max_cycles", minimum=1)
+    _definition_integer(controls["max_handoffs"], "run_definition.runtime_controls.max_handoffs")
+    if controls["no_tool_policy"] not in {"continue", "wait_user", "finish"}:
+        raise ValueError("run_definition.runtime_controls.no_tool_policy is invalid")
+    _definition_integer(
+        controls["memory_compact_threshold"],
+        "run_definition.runtime_controls.memory_compact_threshold",
+    )
+    _definition_integer(
+        controls["memory_threshold_percentage"],
+        "run_definition.runtime_controls.memory_threshold_percentage",
+        maximum=255,
+    )
+    _definition_boolean(controls["allow_interruption"], "run_definition.runtime_controls.allow_interruption")
+    _definition_boolean(controls["native_multimodal"], "run_definition.runtime_controls.native_multimodal")
+    if controls["tool_use_behavior"] not in {
+        "run_llm_again",
+        "stop_on_first_tool",
+        "stop_at_tool_names",
+    }:
+        raise ValueError("run_definition.runtime_controls.tool_use_behavior is invalid")
+    _definition_string_array(
+        controls["stop_at_tool_names"],
+        "run_definition.runtime_controls.stop_at_tool_names",
+        unique=True,
+    )
+
+    tools = _definition_array(definition["tools"], "run_definition.tools")
+    for index, tool in enumerate(tools):
+        _validate_run_definition_tool(tool, index=index)
+    _validate_run_definition_tool_policy(definition["tool_policy"])
+
+    checkpoint_policy = _closed_definition_object(
+        definition["checkpoint_policy"],
+        _RUN_DEFINITION_CHECKPOINT_POLICY_FIELDS,
+        "run_definition.checkpoint_policy",
+    )
+    if checkpoint_policy["ambiguous_model_policy"] not in {
+        "require_reconciliation",
+        "retry_with_duplicate_risk",
+    }:
+        raise ValueError("run_definition.checkpoint_policy.ambiguous_model_policy is invalid")
+    if checkpoint_policy["ambiguous_tool_policy"] not in {
+        "require_reconciliation",
+        "retry_idempotent_only",
+    }:
+        raise ValueError("run_definition.checkpoint_policy.ambiguous_tool_policy is invalid")
+    _definition_integer(
+        checkpoint_policy["max_extension_state_bytes"],
+        "run_definition.checkpoint_policy.max_extension_state_bytes",
+    )
+
+    budget_limits = definition["budget_limits"]
+    if budget_limits is not None:
+        budget = _closed_definition_object(
+            budget_limits,
+            _RUN_DEFINITION_BUDGET_FIELDS,
+            "run_definition.budget_limits",
+        )
+        from vv_agent.budget import RunBudgetLimits
+
+        parsed_budget = RunBudgetLimits.from_dict(budget)
+        if parsed_budget.to_dict() != dict(budget):
+            raise ValueError("run_definition.budget_limits must use the complete current wire shape")
+
+    output_schema = definition["output_schema"]
+    if output_schema is not None:
+        _open_definition_object(output_schema, "run_definition.output_schema")
+    _optional_capability_ref(definition["workspace_ref"], "run_definition.workspace_ref")
+    _optional_capability_ref(definition["session_ref"], "run_definition.session_ref")
+
+    extensions = _definition_array(definition["extensions"], "run_definition.extensions")
+    namespaces: list[str] = []
+    for index, extension_value in enumerate(extensions):
+        label = f"run_definition.extensions[{index}]"
+        extension = _closed_definition_object(
+            extension_value,
+            _RUN_DEFINITION_EXTENSION_FIELDS,
+            label,
+        )
+        namespace = _non_empty_definition_string(extension["namespace"], f"{label}.namespace")
+        validate_extension_namespace(namespace)
+        namespaces.append(namespace)
+        _non_empty_definition_string(extension["version"], f"{label}.version")
+        _definition_boolean(extension["required"], f"{label}.required")
+    if namespaces != sorted(set(namespaces), key=utf16_sort_key):
+        raise ValueError("run_definition.extensions must be sorted by unique namespace")
+
+    refs = _open_definition_object(definition["capability_refs"], "run_definition.capability_refs")
+    for slot, reference in refs.items():
+        if _CAPABILITY_SLOT_RE.fullmatch(slot) is None:
+            raise ValueError(f"run_definition.capability_refs contains invalid slot {slot!r}")
+        _validate_capability_ref(reference, f"run_definition.capability_refs[{slot!r}]")
+
+
+def _validate_run_definition_message(value: Any, *, index: int) -> None:
+    label = f"run_definition.initial_messages[{index}]"
+    message = _closed_definition_object(
+        value,
+        _RUN_DEFINITION_MESSAGE_FIELDS,
+        label,
+        required={"role", "content"},
+    )
+    if message["role"] not in {"system", "user", "assistant", "tool"}:
+        raise ValueError(f"{label}.role is invalid")
+    _definition_string(message["content"], f"{label}.content")
+    for field_name in ("name", "tool_call_id", "reasoning_content", "image_url"):
+        if field_name in message:
+            _definition_string(message[field_name], f"{label}.{field_name}")
+    if "metadata" in message:
+        _open_definition_object(message["metadata"], f"{label}.metadata")
+    if "tool_calls" not in message:
+        return
+    calls = _definition_array(message["tool_calls"], f"{label}.tool_calls")
+    for call_index, value in enumerate(calls):
+        call_label = f"{label}.tool_calls[{call_index}]"
+        call = _closed_definition_object(
+            value,
+            _RUN_DEFINITION_TOOL_CALL_FIELDS,
+            call_label,
+            required=_RUN_DEFINITION_TOOL_CALL_REQUIRED_FIELDS,
+        )
+        _non_empty_definition_string(call["id"], f"{call_label}.id")
+        if call["type"] != "function":
+            raise ValueError(f"{call_label}.type must be function")
+        function = _closed_definition_object(
+            call["function"],
+            _RUN_DEFINITION_TOOL_CALL_FUNCTION_FIELDS,
+            f"{call_label}.function",
+        )
+        _non_empty_definition_string(function["name"], f"{call_label}.function.name")
+        arguments = _definition_string(function["arguments"], f"{call_label}.function.arguments")
+        try:
+            decoded_arguments = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{call_label}.function.arguments must contain JSON") from exc
+        if not isinstance(decoded_arguments, dict):
+            raise ValueError(f"{call_label}.function.arguments must contain a JSON object")
+        if "extra_content" in call:
+            _open_definition_object(call["extra_content"], f"{call_label}.extra_content")
+
+
+def _validate_run_definition_tool(value: Any, *, index: int) -> None:
+    label = f"run_definition.tools[{index}]"
+    tool = _closed_definition_object(value, _RUN_DEFINITION_TOOL_FIELDS, label)
+    schema = _closed_definition_object(
+        tool["schema"],
+        _RUN_DEFINITION_TOOL_SCHEMA_FIELDS,
+        f"{label}.schema",
+    )
+    if schema["type"] != "function":
+        raise ValueError(f"{label}.schema.type must be function")
+    function = _closed_definition_object(
+        schema["function"],
+        _RUN_DEFINITION_FUNCTION_SCHEMA_FIELDS,
+        f"{label}.schema.function",
+        required=_RUN_DEFINITION_FUNCTION_SCHEMA_REQUIRED_FIELDS,
+    )
+    _non_empty_definition_string(function["name"], f"{label}.schema.function.name")
+    _definition_string(function["description"], f"{label}.schema.function.description")
+    _open_definition_object(function["parameters"], f"{label}.schema.function.parameters")
+    if "strict" in function:
+        _definition_boolean(function["strict"], f"{label}.schema.function.strict")
+
+    metadata_value = tool["tool_metadata"]
+    if metadata_value is not None:
+        metadata = _closed_definition_object(
+            metadata_value,
+            _RUN_DEFINITION_TOOL_METADATA_FIELDS,
+            f"{label}.tool_metadata",
+        )
+        if metadata["side_effect"] not in {
+            "unknown",
+            "none",
+            "read",
+            "write",
+            "execute",
+            "network",
+            "external",
+        }:
+            raise ValueError(f"{label}.tool_metadata.side_effect is invalid")
+        if metadata["idempotency"] not in {"supported", "unsupported", "unknown"}:
+            raise ValueError(f"{label}.tool_metadata.idempotency is invalid")
+        _definition_boolean(metadata["terminal"], f"{label}.tool_metadata.terminal")
+        _definition_string_array(
+            metadata["capability_tags"],
+            f"{label}.tool_metadata.capability_tags",
+            sorted_unique=True,
+        )
+        _definition_string_array(
+            metadata["cost_dimensions"],
+            f"{label}.tool_metadata.cost_dimensions",
+            sorted_unique=True,
+        )
+    _optional_positive_definition_number(tool["timeout_seconds"], f"{label}.timeout_seconds")
+    approval = _open_definition_object(tool["approval"], f"{label}.approval")
+    mode = approval.get("mode")
+    if mode == "static":
+        approval = _closed_definition_object(
+            approval,
+            {"mode", "required"},
+            f"{label}.approval",
+        )
+        _definition_boolean(approval["required"], f"{label}.approval.required")
+    elif mode == "referenced":
+        approval = _closed_definition_object(
+            approval,
+            {"mode", "ref"},
+            f"{label}.approval",
+        )
+        _validate_capability_ref(approval["ref"], f"{label}.approval.ref")
+    else:
+        raise ValueError(f"{label}.approval.mode is invalid")
+
+
+def _validate_run_definition_tool_policy(value: Any) -> None:
+    label = "run_definition.tool_policy"
+    policy = _closed_definition_object(value, _RUN_DEFINITION_TOOL_POLICY_FIELDS, label)
+    allowed = policy["allowed_tools"]
+    if allowed is not None:
+        _definition_string_array(allowed, f"{label}.allowed_tools", sorted_unique=True)
+    _definition_string_array(policy["disallowed_tools"], f"{label}.disallowed_tools", sorted_unique=True)
+    if policy["approval"] not in {"default", "always", "never", "on_request"}:
+        raise ValueError(f"{label}.approval is invalid")
+    _optional_capability_ref(policy["predicate_ref"], f"{label}.predicate_ref")
+    _optional_positive_definition_number(
+        policy["approval_timeout_seconds"],
+        f"{label}.approval_timeout_seconds",
+    )
+    effects = _definition_string_array(
+        policy["denied_side_effects"],
+        f"{label}.denied_side_effects",
+        sorted_unique=True,
+    )
+    if not set(effects).issubset({"unknown", "none", "read", "write", "execute", "network", "external"}):
+        raise ValueError(f"{label}.denied_side_effects contains an invalid value")
+    _definition_string_array(
+        policy["denied_capability_tags"],
+        f"{label}.denied_capability_tags",
+        sorted_unique=True,
+    )
+    _definition_boolean(policy["deny_terminal_tools"], f"{label}.deny_terminal_tools")
+    _definition_string_array(
+        policy["denied_cost_dimensions"],
+        f"{label}.denied_cost_dimensions",
+        sorted_unique=True,
+    )
+
+
+def _closed_definition_object(
+    value: Any,
+    allowed: set[str] | frozenset[str],
+    field_name: str,
+    *,
+    required: set[str] | frozenset[str] | None = None,
+) -> dict[str, Any]:
+    payload = _open_definition_object(value, field_name)
+    required_fields = set(allowed if required is None else required)
+    actual = set(payload)
+    if not required_fields.issubset(actual) or not actual.issubset(allowed):
+        missing = sorted(required_fields - actual)
+        unknown = sorted(actual - set(allowed))
+        raise ValueError(f"{field_name} has invalid fields: missing={missing}, unknown={unknown}")
+    return payload
+
+
+def _open_definition_object(value: Any, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise TypeError(f"{field_name} must be an object with string keys")
+    return value
+
+
+def _definition_array(value: Any, field_name: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise TypeError(f"{field_name} must be an array")
+    return value
+
+
+def _definition_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string")
+    return value
+
+
+def _non_empty_definition_string(value: Any, field_name: str) -> str:
+    text = _definition_string(value, field_name)
+    if not text.strip():
+        raise ValueError(f"{field_name} must be non-empty")
+    return text
+
+
+def _optional_non_empty_definition_string(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _non_empty_definition_string(value, field_name)
+
+
+def _definition_boolean(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{field_name} must be a boolean")
+    return value
+
+
+def _definition_integer(
+    value: Any,
+    field_name: str,
+    *,
+    minimum: int = 0,
+    maximum: int = MAX_WIRE_INTEGER,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ValueError(f"{field_name} must be an integer between {minimum} and {maximum}")
+    return value
+
+
+def _optional_positive_definition_number(value: Any, field_name: str) -> float | int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{field_name} must be a finite positive number or null")
+    return value
+
+
+def _definition_string_array(
+    value: Any,
+    field_name: str,
+    *,
+    unique: bool = False,
+    sorted_unique: bool = False,
+) -> list[str]:
+    values = _definition_array(value, field_name)
+    if not all(isinstance(item, str) and item.strip() for item in values):
+        raise TypeError(f"{field_name} must contain non-empty strings")
+    typed_values = list(values)
+    if unique and len(typed_values) != len(set(typed_values)):
+        raise ValueError(f"{field_name} must contain unique values")
+    if sorted_unique and typed_values != sorted(set(typed_values), key=utf16_sort_key):
+        raise ValueError(f"{field_name} must be sorted and unique")
+    return typed_values
+
+
+def _optional_capability_ref(value: Any, field_name: str) -> None:
+    if value is None:
+        return
+    _validate_capability_ref(value, field_name)
+
+
 def compute_run_definition_digest(run_definition: Any) -> str:
     definition = validate_run_definition(run_definition)
     return canonical_json_sha256(definition, "run_definition")
@@ -567,7 +1012,7 @@ def compute_operation_request_digest(request: Any) -> str:
             "operation request has missing or unknown fields",
             code="operation_request_invalid",
         )
-    if projection.get("schema_version") != OPERATION_REQUEST_V1_SCHEMA:
+    if projection.get("schema_version") != OPERATION_REQUEST_SCHEMA:
         raise CheckpointError(
             "operation request schema is unsupported",
             code="operation_request_schema_unsupported",

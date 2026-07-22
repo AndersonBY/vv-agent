@@ -157,7 +157,7 @@ class MemoryManager:
     compact_threshold: int = 250_000
     keep_recent_messages: int = 10
     model: str = ""
-    model_context_window: int = 200_000
+    model_context_window: int = 279_000
     model_max_output_tokens: int | None = None
     reserved_output_tokens: int = 16_000
     reserved_output_source: ReservedOutputSource = "framework_fallback"
@@ -250,9 +250,9 @@ class MemoryManager:
         cleaned = [msg for msg in messages if not (msg.role == "system" and msg.name == _MEMORY_SUMMARY_NAME)]
         summary_removed = len(cleaned) != len(messages)
         sanitized_messages, sanitized = self._sanitize_empty_assistant_messages(cleaned)
-        legacy_changed = summary_removed or sanitized
+        messages_changed = summary_removed or sanitized
         working_messages = self.apply_session_memory_context(sanitized_messages)
-        if legacy_changed or working_messages != sanitized_messages:
+        if messages_changed or working_messages != sanitized_messages:
             strongest_mode = "structural"
 
         message_length = self._calculate_effective_length(
@@ -283,7 +283,7 @@ class MemoryManager:
             )
             if cleared > 0:
                 strongest_mode = _strongest_compaction_mode(strongest_mode, "micro")
-                legacy_changed = True
+                messages_changed = True
                 message_length = self._calculate_effective_length(
                     microcompacted_messages,
                     total_tokens=None,
@@ -301,13 +301,13 @@ class MemoryManager:
                 original_messages,
                 maybe_warned_messages,
                 strongest_mode,
-                legacy_changed or warning_inserted,
+                messages_changed or warning_inserted,
             )
 
         compacted_messages, compacted = self._compact_messages(microcompacted_messages, cycle_index=cycle_index)
         if compacted:
             strongest_mode = _strongest_compaction_mode(strongest_mode, "structural")
-            legacy_changed = True
+            messages_changed = True
         message_length = self._calculate_effective_length(
             compacted_messages,
             total_tokens=None,
@@ -318,13 +318,13 @@ class MemoryManager:
                 original_messages,
                 compacted_messages,
                 strongest_mode,
-                legacy_changed,
+                messages_changed,
             )
 
         summarized_messages, summarized = self.compress_memory(compacted_messages, cycle_index=cycle_index)
         if summarized:
             strongest_mode = _strongest_compaction_mode(strongest_mode, "summary")
-            legacy_changed = True
+            messages_changed = True
         if summarized and self.session_memory is not None:
             post_compaction_messages = self.apply_session_memory_context(summarized_messages)
             self.session_memory.on_compaction(
@@ -334,7 +334,7 @@ class MemoryManager:
             original_messages,
             summarized_messages,
             strongest_mode,
-            legacy_changed,
+            messages_changed,
         )
 
     @staticmethod

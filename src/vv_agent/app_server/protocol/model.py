@@ -18,17 +18,14 @@ class ModelListRequest:
         return payload
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ModelSummary:
     id: str
     provider: str | None = None
     display_name: str | None = None
-    # Keep metadata in the legacy positional slot. New model capability fields
-    # are appended so existing ModelSummary(id, provider, name, metadata) calls
-    # remain valid.
-    metadata: dict[str, Any] = field(default_factory=dict)
     context_length: int | None = None
     supports_tools: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"id": self.id, "supportsTools": self.supports_tools}

@@ -181,8 +181,6 @@ class ModelSettings:
         for name in ("extra_headers", "extra_body", "extra_args"):
             if name in values and not isinstance(values[name], dict):
                 raise TypeError(f"{name} must be an object")
-        if "max_tokens" not in values and "max_output_tokens" in values:
-            values["max_tokens"] = values.pop("max_output_tokens")
         retry = values.get("retry")
         if isinstance(retry, dict):
             unknown_retry = sorted(set(retry) - {"max_attempts", "backoff_seconds"})

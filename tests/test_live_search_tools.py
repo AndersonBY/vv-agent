@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from vv_agent.config import build_openai_llm_from_local_settings
+from vv_agent.config import build_vv_llm_from_local_settings
 from vv_agent.constants import FIND_FILES_TOOL_NAME, SEARCH_FILES_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.model import VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, ToolCall, ToolExecutionResult
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, ToolCall, ToolExecutionResult, ToolResultStatus
 
 pytestmark = pytest.mark.live
 
@@ -28,12 +29,12 @@ class ToolEvent:
 def _live_settings_file() -> Path:
     settings_file = Path(
         os.getenv(
-            "V_AGENT_LOCAL_SETTINGS",
+            "VV_AGENT_LOCAL_SETTINGS",
             Path(__file__).resolve().parents[1] / "local_settings.py",
         )
     )
-    if os.getenv("V_AGENT_RUN_LIVE_TESTS") != "1":
-        pytest.skip("Set V_AGENT_RUN_LIVE_TESTS=1 to run live integration tests")
+    if os.getenv("VV_AGENT_RUN_LIVE_TESTS") != "1":
+        pytest.skip("Set VV_AGENT_RUN_LIVE_TESTS=1 to run live integration tests")
     if not settings_file.exists():
         pytest.skip(f"Live settings file not found: {settings_file}")
     return settings_file
@@ -41,15 +42,18 @@ def _live_settings_file() -> Path:
 
 def _build_live_runtime(workspace: Path) -> tuple[AgentRuntime, str]:
     settings_file = _live_settings_file()
-    backend = os.getenv("V_AGENT_LIVE_BACKEND", "moonshot")
-    model = os.getenv("V_AGENT_LIVE_MODEL", "kimi-k2.6")
-    llm, resolved = build_openai_llm_from_local_settings(settings_file, backend=backend, model=model)
-    runtime = AgentRuntime(
-        llm_client=llm,
-        tool_registry=build_default_registry(),
-        default_workspace=workspace,
+    backend = os.getenv("VV_AGENT_LIVE_BACKEND", "moonshot")
+    model = os.getenv("VV_AGENT_LIVE_MODEL", "kimi-k3")
+    llm, resolved = build_vv_llm_from_local_settings(settings_file, backend=backend, model=model)
+    provider = VvLlmModelProvider(
         settings_file=settings_file,
         default_backend=backend,
+    )
+    runtime = AgentRuntime(
+        llm_client=llm,
+        model_provider=provider,
+        tool_registry=build_default_registry(),
+        default_workspace=workspace,
         tool_registry_factory=build_default_registry,
     )
     return runtime, resolved.model_id
@@ -91,7 +95,6 @@ def _build_live_task(*, model_id: str, workspace: Path) -> AgentTask:
             ],
             "_vv_agent_model_settings": ModelSettings(
                 temperature=0.0,
-                max_tokens=2048,
                 tool_choice="required",
                 parallel_tool_calls=False,
                 timeout_seconds=180.0,
@@ -133,12 +136,12 @@ def test_live_model_uses_find_files_then_search_files(tmp_path: Path) -> None:
     assert event_names[-1] == TASK_FINISH_TOOL_NAME
 
     find_event = events[0]
-    assert find_event.result.status == "success"
+    assert find_event.result.status_code is ToolResultStatus.SUCCESS
     find_payload = json.loads(find_event.result.content)
     assert "notes/target.txt" in find_payload["files"]
 
     search_event = events[1]
-    assert search_event.result.status == "success"
+    assert search_event.result.status_code is ToolResultStatus.SUCCESS
     assert search_event.call.arguments.get("output_mode") == "content"
     assert search_event.result.metadata["summary"]["total_matches"] == 1
     assert search_event.result.metadata["matches"][0]["path"] == "notes/target.txt"

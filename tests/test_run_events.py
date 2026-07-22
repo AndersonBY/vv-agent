@@ -2,21 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from support import FixedModelProvider
+
 from vv_agent import (
     Agent,
     AgentStartedEvent,
+    CycleStartedEvent,
     LLMStartedEvent,
-    MemoryCompactCompleted,
-    MemoryCompactedEvent,
-    MemoryCompactStarted,
     RunConfig,
     Runner,
-    ToolFinishedEvent,
-    ToolStartedEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
-from vv_agent.events import CycleStartedEvent, RunFailedEvent, event_from_runtime_log
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -32,75 +31,24 @@ def _resolved() -> ResolvedModelConfig:
     )
 
 
-def test_runtime_log_mapper_preserves_memory_event_identity() -> None:
-    common = {
-        "event_id": "evt_observed_memory",
-        "created_at": 123.25,
-        "cycle_index": 2,
-    }
-    started = event_from_runtime_log(
-        "memory_compact_started",
-        {
-            **common,
-            "message_count": 4,
-            "estimated_tokens": 3_800,
-            "trigger": "micro_threshold",
-            "configured_threshold": 4_000,
-            "effective_threshold": 4_000,
-            "microcompact_threshold": 3_000,
-            "model_context_window": 64_000,
-            "model_max_output_tokens": 8_192,
-            "reserved_output_tokens": 8_192,
-            "reserved_output_source": "framework_fallback_capped_by_model_capability",
-            "autocompact_buffer_tokens": 13_000,
-        },
-        run_id="run-memory",
-        trace_id="trace-memory",
-        agent_name="assistant",
-        user_input="continue",
+def test_runner_emits_tool_call_started_and_completed_events(tmp_path: Path) -> None:
+    model_provider = FixedModelProvider(
+        ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[
+                        ToolCall(
+                            id="finish",
+                            name=TASK_FINISH_TOOL_NAME,
+                            arguments={"message": "ok"},
+                        )
+                    ],
+                )
+            ]
+        ),
+        _resolved(),
     )
-    completed = event_from_runtime_log(
-        "memory_compact_completed",
-        {
-            **common,
-            "before_count": 4,
-            "after_count": 4,
-            "mode": "micro",
-            "changed": True,
-        },
-        run_id="run-memory",
-        trace_id="trace-memory",
-        agent_name="assistant",
-        user_input="continue",
-    )
-
-    assert isinstance(started, MemoryCompactStarted)
-    assert isinstance(completed, MemoryCompactCompleted)
-    assert started.event_id == completed.event_id == common["event_id"]
-    assert started.created_at == completed.created_at == common["created_at"]
-    assert started.cycle_index == completed.cycle_index == common["cycle_index"]
-
-
-def test_runner_emits_tool_started_and_finished_events(tmp_path: Path) -> None:
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="done",
-                        tool_calls=[
-                            ToolCall(
-                                id="finish",
-                                name=TASK_FINISH_TOOL_NAME,
-                                arguments={"message": "ok"},
-                            )
-                        ],
-                    )
-                ]
-            ),
-            _resolved(),
-        )
 
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Finish.", model="m"),
@@ -108,8 +56,8 @@ def test_runner_emits_tool_started_and_finished_events(tmp_path: Path) -> None:
         run_config=RunConfig(workspace=tmp_path, model_provider=model_provider),
     )
 
-    started = [event for event in result.events if isinstance(event, ToolStartedEvent)]
-    finished = [event for event in result.events if isinstance(event, ToolFinishedEvent)]
+    started = [event for event in result.events if isinstance(event, ToolCallStartedEvent)]
+    finished = [event for event in result.events if isinstance(event, ToolCallCompletedEvent)]
     assert len(started) == 1
     assert started[0].tool_name == TASK_FINISH_TOOL_NAME
     assert started[0].tool_call_id == "finish"
@@ -119,19 +67,17 @@ def test_runner_emits_tool_started_and_finished_events(tmp_path: Path) -> None:
 
 
 def test_runner_emits_cycle_and_llm_started_events(tmp_path: Path) -> None:
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return (
-            ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="done",
-                        tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-                    )
-                ]
-            ),
-            _resolved(),
-        )
+    model_provider = FixedModelProvider(
+        ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="done",
+                    tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                )
+            ]
+        ),
+        _resolved(),
+    )
 
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Finish.", model="m"),
@@ -149,106 +95,3 @@ def test_runner_emits_cycle_and_llm_started_events(tmp_path: Path) -> None:
     assert isinstance(result.events[2], CycleStartedEvent)
     assert isinstance(result.events[3], LLMStartedEvent)
     assert result.events[3].to_dict()["model"] == "m"
-
-
-def test_cycle_llm_response_runtime_log_does_not_masquerade_as_stream_delta() -> None:
-    event = event_from_runtime_log(
-        "cycle_llm_response",
-        {
-            "cycle": 1,
-            "assistant_message": "typed answer",
-            "tool_calls": [{"id": "call_1", "name": "browser"}],
-        },
-        run_id="run_1",
-        trace_id="trace_1",
-        agent_name="assistant",
-        user_input="hello",
-        session_id="session_1",
-    )
-
-    assert event is None
-
-
-def test_cycle_failed_runtime_log_becomes_run_failed_event() -> None:
-    event = event_from_runtime_log(
-        "cycle_failed",
-        {
-            "cycle": 1,
-            "error": "ValueError: bad endpoint",
-            "details": "Traceback...",
-        },
-        run_id="run_1",
-        trace_id="trace_1",
-        agent_name="assistant",
-        user_input="hello",
-        session_id="session_1",
-    )
-
-    assert isinstance(event, RunFailedEvent)
-    assert event.type == "run_failed"
-    assert event.cycle_index == 1
-    assert event.error == "ValueError: bad endpoint"
-    assert event.metadata["error"] == "ValueError: bad endpoint"
-    assert event.metadata["details"] == "Traceback..."
-
-
-def test_runtime_mapping_preserves_taxonomy_and_runner_session_identity() -> None:
-    mapped = [
-        event_from_runtime_log(
-            event_type,
-            {"cycle": 3, "model": "model-parity", "session_id": "session_payload"},
-            run_id="run_1",
-            trace_id="trace_1",
-            agent_name="assistant",
-            user_input="hello",
-            session_id="session_fallback",
-        )
-        for event_type in ("agent_started", "cycle_started", "llm_started")
-    ]
-
-    assert isinstance(mapped[0], AgentStartedEvent)
-    assert isinstance(mapped[1], CycleStartedEvent)
-    assert isinstance(mapped[2], LLMStartedEvent)
-    assert [event.type for event in mapped if event is not None] == [
-        "agent_started",
-        "cycle_started",
-        "llm_started",
-    ]
-    assert all(event is not None and event.session_id == "session_fallback" for event in mapped)
-
-
-def test_memory_compacted_event_dict_includes_counts() -> None:
-    event = MemoryCompactedEvent(
-        run_id="run",
-        trace_id="trace",
-        cycle_index=2,
-        agent_name="assistant",
-        before_count=12,
-        after_count=5,
-    )
-
-    payload = event.to_dict()
-
-    assert payload["version"] == "v1"
-    assert payload["event_id"].startswith("evt_")
-    assert payload["created_at"] > 0
-    assert {
-        key: payload[key]
-        for key in (
-            "type",
-            "run_id",
-            "trace_id",
-            "cycle_index",
-            "agent_name",
-            "before_count",
-            "after_count",
-        )
-    } == {
-        "type": "memory_compacted",
-        "run_id": "run",
-        "trace_id": "trace",
-        "cycle_index": 2,
-        "agent_name": "assistant",
-        "before_count": 12,
-        "after_count": 5,
-    }

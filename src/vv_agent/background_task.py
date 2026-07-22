@@ -221,10 +221,9 @@ class BackgroundAgentTask(FunctionTool):
     def _input_from_arguments(raw_arguments: dict[str, Any]) -> str:
         if not isinstance(raw_arguments, dict):
             raise ValueError("background task arguments must be an object")
-        for key in ("task_description", "task", "input"):
-            value = raw_arguments.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        value = raw_arguments.get("task_description")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
         raise ValueError("background task requires task_description")
 
 

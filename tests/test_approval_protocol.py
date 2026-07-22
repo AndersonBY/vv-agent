@@ -4,6 +4,7 @@ from contextlib import suppress
 from threading import Event
 
 import pytest
+from support import FixedModelProvider
 
 from vv_agent import (
     Agent,
@@ -102,15 +103,11 @@ def test_approval_provider_failure_fails_run_without_faking_a_denial() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        del agent, run_config
-        return llm, _resolved_model()
-
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Use tool.", model="test-model", tools=[dangerous]),
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=provider,
             approval_broker=broker,
             max_cycles=1,
@@ -122,11 +119,10 @@ def test_approval_provider_failure_fails_run_without_faking_a_denial() -> None:
     assert calls == []
     assert provider.request_id
     assert broker.pending_request(provider.request_id) is None
-    assert [
-        event.type
-        for event in result.events
-        if event.type in {"approval_requested", "approval_resolved", "run_failed"}
-    ] == ["approval_requested", "run_failed"]
+    assert [event.type for event in result.events if event.type in {"approval_requested", "approval_resolved", "run_failed"}] == [
+        "approval_requested",
+        "run_failed",
+    ]
 
 
 def test_approval_request_pauses_tool_until_handle_approves() -> None:
@@ -145,14 +141,11 @@ def test_approval_request_pauses_tool_until_handle_approves() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
         ),
     )
@@ -187,14 +180,11 @@ def test_function_tool_approval_policy_always_requests_once() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
             tool_policy=ToolPolicy(approval="always"),
         ),
@@ -237,14 +227,11 @@ def test_executor_registered_tool_approval_can_be_approved_from_run_handle() -> 
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
             tool_registry_factory=registry_factory,
         ),
@@ -286,14 +273,11 @@ def test_executor_approval_policy_never_skips_executor_approval() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     result = Runner.run_sync(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             tool_registry_factory=registry_factory,
             tool_policy=ToolPolicy(approval="never"),
         ),
@@ -324,14 +308,11 @@ def test_executor_approval_policy_always_requests_executor_approval() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
             tool_registry_factory=registry_factory,
             tool_policy=ToolPolicy(approval="always"),
@@ -369,14 +350,11 @@ def test_approval_denial_returns_tool_error_without_running_tool() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     result = Runner.run_sync(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=DenyApprovalProvider(),
         ),
     )
@@ -403,14 +381,11 @@ def test_approval_timeout_returns_tool_error_without_running_tool() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     result = Runner.run_sync(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
             approval_timeout_seconds=0.01,
         ),
@@ -426,13 +401,10 @@ def test_approval_rejects_unknown_request_id_without_storing_decision() -> None:
     agent = Agent(name="assistant", instructions="Answer.", model="test-model")
     llm = ScriptedLLM(steps=[_finish_response("done")])
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
-        run_config=RunConfig(model_provider=model_provider),
+        run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model())),
     )
     assert handle.result(timeout=2).final_output == "done"
 
@@ -453,14 +425,11 @@ def test_approval_rejects_stale_request_id_after_timeout() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
             approval_timeout_seconds=0.01,
         ),
@@ -488,14 +457,11 @@ def test_approval_provider_does_not_change_default_no_tool_policy() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     result = Runner.run_sync(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
             max_cycles=2,
         ),
@@ -521,14 +487,11 @@ def test_cancel_unblocks_pending_approval_without_running_tool() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
         ),
     )
@@ -574,14 +537,11 @@ def test_direct_cancellation_token_unblocks_pending_approval_without_running_too
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
             cancellation_token=token,
         ),
@@ -632,14 +592,11 @@ def test_cancel_after_approval_resolved_prevents_tool_side_effect() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=AlwaysAskApprovalProvider(),
             cancellation_token=token,
             stream=stream,
@@ -676,14 +633,11 @@ def test_cancel_during_should_request_does_not_lose_cancellation() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=provider,
         ),
     )
@@ -725,14 +679,11 @@ def test_cancel_during_should_request_false_prevents_tool_side_effect() -> None:
         ]
     )
 
-    def model_provider(agent: Agent, run_config: RunConfig):
-        return llm, _resolved_model()
-
     handle = Runner.start(
         agent,
         "go",
         run_config=RunConfig(
-            model_provider=model_provider,
+            model_provider=FixedModelProvider(llm, _resolved_model()),
             approval_provider=provider,
         ),
     )

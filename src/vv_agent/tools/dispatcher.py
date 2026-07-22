@@ -18,7 +18,6 @@ def _needs_tool_call_id(value: str | None) -> bool:
 def _error_result(tool_call_id: str, message: str, *, error_code: str | None = None) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_call_id=tool_call_id,
-        status="error",
         status_code=ToolResultStatus.ERROR,
         error_code=error_code,
         content=json.dumps({"ok": False, "error": message, "error_code": error_code}, ensure_ascii=False),

@@ -21,18 +21,18 @@ def main() -> None:
     agent = Agent(
         name="operator",
         instructions="Use tools when needed. Finish with task_finish.",
-        model=os.getenv("V_AGENT_EXAMPLE_MODEL", "kimi-k2.6"),
+        model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[delete_file],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("V_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("V_AGENT_EXAMPLE_BACKEND", "moonshot"),
-        workspace=Path(os.getenv("V_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
-        tool_policy=ToolPolicy(approval=os.getenv("V_AGENT_EXAMPLE_APPROVAL", "default")),
+        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
+        tool_policy=ToolPolicy(approval=os.getenv("VV_AGENT_EXAMPLE_APPROVAL", "default")),
     )
     result = Runner.run_sync(
         agent,
-        os.getenv("V_AGENT_EXAMPLE_PROMPT", "Delete obsolete.txt if it exists."),
+        os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Delete obsolete.txt if it exists."),
         run_config=config,
     )
     print(result.status.value, result.final_output)

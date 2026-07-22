@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -13,19 +12,8 @@ from vv_agent.sessions.base import _deserialize_message, _serialize_message
 from vv_agent.types import Role
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
-CODEC_FIXTURE = FIXTURE_DIR / "session_codec_v1.json"
-LEGACY_SQL_FIXTURE = FIXTURE_DIR / "session_sqlite_rust_legacy_v0.sql"
-CANONICAL_SQL_FIXTURE = FIXTURE_DIR / "session_sqlite_canonical_v1.sql"
-PYTHON_UNVERSIONED_SQL_FIXTURE = FIXTURE_DIR / "session_sqlite_python_unversioned_v0.sql"
-INVALID_LEGACY_SQL_FIXTURE = FIXTURE_DIR / "session_sqlite_invalid_legacy_v0.sql"
-
-FIXTURE_SHA256 = {
-    "session_codec_v1.json": "ddb771fd89827145557297d8bfc6d734684fadf9ce019ed87a9b38b884782eb8",
-    "session_sqlite_rust_legacy_v0.sql": "1cfa0fa6550cb7ddf6b6029cfb63fdb007287cb4289bd481e86d28942fcbbed5",
-    "session_sqlite_canonical_v1.sql": "03e1dbf36e2299cf8f7d0b9d4e85ec685a7e10c46bcdc2cef4ee8b87d0d5d18d",
-    "session_sqlite_python_unversioned_v0.sql": "215ae69f2fb44b18a0a7e2473d11ab0d86cb93552791b00350de0a056d7dc956",
-    "session_sqlite_invalid_legacy_v0.sql": "37e8b0662fc346d3c424a83d213357ee54545c8b66a9d2df65ca7ec100845aa6",
-}
+CODEC_FIXTURE = FIXTURE_DIR / "session_codec.json"
+CANONICAL_SQL_FIXTURE = FIXTURE_DIR / "session_sqlite_canonical.sql"
 
 
 def _seed_database(path: Path, fixture: Path) -> None:
@@ -42,34 +30,19 @@ def _schema_state(path: Path) -> tuple[int, list[str], list[tuple[int, str, str]
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         columns = [str(row[1]) for row in connection.execute("PRAGMA table_info(session_items)")]
-        if columns == ["session_id", "item_index", "payload"]:
-            rows = [
-                (int(row[0]), str(row[1]), str(row[2]))
-                for row in connection.execute(
-                    "SELECT item_index, session_id, payload FROM session_items ORDER BY item_index"
-                )
-            ]
-        else:
-            rows = [
-                (int(row[0]), str(row[1]), str(row[2]))
-                for row in connection.execute(
-                    "SELECT id, session_id, item_json FROM session_items ORDER BY id"
-                )
-            ]
+        rows = [
+            (int(row[0]), str(row[1]), str(row[2]))
+            for row in connection.execute("SELECT item_index, session_id, payload FROM session_items ORDER BY item_index")
+        ]
         return version, columns, rows
     finally:
         connection.close()
 
 
-def test_shared_session_parity_fixtures_have_stable_hashes() -> None:
-    for name, expected in FIXTURE_SHA256.items():
-        assert hashlib.sha256((FIXTURE_DIR / name).read_bytes()).hexdigest() == expected
-
-
-def test_session_codec_matches_canonical_and_legacy_contract() -> None:
+def test_session_codec_matches_canonical_contract() -> None:
     fixture = json.loads(CODEC_FIXTURE.read_text(encoding="utf-8"))
 
-    for case in [*fixture["canonical_cases"], *fixture["legacy_cases"]]:
+    for case in fixture["canonical_cases"]:
         raw = json.dumps(case["input"], ensure_ascii=False, separators=(",", ":"))
         message = _deserialize_message(raw)
         actual = json.loads(_serialize_message(message))
@@ -80,6 +53,99 @@ def test_session_codec_matches_canonical_and_legacy_contract() -> None:
         raw = json.dumps(case["input"], ensure_ascii=False, separators=(",", ":"))
         with pytest.raises(ValueError):
             _deserialize_message(raw)
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"role": "user"}, 'missing required string field "content"'),
+        ({"role": "user", "content": None}, 'field "content" must be a string'),
+        ({"role": "user", "content": "x", "unknown": True}, "Message contains unknown fields"),
+        ({"role": "user", "content": "x", "name": None}, 'field "name" must be a string'),
+        ({"role": "assistant", "content": "", "tool_calls": None}, '"tool_calls" must be an array'),
+        (
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "name": "lookup", "arguments": {}}],
+            },
+            "ToolCall contains unknown fields",
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": {}},
+                    }
+                ],
+            },
+            'field "arguments" must be a string',
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "not-json"},
+                    }
+                ],
+            },
+            '"arguments" must contain a JSON object',
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "[]"},
+                    }
+                ],
+            },
+            '"arguments" must contain a JSON object',
+        ),
+    ],
+)
+def test_session_codec_rejects_noncanonical_wire(payload: object, error: str) -> None:
+    with pytest.raises(ValueError, match=error):
+        _deserialize_message(json.dumps(payload))
+
+
+def test_session_codec_accepts_only_openai_function_tool_calls() -> None:
+    payload = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": ' {"z":2,"a":1} '},
+                "extra_content": {"provider": "test"},
+            }
+        ],
+    }
+
+    assert json.loads(_serialize_message(_deserialize_message(json.dumps(payload)))) == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"a":1,"z":2}'},
+                "extra_content": {"provider": "test"},
+            }
+        ],
+    }
 
 
 def test_memory_session_uses_validated_snapshots_and_atomic_batches() -> None:
@@ -100,40 +166,6 @@ def test_memory_session_uses_validated_snapshots_and_atomic_batches() -> None:
     with pytest.raises(ValueError, match="unknown message role"):
         session.add_items([Message(role="user", content="must not persist"), invalid])
     assert [item.content for item in session.get_items()] == ["snapshot"]
-
-
-def test_sqlite_migrates_rust_legacy_schema_and_payloads_transactionally(tmp_path: Path) -> None:
-    db_path = tmp_path / "legacy.sqlite3"
-    _seed_database(db_path, LEGACY_SQL_FIXTURE)
-
-    store = SQLiteSessionStore(db_path)
-    shared = store.session("shared")
-    assert [json.loads(_serialize_message(item)) for item in shared.get_items()] == [
-        {"role": "user", "content": "legacy user"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_legacy",
-                    "type": "function",
-                    "function": {
-                        "name": "lookup",
-                        "arguments": '{"a":{"x":1,"y":2},"z":1}',
-                    },
-                }
-            ],
-        },
-    ]
-    assert [item.content for item in store.session("other").get_items()] == ["other session"]
-    shared.add_items([Message(role="tool", content="done", tool_call_id="call_legacy")])
-    store.close()
-
-    version, columns, rows = _schema_state(db_path)
-    assert version == 1
-    assert columns == ["session_id", "item_index", "payload"]
-    assert [row[:2] for row in rows] == [(2, "shared"), (5, "other"), (8, "shared"), (9, "shared")]
-    assert all(set(json.loads(payload)).isdisjoint({"type", "message"}) for _, _, payload in rows)
 
 
 def test_sqlite_opens_canonical_schema_written_by_either_runtime(tmp_path: Path) -> None:
@@ -164,38 +196,154 @@ def test_sqlite_opens_canonical_schema_written_by_either_runtime(tmp_path: Path)
     }
 
 
-def test_sqlite_upgrades_unversioned_python_schema_in_place(tmp_path: Path) -> None:
-    db_path = tmp_path / "python-unversioned.sqlite3"
-    _seed_database(db_path, PYTHON_UNVERSIONED_SQL_FIXTURE)
+def test_sqlite_rejects_existing_schema_without_current_version(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-version.sqlite3"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(CANONICAL_SQL_FIXTURE.read_text(encoding="utf-8"))
+        connection.execute("PRAGMA user_version = 0")
+        connection.commit()
+    finally:
+        connection.close()
 
-    store = SQLiteSessionStore(db_path)
-    assert [item.content for item in store.session("shared").get_items()] == ["python unversioned"]
-    store.close()
-
-    version, columns, rows = _schema_state(db_path)
-    assert version == 1
-    assert columns == ["session_id", "item_index", "payload"]
-    assert rows == [(4, "shared", '{"role":"user","content":"python unversioned"}')]
+    with pytest.raises(RuntimeError, match="does not match required version"):
+        SQLiteSessionStore(db_path)
 
     connection = sqlite3.connect(db_path)
     try:
-        indexes = {str(row[1]) for row in connection.execute("PRAGMA index_list(session_items)")}
+        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 0
     finally:
         connection.close()
-    assert "idx_session_items_session_id_item_index" in indexes
 
 
-def test_sqlite_failed_legacy_migration_rolls_back_schema_and_rows(tmp_path: Path) -> None:
-    db_path = tmp_path / "invalid-legacy.sqlite3"
-    _seed_database(db_path, INVALID_LEGACY_SQL_FIXTURE)
+def test_sqlite_creates_only_the_current_schema_on_an_empty_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "new.sqlite3"
+    store = SQLiteSessionStore(db_path)
+    store.close()
 
-    with pytest.raises(ValueError, match="unknown session item type"):
+    connection = sqlite3.connect(db_path)
+    try:
+        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 1
+        assert [
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in connection.execute(
+                "SELECT type, name, tbl_name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            )
+        ] == [
+            ("index", "idx_session_items_session_id_item_index", "session_items"),
+            ("table", "session_commits", "session_commits"),
+            ("table", "session_items", "session_items"),
+        ]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("name", "mutation", "error"),
+    [
+        (
+            "missing-table",
+            "DROP TABLE session_commits",
+            "unsupported session schema objects",
+        ),
+        (
+            "unexpected-object",
+            "CREATE VIEW session_view AS SELECT session_id FROM session_items",
+            "unsupported session schema objects",
+        ),
+        (
+            "wrong-index",
+            "DROP INDEX idx_session_items_session_id_item_index; "
+            "CREATE INDEX idx_session_items_session_id_item_index ON session_items (item_index, session_id)",
+            "unsupported idx_session_items_session_id_item_index schema columns",
+        ),
+    ],
+)
+def test_sqlite_rejects_noncanonical_schema_objects(
+    tmp_path: Path,
+    name: str,
+    mutation: str,
+    error: str,
+) -> None:
+    db_path = tmp_path / f"{name}.sqlite3"
+    _seed_database(db_path, CANONICAL_SQL_FIXTURE)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(mutation)
+        connection.commit()
+    finally:
+        connection.close()
+
+    before = db_path.read_bytes()
+    with pytest.raises(RuntimeError, match=error):
         SQLiteSessionStore(db_path)
+    assert db_path.read_bytes() == before
 
-    version, columns, rows = _schema_state(db_path)
-    assert version == 0
-    assert columns == ["id", "session_id", "item_json"]
-    assert [row[0] for row in rows] == [1, 2]
+
+def test_sqlite_rejects_canonical_column_names_with_wrong_constraints(tmp_path: Path) -> None:
+    db_path = tmp_path / "wrong-constraints.sqlite3"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            """
+            PRAGMA user_version = 1;
+            CREATE TABLE session_items (
+                session_id TEXT,
+                item_index INTEGER PRIMARY KEY AUTOINCREMENT,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX idx_session_items_session_id_item_index
+                ON session_items (session_id, item_index);
+            CREATE TABLE session_commits (
+                session_id TEXT NOT NULL,
+                commit_id TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                PRIMARY KEY (session_id, commit_id)
+            );
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    before = db_path.read_bytes()
+    with pytest.raises(RuntimeError, match="unsupported session_items schema columns"):
+        SQLiteSessionStore(db_path)
+    assert db_path.read_bytes() == before
+
+
+def test_sqlite_rejects_superseded_session_columns_without_migrating(tmp_path: Path) -> None:
+    db_path = tmp_path / "superseded-columns.sqlite3"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            """
+            PRAGMA user_version = 1;
+            CREATE TABLE session_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                item_json TEXT NOT NULL
+            );
+            CREATE INDEX idx_session_items_session_id_item_index
+                ON session_items (session_id, id);
+            CREATE TABLE session_commits (
+                session_id TEXT NOT NULL,
+                commit_id TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                PRIMARY KEY (session_id, commit_id)
+            );
+            INSERT INTO session_items (id, session_id, item_json)
+                VALUES (4, 'shared', '{"type":"user","content":"stored"}');
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    before = db_path.read_bytes()
+    with pytest.raises(RuntimeError, match="unsupported session_items schema columns"):
+        SQLiteSessionStore(db_path)
+    assert db_path.read_bytes() == before
 
 
 def test_sqlite_batch_validation_and_corrupt_pop_are_atomic(tmp_path: Path) -> None:
@@ -237,7 +385,7 @@ def test_sqlite_rejects_newer_schema_without_mutating_it(tmp_path: Path) -> None
     finally:
         connection.close()
 
-    with pytest.raises(RuntimeError, match="newer than supported"):
+    with pytest.raises(RuntimeError, match="does not match required version"):
         SQLiteSessionStore(db_path)
 
     version, columns, rows = _schema_state(db_path)

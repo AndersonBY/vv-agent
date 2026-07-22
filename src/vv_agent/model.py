@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 from vv_agent.config import (
     ResolvedModelConfig,
-    build_openai_llm_from_local_settings,
+    build_vv_llm_from_local_settings,
     load_llm_settings_from_file,
     resolve_model_endpoint,
 )
@@ -246,7 +246,7 @@ class VvLlmModelProvider:
         return resolve_model_endpoint(settings, backend=backend, model=model.model_name)
 
     def client(self, resolved: ResolvedModelConfig) -> LLMClient:
-        client, _ = build_openai_llm_from_local_settings(
+        client, _ = build_vv_llm_from_local_settings(
             self.settings_file,
             backend=resolved.backend,
             model=resolved.selected_model,
@@ -256,7 +256,7 @@ class VvLlmModelProvider:
 
     def default_settings(self, resolved: ResolvedModelConfig) -> ModelSettings:
         del resolved
-        return ModelSettings()
+        return ModelSettings(timeout_seconds=self.timeout_seconds)
 
     def default_model_ref(self) -> ModelRef | None:
         return None

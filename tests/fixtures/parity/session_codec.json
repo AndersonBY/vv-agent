@@ -1,0 +1,281 @@
+{
+  "version": 1,
+  "canonical_cases": [
+    {
+      "name": "plain_message_uses_current_wire",
+      "input": {
+        "role": "user",
+        "content": "Inspect the current session contract."
+      },
+      "canonical": {
+        "role": "user",
+        "content": "Inspect the current session contract."
+      }
+    },
+    {
+      "name": "openai_function_tool_call_is_canonicalized",
+      "input": {
+        "role": "assistant",
+        "content": "working",
+        "name": "planner",
+        "tool_calls": [
+          {
+            "id": "call_lookup",
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": " { \"z\": 1, \"a\": {\"y\": 2, \"x\": 1} } "
+            },
+            "extra_content": {
+              "provider": "fixture"
+            }
+          }
+        ],
+        "reasoning_content": "Check the canonical wire.",
+        "image_url": "data:image/png;base64,AA==",
+        "metadata": {
+          "sequence": 2
+        }
+      },
+      "canonical": {
+        "role": "assistant",
+        "content": "working",
+        "name": "planner",
+        "tool_calls": [
+          {
+            "id": "call_lookup",
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": "{\"a\":{\"x\":1,\"y\":2},\"z\":1}"
+            },
+            "extra_content": {
+              "provider": "fixture"
+            }
+          }
+        ],
+        "reasoning_content": "Check the canonical wire.",
+        "image_url": "data:image/png;base64,AA==",
+        "metadata": {
+          "sequence": 2
+        }
+      }
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "message_must_be_object",
+      "input": []
+    },
+    {
+      "name": "role_is_required",
+      "input": {
+        "content": "missing role"
+      }
+    },
+    {
+      "name": "content_is_required",
+      "input": {
+        "role": "user"
+      }
+    },
+    {
+      "name": "role_must_be_known",
+      "input": {
+        "role": "developer",
+        "content": "unknown role"
+      }
+    },
+    {
+      "name": "content_must_be_string",
+      "input": {
+        "role": "user",
+        "content": null
+      }
+    },
+    {
+      "name": "unknown_message_field_is_rejected",
+      "input": {
+        "role": "user",
+        "content": "closed message",
+        "vendor_extension": true
+      }
+    },
+    {
+      "name": "optional_string_must_be_string_when_present",
+      "input": {
+        "role": "user",
+        "content": "bad optional string",
+        "name": null
+      }
+    },
+    {
+      "name": "metadata_must_be_object",
+      "input": {
+        "role": "user",
+        "content": "bad metadata",
+        "metadata": []
+      }
+    },
+    {
+      "name": "tool_calls_must_be_array",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": null
+      }
+    },
+    {
+      "name": "tool_call_id_is_required",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": "{}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "tool_call_type_must_be_function",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_custom",
+            "type": "custom",
+            "function": {
+              "name": "lookup",
+              "arguments": "{}"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "tool_call_unknown_field_is_rejected",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_unknown",
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": "{}"
+            },
+            "vendor_extension": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "tool_function_unknown_field_is_rejected",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_unknown",
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": "{}",
+              "strict": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "tool_extra_content_must_be_object",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_extra",
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": "{}"
+            },
+            "extra_content": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "tool_arguments_must_contain_json_object",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_array",
+            "type": "function",
+            "function": {
+              "name": "lookup",
+              "arguments": "[]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "message_missing_content_is_rejected",
+      "input": {
+        "role": "user"
+      }
+    },
+    {
+      "name": "tool_arguments_must_be_a_json_string",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_object",
+            "type": "function",
+            "function": {
+              "name": "search",
+              "arguments": {
+                "query": "session parity"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "tool_call_requires_function_envelope",
+      "input": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_flat",
+            "name": "read_file",
+            "arguments": {
+              "path": "README.md"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "message_requires_role_field",
+      "input": {
+        "type": "user",
+        "content": "missing role"
+      }
+    }
+  ]
+}

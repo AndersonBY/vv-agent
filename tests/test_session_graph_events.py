@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from support import ModelMapProvider
+
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import (
@@ -13,6 +15,7 @@ from vv_agent.events import (
     event_from_dict,
 )
 from vv_agent.llm import ScriptedLLM
+from vv_agent.model import ModelRef
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.tools import build_default_registry
@@ -118,51 +121,42 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
             ),
             LLMResponse(
                 content="finish parent",
-                tool_calls=[
-                    ToolCall(id="call_finish_parent", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})
-                ],
+                tool_calls=[ToolCall(id="call_finish_parent", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})],
             ),
         ]
     )
 
-    settings_file = tmp_path / "local_settings.py"
-    settings_file.write_text("LLM_SETTINGS = {}", encoding="utf-8")
-
-    def fake_llm_builder(
-        settings_path: str | Path,
-        *,
-        backend: str,
-        model: str,
-        timeout_seconds: float = 90.0,
-    ) -> tuple[ScriptedLLM, ResolvedModelConfig]:
-        del settings_path, timeout_seconds
-        sub_llm = ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="sub done",
-                    tool_calls=[ToolCall(id="sub_finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
-                )
-            ]
-        )
-        return sub_llm, _fake_resolved(backend=backend, model=model)
+    sub_llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="sub done",
+                tool_calls=[ToolCall(id="sub_finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
+            )
+        ]
+    )
+    provider = ModelMapProvider(
+        routes={
+            "parent-model": (parent_llm, _fake_resolved(backend="moonshot", model="parent-model")),
+            "kimi-k2.5": (sub_llm, _fake_resolved(backend="moonshot", model="kimi-k2.5")),
+        },
+        default_model="parent-model",
+    )
 
     emitted: list[RunEvent] = []
     ctx = ExecutionContext(
+        event_handler=emitted.append,
         metadata={
             "_vv_agent_agent_name": "planner",
-            "_vv_agent_emit_event": emitted.append,
             "_vv_agent_run_id": "run_parent",
             "_vv_agent_trace_id": "trace_1",
             "_vv_agent_session_id": "session_parent",
-        }
+        },
     )
     runtime = AgentRuntime(
-        llm_client=parent_llm,
+        llm_client=provider.client(provider.resolve(ModelRef.named("parent-model"))),
+        model_provider=provider,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
-        settings_file=settings_file,
-        default_backend="moonshot",
-        llm_builder=fake_llm_builder,
         tool_registry_factory=build_default_registry,
     )
     task = AgentTask(
@@ -183,6 +177,7 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
     result = runtime.run(task, ctx=ctx)
 
     assert result.status == AgentStatus.COMPLETED
+    assert provider.resolved_models == ["parent-model", "kimi-k2.5"]
     started_events = [event for event in emitted if isinstance(event, SubRunStartedEvent)]
     completed_events = [event for event in emitted if isinstance(event, SubRunCompletedEvent)]
     assert len(started_events) == 1

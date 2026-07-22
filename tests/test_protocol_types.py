@@ -2,26 +2,46 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolCall, ToolExecutionResult, ToolResultStatus
 
 
 def test_tool_result_keeps_tool_message_shape() -> None:
-    result = ToolExecutionResult(tool_call_id="call_1", status="success", content="ok")
+    result = ToolExecutionResult(
+        tool_call_id="call_1",
+        status_code=ToolResultStatus.SUCCESS,
+        content="ok",
+    )
     msg = result.to_tool_message()
     assert msg.role == "tool"
     assert msg.tool_call_id == "call_1"
     assert msg.content == "ok"
 
 
-def test_tool_result_status_compatibility_mapping() -> None:
-    legacy = ToolExecutionResult(tool_call_id="c1", status="error", content="bad")
-    assert legacy.status == "error"
-    assert legacy.status_code == ToolResultStatus.ERROR
+def test_tool_result_has_one_typed_status() -> None:
+    result = ToolExecutionResult(
+        tool_call_id="c2",
+        status_code=ToolResultStatus.RUNNING,
+        content="running",
+    )
 
-    protocol = ToolExecutionResult(tool_call_id="c2", status_code=ToolResultStatus.RUNNING, content="running")
-    assert protocol.status_code == ToolResultStatus.RUNNING
-    assert protocol.status == "success"
+    assert result.status_code == ToolResultStatus.RUNNING
+    assert "status" not in result.to_dict()
+
+
+def test_tool_result_rejects_superseded_status_wire() -> None:
+    with pytest.raises(ValueError, match="unknown=\\['status'\\]"):
+        ToolExecutionResult.from_dict(
+            {
+                "tool_call_id": "c1",
+                "content": "bad",
+                "status": "error",
+                "status_code": "ERROR",
+                "directive": "continue",
+            }
+        )
 
 
 def test_protocol_enums_are_json_serializable() -> None:
@@ -30,8 +50,8 @@ def test_protocol_enums_are_json_serializable() -> None:
         "cycle_status": CycleStatus.WAIT_RESPONSE,
     }
     encoded = json.dumps(payload)
-    assert "\"PENDING_COMPRESS\"" in encoded
-    assert "\"wait_response\"" in encoded
+    assert '"PENDING_COMPRESS"' in encoded
+    assert '"wait_response"' in encoded
 
 
 def test_assistant_message_keeps_tool_calls_in_openai_payload() -> None:

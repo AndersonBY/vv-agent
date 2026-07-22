@@ -21,8 +21,6 @@ from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.metadata import ToolSideEffect
 from vv_agent.types import AgentTask, Message, NoToolPolicy
 
-RuntimeTask = AgentTask
-
 _TASK_TOOL_POLICY_METADATA_KEYS = (
     "_vv_agent_allowed_tools",
     "_vv_agent_disallowed_tools",
@@ -65,7 +63,7 @@ class AgentCompiler:
         resolved: ResolvedModelConfig,
         trace_id: str,
         run_id: str = "",
-    ) -> RuntimeTask:
+    ) -> AgentTask:
         model = run_config.model or agent.model or resolved.selected_model
         metadata = dict(agent.metadata)
         metadata.update(run_config.metadata)
@@ -143,14 +141,13 @@ class AgentCompiler:
             minimum=1,
         )
         assert max_cycles is not None
-        return RuntimeTask(
+        return AgentTask(
             task_id=f"{agent.name}_{uuid.uuid4().hex[:8]}",
             model=str(resolved.model_id or model),
             system_prompt=system_prompt,
             user_prompt=input,
             max_cycles=max_cycles,
             no_tool_policy=no_tool_policy,
-            has_sub_agents=False,
             sub_agents=deepcopy(agent.sub_agents),
             native_multimodal=resolved.native_multimodal,
             extra_tool_names=[
@@ -171,7 +168,7 @@ class AgentCompiler:
         resolved: ResolvedModelConfig,
         checkpoint: Any,
         trace_id: str,
-    ) -> RuntimeTask:
+    ) -> AgentTask:
         definition = getattr(checkpoint, "run_definition", None)
         if not isinstance(definition, dict):
             raise CheckpointError(
@@ -217,7 +214,7 @@ class AgentCompiler:
             and isinstance(function.get("name"), str)
         }
         handoff_tool_names = [transfer.tool_name for transfer in agent.handoffs if transfer.tool_name]
-        return RuntimeTask(
+        return AgentTask(
             task_id=str(checkpoint.task_id),
             model=str(model["model_id"]),
             system_prompt=str(definition["compiled_prompt"]),
@@ -228,7 +225,6 @@ class AgentCompiler:
             no_tool_policy=cast(NoToolPolicy, controls["no_tool_policy"]),
             allow_interruption=bool(controls["allow_interruption"]),
             use_workspace=bool(stored_tool_names.intersection(WORKSPACE_TOOLS)),
-            has_sub_agents=False,
             sub_agents=deepcopy(agent.sub_agents),
             agent_type=agent_definition.get("type"),
             native_multimodal=bool(controls["native_multimodal"]),
