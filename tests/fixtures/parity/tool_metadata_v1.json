@@ -49,7 +49,7 @@
     "cost_dimensions_semantics": "opaque names of resources a tool may consume; declarations are not measurements, prices, or budget observations",
     "generic_metadata_is_not_a_declaration": true,
     "model_visible": false,
-    "absent_metadata_preserves_legacy_behavior": true
+    "absent_metadata_uses_neutral_defaults": true
   },
   "collection_normalization": {
     "trim": "portable_whitespace",
@@ -228,91 +228,6 @@
       }
     }
   ],
-  "legacy_idempotency": {
-    "public_alias_remains_supported": true,
-    "metadata_unknown_allows_legacy_value": true,
-    "metadata_declared_value_becomes_effective_executor_value": true,
-    "conflicting_non_unknown_values": "reject",
-    "effective_value_is_used_by_checkpoint_recovery": true,
-    "normalization_is_idempotent": true,
-    "cases": [
-      {
-        "name": "metadata_absent_uses_legacy",
-        "legacy": "supported",
-        "typed": null,
-        "expected_effective": "supported",
-        "expected_run_definition_idempotency": "supported",
-        "expected_run_definition_tool_metadata": null,
-        "expected_event_tool_metadata": "omitted",
-        "valid": true
-      },
-      {
-        "name": "typed_unknown_inherits_legacy",
-        "legacy": "supported",
-        "typed": {
-          "idempotency": "unknown"
-        },
-        "expected_effective": "supported",
-        "expected_run_definition_idempotency": "supported",
-        "expected_run_definition_tool_metadata": {
-          "side_effect": "unknown",
-          "idempotency": "supported",
-          "terminal": false,
-          "capability_tags": [],
-          "cost_dimensions": []
-        },
-        "expected_event_tool_metadata": "same_as_run_definition_tool_metadata",
-        "valid": true
-      },
-      {
-        "name": "typed_value_overrides_legacy_unknown",
-        "legacy": "unknown",
-        "typed": {
-          "idempotency": "unsupported"
-        },
-        "expected_effective": "unsupported",
-        "expected_run_definition_idempotency": "unsupported",
-        "expected_run_definition_tool_metadata": {
-          "side_effect": "unknown",
-          "idempotency": "unsupported",
-          "terminal": false,
-          "capability_tags": [],
-          "cost_dimensions": []
-        },
-        "expected_event_tool_metadata": "same_as_run_definition_tool_metadata",
-        "valid": true
-      },
-      {
-        "name": "matching_non_unknown_values_are_valid",
-        "legacy": "supported",
-        "typed": {
-          "idempotency": "supported"
-        },
-        "expected_effective": "supported",
-        "expected_run_definition_idempotency": "supported",
-        "expected_run_definition_tool_metadata": {
-          "side_effect": "unknown",
-          "idempotency": "supported",
-          "terminal": false,
-          "capability_tags": [],
-          "cost_dimensions": []
-        },
-        "expected_event_tool_metadata": "same_as_run_definition_tool_metadata",
-        "valid": true
-      },
-      {
-        "name": "conflicting_non_unknown_values_fail_closed",
-        "legacy": "supported",
-        "typed": {
-          "idempotency": "unsupported"
-        },
-        "valid": false,
-        "error_code": "tool_metadata_invalid",
-        "model_calls": 0,
-        "tool_calls": 0
-      }
-    ]
-  },
   "public_construction": {
     "python": {
       "type": "vv_agent.ToolMetadata",
@@ -551,10 +466,10 @@
       "successful_error_code": null,
       "not_started_duration_ms": null
     },
-    "legacy_event_reader_defaults": "missing additive completed fields remain absent and do not fabricate execution or duration facts",
     "telemetry_changes_runtime_decisions": false,
     "generic_metadata_can_fabricate_typed_fields": false,
-    "event_store_failure_policy_unchanged": true
+    "event_store_failure_policy_unchanged": true,
+    "missing_required_completed_fields_are_rejected": true
   },
   "producer_cases": [
     {
@@ -661,7 +576,7 @@
       }
     },
     {
-      "name": "missing_metadata_preserves_legacy_events_and_behavior",
+      "name": "missing_metadata_uses_neutral_defaults",
       "tool_metadata": null,
       "expected_event_types": [
         "tool_call_planned",
@@ -669,16 +584,23 @@
         "tool_call_completed"
       ],
       "typed_metadata_field_present": false,
-      "runtime_behavior_changed": false
+      "runtime_behavior_changed": false,
+      "neutral_defaults": {
+        "side_effect": "unknown",
+        "idempotency": "unknown",
+        "terminal": false,
+        "capability_tags": [],
+        "cost_dimensions": []
+      }
     }
   ],
   "app_server_projection": {
     "tool_call_planned": "no_notification",
-    "tool_call_started": "existing item_started plus tool delta with additive toolMetadata payload when declared",
-    "tool_call_completed": "existing item_completed with additive directive errorCode executionStarted durationMs and toolMetadata payloads when available",
+    "tool_call_started": "item_started plus tool delta with toolMetadata when declared",
+    "tool_call_completed": "item_completed with required directive errorCode executionStarted durationMs and toolMetadata when declared",
     "planned_is_never_presented_as_execution_started": true
   },
-  "checkpoint_v2": {
+  "checkpoint": {
     "run_definition_tool_field": "tool_metadata",
     "missing_value": null,
     "policy_fields_are_frozen": true,

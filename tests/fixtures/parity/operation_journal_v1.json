@@ -235,21 +235,23 @@
             }
           },
           "token_usage": {
-            "prompt_tokens": 12,
-            "completion_tokens": 8,
+            "schema_version": "vv-agent.token-usage.v1",
+            "input_tokens": 12,
+            "output_tokens": 8,
             "total_tokens": 20,
-            "cached_tokens": 0,
-            "reasoning_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_tokens": 0,
+            "reasoning_tokens": null,
             "usage_source": "provider_reported",
             "cache_usage": {
               "status": "accounting_missing",
-              "read_tokens": null,
-              "write_tokens": null,
+              "read_input_tokens": null,
+              "write_input_tokens": null,
               "uncached_input_tokens": null,
               "source": null
+            },
+            "provider_usage": {
+              "prompt_tokens": 12,
+              "completion_tokens": 8,
+              "total_tokens": 20
             }
           }
         },
@@ -571,21 +573,23 @@
             }
           },
           "token_usage": {
-            "prompt_tokens": 12,
-            "completion_tokens": 8,
+            "schema_version": "vv-agent.token-usage.v1",
+            "input_tokens": 12,
+            "output_tokens": 8,
             "total_tokens": 20,
-            "cached_tokens": 0,
-            "reasoning_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_tokens": 0,
+            "reasoning_tokens": null,
             "usage_source": "provider_reported",
             "cache_usage": {
               "status": "accounting_missing",
-              "read_tokens": null,
-              "write_tokens": null,
+              "read_input_tokens": null,
+              "write_input_tokens": null,
               "uncached_input_tokens": null,
               "source": null
+            },
+            "provider_usage": {
+              "prompt_tokens": 12,
+              "completion_tokens": 8,
+              "total_tokens": 20
             }
           }
         }

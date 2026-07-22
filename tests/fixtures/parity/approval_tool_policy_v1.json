@@ -69,7 +69,6 @@
       "tool_name"
     ],
     "resolved_event_metadata_keys": [
-      "action",
       "reason",
       "decision_metadata"
     ],
