@@ -6,6 +6,11 @@
       "model",
       "tool"
     ],
+    "model_operations": [
+      "agent_cycle",
+      "session_memory",
+      "memory_compaction"
+    ],
     "states": [
       "planned",
       "started",
@@ -171,7 +176,241 @@
     "before_tool_hook_short_circuit_writes_started": false,
     "approval_resume_uses_source_tool_call_id_request_digest_and_idempotency_key": true,
     "approval_resume_operation_id_is_stable_within_the_distinct_resume_run": true,
-    "memory_compaction_and_ptl_model_requests_are_journaled_model_operations": true
+    "session_memory_compaction_and_ptl_requests_are_journaled_model_operations": true,
+    "model_operation_and_dispatch_attempt_id_are_durable": true,
+    "started_means_provider_may_or_may_not_have_received_request": true,
+    "model_started_state_and_started_event_are_one_progress_cas": true,
+    "terminal_model_state_ledger_budget_and_outbox_are_one_progress_cas": true,
+    "ambiguous_recovery_ledger_budget_and_failed_event_are_one_progress_cas": true,
+    "pre_dispatch_model_failure_adds_no_model_call_record": true,
+    "receipt_replay_does_not_append_usage_or_budget": true
+  },
+  "model_call_accounting": {
+    "identity_contract": {
+      "fields": [
+        "call_id",
+        "operation_id",
+        "attempt",
+        "operation",
+        "cycle_index",
+        "backend",
+        "model"
+      ],
+      "journal_operation_field": "model_operation",
+      "other_record_operation_field": "operation",
+      "backend_and_model_source": "actual_effective_dispatch",
+      "root_run_definition_model_is_not_a_fallback": true,
+      "journal_started_event_terminal_event_and_ledger_must_match": true,
+      "missing_or_mismatch_error": "checkpoint_status_invalid"
+    },
+    "completed_attempt": {
+      "root_run_definition_model": {
+        "backend": "test",
+        "model": "test-model"
+      },
+      "journal": {
+        "call_id": "op_model_cycle_3_compaction:attempt:1",
+        "operation_id": "op_model_cycle_3_compaction",
+        "attempt": 1,
+        "model_operation": "memory_compaction",
+        "cycle_index": 3,
+        "backend": "memory-test",
+        "model": "memory-model"
+      },
+      "started_event": {
+        "call_id": "op_model_cycle_3_compaction:attempt:1",
+        "operation_id": "op_model_cycle_3_compaction",
+        "attempt": 1,
+        "operation": "memory_compaction",
+        "cycle_index": 3,
+        "backend": "memory-test",
+        "model": "memory-model"
+      },
+      "ledger": {
+        "call_id": "op_model_cycle_3_compaction:attempt:1",
+        "operation_id": "op_model_cycle_3_compaction",
+        "attempt": 1,
+        "operation": "memory_compaction",
+        "cycle_index": 3,
+        "backend": "memory-test",
+        "model": "memory-model",
+        "status": "completed"
+      },
+      "terminal_event": {
+        "type": "model_call_completed",
+        "call_id": "op_model_cycle_3_compaction:attempt:1",
+        "operation_id": "op_model_cycle_3_compaction",
+        "attempt": 1,
+        "operation": "memory_compaction",
+        "cycle_index": 3,
+        "backend": "memory-test",
+        "model": "memory-model"
+      },
+      "journal_state": "succeeded",
+      "budget_increment_count": 1,
+      "started_event_count": 1,
+      "completed_event_count": 1,
+      "terminal_cas_outbox_event_order": [
+        "model_call_completed",
+        "budget_snapshot"
+      ]
+    },
+    "ambiguous_then_retry": {
+      "operation_id": "op_model_cycle_4_main",
+      "backend": "test",
+      "model": "test-model",
+      "cycle_index": 4,
+      "attempts": [
+        {
+          "attempt": 1,
+          "call_id": "op_model_cycle_4_main:attempt:1",
+          "ledger_status": "ambiguous",
+          "usage_source": "accounting_missing"
+        },
+        {
+          "attempt": 2,
+          "call_id": "op_model_cycle_4_main:attempt:2",
+          "ledger_status": "completed",
+          "usage_source": "provider_reported"
+        }
+      ],
+      "model_call_count": 2,
+      "aggregate_usage_available": false
+    },
+    "atomic_outbox_cases": [
+      {
+        "name": "started_dispatch_admission",
+        "progress_cas": "started",
+        "budget_configured": false,
+        "budget_exhausted": false,
+        "appended_event_types": [
+          "model_call_started"
+        ]
+      },
+      {
+        "name": "terminal_without_configured_budget",
+        "progress_cas": "terminal",
+        "budget_configured": false,
+        "budget_exhausted": false,
+        "appended_event_types": [
+          "model_call_completed"
+        ]
+      },
+      {
+        "name": "terminal_with_budget_snapshot",
+        "progress_cas": "terminal",
+        "budget_configured": true,
+        "budget_exhausted": false,
+        "appended_event_types": [
+          "model_call_completed",
+          "budget_snapshot"
+        ]
+      },
+      {
+        "name": "terminal_with_budget_exhaustion",
+        "progress_cas": "terminal",
+        "budget_configured": true,
+        "budget_exhausted": true,
+        "appended_event_types": [
+          "model_call_completed",
+          "budget_exhausted"
+        ]
+      },
+      {
+        "name": "ambiguous_recovery_with_budget_snapshot",
+        "progress_cas": "terminal_recovery",
+        "budget_configured": true,
+        "budget_exhausted": false,
+        "appended_event_types": [
+          "model_call_failed",
+          "budget_snapshot"
+        ]
+      }
+    ],
+    "atomic_outbox_rules": {
+      "events_are_appended_contiguously_in_listed_order": true,
+      "terminal_model_event_precedes_budget_observation": true,
+      "budget_exhausted_replaces_budget_snapshot_for_the_same_boundary": true,
+      "budget_events_are_absent_when_no_budget_is_configured": true,
+      "event_delivery_occurs_after_the_progress_cas": true
+    },
+    "invalid_identity_cases": [
+      {
+        "name": "call_id_mismatch",
+        "target": "ledger",
+        "replace": {
+          "call_id": "op_model_cycle_3_compaction:attempt:2"
+        },
+        "error_code": "checkpoint_status_invalid"
+      },
+      {
+        "name": "operation_id_mismatch",
+        "target": "terminal_event",
+        "replace": {
+          "operation_id": "op_model_cycle_3_other"
+        },
+        "error_code": "checkpoint_status_invalid"
+      },
+      {
+        "name": "attempt_mismatch",
+        "target": "started_event",
+        "replace": {
+          "attempt": 2
+        },
+        "error_code": "checkpoint_status_invalid"
+      },
+      {
+        "name": "operation_mismatch",
+        "target": "ledger",
+        "replace": {
+          "operation": "agent_cycle"
+        },
+        "error_code": "checkpoint_status_invalid"
+      },
+      {
+        "name": "cycle_index_mismatch",
+        "target": "terminal_event",
+        "replace": {
+          "cycle_index": 2
+        },
+        "error_code": "checkpoint_status_invalid"
+      },
+      {
+        "name": "backend_mismatch",
+        "target": "started_event",
+        "replace": {
+          "backend": "test"
+        },
+        "error_code": "checkpoint_status_invalid"
+      },
+      {
+        "name": "model_mismatch",
+        "target": "ledger",
+        "replace": {
+          "model": "test-model"
+        },
+        "error_code": "checkpoint_status_invalid"
+      },
+      {
+        "name": "journal_backend_missing",
+        "target": "journal",
+        "remove": "backend",
+        "error_code": "checkpoint_status_invalid"
+      },
+      {
+        "name": "journal_model_missing",
+        "target": "journal",
+        "remove": "model",
+        "error_code": "checkpoint_status_invalid"
+      }
+    ],
+    "succeeded_receipt_replay": {
+      "new_dispatch_count": 0,
+      "new_ledger_record_count": 0,
+      "budget_increment_count": 0,
+      "started_event_count": 0,
+      "original_terminal_event_identity_reused": true
+    }
   },
   "valid_entries": [
     {
@@ -179,14 +418,18 @@
       "request_golden_case": "model_basic",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 1,
         "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
         "idempotency_key": null,
         "state": "planned",
         "response": null,
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     },
     {
@@ -194,14 +437,18 @@
       "request_golden_case": "model_basic",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 1,
         "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
         "idempotency_key": null,
         "state": "started",
         "response": null,
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     },
     {
@@ -209,7 +456,7 @@
       "request_golden_case": "model_basic",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 1,
         "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
@@ -255,7 +502,11 @@
             }
           }
         },
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     },
     {
@@ -263,7 +514,7 @@
       "request_golden_case": "model_basic",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 1,
         "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
@@ -274,7 +525,11 @@
           "code": "provider_rejected",
           "message": "provider rejected the request before inference",
           "retryable": false
-        }
+        },
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     },
     {
@@ -282,14 +537,18 @@
       "request_golden_case": "model_basic",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 1,
         "request_digest": "6630ec45aef225de8f9b1c730ff76f26717d2330fbe84454ac9661019d196b3c",
         "idempotency_key": null,
         "state": "ambiguous",
         "response": null,
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     },
     {
@@ -661,18 +920,58 @@
   },
   "invalid_entries": [
     {
+      "name": "model_backend_missing",
+      "error_code": "model_identity_invalid",
+      "base_valid_entry": "model_planned",
+      "mutation": {
+        "remove": "backend"
+      }
+    },
+    {
+      "name": "model_backend_empty",
+      "error_code": "model_identity_invalid",
+      "base_valid_entry": "model_planned",
+      "mutation": {
+        "replace": {
+          "backend": ""
+        }
+      }
+    },
+    {
+      "name": "model_name_missing",
+      "error_code": "model_identity_invalid",
+      "base_valid_entry": "model_planned",
+      "mutation": {
+        "remove": "model"
+      }
+    },
+    {
+      "name": "model_name_empty",
+      "error_code": "model_identity_invalid",
+      "base_valid_entry": "model_planned",
+      "mutation": {
+        "replace": {
+          "model": ""
+        }
+      }
+    },
+    {
       "name": "zero_cycle",
       "error_code": "operation_cycle_invalid",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 0,
         "attempt": 1,
         "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "idempotency_key": null,
         "state": "planned",
         "response": null,
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     },
     {
@@ -680,14 +979,18 @@
       "error_code": "operation_attempt_invalid",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 0,
         "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "idempotency_key": null,
         "state": "planned",
         "response": null,
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:0"
       }
     },
     {
@@ -695,14 +998,18 @@
       "error_code": "operation_request_digest_invalid",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 1,
         "request_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "idempotency_key": null,
         "state": "planned",
         "response": null,
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     },
     {
@@ -732,14 +1039,18 @@
       "error_code": "operation_error_required",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 1,
         "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "idempotency_key": null,
         "state": "failed",
         "response": null,
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     },
     {
@@ -769,7 +1080,7 @@
       "error_code": "operation_kind_fields_invalid",
       "entry": {
         "kind": "model",
-        "operation_id": "op_model_cycle_1_attempt_1",
+        "operation_id": "op_model_cycle_1_main",
         "cycle_index": 1,
         "attempt": 1,
         "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -777,7 +1088,11 @@
         "state": "planned",
         "tool_call_id": "call_x",
         "response": null,
-        "error": null
+        "error": null,
+        "model_operation": "agent_cycle",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_1_main:attempt:1"
       }
     }
   ]

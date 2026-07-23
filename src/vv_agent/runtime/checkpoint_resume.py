@@ -40,6 +40,14 @@ from vv_agent.events import (
     event_from_dict,
 )
 from vv_agent.llm.base import LlmRequest
+from vv_agent.runtime.model_calls import (
+    ModelCallCoordinator,
+    ModelCallDispatchResult,
+    ModelCallIdentity,
+    ModelCallTerminal,
+    is_definitive_model_error,
+    model_error_code,
+)
 from vv_agent.runtime.state import (
     Checkpoint,
     CheckpointStore,
@@ -49,12 +57,16 @@ from vv_agent.runtime.state import (
     OperationError,
     OperationJournalEntry,
 )
+from vv_agent.runtime.token_usage import normalize_token_usage, summarize_task_token_usage
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
     CycleRecord,
     LLMResponse,
     Message,
+    ModelCallOperation,
+    TaskTokenUsage,
+    TokenUsage,
     ToolCall,
     ToolExecutionResult,
     ToolResultStatus,
@@ -87,7 +99,7 @@ class CheckpointReconciliationRequired(RuntimeError):
 
 
 class CheckpointResumeController:
-    """Coordinates one opt-in checkpoint v2 root run against a durable store."""
+    """Coordinates one opt-in checkpoint v3 root run against a durable store."""
 
     def __init__(
         self,
@@ -141,6 +153,7 @@ class CheckpointResumeController:
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_error: CheckpointError | None = None
         self._owned_claim_token: str | None = None
+        self._model_accounting: ModelCallCoordinator | None = None
 
     @property
     def checkpoint_key(self) -> str:
@@ -154,6 +167,16 @@ class CheckpointResumeController:
     @property
     def budget_usage(self) -> BudgetUsageSnapshot | None:
         return deepcopy(self._require_checkpoint().budget_usage)
+
+    @property
+    def model_calls(self) -> TaskTokenUsage:
+        return summarize_task_token_usage(self._require_checkpoint().model_calls)
+
+    def bind_model_accounting(self, accounting: ModelCallCoordinator) -> None:
+        if not isinstance(accounting, ModelCallCoordinator):
+            raise TypeError("checkpoint model accounting must be a ModelCallCoordinator")
+        self._model_accounting = accounting
+        accounting.ledger.replace(self._require_checkpoint().model_calls)
 
     @property
     def next_claim_mode(self) -> ClaimMode:
@@ -294,6 +317,8 @@ class CheckpointResumeController:
         self._runtime_cycles = cycles
         self._runtime_shared_state = shared_state
         self._budget_snapshot_provider = budget_snapshot_provider
+        if self._model_accounting is not None:
+            self._model_accounting.ledger.replace(checkpoint.model_calls)
         return messages, cycles, shared_state, checkpoint.cycle_index + 1
 
     def complete_model(
@@ -301,17 +326,29 @@ class CheckpointResumeController:
         *,
         cycle_index: int,
         operation_slot: str,
+        operation: ModelCallOperation,
+        backend: str,
+        model: str,
         request: LlmRequest,
         invoke: Callable[[], LLMResponse],
-    ) -> LLMResponse:
+        accounting: ModelCallCoordinator,
+    ) -> ModelCallDispatchResult:
         if not isinstance(operation_slot, str) or not operation_slot:
             raise CheckpointError(
                 "model operation slot must be non-empty",
                 code="checkpoint_journal_integrity_mismatch",
             )
-        projection = self._model_request_projection(request)
+        self.bind_model_accounting(accounting)
+        projection = self._model_request_projection(request, backend=backend, model=model)
         digest = compute_operation_request_digest(projection)
-        operation_id = self._model_operation_id(cycle_index, operation_slot)
+        initial_identity = accounting.new_identity(
+            cycle_index=cycle_index,
+            operation_slot=operation_slot,
+            operation=operation,
+            backend=backend,
+            model=model,
+        )
+        operation_id = initial_identity.operation_id
         self._ensure_claim(cycle_index)
         entry = self._find_operation(OperationKind.MODEL, operation_id=operation_id)
         if entry is not None and entry.request_digest != digest:
@@ -319,15 +356,31 @@ class CheckpointResumeController:
                 "model request does not match the durable operation slot",
                 code="checkpoint_journal_integrity_mismatch",
             )
+        identity = initial_identity
+        if entry is not None:
+            identity = self._identity_from_model_entry(entry)
+            self._require_model_identity(
+                identity,
+                operation=operation,
+                backend=backend,
+                model=model,
+            )
         if entry is not None and entry.state is OperationState.SUCCEEDED:
             assert entry.response is not None
             self._emit_operation_replayed(entry)
-            return self._llm_response_from_dict(entry.response)
+            response, usage = self._model_receipt_from_dict(entry.response)
+            return ModelCallDispatchResult(
+                response=response,
+                usage=usage,
+                identity=identity,
+                replayed=True,
+            )
         if entry is not None and entry.state is OperationState.FAILED:
             error = entry.error or OperationError(
                 code="model_request_failed",
                 message="durable model operation failed",
             )
+            self._emit_operation_replayed(entry)
             raise RuntimeError(f"{error.code}: {error.message}")
         if entry is None:
             entry = OperationJournalEntry(
@@ -338,6 +391,10 @@ class CheckpointResumeController:
                 state=OperationState.PLANNED,
                 request_digest=digest,
                 idempotency_key=None,
+                model_operation=identity.operation,
+                backend=identity.backend,
+                model=identity.model,
+                call_id=identity.call_id,
             )
             self._require_checkpoint().model_call_journal.append(entry)
             self._progress()
@@ -346,29 +403,92 @@ class CheckpointResumeController:
                 "model journal is not executable after recovery",
                 code="checkpoint_journal_integrity_mismatch",
             )
-        entry.state = OperationState.STARTED
-        self._progress()
+        identity = self._identity_from_model_entry(entry)
         self._renew_claim_before_dispatch()
+        entry.state = OperationState.STARTED
+        started_event = accounting.started_event(
+            identity,
+            event_id=self._stable_event_id(
+                "model_call_started",
+                identity.operation_id,
+                str(identity.attempt),
+            ),
+        )
+        self._queue_outbox_event(self._require_checkpoint(), started_event)
+        self._progress()
+        self._deliver_pending_outbox()
         try:
             response = invoke()
         except BaseException as exc:
-            if self._is_definitive_model_error(exc):
+            definitive = is_definitive_model_error(exc)
+            terminal = accounting.failed_terminal(
+                identity,
+                error_code=model_error_code(exc),
+                ambiguous=not definitive,
+                event_id=self._stable_event_id(
+                    "model_call_failed",
+                    identity.operation_id,
+                    str(identity.attempt),
+                ),
+            )
+            if definitive:
                 entry.state = OperationState.FAILED
                 entry.error = OperationError(
-                    code=getattr(exc, "code", None) or "model_request_failed",
-                    message=str(exc) or type(exc).__name__,
+                    code=terminal.record.error_code or "model_request_failed",
+                    message="model request failed with a definitive outcome",
                     retryable=False,
                 )
-                self._progress()
+                self._commit_model_terminal(entry, terminal, accounting=accounting)
                 raise
             entry.state = OperationState.AMBIGUOUS
-            self._progress()
+            self._commit_model_terminal(entry, terminal, accounting=accounting)
             self._suspend_for(entry)
+            raise AssertionError("checkpoint suspension must transfer control") from exc
+        usage = normalize_token_usage(
+            response.raw.get("usage"),
+            usage_source=response.raw.get("usage_source"),
+            cache_status=response.raw.get("cache_status"),
+        )
         entry.state = OperationState.SUCCEEDED
-        entry.response = self._llm_response_to_dict(response)
+        entry.response = self._model_receipt_to_dict(response, usage)
         entry.error = None
+        terminal = accounting.completed_terminal(
+            identity,
+            usage,
+            event_id=self._stable_event_id(
+                "model_call_completed",
+                identity.operation_id,
+                str(identity.attempt),
+            ),
+        )
+        self._commit_model_terminal(entry, terminal, accounting=accounting)
+        return ModelCallDispatchResult(
+            response=response,
+            usage=usage,
+            identity=identity,
+            budget_exhaustion=terminal.budget.exhaustion,
+        )
+
+    def _commit_model_terminal(
+        self,
+        entry: OperationJournalEntry,
+        terminal: ModelCallTerminal,
+        *,
+        accounting: ModelCallCoordinator,
+    ) -> None:
+        checkpoint = self._require_checkpoint()
+        if terminal.record.call_id != entry.call_id:
+            raise CheckpointError(
+                "model terminal identity does not match its durable journal",
+                code="checkpoint_status_invalid",
+            )
+        checkpoint.model_calls.append(deepcopy(terminal.record))
+        self._queue_outbox_event(checkpoint, terminal.event)
+        if terminal.budget.event is not None:
+            self._queue_outbox_event(checkpoint, terminal.budget.event)
         self._progress()
-        return response
+        accounting.ledger.replace(checkpoint.model_calls)
+        self._deliver_pending_outbox()
 
     def plan_tool(
         self,
@@ -538,7 +658,6 @@ class CheckpointResumeController:
         self._refresh_snapshot(messages=messages, cycles=cycles, shared_state=shared_state)
         checkpoint.cycle_index = cycle_index
         checkpoint.status = AgentStatus.RUNNING
-        checkpoint.event_outbox = [entry for entry in checkpoint.event_outbox if entry.state == "pending"]
         revision = checkpoint.revision
         claim_token = checkpoint.claim_token
         if not self.store.commit_checkpoint(
@@ -554,6 +673,7 @@ class CheckpointResumeController:
         checkpoint.claim_token = None
         checkpoint.claimed_cycle = None
         checkpoint.lease_expires_at_ms = None
+        checkpoint.event_outbox = [entry for entry in checkpoint.event_outbox if entry.state == "pending"]
         checkpoint.model_call_journal = []
         checkpoint.tool_journal = []
         self._first_claim_is_recovery = False
@@ -584,6 +704,7 @@ class CheckpointResumeController:
             )
         terminal = deepcopy(result)
         terminal.checkpoint_key = checkpoint.checkpoint_key
+        terminal.token_usage = summarize_task_token_usage(checkpoint.model_calls)
         checkpoint.status = terminal.status
         checkpoint.terminal_result = terminal
         preserve_ambiguity = bool(
@@ -639,6 +760,7 @@ class CheckpointResumeController:
         self._deliver_pending_outbox()
         self._acknowledge_terminal()
         result.checkpoint_key = checkpoint.checkpoint_key
+        result.token_usage = summarize_task_token_usage(authoritative.model_calls)
         return result
 
     def prepare_terminal(self, result: AgentResult) -> AgentResult:
@@ -704,6 +826,7 @@ class CheckpointResumeController:
             status=AgentStatus.RUNNING,
             messages=deepcopy(self.initial_messages),
             cycles=[],
+            model_calls=[],
             shared_state=deepcopy(self.initial_shared_state),
             budget_usage=deepcopy(self.initial_budget_usage),
         )
@@ -762,13 +885,26 @@ class CheckpointResumeController:
 
     def _recover_ambiguous_operations(self) -> None:
         checkpoint = self._require_checkpoint()
-        changed = False
         for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]:
-            if entry.state is OperationState.STARTED:
-                entry.state = OperationState.AMBIGUOUS
-                changed = True
-        if changed:
-            self._progress()
+            if entry.state is not OperationState.STARTED:
+                continue
+            entry.state = OperationState.AMBIGUOUS
+            if entry.kind is OperationKind.MODEL:
+                accounting = self._require_model_accounting()
+                identity = self._identity_from_model_entry(entry)
+                terminal = accounting.failed_terminal(
+                    identity,
+                    error_code="model_outcome_ambiguous",
+                    ambiguous=True,
+                    event_id=self._stable_event_id(
+                        "model_call_failed",
+                        identity.operation_id,
+                        str(identity.attempt),
+                    ),
+                )
+                self._commit_model_terminal(entry, terminal, accounting=accounting)
+            else:
+                self._progress()
         for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]:
             if entry.state is not OperationState.AMBIGUOUS:
                 continue
@@ -784,6 +920,8 @@ class CheckpointResumeController:
             if decision.kind is ReconciliationDecisionKind.RETRY:
                 entry.state = OperationState.PLANNED
                 entry.attempt += 1
+                if entry.kind is OperationKind.MODEL:
+                    entry.call_id = f"{entry.operation_id}:attempt:{entry.attempt}"
                 entry.response = None
                 entry.result = None
                 entry.error = None
@@ -913,6 +1051,7 @@ class CheckpointResumeController:
             messages=deepcopy(checkpoint.messages),
             cycles=deepcopy(checkpoint.cycles),
             shared_state=deepcopy(checkpoint.shared_state),
+            token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
             checkpoint_key=checkpoint.checkpoint_key,
             resume_observation=observation,
@@ -932,6 +1071,7 @@ class CheckpointResumeController:
             cycles=deepcopy(checkpoint.cycles),
             error="operator_abort_with_unknown_outcome",
             shared_state=deepcopy(checkpoint.shared_state),
+            token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
             checkpoint_key=checkpoint.checkpoint_key,
             resume_observation=observation,
@@ -1044,24 +1184,19 @@ class CheckpointResumeController:
                 code="checkpoint_definition_mismatch",
             )
 
-    def _model_request_projection(self, request: LlmRequest) -> dict[str, Any]:
+    def _model_request_projection(
+        self,
+        request: LlmRequest,
+        *,
+        backend: str,
+        model: str,
+    ) -> dict[str, Any]:
         checkpoint = self._require_checkpoint()
-        model_definition = checkpoint.run_definition["model"]
-        model_override = request.metadata.get("_vv_agent_checkpoint_model")
-        if isinstance(model_override, dict):
-            backend = model_override.get("backend")
-            model_id = model_override.get("model_id")
-            if not isinstance(backend, str) or not isinstance(model_id, str):
-                raise CheckpointError(
-                    "checkpoint model override is invalid",
-                    code="checkpoint_journal_integrity_mismatch",
-                )
-            effective_model = {"backend": backend, "model_id": model_id}
-        else:
-            effective_model = {
-                "backend": model_definition["backend"],
-                "model_id": model_definition["model_id"],
-            }
+        if not isinstance(backend, str) or not backend.strip() or not isinstance(model, str) or not model.strip():
+            raise CheckpointError(
+                "effective model backend and model must be non-empty",
+                code="checkpoint_journal_integrity_mismatch",
+            )
         settings = request.model_settings.to_dict() if request.model_settings is not None else {}
         settings.pop("timeout_seconds", None)
         return {
@@ -1069,7 +1204,8 @@ class CheckpointResumeController:
             "kind": "model",
             "request": {
                 "model": {
-                    **effective_model,
+                    "backend": backend,
+                    "model_id": model,
                 },
                 "messages": [message.to_openai_message() for message in request.messages],
                 "tools": deepcopy(request.tools),
@@ -1093,9 +1229,50 @@ class CheckpointResumeController:
         )
 
     @staticmethod
-    def _model_operation_id(cycle_index: int, operation_slot: str) -> str:
-        slot_digest = hashlib.sha256(operation_slot.encode("utf-8")).hexdigest()[:16]
-        return f"op_model_cycle_{cycle_index}_{slot_digest}"
+    def _identity_from_model_entry(entry: OperationJournalEntry) -> ModelCallIdentity:
+        if entry.kind is not OperationKind.MODEL:
+            raise CheckpointError(
+                "model identity requested for a non-model journal entry",
+                code="checkpoint_status_invalid",
+            )
+        operation = entry.model_operation
+        backend = entry.backend
+        model = entry.model
+        if operation is None or backend is None or model is None:
+            raise CheckpointError(
+                "model journal entry is missing model identity fields",
+                code="checkpoint_status_invalid",
+            )
+        return ModelCallIdentity.create(
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            operation=operation,
+            cycle_index=entry.cycle_index,
+            backend=backend,
+            model=model,
+        )
+
+    @staticmethod
+    def _require_model_identity(
+        identity: ModelCallIdentity,
+        *,
+        operation: ModelCallOperation,
+        backend: str,
+        model: str,
+    ) -> None:
+        if identity.operation is not operation or identity.backend != backend or identity.model != model:
+            raise CheckpointError(
+                "effective model identity does not match the durable journal",
+                code="checkpoint_journal_integrity_mismatch",
+            )
+
+    def _require_model_accounting(self) -> ModelCallCoordinator:
+        if self._model_accounting is None:
+            raise CheckpointError(
+                "checkpoint model accounting is not initialized",
+                code="checkpoint_status_invalid",
+            )
+        return self._model_accounting
 
     def _find_tool_call(
         self,
@@ -1406,38 +1583,41 @@ class CheckpointResumeController:
         return f"idem_{hashlib.sha256(source.encode()).hexdigest()[:32]}"
 
     @staticmethod
-    def _llm_response_to_dict(response: LLMResponse) -> dict[str, Any]:
+    def _model_receipt_to_dict(response: LLMResponse, usage: TokenUsage) -> dict[str, Any]:
         return {
             "content": response.content,
             "tool_calls": [call.to_dict() for call in response.tool_calls],
             "raw": deepcopy(response.raw),
+            "token_usage": usage.to_dict(),
         }
 
     @staticmethod
-    def _llm_response_from_dict(payload: dict[str, Any]) -> LLMResponse:
-        raw = payload.get("raw")
-        raw_payload: dict[str, Any] = deepcopy(raw) if isinstance(raw, dict) else {}
-        return LLMResponse(
-            content=str(payload.get("content") or ""),
-            tool_calls=[ToolCall.from_dict(item) for item in payload.get("tool_calls", []) if isinstance(item, dict)],
-            raw=raw_payload,
-        )
-
-    @staticmethod
-    def _is_definitive_model_error(error: BaseException) -> bool:
-        if getattr(error, "definitive_outcome", False) is True:
-            return True
-        text = str(error).lower()
-        return any(
-            marker in text
-            for marker in (
-                "context length",
-                "context_length_exceeded",
-                "maximum context length",
-                "prompt is too long",
-                "request too large",
+    def _model_receipt_from_dict(payload: dict[str, Any]) -> tuple[LLMResponse, TokenUsage]:
+        if not isinstance(payload, dict) or set(payload) != {"content", "tool_calls", "raw", "token_usage"}:
+            raise CheckpointError(
+                "durable model receipt does not match the current shape",
+                code="checkpoint_journal_integrity_mismatch",
             )
+        content = payload["content"]
+        tool_calls = payload["tool_calls"]
+        raw = payload["raw"]
+        token_usage = payload["token_usage"]
+        if not isinstance(content, str) or not isinstance(tool_calls, list) or not isinstance(raw, dict):
+            raise CheckpointError(
+                "durable model receipt fields are invalid",
+                code="checkpoint_journal_integrity_mismatch",
+            )
+        if not isinstance(token_usage, dict):
+            raise CheckpointError(
+                "durable model receipt token_usage is invalid",
+                code="checkpoint_journal_integrity_mismatch",
+            )
+        response = LLMResponse(
+            content=content,
+            tool_calls=[ToolCall.from_dict(item) for item in tool_calls],
+            raw=deepcopy(raw),
         )
+        return response, TokenUsage.from_dict(token_usage)
 
     @staticmethod
     def _now_ms() -> int:

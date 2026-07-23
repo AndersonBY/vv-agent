@@ -25,6 +25,7 @@ from vv_agent.runtime.state import (
     check_claim,
     prepare_claimed_terminal,
     prepare_event_delivery,
+    validate_model_journal_accounting,
 )
 from vv_agent.types import AgentStatus
 
@@ -66,7 +67,7 @@ class SqliteCheckpointStore:
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
         snapshot = checkpoint_from_json(checkpoint_to_json(checkpoint))
         if snapshot.revision != 0 or snapshot.resume_attempt != 1 or snapshot.claim_token is not None:
-            raise ValueError("new checkpoint v2 records must be unclaimed at revision zero")
+            raise ValueError("new checkpoint v3 records must be unclaimed at revision zero")
         row = _checkpoint_row(snapshot)
         with self._lock, self._conn:
             cursor = self._conn.execute(
@@ -193,7 +194,7 @@ class SqliteCheckpointStore:
             return False
         claimed_cycle = checkpoint.claimed_cycle
         if claimed_cycle is None:
-            raise ValueError("checkpoint v2 suspend requires an active claim")
+            raise ValueError("checkpoint v3 suspend requires an active claim")
         snapshot = replace(
             checkpoint,
             revision=expected_revision + 1,
@@ -236,19 +237,21 @@ class SqliteCheckpointStore:
             return False
         claimed_cycle = checkpoint.claimed_cycle
         if claimed_cycle is None:
-            raise ValueError("checkpoint v2 commit requires an active claim")
+            raise ValueError("checkpoint v3 commit requires an active claim")
         if (
             checkpoint.cycle_index != claimed_cycle
             or checkpoint.status is not AgentStatus.RUNNING
             or checkpoint.terminal_result is not None
         ):
             return False
+        validate_model_journal_accounting(checkpoint)
         snapshot = replace(
             checkpoint,
             revision=expected_revision + 1,
             claim_token=None,
             claimed_cycle=None,
             lease_expires_at_ms=None,
+            event_outbox=[entry for entry in checkpoint.event_outbox if entry.state == "pending"],
             model_call_journal=[],
             tool_journal=[],
         )
@@ -284,7 +287,7 @@ class SqliteCheckpointStore:
             return False
         snapshot = checkpoint_from_json(checkpoint_to_json(checkpoint))
         if snapshot.terminal_result is None or snapshot.claim_token is not None:
-            raise ValueError("finalized checkpoint v2 must be terminal and unclaimed")
+            raise ValueError("finalized checkpoint v3 must be terminal and unclaimed")
         snapshot.revision = expected_revision + 1
         row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
         columns = _FINALIZE_COLUMNS
@@ -456,8 +459,8 @@ class SqliteCheckpointStore:
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v2'),
-    run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v1'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v3'),
+    run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v2'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,
     root_run_id TEXT NOT NULL,
@@ -468,6 +471,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     status TEXT NOT NULL,
     messages TEXT NOT NULL,
     cycles TEXT NOT NULL,
+    model_calls TEXT NOT NULL,
     shared_state TEXT NOT NULL,
     budget_usage TEXT,
     event_cursor TEXT,
@@ -513,6 +517,7 @@ _COLUMNS = (
     "status",
     "messages",
     "cycles",
+    "model_calls",
     "shared_state",
     "budget_usage",
     "event_cursor",
@@ -574,6 +579,7 @@ def _checkpoint_row(checkpoint: Checkpoint) -> tuple[object, ...]:
         full["status"],
         _json_dump(full["messages"]),
         _json_dump(full["cycles"]),
+        _json_dump(full["model_calls"]),
         _json_dump(full["shared_state"]),
         _json_dump(full["budget_usage"]) if full["budget_usage"] is not None else None,
         _json_dump(full["event_cursor"]) if full["event_cursor"] is not None else None,
@@ -608,6 +614,7 @@ def _checkpoint_from_row(row: tuple[object, ...]) -> Checkpoint:
         "status": values["status"],
         "messages": _json_load(values["messages"], "messages"),
         "cycles": _json_load(values["cycles"], "cycles"),
+        "model_calls": _json_load(values["model_calls"], "model_calls"),
         "shared_state": _json_load(values["shared_state"], "shared_state"),
         "budget_usage": (_json_load(values["budget_usage"], "budget_usage") if values["budget_usage"] is not None else None),
         "event_cursor": (_json_load(values["event_cursor"], "event_cursor") if values["event_cursor"] is not None else None),
@@ -658,4 +665,4 @@ def _json_load(value: object, field_name: str) -> Any:
     try:
         return _strict_json_loads(str(value))
     except (json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(f"invalid checkpoint v2 {field_name} JSON") from exc
+        raise ValueError(f"invalid checkpoint v3 {field_name} JSON") from exc

@@ -20,9 +20,17 @@ from vv_agent.checkpoint import (
     validate_extension_namespace,
     validate_sha256,
 )
-from vv_agent.types import AgentResult, AgentStatus, CycleRecord, Message
+from vv_agent.types import (
+    AgentResult,
+    AgentStatus,
+    CycleRecord,
+    Message,
+    ModelCallOperation,
+    ModelCallRecord,
+    ModelCallStatus,
+)
 
-CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v2"
+CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v3"
 MAX_WIRE_INTEGER = (1 << 53) - 1
 ClaimMode = Literal["continue", "recovery"]
 
@@ -108,6 +116,10 @@ class OperationJournalEntry:
     tool_name: str | None = None
     arguments: dict[str, Any] | None = None
     idempotency_support: ToolIdempotency | None = None
+    model_operation: ModelCallOperation | None = None
+    backend: str | None = None
+    model: str | None = None
+    call_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, OperationKind):
@@ -166,7 +178,32 @@ class OperationJournalEntry:
                     "model journal entry cannot contain tool fields",
                     code="operation_kind_fields_invalid",
                 )
+            try:
+                self.model_operation = ModelCallOperation(self.model_operation)
+            except (TypeError, ValueError) as exc:
+                raise CheckpointError(
+                    "model journal entry requires a valid model_operation",
+                    code="model_identity_invalid",
+                ) from exc
+            for value, name in (
+                (self.backend, "backend"),
+                (self.model, "model"),
+                (self.call_id, "call_id"),
+            ):
+                if not isinstance(value, str) or not value.strip():
+                    raise CheckpointError(
+                        f"model journal entry requires non-empty {name}",
+                        code="model_identity_invalid",
+                    )
         else:
+            if any(
+                value is not None
+                for value in (self.model_operation, self.backend, self.model, self.call_id)
+            ):
+                raise CheckpointError(
+                    "tool journal entry cannot contain model identity fields",
+                    code="operation_kind_fields_invalid",
+                )
             if not isinstance(self.tool_call_id, str) or not self.tool_call_id:
                 raise CheckpointError(
                     "tool journal entry requires tool_call_id",
@@ -232,7 +269,17 @@ class OperationJournalEntry:
             "idempotency_key": self.idempotency_key,
         }
         if self.kind is OperationKind.MODEL:
-            payload["response"] = self.response
+            model_operation = self.model_operation
+            assert model_operation is not None
+            payload.update(
+                {
+                    "response": self.response,
+                    "model_operation": model_operation.value,
+                    "backend": self.backend,
+                    "model": self.model,
+                    "call_id": self.call_id,
+                }
+            )
         else:
             idempotency_support = self.idempotency_support
             assert idempotency_support is not None
@@ -286,6 +333,10 @@ class OperationJournalEntry:
             "state",
             "response",
             "error",
+            "model_operation",
+            "backend",
+            "model",
+            "call_id",
         }
         tool_fields = {
             "kind",
@@ -302,6 +353,16 @@ class OperationJournalEntry:
             "result",
             "error",
         }
+        if kind is OperationKind.MODEL and not {
+            "model_operation",
+            "backend",
+            "model",
+            "call_id",
+        }.issubset(payload):
+            raise CheckpointError(
+                "model journal entry is missing model identity fields",
+                code="model_identity_invalid",
+            )
         if set(payload) != (model_fields if kind is OperationKind.MODEL else tool_fields):
             raise CheckpointError(
                 "operation journal fields do not match operation kind",
@@ -323,6 +384,10 @@ class OperationJournalEntry:
             tool_name=payload.get("tool_name"),
             arguments=payload.get("arguments"),
             idempotency_support=(payload.get("idempotency_support") if kind is OperationKind.TOOL else None),
+            model_operation=(payload.get("model_operation") if kind is OperationKind.MODEL else None),
+            backend=(payload.get("backend") if kind is OperationKind.MODEL else None),
+            model=(payload.get("model") if kind is OperationKind.MODEL else None),
+            call_id=(payload.get("call_id") if kind is OperationKind.MODEL else None),
         )
 
 
@@ -450,6 +515,7 @@ class Checkpoint:
     status: AgentStatus
     messages: list[Message]
     cycles: list[CycleRecord]
+    model_calls: list[ModelCallRecord] = field(default_factory=list)
     shared_state: dict[str, Any] = field(default_factory=dict)
     budget_usage: BudgetUsageSnapshot | None = None
     event_cursor: EventCursor | None = None
@@ -553,7 +619,7 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         raise TypeError("checkpoint must be a Checkpoint")
     if checkpoint.schema_version != CHECKPOINT_SCHEMA:
         raise CheckpointError(
-            "unsupported checkpoint v2 schema_version",
+            "unsupported checkpoint v3 schema_version",
             code="checkpoint_schema_unsupported",
         )
     if checkpoint.run_definition_schema != RUN_DEFINITION_SCHEMA:
@@ -605,6 +671,16 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         raise TypeError("checkpoint messages must contain Message values")
     if not isinstance(checkpoint.cycles, list) or not all(isinstance(item, CycleRecord) for item in checkpoint.cycles):
         raise TypeError("checkpoint cycles must contain CycleRecord values")
+    if not isinstance(checkpoint.model_calls, list) or not all(
+        isinstance(item, ModelCallRecord) for item in checkpoint.model_calls
+    ):
+        raise TypeError("checkpoint model_calls must contain ModelCallRecord values")
+    call_ids = [record.call_id for record in checkpoint.model_calls]
+    if len(call_ids) != len(set(call_ids)):
+        raise CheckpointError(
+            "checkpoint model_calls contains duplicate call ids",
+            code="checkpoint_status_invalid",
+        )
     canonical_json_bytes(checkpoint.shared_state, "checkpoint shared_state")
     if checkpoint.budget_usage is not None and not isinstance(
         checkpoint.budget_usage,
@@ -688,12 +764,7 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 "journal cycle_index must equal active cycle",
                 code="checkpoint_journal_cycle_invalid",
             )
-    for entry in checkpoint.model_call_journal:
-        if entry.kind is not OperationKind.MODEL:
-            raise CheckpointError(
-                "model_call_journal contains a non-model entry",
-                code="operation_kind_fields_invalid",
-            )
+    validate_model_journal_accounting(checkpoint)
     for entry in checkpoint.tool_journal:
         if entry.kind is not OperationKind.TOOL:
             raise CheckpointError(
@@ -723,6 +794,11 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 "terminal_result checkpoint_key does not match checkpoint",
                 code="checkpoint_status_invalid",
             )
+        if checkpoint.terminal_result.token_usage.model_calls != checkpoint.model_calls:
+            raise CheckpointError(
+                "terminal result model-call ledger does not match checkpoint",
+                code="checkpoint_status_invalid",
+            )
         if journals and not _is_operator_abort_terminal(checkpoint, ambiguous):
             raise CheckpointError(
                 "terminal checkpoint cannot retain active journals",
@@ -736,6 +812,148 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 str(exc),
                 code="checkpoint_extension_namespace_invalid",
             ) from exc
+
+
+def validate_model_journal_accounting(checkpoint: Checkpoint) -> None:
+    for entry in checkpoint.model_call_journal:
+        if entry.kind is not OperationKind.MODEL:
+            raise CheckpointError(
+                "model_call_journal contains a non-model entry",
+                code="operation_kind_fields_invalid",
+            )
+        _validate_model_journal_entry_accounting(checkpoint, entry)
+
+
+def _validate_model_journal_entry_accounting(checkpoint: Checkpoint, journal: OperationJournalEntry) -> None:
+    identity = _model_journal_identity(journal)
+    record_candidates = [
+        record
+        for record in checkpoint.model_calls
+        if record.call_id == journal.call_id
+        or (record.operation_id == journal.operation_id and record.attempt == journal.attempt)
+    ]
+    event_candidates = [
+        entry.event
+        for entry in checkpoint.event_outbox
+        if entry.event.get("type") in {"model_call_started", "model_call_completed", "model_call_failed"}
+        and (
+            entry.event.get("call_id") == journal.call_id
+            or (
+                entry.event.get("operation_id") == journal.operation_id
+                and entry.event.get("attempt") == journal.attempt
+            )
+        )
+    ]
+    started_events = [event for event in event_candidates if event["type"] == "model_call_started"]
+    terminal_events = [event for event in event_candidates if event["type"] in {"model_call_completed", "model_call_failed"}]
+
+    if len(record_candidates) > 1 or len(started_events) > 1 or len(terminal_events) > 1:
+        raise CheckpointError(
+            "model journal attempt has duplicate accounting evidence",
+            code="checkpoint_status_invalid",
+        )
+
+    if journal.state is OperationState.PLANNED:
+        _require_model_evidence_counts(record_candidates, started_events, terminal_events, expected=(0, 0, 0))
+        return
+    if journal.state is OperationState.STARTED:
+        _require_model_evidence_counts(record_candidates, started_events, terminal_events, expected=(0, 1, 0))
+        _require_model_identity(identity, _model_event_identity(started_events[0]))
+        return
+
+    evidence_present = bool(record_candidates or started_events or terminal_events)
+    if journal.state is OperationState.FAILED and not evidence_present:
+        return
+    _require_model_evidence_counts(record_candidates, started_events, terminal_events, expected=(1, 1, 1))
+
+    record = record_candidates[0]
+    started_event = started_events[0]
+    terminal_event = terminal_events[0]
+    _require_model_identity(identity, _model_record_identity(record))
+    _require_model_identity(identity, _model_event_identity(started_event))
+    _require_model_identity(identity, _model_event_identity(terminal_event))
+
+    expected_statuses = {
+        OperationState.SUCCEEDED: {ModelCallStatus.COMPLETED, ModelCallStatus.AMBIGUOUS},
+        OperationState.FAILED: {ModelCallStatus.FAILED, ModelCallStatus.AMBIGUOUS},
+        OperationState.AMBIGUOUS: {ModelCallStatus.AMBIGUOUS},
+    }.get(journal.state)
+    expected_event_type = (
+        "model_call_completed" if record.status is ModelCallStatus.COMPLETED else "model_call_failed"
+    )
+    if expected_statuses is None or record.status not in expected_statuses or terminal_event["type"] != expected_event_type:
+        raise CheckpointError(
+            "model journal terminal state does not match its accounting evidence",
+            code="checkpoint_status_invalid",
+        )
+    if terminal_event.get("usage") != record.usage.to_dict():
+        raise CheckpointError(
+            "model terminal event usage does not match its ledger record",
+            code="checkpoint_status_invalid",
+        )
+    if record.status is not ModelCallStatus.COMPLETED:
+        expected_outcome = "ambiguous" if record.status is ModelCallStatus.AMBIGUOUS else "definitive"
+        if terminal_event.get("outcome") != expected_outcome or terminal_event.get("error_code") != record.error_code:
+            raise CheckpointError(
+                "model failed event does not match its ledger record",
+                code="checkpoint_status_invalid",
+            )
+
+
+def _require_model_evidence_counts(
+    records: list[ModelCallRecord],
+    started_events: list[dict[str, Any]],
+    terminal_events: list[dict[str, Any]],
+    *,
+    expected: tuple[int, int, int],
+) -> None:
+    observed = (len(records), len(started_events), len(terminal_events))
+    if observed != expected:
+        raise CheckpointError(
+            "model journal attempt is missing atomic accounting evidence",
+            code="checkpoint_status_invalid",
+        )
+
+
+def _model_journal_identity(journal: OperationJournalEntry) -> tuple[Any, ...]:
+    operation = journal.model_operation
+    assert operation is not None
+    return (
+        journal.call_id,
+        journal.operation_id,
+        journal.attempt,
+        operation.value,
+        journal.cycle_index,
+        journal.backend,
+        journal.model,
+    )
+
+
+def _model_record_identity(record: ModelCallRecord) -> tuple[Any, ...]:
+    return (
+        record.call_id,
+        record.operation_id,
+        record.attempt,
+        record.operation.value,
+        record.cycle_index,
+        record.backend,
+        record.model,
+    )
+
+
+def _model_event_identity(event: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(
+        event.get(field)
+        for field in ("call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model")
+    )
+
+
+def _require_model_identity(expected: tuple[Any, ...], observed: tuple[Any, ...]) -> None:
+    if observed != expected:
+        raise CheckpointError(
+            "model journal, event, and ledger identities do not match",
+            code="checkpoint_status_invalid",
+        )
 
 
 def check_claim(
@@ -830,6 +1048,7 @@ def prepare_claimed_terminal(
         or not checkpoint_definition_matches(current, checkpoint)
     ):
         return None
+    validate_model_journal_accounting(checkpoint)
     journals = [*checkpoint.model_call_journal, *checkpoint.tool_journal]
     ambiguous = [entry for entry in journals if entry.state is OperationState.AMBIGUOUS]
     preserve_ambiguity = _is_operator_abort_terminal(checkpoint, ambiguous)

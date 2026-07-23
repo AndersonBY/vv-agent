@@ -101,7 +101,7 @@ def test_total_tokens_equal_limit_can_finish_but_next_cycle_is_rejected() -> Non
 
     assert evaluator.run_start() is None
     assert evaluator.cycle_start() is None
-    assert evaluator.llm_complete(_usage(10, 10)) is None
+    assert evaluator.model_call_complete(_usage(10, 10)) is None
     exhaustion = evaluator.cycle_start()
 
     assert exhaustion is not None
@@ -119,7 +119,7 @@ def test_total_tokens_allow_one_atomic_overshoot() -> None:
 
     assert evaluator.run_start() is None
     assert evaluator.cycle_start() is None
-    exhaustion = evaluator.llm_complete(_usage(12, 12))
+    exhaustion = evaluator.model_call_complete(_usage(12, 12))
 
     assert exhaustion is not None
     assert exhaustion.reason is BudgetExhaustionReason.LIMIT_EXCEEDED
@@ -143,13 +143,13 @@ def test_missing_uncached_usage_is_not_zero_and_policy_is_configurable() -> None
 
     assert continuing.run_start() is None
     assert continuing.cycle_start() is None
-    assert continuing.llm_complete(_usage(4, None)) is None
+    assert continuing.model_call_complete(_usage(4, None)) is None
     assert continuing.snapshot().uncached_input_tokens is None
     assert continuing.snapshot().unavailable_dimensions[0].reason is BudgetUnavailableReason.USAGE_MISSING
 
     assert strict.run_start() is None
     assert strict.cycle_start() is None
-    exhaustion = strict.llm_complete(_usage(4, None))
+    exhaustion = strict.model_call_complete(_usage(4, None))
     assert exhaustion is not None
     assert exhaustion.reason is BudgetExhaustionReason.METRIC_UNAVAILABLE
     assert exhaustion.unavailable_reason is BudgetUnavailableReason.USAGE_MISSING
@@ -164,7 +164,7 @@ def test_explicit_zero_uncached_usage_remains_available() -> None:
     evaluator.run_start()
     evaluator.cycle_start()
 
-    assert evaluator.llm_complete(_usage(3, 0)) is None
+    assert evaluator.model_call_complete(_usage(3, 0)) is None
     assert evaluator.snapshot().uncached_input_tokens == 0
     assert evaluator.snapshot().unavailable_dimensions == ()
 
@@ -217,7 +217,7 @@ def test_host_meter_overshoot_and_non_monotonic_reading() -> None:
 
     assert overshoot.run_start() is None
     assert overshoot.cycle_start() is None
-    exhaustion = overshoot.llm_complete(_usage(1, 1))
+    exhaustion = overshoot.model_call_complete(_usage(1, 1))
     assert exhaustion is not None
     assert exhaustion.dimension is BudgetDimension.HOST_COST
     assert exhaustion.overshoot == 20
@@ -248,7 +248,7 @@ def test_token_sum_wire_overflow_becomes_typed_unavailable() -> None:
         clock_ns=_Clock([0, 0]),
     )
 
-    exhaustion = evaluator.llm_complete(_usage(1, 0))
+    exhaustion = evaluator.model_call_complete(_usage(1, 0))
 
     assert exhaustion is not None
     assert exhaustion.reason is BudgetExhaustionReason.METRIC_UNAVAILABLE
@@ -653,7 +653,7 @@ def test_inline_and_thread_backends_share_budget_enforcement(
 
     assert result.completion_reason is CompletionReason.BUDGET_EXHAUSTED
     assert result.budget_exhaustion is not None
-    assert result.budget_exhaustion.enforcement_boundary is BudgetEnforcementBoundary.LLM_COMPLETE
+    assert result.budget_exhaustion.enforcement_boundary is BudgetEnforcementBoundary.MODEL_CALL_COMPLETE
 
 
 def test_per_run_budget_replaces_configured_runner_default_as_a_whole(tmp_path: Path) -> None:

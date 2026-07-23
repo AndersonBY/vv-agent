@@ -3,6 +3,31 @@
   "normalization_rules": {
     "computer_os": "Replace the host OS label in rendered environment text with <OS> and recompute the stable hash."
   },
+  "session_memory_gate": {
+    "control": "session_memory_enabled",
+    "default": false,
+    "enabled_value": true,
+    "disabled_or_omitted_context_behavior": "ignore_without_rendering",
+    "session_memory_section_requires_enabled_true": true,
+    "context_presence_does_not_enable_session_memory": true,
+    "probe_cases": [
+      {
+        "name": "explicit_false_ignores_nonempty_context",
+        "base_scenario": "en-US-minimal",
+        "expected_session_memory_section_count": 0,
+        "expected_prompt_equals_base_output": true
+      },
+      {
+        "name": "omitted_control_ignores_nonempty_context",
+        "base_scenario": "en-US-minimal",
+        "input_mutation": {
+          "remove": "session_memory_enabled"
+        },
+        "expected_session_memory_section_count": 0,
+        "expected_prompt_equals_base_output": true
+      }
+    ]
+  },
   "scenarios": [
     {
       "id": "en-US-full",
@@ -26,6 +51,7 @@
         "enable_todo_management": true,
         "language": "en-US",
         "original_system_prompt": "You are a careful coding agent.",
+        "session_memory_enabled": true,
         "session_memory_context": "<Session Memory>\n- Keep source evidence.\n</Session Memory>",
         "use_workspace": true
       },
@@ -87,6 +113,7 @@
         "enable_todo_management": true,
         "language": "zh-CN",
         "original_system_prompt": "你是一个严谨的编码 Agent。",
+        "session_memory_enabled": true,
         "session_memory_context": "<Session Memory>\n- 保留源码证据。\n</Session Memory>",
         "use_workspace": true
       },
@@ -137,7 +164,8 @@
         "enable_todo_management": false,
         "language": "en-US",
         "original_system_prompt": "Return only verified facts.",
-        "session_memory_context": "",
+        "session_memory_enabled": false,
+        "session_memory_context": "<Session Memory>\n- MUST NOT RENDER.\n</Session Memory>",
         "use_workspace": false
       },
       "normalizations": [],

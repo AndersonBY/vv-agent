@@ -20,7 +20,7 @@ from vv_agent.checkpoint import (
     ResumeObservation,
     ToolIdempotency,
 )
-from vv_agent.types import CompletionReason
+from vv_agent.types import CompletionReason, ModelCallOperation, TokenUsage
 
 if TYPE_CHECKING:
     from vv_agent.tools.metadata import ToolMetadata
@@ -36,6 +36,7 @@ ReservedOutputSource = Literal[
     "framework_fallback_capped_by_model_capability",
 ]
 DiagnosticLevel = Literal["debug", "info", "warning", "error"]
+ModelCallOutcome = Literal["definitive", "ambiguous"]
 _APPROVAL_ACTIONS = frozenset({"allow", "allow_session", "deny", "timeout"})
 _MEMORY_COMPACT_TRIGGER_VALUES = frozenset({"micro_threshold", "full_threshold", "prompt_too_long"})
 _MEMORY_COMPACT_MODE_VALUES = frozenset({"none", "micro", "structural", "summary", "emergency"})
@@ -48,6 +49,7 @@ _RESERVED_OUTPUT_SOURCE_VALUES = frozenset(
     }
 )
 _DIAGNOSTIC_LEVEL_VALUES = frozenset({"debug", "info", "warning", "error"})
+_MODEL_CALL_OUTCOME_VALUES = frozenset({"definitive", "ambiguous"})
 _MEMORY_COMPACT_STARTED_FIELDS = (
     "trigger",
     "configured_threshold",
@@ -83,7 +85,25 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "run_started": frozenset({"input"}),
     "agent_started": frozenset(),
     "cycle_started": frozenset(),
-    "llm_started": frozenset({"model"}),
+    "model_call_started": frozenset(
+        {"call_id", "operation_id", "attempt", "operation", "backend", "model"}
+    ),
+    "model_call_completed": frozenset(
+        {"call_id", "operation_id", "attempt", "operation", "backend", "model", "usage"}
+    ),
+    "model_call_failed": frozenset(
+        {
+            "call_id",
+            "operation_id",
+            "attempt",
+            "operation",
+            "backend",
+            "model",
+            "outcome",
+            "usage",
+            "error_code",
+        }
+    ),
     "run_state_changed": frozenset({"state"}),
     "diagnostic": frozenset({"level", "code", "details"}),
     "memory_compact_started": frozenset(
@@ -176,7 +196,26 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
 }
 _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "run_started": frozenset({"input"}),
-    "llm_started": frozenset({"model"}),
+    "model_call_started": frozenset(
+        {"call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model"}
+    ),
+    "model_call_completed": frozenset(
+        {"call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model", "usage"}
+    ),
+    "model_call_failed": frozenset(
+        {
+            "call_id",
+            "operation_id",
+            "attempt",
+            "operation",
+            "cycle_index",
+            "backend",
+            "model",
+            "outcome",
+            "usage",
+            "error_code",
+        }
+    ),
     "assistant_delta": frozenset({"delta", "cycle_index"}),
     "reasoning_delta": frozenset({"delta", "cycle_index"}),
     "model_tool_call_started": frozenset({"tool_call_id", "tool_name", "cycle_index"}),
@@ -574,8 +613,71 @@ class CycleStartedEvent(RunEvent):
         )
 
 
+def _set_model_call_fields(
+    event: RunEvent,
+    *,
+    type: str,
+    run_id: str,
+    trace_id: str,
+    call_id: str,
+    operation_id: str,
+    attempt: int,
+    operation: ModelCallOperation | str,
+    cycle_index: int,
+    backend: str,
+    model: str,
+    agent_name: str | None = None,
+    session_id: str | None = None,
+    parent_event_id: str | None = None,
+    parent_run_id: str | None = None,
+    event_id: str | None = None,
+    created_at: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    _set_run_event_fields(
+        event,
+        type=type,
+        run_id=run_id,
+        trace_id=trace_id,
+        cycle_index=_positive_event_integer(cycle_index, "cycle_index"),
+        agent_name=agent_name,
+        session_id=session_id,
+        parent_event_id=parent_event_id,
+        parent_run_id=parent_run_id,
+        event_id=event_id,
+        created_at=created_at,
+        metadata=metadata,
+    )
+    object.__setattr__(event, "call_id", _required_event_text(call_id, "call_id"))
+    object.__setattr__(event, "operation_id", _required_event_text(operation_id, "operation_id"))
+    object.__setattr__(event, "attempt", _positive_event_integer(attempt, "attempt"))
+    object.__setattr__(event, "operation", ModelCallOperation(operation))
+    object.__setattr__(event, "backend", _required_event_text(backend, "backend"))
+    object.__setattr__(event, "model", _required_event_text(model, "model"))
+
+
+def _model_call_dict(event: Any) -> dict[str, Any]:
+    payload = RunEvent.to_dict(event)
+    payload.update(
+        {
+            "call_id": event.call_id,
+            "operation_id": event.operation_id,
+            "attempt": event.attempt,
+            "operation": event.operation.value,
+            "backend": event.backend,
+            "model": event.model,
+        }
+    )
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
-class LLMStartedEvent(RunEvent):
+class ModelCallStartedEvent(RunEvent):
+    call_id: str = ""
+    operation_id: str = ""
+    attempt: int = 1
+    operation: ModelCallOperation = ModelCallOperation.AGENT_CYCLE
+    backend: str = ""
     model: str = ""
 
     def __init__(
@@ -583,8 +685,13 @@ class LLMStartedEvent(RunEvent):
         *,
         run_id: str,
         trace_id: str,
+        call_id: str,
+        operation_id: str,
+        attempt: int,
+        operation: ModelCallOperation | str,
+        cycle_index: int,
+        backend: str,
         model: str,
-        cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
         parent_event_id: str | None = None,
@@ -593,12 +700,18 @@ class LLMStartedEvent(RunEvent):
         created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        _set_run_event_fields(
+        _set_model_call_fields(
             self,
-            type="llm_started",
+            type="model_call_started",
             run_id=run_id,
             trace_id=trace_id,
+            call_id=call_id,
+            operation_id=operation_id,
+            attempt=attempt,
+            operation=operation,
             cycle_index=cycle_index,
+            backend=backend,
+            model=model,
             agent_name=agent_name,
             session_id=session_id,
             parent_event_id=parent_event_id,
@@ -607,11 +720,59 @@ class LLMStartedEvent(RunEvent):
             created_at=created_at,
             metadata=metadata,
         )
-        object.__setattr__(self, "model", model)
 
     def to_dict(self) -> dict[str, Any]:
-        payload = RunEvent.to_dict(self)
-        payload["model"] = self.model
+        return _model_call_dict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallCompletedEvent(ModelCallStartedEvent):
+    usage: TokenUsage = field(default_factory=TokenUsage)
+
+    def __init__(self, *, usage: TokenUsage, **kwargs: Any) -> None:
+        _set_model_call_fields(self, type="model_call_completed", **kwargs)
+        if not isinstance(usage, TokenUsage):
+            raise TypeError("model call completed usage must be TokenUsage")
+        object.__setattr__(self, "usage", usage)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = _model_call_dict(self)
+        payload["usage"] = self.usage.to_dict()
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallFailedEvent(ModelCallStartedEvent):
+    outcome: ModelCallOutcome = "definitive"
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    error_code: str = "model_request_failed"
+
+    def __init__(
+        self,
+        *,
+        outcome: ModelCallOutcome,
+        usage: TokenUsage,
+        error_code: str,
+        **kwargs: Any,
+    ) -> None:
+        _set_model_call_fields(self, type="model_call_failed", **kwargs)
+        if outcome not in _MODEL_CALL_OUTCOME_VALUES:
+            raise ValueError(f"Unsupported model call outcome: {outcome!r}")
+        if not isinstance(usage, TokenUsage):
+            raise TypeError("model call failed usage must be TokenUsage")
+        object.__setattr__(self, "outcome", outcome)
+        object.__setattr__(self, "usage", usage)
+        object.__setattr__(self, "error_code", _required_event_text(error_code, "error_code"))
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = _model_call_dict(self)
+        payload.update(
+            {
+                "outcome": self.outcome,
+                "usage": self.usage.to_dict(),
+                "error_code": self.error_code,
+            }
+        )
         return payload
 
 
@@ -2498,6 +2659,23 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         _diagnostic_level(payload.get("level"))
         _required_event_text(payload.get("code"), "code")
         _diagnostic_details(payload.get("details"))
+    if payload["type"] in {"model_call_started", "model_call_completed", "model_call_failed"}:
+        _required_event_text(payload.get("call_id"), "call_id")
+        _required_event_text(payload.get("operation_id"), "operation_id")
+        _positive_event_integer(payload.get("attempt"), "attempt")
+        _positive_event_integer(payload.get("cycle_index"), "cycle_index")
+        ModelCallOperation(payload.get("operation"))
+        _required_event_text(payload.get("backend"), "backend")
+        _required_event_text(payload.get("model"), "model")
+        if payload["type"] != "model_call_started":
+            usage = payload.get("usage")
+            if not isinstance(usage, dict):
+                raise ValueError(f"Run event {payload['type']} requires usage")
+            TokenUsage.from_dict(usage)
+        if payload["type"] == "model_call_failed":
+            if payload.get("outcome") not in _MODEL_CALL_OUTCOME_VALUES:
+                raise ValueError(f"Unsupported model call outcome: {payload.get('outcome')!r}")
+            _required_event_text(payload.get("error_code"), "error_code")
     tool_lifecycle_types = {"tool_call_planned", "tool_call_started", "tool_call_completed"}
     if payload["type"] in tool_lifecycle_types:
         _required_event_text(payload.get("tool_call_id"), "tool_call_id")
@@ -2647,8 +2825,40 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         return AgentStartedEvent(**_with_cycle_and_agent(payload, common))
     if event_type == "cycle_started":
         return CycleStartedEvent(**_with_cycle_and_agent(payload, common))
-    if event_type == "llm_started":
-        return LLMStartedEvent(model=str(payload.get("model") or ""), **_with_cycle_and_agent(payload, common))
+    if event_type == "model_call_started":
+        return ModelCallStartedEvent(
+            call_id=payload["call_id"],
+            operation_id=payload["operation_id"],
+            attempt=payload["attempt"],
+            operation=payload["operation"],
+            backend=payload["backend"],
+            model=payload["model"],
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "model_call_completed":
+        return ModelCallCompletedEvent(
+            call_id=payload["call_id"],
+            operation_id=payload["operation_id"],
+            attempt=payload["attempt"],
+            operation=payload["operation"],
+            backend=payload["backend"],
+            model=payload["model"],
+            usage=TokenUsage.from_dict(payload["usage"]),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "model_call_failed":
+        return ModelCallFailedEvent(
+            call_id=payload["call_id"],
+            operation_id=payload["operation_id"],
+            attempt=payload["attempt"],
+            operation=payload["operation"],
+            backend=payload["backend"],
+            model=payload["model"],
+            outcome=payload["outcome"],
+            usage=TokenUsage.from_dict(payload["usage"]),
+            error_code=payload["error_code"],
+            **_with_cycle_and_agent(payload, common),
+        )
     if event_type == "run_state_changed":
         return RunStateChangedEvent(
             state=str(payload.get("state") or ""),

@@ -44,6 +44,7 @@ from vv_agent.runtime.engine import (
     register_sub_agent_session,
     unregister_sub_agent_session,
 )
+from vv_agent.runtime.model_calls import ModelCallCoordinator
 from vv_agent.runtime.run_definition import (
     _normalize_extra_headers,
     _redact_credential_slots,
@@ -400,6 +401,8 @@ def _rebuild_runtime(
     )
     metadata: dict[str, Any] = {
         "_vv_agent_run_id": "",
+        "_vv_agent_resolved_backend": recipe.backend,
+        "_vv_agent_resolved_model": recipe.model,
         "_vv_agent_allowed_tools": (list(tool_policy.allowed_tools) if tool_policy.allowed_tools is not None else None),
         "_vv_agent_disallowed_tools": list(tool_policy.disallowed_tools),
         "_vv_agent_tool_policy_approval": tool_policy.approval,
@@ -584,6 +587,18 @@ def _run_single_cycle(
     ctx.metadata["_vv_agent_checkpoint_budget_snapshot"] = (
         (lambda: budget_controller.snapshot) if budget_controller is not None else (lambda: None)
     )
+    ctx.model_call_coordinator = ModelCallCoordinator(
+        ledger=ctx.model_call_ledger,
+        run_id=envelope.root_run_id,
+        trace_id=envelope.trace_id,
+        agent_name=str(task.metadata.get("agent_name") or task.task_id),
+        session_id=None,
+        parent_run_id=None,
+        event_sink=ctx.event_handler,
+        budget_observer=(budget_controller.model_call_complete if budget_controller is not None else None),
+        durable_dispatcher=controller,
+    )
+    controller.bind_model_accounting(ctx.model_call_coordinator)
     messages: list[Any] = []
     cycles: list[Any] = []
     shared_state: dict[str, Any] = {}

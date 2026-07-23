@@ -30,7 +30,6 @@ from vv_agent.events import (
     BudgetSnapshotEvent,
     CycleStartedEvent,
     DiagnosticEvent,
-    LLMStartedEvent,
     RunEvent,
     RunStartedEvent,
     SubRunCompletedEvent,
@@ -64,9 +63,13 @@ from vv_agent.runtime.lifecycle import (
     persist_after_cycle_disallowed_tools,
     read_after_cycle_disallowed_tools,
 )
+from vv_agent.runtime.model_calls import (
+    ModelCallBudgetExhausted,
+    ModelCallBudgetObservation,
+    ModelCallCoordinator,
+)
 from vv_agent.runtime.sub_task_identity import normalize_identity_string, take_sub_task_identity
 from vv_agent.runtime.sub_task_manager import SubTaskManager, _SubTaskTurnSnapshot
-from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.runtime.tool_call_runner import ToolCallRunner, _ConfiguredSubTaskCancelledError
 from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints, plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
@@ -78,9 +81,12 @@ from vv_agent.types import (
     CompletionReason,
     CycleRecord,
     Message,
+    ModelCallOperation,
     SubAgentConfig,
     SubTaskOutcome,
     SubTaskRequest,
+    TaskTokenUsage,
+    TokenUsage,
     ToolCall,
     ToolDirective,
     ToolExecutionResult,
@@ -200,19 +206,24 @@ class _RunBudgetController:
             cycle_index=cycle_index,
         )
 
-    def llm_complete(
+    def model_call_complete(
         self,
         cycle_index: int,
-        token_usage: Any,
-        *,
-        suppress_exhaustion: bool = False,
-    ) -> BudgetExhaustion | None:
-        return self._observe(
-            BudgetEnforcementBoundary.LLM_COMPLETE,
-            lambda: self.evaluator.llm_complete(token_usage),
-            cycle_index=cycle_index,
-            suppress_exhaustion=suppress_exhaustion,
+        token_usage: TokenUsage,
+    ) -> ModelCallBudgetObservation:
+        cancelled = bool(
+            self.ctx is not None
+            and self.ctx.cancellation_token is not None
+            and self.ctx.cancellation_token.cancelled
         )
+        exhaustion, event = self._observe_result(
+            BudgetEnforcementBoundary.MODEL_CALL_COMPLETE,
+            lambda: self.evaluator.model_call_complete(token_usage),
+            cycle_index=cycle_index,
+            suppress_exhaustion=cancelled,
+            emit=False,
+        )
+        return ModelCallBudgetObservation(exhaustion=exhaustion, event=event)
 
     def preflight_tools(self, cycle_index: int, tool_names: list[str]) -> BudgetExhaustion | None:
         return self._observe(
@@ -251,10 +262,31 @@ class _RunBudgetController:
         force_snapshot: bool = False,
         suppress_exhaustion: bool = False,
     ) -> BudgetExhaustion | None:
+        exhaustion, _ = self._observe_result(
+            boundary,
+            operation,
+            cycle_index=cycle_index,
+            force_snapshot=force_snapshot,
+            suppress_exhaustion=suppress_exhaustion,
+            emit=True,
+        )
+        return exhaustion
+
+    def _observe_result(
+        self,
+        boundary: BudgetEnforcementBoundary,
+        operation: Callable[[], BudgetExhaustion | None],
+        *,
+        cycle_index: int | None = None,
+        force_snapshot: bool = False,
+        suppress_exhaustion: bool = False,
+        emit: bool,
+    ) -> tuple[BudgetExhaustion | None, RunEvent | None]:
         if self.exhaustion is not None:
-            return self.exhaustion
+            return self.exhaustion, None
         exhaustion = operation()
         snapshot = self.evaluator.snapshot()
+        event: RunEvent | None = None
         if exhaustion is not None and not suppress_exhaustion:
             self.exhaustion = exhaustion
             event = BudgetExhaustedEvent(
@@ -268,9 +300,10 @@ class _RunBudgetController:
                 budget_usage=snapshot,
                 budget_exhaustion=exhaustion,
             )
-            self._emit_event(event)
+            if emit:
+                self._emit_event(event)
             self._last_emitted_snapshot = snapshot
-            return exhaustion
+            return exhaustion, event
         if force_snapshot or snapshot != self._last_emitted_snapshot:
             event = BudgetSnapshotEvent(
                 run_id=self._identity("_vv_agent_run_id", "run_id") or self.task.task_id,
@@ -282,9 +315,10 @@ class _RunBudgetController:
                 enforcement_boundary=boundary,
                 budget_usage=snapshot,
             )
-            self._emit_event(event)
+            if emit:
+                self._emit_event(event)
             self._last_emitted_snapshot = snapshot
-        return None
+        return None, event
 
     def _identity(self, *keys: str) -> str | None:
         if self.ctx is None:
@@ -440,6 +474,8 @@ class AgentRuntime:
         )
         freeze_dynamic_tool_schema_hints(task)
         runtime_ctx = ctx if ctx is not None else ExecutionContext()
+        if checkpoint_controller is not None:
+            runtime_ctx.model_call_ledger.replace(checkpoint_controller.model_calls.model_calls)
         if runtime_ctx.event_handler is None and self.event_handler is not None:
             runtime_ctx.event_handler = self._notify_runtime_observer
         runtime_run_id = self._metadata_str(runtime_ctx.metadata, "_vv_agent_run_id", "run_id") or task.task_id
@@ -505,7 +541,7 @@ class AgentRuntime:
                     cycles=[],
                     error=runtime_ctx.cancellation_token.reason or "Operation was cancelled",
                     shared_state=shared,
-                    token_usage=summarize_task_token_usage([]),
+                    token_usage=runtime_ctx.model_call_ledger.usage(),
                     budget_usage=budget_controller.snapshot,
                 )
             else:
@@ -527,6 +563,20 @@ class AgentRuntime:
             runtime_ctx.metadata["_vv_agent_checkpoint_budget_snapshot"] = (
                 (lambda: budget_controller.snapshot) if budget_controller is not None else (lambda: None)
             )
+
+        runtime_ctx.model_call_coordinator = ModelCallCoordinator(
+            ledger=runtime_ctx.model_call_ledger,
+            run_id=runtime_run_id,
+            trace_id=runtime_trace_id,
+            agent_name=self._metadata_str(runtime_ctx.metadata, "_vv_agent_agent_name", "agent_name"),
+            session_id=self._metadata_str(runtime_ctx.metadata, "_vv_agent_session_id", "session_id"),
+            parent_run_id=self._metadata_str(runtime_ctx.metadata, "_vv_agent_parent_run_id", "parent_run_id"),
+            event_sink=runtime_ctx.event_handler,
+            budget_observer=(budget_controller.model_call_complete if budget_controller is not None else None),
+            durable_dispatcher=checkpoint_controller,
+        )
+        if checkpoint_controller is not None:
+            checkpoint_controller.bind_model_accounting(runtime_ctx.model_call_coordinator)
 
         memory_manager = self._build_memory_manager(
             task=task,
@@ -667,7 +717,7 @@ class AgentRuntime:
                     cycles=cycles,
                     error=reason or "Operation was cancelled",
                     shared_state=shared,
-                    token_usage=summarize_task_token_usage(cycles),
+                    token_usage=self._task_token_usage(ctx),
                     budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
                 )
 
@@ -690,6 +740,7 @@ class AgentRuntime:
                     shared_state=shared,
                     error=f"{exc.code}: {exc}",
                     budget_controller=budget_controller,
+                    ctx=ctx,
                 )
 
             if budget_controller is not None:
@@ -724,26 +775,18 @@ class AgentRuntime:
                 max_cycles=task.max_cycles,
                 message_count=len(messages),
             )
-            previous_prompt_tokens: int | None = None
+            previous_prompt_tokens = (
+                ctx.model_call_ledger.previous_agent_input_tokens(cycle_index)
+                if ctx is not None
+                else None
+            )
             recent_tool_call_ids: set[str] | None = None
             if cycles:
                 last_cycle = cycles[-1]
-                usage = last_cycle.token_usage
-                input_tokens = getattr(usage, "input_tokens", None)
-                if isinstance(input_tokens, int) and not isinstance(input_tokens, bool) and input_tokens >= 0:
-                    previous_prompt_tokens = input_tokens
-
                 candidate_ids = {call.id for call in last_cycle.tool_calls if getattr(call, "id", "")}
                 if candidate_ids:
                     recent_tool_call_ids = candidate_ids
             try:
-                self._emit_observation(
-                    "llm_started",
-                    ctx=ctx,
-                    cycle=cycle_index,
-                    model=task.model,
-                    message_count=len(messages),
-                )
                 updated_messages, cycle_record = self.cycle_runner.run_cycle(
                     task=task,
                     messages=messages,
@@ -756,6 +799,16 @@ class AgentRuntime:
                 )
             except CheckpointReconciliationRequired:
                 raise
+            except ModelCallBudgetExhausted as exc:
+                if budget_controller is None:
+                    raise AssertionError("model call budget exhaustion requires a budget controller") from exc
+                return self._budget_failure_result(
+                    messages=messages,
+                    cycles=cycles,
+                    shared_state=shared,
+                    controller=budget_controller,
+                    exhaustion=exc.exhaustion,
+                )
             except Exception as exc:
                 cancelled = isinstance(exc, CancelledError) or bool(
                     ctx is not None and ctx.cancellation_token is not None and ctx.cancellation_token.cancelled
@@ -770,31 +823,16 @@ class AgentRuntime:
                     cycles=cycles,
                     error=f"LLM call failed in cycle {cycle_index}: {exc}",
                     shared_state=shared,
-                    token_usage=summarize_task_token_usage(cycles),
+                    token_usage=self._task_token_usage(ctx),
+                    budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
                 )
             # Replace messages list contents in-place so caller sees updates
             messages.clear()
             messages.extend(updated_messages)
 
-            self._emit_observation(
-                "cycle_llm_response",
-                ctx=ctx,
-                cycle=cycle_index,
-                assistant_message=cycle_record.assistant_message,
-                assistant_preview=self._preview_text(cycle_record.assistant_message),
-                tool_calls=[call.to_dict() for call in cycle_record.tool_calls],
-                tool_call_names=[call.name for call in cycle_record.tool_calls],
-                tool_call_count=len(cycle_record.tool_calls),
-                memory_compacted=cycle_record.memory_compacted,
-                token_usage=cycle_record.token_usage.to_dict(),
-            )
             cancelled = is_cancelled()
             if budget_controller is not None:
-                exhaustion = budget_controller.llm_complete(
-                    cycle_index,
-                    cycle_record.token_usage,
-                    suppress_exhaustion=cancelled,
-                )
+                exhaustion = budget_controller.exhaustion
                 if exhaustion is not None:
                     cycles.append(cycle_record)
                     return self._budget_failure_result(
@@ -807,6 +845,17 @@ class AgentRuntime:
             if cancelled:
                 cycles.append(cycle_record)
                 return cancellation_result()
+            self._emit_observation(
+                "cycle_llm_response",
+                ctx=ctx,
+                cycle=cycle_index,
+                assistant_message=cycle_record.assistant_message,
+                assistant_preview=self._preview_text(cycle_record.assistant_message),
+                tool_calls=[call.to_dict() for call in cycle_record.tool_calls],
+                tool_call_names=[call.name for call in cycle_record.tool_calls],
+                tool_call_count=len(cycle_record.tool_calls),
+                memory_compacted=cycle_record.memory_compacted,
+            )
             if cycle_record.tool_calls:
                 if budget_controller is not None:
                     exhaustion = budget_controller.preflight_tools(
@@ -896,7 +945,7 @@ class AgentRuntime:
                         cycles=cycles,
                         error=str(exc),
                         shared_state=shared,
-                        token_usage=summarize_task_token_usage(cycles),
+                        token_usage=self._task_token_usage(ctx),
                         budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
                     )
                 except _ConfiguredSubTaskCancelledError as exc:
@@ -993,7 +1042,7 @@ class AgentRuntime:
                         cycles=cycles,
                         wait_reason=str(wait_reason),
                         shared_state=shared,
-                        token_usage=summarize_task_token_usage(cycles),
+                        token_usage=self._task_token_usage(ctx),
                     )
 
                 if tool_result and tool_result.directive == ToolDirective.FINISH:
@@ -1014,7 +1063,7 @@ class AgentRuntime:
                         cycles=cycles,
                         final_answer=final_answer,
                         shared_state=shared,
-                        token_usage=summarize_task_token_usage(cycles),
+                        token_usage=self._task_token_usage(ctx),
                     )
 
                 return None  # continue to next cycle
@@ -1073,7 +1122,7 @@ class AgentRuntime:
                     cycles=cycles,
                     final_answer=cycle_record.assistant_message,
                     shared_state=shared,
-                    token_usage=summarize_task_token_usage(cycles),
+                    token_usage=self._task_token_usage(ctx),
                 )
 
             if task.no_tool_policy == "wait_user":
@@ -1093,7 +1142,7 @@ class AgentRuntime:
                     cycles=cycles,
                     wait_reason=cycle_record.assistant_message or "No tool call and runtime is waiting for user.",
                     shared_state=shared,
-                    token_usage=summarize_task_token_usage(cycles),
+                    token_usage=self._task_token_usage(ctx),
                 )
 
             if cycle_index < task.max_cycles:
@@ -1135,7 +1184,7 @@ class AgentRuntime:
                 cycle=cycle_record,
                 messages=messages,
                 shared_state=shared_state,
-                cumulative_token_usage=summarize_task_token_usage(cycles),
+                cumulative_token_usage=self._task_token_usage(ctx),
                 available_tool_names=available_tool_names,
                 disallowed_tool_names=disallowed,
                 native_outcome=native_outcome,
@@ -1164,6 +1213,7 @@ class AgentRuntime:
                 shared_state=shared_state,
                 error=f"{exc.code}: {exc}",
                 budget_controller=budget_controller,
+                ctx=ctx,
             )
         except Exception as exc:
             code = "after_cycle_hook_failed"
@@ -1180,6 +1230,7 @@ class AgentRuntime:
                 shared_state=shared_state,
                 error=f"{code}: failed to prepare after-cycle snapshot: {exc}",
                 budget_controller=budget_controller,
+                ctx=ctx,
             )
 
         if decision.action is AfterCycleAction.STOP_NON_SUCCESS:
@@ -1197,6 +1248,7 @@ class AgentRuntime:
                 shared_state=shared_state,
                 error=f"{decision.stop.code}: {decision.stop.message}",
                 budget_controller=budget_controller,
+                ctx=ctx,
             )
 
         if decision.action is AfterCycleAction.STEER:
@@ -1215,6 +1267,7 @@ class AgentRuntime:
                     shared_state=shared_state,
                     error=f"{code}: after-cycle steering is unavailable at this boundary",
                     budget_controller=budget_controller,
+                    ctx=ctx,
                 )
             messages.extend(Message(role="user", content=content) for content in decision.steering_messages)
             self._emit_observation(
@@ -1242,6 +1295,7 @@ class AgentRuntime:
         shared_state: dict[str, Any],
         error: str,
         budget_controller: _RunBudgetController | None,
+        ctx: ExecutionContext | None,
     ) -> AgentResult:
         return AgentResult(
             status=AgentStatus.FAILED,
@@ -1251,7 +1305,7 @@ class AgentRuntime:
             cycles=cycles,
             error=error,
             shared_state=shared_state,
-            token_usage=summarize_task_token_usage(cycles),
+            token_usage=AgentRuntime._task_token_usage(ctx),
             budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
         )
 
@@ -1303,10 +1357,16 @@ class AgentRuntime:
             wait_reason=None,
             error="Run budget exhausted.",
             shared_state=shared_state,
-            token_usage=summarize_task_token_usage(cycles),
+            token_usage=AgentRuntime._task_token_usage(controller.ctx),
             budget_usage=controller.snapshot,
             budget_exhaustion=exhaustion,
         )
+
+    @staticmethod
+    def _task_token_usage(ctx: ExecutionContext | None) -> TaskTokenUsage:
+        if ctx is None:
+            return TaskTokenUsage()
+        return ctx.model_call_ledger.usage()
 
     def _emit_observation(
         self,
@@ -1344,13 +1404,6 @@ class AgentRuntime:
             event = AgentStartedEvent(cycle_index=cycle_index, metadata=normalized, **common)
         elif code == "cycle_started":
             event = CycleStartedEvent(cycle_index=cycle_index, metadata=normalized, **common)
-        elif code == "llm_started":
-            event = LLMStartedEvent(
-                cycle_index=cycle_index,
-                model=str(normalized.pop("model", "")),
-                metadata=normalized,
-                **common,
-            )
         else:
             event = DiagnosticEvent(
                 cycle_index=cycle_index,
@@ -1483,11 +1536,21 @@ class AgentRuntime:
     ) -> MemoryManager:
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
 
-        def summarize(prompt: str, backend: str | None, model: str | None) -> str | None:
+        def summarize_session_memory(prompt: str, backend: str | None, model: str | None) -> str | None:
             return self._summarize_memory_prompt(
                 prompt,
                 backend,
                 model,
+                operation=ModelCallOperation.SESSION_MEMORY,
+                ctx=ctx,
+            )
+
+        def summarize_compaction(prompt: str, backend: str | None, model: str | None) -> str | None:
+            return self._summarize_memory_prompt(
+                prompt,
+                backend,
+                model,
+                operation=ModelCallOperation.MEMORY_COMPACTION,
                 ctx=ctx,
             )
 
@@ -1588,7 +1651,7 @@ class AgentRuntime:
                     max_tokens=read_int("session_memory_max_tokens", 40_000, minimum=1),
                     min_text_messages=read_int("session_memory_min_text_messages", 5, minimum=1),
                     storage_dir=str(metadata.get("session_memory_storage_dir", ".memory/session")),
-                    extraction_callback=summarize,
+                    extraction_callback=summarize_session_memory,
                     extraction_backend=session_memory_extraction_backend,
                     extraction_model=session_memory_extraction_model,
                     token_model=task.model or "",
@@ -1624,7 +1687,7 @@ class AgentRuntime:
             summary_event_limit=read_int("summary_event_limit", 40, minimum=1),
             summary_backend=summary_backend,
             summary_model=summary_model,
-            summary_callback=summarize,
+            summary_callback=summarize_compaction,
             base_system_prompt=task.system_prompt,
             session_memory=session_memory,
         )
@@ -1641,12 +1704,10 @@ class AgentRuntime:
 
     @staticmethod
     def _read_session_memory_enabled(metadata: dict[str, Any]) -> bool:
-        if "session_memory_enabled" in metadata:
-            explicit = metadata["session_memory_enabled"]
-            if not isinstance(explicit, bool):
-                raise ValueError("session_memory_enabled must be a boolean")
-            return explicit
-        return not bool(metadata.get("is_sub_task"))
+        explicit = metadata.get("session_memory_enabled", False)
+        if not isinstance(explicit, bool):
+            raise ValueError("session_memory_enabled must be a boolean")
+        return explicit
 
     def _summarize_memory_prompt(
         self,
@@ -1654,6 +1715,7 @@ class AgentRuntime:
         backend: str | None,
         model: str | None,
         *,
+        operation: ModelCallOperation,
         ctx: ExecutionContext | None = None,
     ) -> str | None:
         backend_name = (backend or "").strip()
@@ -1663,49 +1725,57 @@ class AgentRuntime:
 
         cache_key = (backend_name, model_name)
         client = self._memory_summary_clients.get(cache_key)
+        effective_backend = backend_name
+        effective_model = model_name
         if client is None:
             if self.model_provider is None:
                 if backend_name:
                     return None
                 client = self.llm_client
+                if ctx is not None:
+                    effective_backend = str(ctx.metadata.get("_vv_agent_resolved_backend") or "direct")
+                    effective_model = str(ctx.metadata.get("_vv_agent_resolved_model") or model_name)
             else:
                 model_ref = ModelRef.backend(backend_name, model_name) if backend_name else ModelRef.named(model_name)
                 resolved = self.model_provider.resolve(model_ref)
                 client = self.model_provider.client(resolved)
+                effective_backend = resolved.backend
+                effective_model = resolved.model_id
             self._memory_summary_clients[cache_key] = client
+        elif self.model_provider is not None:
+            model_ref = ModelRef.backend(backend_name, model_name) if backend_name else ModelRef.named(model_name)
+            resolved = self.model_provider.resolve(model_ref)
+            effective_backend = resolved.backend
+            effective_model = resolved.model_id
+        elif ctx is not None:
+            effective_backend = str(ctx.metadata.get("_vv_agent_resolved_backend") or "direct")
+            effective_model = str(ctx.metadata.get("_vv_agent_resolved_model") or model_name)
 
         request = LlmRequest(
             model=model_name,
             messages=[Message(role="user", content=prompt)],
             tools=[],
-            metadata={
-                "_vv_agent_checkpoint_model": {
-                    "backend": backend_name,
-                    "model_id": model_name,
-                }
-            },
         )
-        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
         cycle_index = ctx.metadata.get("_vv_agent_active_cycle_index") if ctx is not None else None
 
         def invoke() -> Any:
             return complete_llm_request(client, request)
 
-        if isinstance(checkpoint_controller, CheckpointResumeController) and isinstance(
-            cycle_index,
-            int,
-        ):
-            assert ctx is not None
-            summary_index = int(ctx.metadata.get("_vv_agent_checkpoint_memory_summary_index", 0)) + 1
-            ctx.metadata["_vv_agent_checkpoint_memory_summary_index"] = summary_index
-            response = checkpoint_controller.complete_model(
-                cycle_index=cycle_index,
-                operation_slot=f"memory_summary:{summary_index}",
-                request=request,
-                invoke=invoke,
-            )
-        else:
-            response = invoke()
+        if ctx is None or ctx.model_call_coordinator is None or not isinstance(cycle_index, int):
+            raise RuntimeError("model call coordinator is not initialized for memory inference")
+        slot = "session" if operation is ModelCallOperation.SESSION_MEMORY else "compaction"
+        dispatch = ctx.model_call_coordinator.dispatch(
+            operation=operation,
+            cycle_index=cycle_index,
+            operation_slot=slot,
+            backend=effective_backend,
+            model=effective_model,
+            request=request,
+            invoke=invoke,
+        )
+        if dispatch.budget_exhaustion is not None:
+            raise ModelCallBudgetExhausted(dispatch.budget_exhaustion)
+        response = dispatch.response
         content = (response.content or "").strip()
         return content or None
 
@@ -2199,6 +2269,7 @@ class AgentRuntime:
                         child_run_id=current_child_run_id,
                         child_session_id=sub_session_id,
                         child_agent_name=request.agent_name,
+                        child_backend=resolved_config.backend,
                         child_model=sub_task.model,
                         child_workspace=workspace_path,
                         child_metadata=run_task.metadata,
@@ -2682,7 +2753,7 @@ class AgentRuntime:
             "is_sub_task": True,
             "parent_task_id": parent_task.task_id,
             "sub_agent_name": sub_agent_name,
-            "session_memory_enabled": False,
+            "session_memory_enabled": sub_agent.session_memory_enabled,
             "workspace": str(workspace_path),
         }
         for key in (
@@ -2722,7 +2793,7 @@ class AgentRuntime:
                 "is_sub_task": True,
                 "parent_task_id": parent_task.task_id,
                 "sub_agent_name": sub_agent_name,
-                "session_memory_enabled": False,
+                "session_memory_enabled": sub_agent.session_memory_enabled,
                 "workspace": str(workspace_path),
             }
         )
@@ -2830,6 +2901,7 @@ class AgentRuntime:
         child_run_id: str = "",
         child_session_id: str = "",
         child_agent_name: str = "",
+        child_backend: str = "",
         child_model: str = "",
         child_workspace: str | Path | WorkspaceBackend | None = None,
         child_metadata: dict[str, Any] | None = None,
@@ -2851,6 +2923,10 @@ class AgentRuntime:
             metadata["_vv_agent_run_id"] = child_run_id
         if child_agent_name:
             metadata["_vv_agent_agent_name"] = child_agent_name
+        if child_backend:
+            metadata["_vv_agent_resolved_backend"] = child_backend
+        if child_model:
+            metadata["_vv_agent_resolved_model"] = child_model
         if child_session_id:
             metadata["_vv_agent_session_id"] = child_session_id
         if trace_id:

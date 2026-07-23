@@ -84,9 +84,12 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
     completed = next(message for message in outbound if message.get("method") == "turn/completed")
     completed_params = cast(dict[str, object], completed["params"])
     token_usage = cast(dict[str, object], completed_params["tokenUsage"])
-    cache_usage = cast(dict[str, object], token_usage["cache_usage"])
+    cache_usage = cast(dict[str, object], token_usage["cacheUsage"])
     assert cache_usage["status"] == "provider_reported"
-    assert cache_usage["read_input_tokens"] == 0
+    assert cache_usage["readInputTokens"] == 0
+    model_calls = cast(list[dict[str, object]], token_usage["modelCalls"])
+    assert len(model_calls) == 1
+    assert model_calls[0]["backend"] == "test"
 
 
 def test_turn_start_and_completion_emit_thread_status_changes() -> None:

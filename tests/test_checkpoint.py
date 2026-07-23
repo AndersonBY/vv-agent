@@ -28,7 +28,14 @@ from vv_agent.checkpoint import (
     compute_run_definition_digest,
     validate_checkpoint_extension,
 )
-from vv_agent.events import CheckpointCreatedEvent, CheckpointResumedEvent, RunFailedEvent
+from vv_agent.events import (
+    CheckpointCreatedEvent,
+    CheckpointResumedEvent,
+    ModelCallCompletedEvent,
+    ModelCallFailedEvent,
+    ModelCallStartedEvent,
+    RunFailedEvent,
+)
 from vv_agent.runtime.checkpoint_codec import (
     _strict_json_loads,
     checkpoint_from_dict,
@@ -48,7 +55,16 @@ from vv_agent.runtime.state import (
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.redis import RedisCheckpointStore
 from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
-from vv_agent.types import AgentResult, AgentStatus, CompletionReason, Message
+from vv_agent.runtime.token_usage import summarize_task_token_usage
+from vv_agent.types import (
+    AgentResult,
+    AgentStatus,
+    CompletionReason,
+    Message,
+    ModelCallRecord,
+    ModelCallStatus,
+    TokenUsage,
+)
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
 
@@ -182,6 +198,112 @@ def _journal_case(name: str) -> dict[str, Any]:
     return deepcopy(next(case["entry"] for case in fixture["valid_entries"] if case["name"] == name))
 
 
+def _model_event_kwargs(checkpoint: Checkpoint, journal: OperationJournalEntry) -> dict[str, Any]:
+    assert journal.call_id is not None
+    assert journal.model_operation is not None
+    assert journal.backend is not None
+    assert journal.model is not None
+    return {
+        "run_id": checkpoint.root_run_id,
+        "trace_id": checkpoint.trace_id,
+        "call_id": journal.call_id,
+        "operation_id": journal.operation_id,
+        "attempt": journal.attempt,
+        "operation": journal.model_operation,
+        "cycle_index": journal.cycle_index,
+        "backend": journal.backend,
+        "model": journal.model,
+    }
+
+
+def _append_outbox_event(checkpoint: Checkpoint, event: Any) -> None:
+    payload = event.to_dict()
+    checkpoint.event_outbox.append(EventOutboxEntry.pending(payload["event_id"], payload))
+
+
+def _attach_model_accounting(
+    checkpoint: Checkpoint,
+    journal: OperationJournalEntry,
+    *,
+    status: ModelCallStatus | None = None,
+    usage: TokenUsage | None = None,
+    error_code: str = "provider_rejected",
+) -> None:
+    identity = _model_event_kwargs(checkpoint, journal)
+    _append_outbox_event(
+        checkpoint,
+        ModelCallStartedEvent(
+            **identity,
+            event_id=f"evt-{journal.call_id}-started",
+            created_at=100.0,
+        ),
+    )
+    if status is None:
+        return
+
+    effective_usage = usage or TokenUsage()
+    checkpoint.model_calls.append(
+        ModelCallRecord(
+            call_id=identity["call_id"],
+            operation_id=identity["operation_id"],
+            attempt=identity["attempt"],
+            operation=identity["operation"],
+            cycle_index=identity["cycle_index"],
+            backend=identity["backend"],
+            model=identity["model"],
+            status=status,
+            usage=deepcopy(effective_usage),
+            error_code=None if status is ModelCallStatus.COMPLETED else error_code,
+        )
+    )
+    if status is ModelCallStatus.COMPLETED:
+        terminal_event = ModelCallCompletedEvent(
+            **identity,
+            usage=deepcopy(effective_usage),
+            event_id=f"evt-{journal.call_id}-completed",
+            created_at=101.0,
+        )
+    else:
+        terminal_event = ModelCallFailedEvent(
+            **identity,
+            outcome="ambiguous" if status is ModelCallStatus.AMBIGUOUS else "definitive",
+            usage=deepcopy(effective_usage),
+            error_code=error_code,
+            event_id=f"evt-{journal.call_id}-failed",
+            created_at=101.0,
+        )
+    _append_outbox_event(checkpoint, terminal_event)
+
+
+def _checkpoint_with_model_journal(
+    journal_case: str,
+    *,
+    status: ModelCallStatus | None = None,
+    error_code: str = "provider_rejected",
+) -> Checkpoint:
+    checkpoint = _minimal_checkpoint(key=f"accounting-{journal_case}")
+    checkpoint.claim_token = "owner"
+    checkpoint.claimed_cycle = 1
+    checkpoint.lease_expires_at_ms = 200
+    journal = OperationJournalEntry.from_dict(_journal_case(journal_case))
+    checkpoint.model_call_journal = [journal]
+    if journal.state is OperationState.AMBIGUOUS:
+        checkpoint.status = AgentStatus.RECONCILIATION_REQUIRED
+        checkpoint.claim_token = None
+        checkpoint.claimed_cycle = None
+        checkpoint.lease_expires_at_ms = None
+    if journal.state is not OperationState.PLANNED and not (
+        journal.state is OperationState.FAILED and status is None
+    ):
+        _attach_model_accounting(
+            checkpoint,
+            journal,
+            status=status,
+            error_code=error_code,
+        )
+    return checkpoint
+
+
 def test_rfc8785_vectors_match_canonical_bytes_and_digests() -> None:
     vectors = (
         ("run_definition.json", ("golden_cases",), "definition"),
@@ -279,7 +401,7 @@ def test_checkpoint_validates_embedded_definition_schema_and_digest() -> None:
     assert error.value.code == "checkpoint_definition_mismatch"
 
     unknown = deepcopy(payload)
-    unknown["schema_version"] = "vv-agent.checkpoint.v3"
+    unknown["schema_version"] = "vv-agent.checkpoint.v4"
     with pytest.raises(CheckpointError) as error:
         checkpoint_from_dict(unknown)
     assert error.value.code == "checkpoint_schema_unsupported"
@@ -467,9 +589,147 @@ def test_operation_journal_invalid_cases_have_stable_codes() -> None:
     for case in fixture["valid_entries"]:
         OperationJournalEntry.from_dict(case["entry"])
     for case in fixture["invalid_entries"]:
+        if "base_valid_entry" in case:
+            entry = _journal_case(case["base_valid_entry"])
+            mutation = case["mutation"]
+            if "remove" in mutation:
+                entry.pop(mutation["remove"])
+            if "replace" in mutation:
+                entry.update(mutation["replace"])
+        else:
+            entry = case["entry"]
         with pytest.raises(CheckpointError) as error:
-            OperationJournalEntry.from_dict(case["entry"])
+            OperationJournalEntry.from_dict(entry)
         assert error.value.code == case["error_code"], case["name"]
+
+
+@pytest.mark.parametrize(
+    ("journal_case", "status"),
+    [
+        ("model_planned", None),
+        ("model_started", None),
+        ("model_succeeded", ModelCallStatus.COMPLETED),
+        ("model_failed", None),
+        ("model_failed", ModelCallStatus.FAILED),
+        ("model_ambiguous", ModelCallStatus.AMBIGUOUS),
+    ],
+)
+def test_model_journal_accepts_complete_atomic_accounting_states(
+    journal_case: str,
+    status: ModelCallStatus | None,
+) -> None:
+    checkpoint_to_dict(_checkpoint_with_model_journal(journal_case, status=status))
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("call_id", "different-call"),
+        ("operation_id", "different-operation"),
+        ("attempt", 2),
+        ("operation", "session_memory"),
+        ("cycle_index", 2),
+        ("backend", "different-backend"),
+        ("model", "different-model"),
+    ],
+)
+def test_model_started_event_identity_must_match_journal(
+    field: str,
+    replacement: Any,
+) -> None:
+    checkpoint = _checkpoint_with_model_journal("model_started")
+    event = deepcopy(checkpoint.event_outbox[0].event)
+    event[field] = replacement
+    checkpoint.event_outbox[0] = EventOutboxEntry.pending(event["event_id"], event)
+
+    with pytest.raises(CheckpointError) as error:
+        checkpoint_to_dict(checkpoint)
+
+    assert error.value.code == "checkpoint_status_invalid"
+
+
+def test_model_started_journal_requires_atomic_started_event() -> None:
+    checkpoint = _checkpoint_with_model_journal("model_started")
+    checkpoint.event_outbox.clear()
+
+    with pytest.raises(CheckpointError) as error:
+        checkpoint_to_dict(checkpoint)
+
+    assert error.value.code == "checkpoint_status_invalid"
+
+
+@pytest.mark.parametrize("missing", ["started_event", "terminal_event", "ledger_record"])
+def test_terminal_model_journal_requires_complete_atomic_evidence(missing: str) -> None:
+    checkpoint = _checkpoint_with_model_journal(
+        "model_succeeded",
+        status=ModelCallStatus.COMPLETED,
+    )
+    if missing == "started_event":
+        checkpoint.event_outbox.pop(0)
+    elif missing == "terminal_event":
+        checkpoint.event_outbox.pop()
+    else:
+        checkpoint.model_calls.clear()
+
+    with pytest.raises(CheckpointError) as error:
+        checkpoint_to_dict(checkpoint)
+
+    assert error.value.code == "checkpoint_status_invalid"
+
+
+def test_terminal_model_event_usage_must_match_ledger() -> None:
+    checkpoint = _checkpoint_with_model_journal(
+        "model_succeeded",
+        status=ModelCallStatus.COMPLETED,
+    )
+    event = deepcopy(checkpoint.event_outbox[-1].event)
+    event["usage"] = TokenUsage(input_tokens=1, total_tokens=1).to_dict()
+    checkpoint.event_outbox[-1] = EventOutboxEntry.pending(event["event_id"], event)
+
+    with pytest.raises(CheckpointError) as error:
+        checkpoint_to_dict(checkpoint)
+
+    assert error.value.code == "checkpoint_status_invalid"
+
+
+def test_failed_model_event_error_must_match_ledger() -> None:
+    checkpoint = _checkpoint_with_model_journal(
+        "model_failed",
+        status=ModelCallStatus.FAILED,
+    )
+    event = deepcopy(checkpoint.event_outbox[-1].event)
+    event["error_code"] = "different_error"
+    checkpoint.event_outbox[-1] = EventOutboxEntry.pending(event["event_id"], event)
+
+    with pytest.raises(CheckpointError) as error:
+        checkpoint_to_dict(checkpoint)
+
+    assert error.value.code == "checkpoint_status_invalid"
+
+
+def test_terminal_model_event_type_must_match_ledger_status() -> None:
+    checkpoint = _checkpoint_with_model_journal(
+        "model_succeeded",
+        status=ModelCallStatus.COMPLETED,
+    )
+    journal = checkpoint.model_call_journal[0]
+    failed_event = ModelCallFailedEvent(
+        **_model_event_kwargs(checkpoint, journal),
+        outcome="definitive",
+        usage=deepcopy(checkpoint.model_calls[0].usage),
+        error_code="provider_rejected",
+        event_id=f"evt-{journal.call_id}-failed",
+        created_at=101.0,
+    )
+    checkpoint.event_outbox[-1] = EventOutboxEntry.pending(
+        failed_event.event_id,
+        failed_event.to_dict(),
+    )
+
+    with pytest.raises(CheckpointError) as error:
+        checkpoint_to_dict(checkpoint)
+
+    assert error.value.code == "checkpoint_status_invalid"
 
 
 def test_checkpoint_config_validates_store_key_capabilities_and_stable_codes() -> None:
@@ -633,7 +893,9 @@ def test_progress_and_heartbeat_preserve_claim_and_journal(
         claim_mode="continue",
     )
     assert claimed is not None
-    claimed.model_call_journal = [OperationJournalEntry.from_dict(_journal_case("model_started"))]
+    started = OperationJournalEntry.from_dict(_journal_case("model_started"))
+    claimed.model_call_journal = [started]
+    _attach_model_accounting(claimed, started)
     claimed.shared_state["progress"] = "started"
     assert store.progress_checkpoint(
         claimed,
@@ -675,6 +937,12 @@ def test_suspend_preserves_ambiguity_and_recovery_claims_it(
     assert claimed is not None
     ambiguous = OperationJournalEntry.from_dict(_journal_case("model_ambiguous"))
     claimed.model_call_journal = [ambiguous]
+    _attach_model_accounting(
+        claimed,
+        ambiguous,
+        status=ModelCallStatus.AMBIGUOUS,
+        error_code="model_outcome_unknown",
+    )
     claimed.status = AgentStatus.RECONCILIATION_REQUIRED
     assert store.suspend_checkpoint(
         claimed,
@@ -721,7 +989,13 @@ def test_cycle_commit_finalize_and_acknowledgement_are_separate(
         claim_mode="continue",
     )
     assert claimed is not None
-    claimed.model_call_journal = [OperationJournalEntry.from_dict(_journal_case("model_succeeded"))]
+    succeeded = OperationJournalEntry.from_dict(_journal_case("model_succeeded"))
+    claimed.model_call_journal = [succeeded]
+    _attach_model_accounting(
+        claimed,
+        succeeded,
+        status=ModelCallStatus.COMPLETED,
+    )
     claimed.cycle_index = 1
     assert store.commit_checkpoint(
         claimed,
@@ -741,6 +1015,7 @@ def test_cycle_commit_finalize_and_acknowledgement_are_separate(
         cycles=committed.cycles,
         final_answer="done",
         completion_reason=CompletionReason.NO_TOOL_FINISH,
+        token_usage=summarize_task_token_usage(committed.model_calls),
         checkpoint_key=committed.checkpoint_key,
     )
     assert store.finalize_checkpoint(committed, expected_revision=committed.revision)
@@ -763,6 +1038,74 @@ def test_cycle_commit_finalize_and_acknowledgement_are_separate(
         checkpoint.checkpoint_key,
         expected_revision=retained.revision,
     )
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_cycle_commit_rejects_model_journal_without_atomic_accounting(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, "invalid-commit-accounting")
+    checkpoint = _minimal_checkpoint(key=f"invalid-commit-accounting-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    claimed.model_call_journal = [OperationJournalEntry.from_dict(_journal_case("model_succeeded"))]
+    claimed.cycle_index = 1
+
+    with pytest.raises(CheckpointError) as error:
+        store.commit_checkpoint(
+            claimed,
+            claim_token="owner",
+            expected_revision=claimed.revision,
+        )
+
+    assert error.value.code == "checkpoint_status_invalid"
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_claimed_terminal_rejects_model_journal_without_atomic_accounting(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, "invalid-terminal-accounting")
+    checkpoint = _minimal_checkpoint(key=f"invalid-terminal-accounting-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    claimed.model_call_journal = [OperationJournalEntry.from_dict(_journal_case("model_succeeded"))]
+    claimed.status = AgentStatus.FAILED
+    claimed.terminal_result = AgentResult(
+        status=AgentStatus.FAILED,
+        messages=claimed.messages,
+        cycles=claimed.cycles,
+        error="failed after model dispatch",
+        completion_reason=CompletionReason.FAILED,
+        checkpoint_key=claimed.checkpoint_key,
+    )
+
+    with pytest.raises(CheckpointError) as error:
+        store.finalize_claimed_checkpoint(
+            claimed,
+            claim_token="owner",
+            expected_revision=claimed.revision,
+        )
+
+    assert error.value.code == "checkpoint_status_invalid"
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])

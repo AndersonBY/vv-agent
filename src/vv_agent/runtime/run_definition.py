@@ -90,7 +90,7 @@ def build_run_definition(
     )
 
     definition: dict[str, Any] = {
-        "schema_version": "vv-agent.run-definition.v1",
+        "schema_version": "vv-agent.run-definition.v2",
         "agent": {"name": agent.name, "type": task.agent_type},
         "root_input": root_input,
         "compiled_prompt": task.system_prompt,
@@ -109,6 +109,7 @@ def build_run_definition(
             "max_cycles": task.max_cycles,
             "max_handoffs": run_config.max_handoffs,
             "no_tool_policy": task.no_tool_policy,
+            "session_memory_enabled": run_config.session_memory_enabled,
             "memory_compact_threshold": task.memory_compact_threshold,
             "memory_threshold_percentage": task.memory_threshold_percentage,
             "allow_interruption": task.allow_interruption,

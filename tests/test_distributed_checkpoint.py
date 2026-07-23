@@ -447,7 +447,7 @@ def test_distributed_reader_rejects_missing_current_wire_field(
         ("schema_version", "vv-agent.distributed-run.v3"),
         ("run_definition_schema", None),
         ("run_definition_schema", "vv-agent.run-definition.v0"),
-        ("run_definition_schema", "vv-agent.run-definition.v2"),
+        ("run_definition_schema", "vv-agent.run-definition.v3"),
     ],
 )
 def test_distributed_reader_rejects_missing_stale_or_unknown_versions(

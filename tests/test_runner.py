@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import pytest
 from support import FixedModelProvider
 
 from vv_agent import (
@@ -13,8 +14,8 @@ from vv_agent import (
     AssistantDeltaEvent,
     CycleStartedEvent,
     DiagnosticEvent,
-    LLMStartedEvent,
     MemorySession,
+    ModelCallStartedEvent,
     ModelSettings,
     RunCompletedEvent,
     RunConfig,
@@ -102,6 +103,61 @@ def test_runner_run_sync_executes_agent_with_model_provider(tmp_path: Path) -> N
     assert seen_settings == [ModelSettings(temperature=0.1, max_tokens=200)]
 
 
+def test_runner_path_workspace_isolated_from_process_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    process_cwd = tmp_path / "process-cwd"
+    workspace = tmp_path / "configured-workspace"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content=json.dumps(
+                    [{"category": "key_fact", "content": "workspace isolation marker", "importance": 8}]
+                )
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+
+    result = Runner.run_sync(
+        Agent(
+            name="workspace-isolation",
+            instructions="Answer briefly.",
+            model="m",
+            max_cycles=1,
+            no_tool_policy="finish",
+        ),
+        "Remember the workspace isolation marker.",
+        run_config=RunConfig(
+            workspace=workspace,
+            model_provider=FixedModelProvider(llm, _fake_resolved()),
+            session_memory_enabled=True,
+            max_cycles=1,
+            no_tool_policy="finish",
+            metadata={
+                "session_id": "workspace-isolation",
+                "session_memory_min_tokens": 1,
+                "session_memory_min_text_messages": 1,
+            },
+        ),
+    )
+
+    memory_files = list(workspace.glob(".memory/session/*/session_memory.json"))
+    assert result.status == AgentStatus.COMPLETED
+    assert len(memory_files) == 1
+    assert "workspace isolation marker" in memory_files[0].read_text(encoding="utf-8")
+    assert not (process_cwd / ".vv-agent-workspace").exists()
+
+
+def test_run_config_rejects_workspace_backend_in_workspace_field() -> None:
+    class BackendLike:
+        def read_text(self, _path: str) -> str:
+            return ""
+
+    with pytest.raises(TypeError, match="use workspace_backend"):
+        RunConfig(workspace=cast(Any, BackendLike()))
+
+
 def test_runner_preserves_reasoning_only_history_for_next_model_request(tmp_path: Path) -> None:
     contract = _assistant_reasoning_contract()
     runtime_case = cast(dict[str, object], contract["runtime_case"])
@@ -157,7 +213,7 @@ def test_runner_preserves_reasoning_only_history_for_next_model_request(tmp_path
     assert replayed.content == reasoning_expected["visible_content"]
     assert replayed.reasoning_content == reasoning_expected["reasoning_content"]
     assert replayed.to_openai_message() == reasoning_expected["openai_compatible_projection"]
-    assert result.raw_result.cycles[0].token_usage.reasoning_tokens == 7
+    assert result.token_usage.model_calls[0].usage.reasoning_tokens == 7
 
 
 def test_runner_removes_fully_empty_assistant_before_next_model_request(tmp_path: Path) -> None:
@@ -523,9 +579,10 @@ def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
         "run_started",
         "agent_started",
         "cycle_started",
-        "llm_started",
+        "model_call_started",
         "assistant_delta",
         "assistant_delta",
+        "model_call_completed",
         "tool_call_planned",
         "tool_call_started",
         "tool_call_completed",
@@ -539,7 +596,7 @@ def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
     assert completed.to_dict()["type"] == "run_completed"
     assert isinstance(events[1], AgentStartedEvent)
     assert isinstance(events[2], CycleStartedEvent)
-    assert isinstance(events[3], LLMStartedEvent)
+    assert isinstance(events[3], ModelCallStartedEvent)
 
 
 def test_runner_appends_session_items_across_runs(tmp_path: Path) -> None:

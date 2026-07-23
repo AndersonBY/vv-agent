@@ -1,14 +1,22 @@
 {
   "contract": "token_usage",
-  "schema_version": "vv-agent.token-usage-contract.v1",
+  "schema_version": "vv-agent.token-usage-contract.v2",
   "wire": {
     "token_usage_schema": "vv-agent.token-usage.v1",
-    "task_token_usage_schema": "vv-agent.task-token-usage.v1",
+    "task_token_usage_schema": "vv-agent.task-token-usage.v2",
+    "model_call_schema": "vv-agent.model-call.v1",
     "objects_are_closed": true,
     "missing_or_unknown_schema_is_rejected": true,
     "unknown_counts_are_null_not_zero": true,
-    "cycle_shape": {
+    "model_call_shape": {
+      "call_id": "op_model_cycle_1_main:attempt:1",
+      "operation_id": "op_model_cycle_1_main",
+      "attempt": 1,
+      "operation": "agent_cycle",
       "cycle_index": 1,
+      "backend": "test",
+      "model": "test-model",
+      "status": "completed",
       "usage": {
         "schema_version": "vv-agent.token-usage.v1",
         "input_tokens": 1000,
@@ -31,8 +39,52 @@
             "cached_tokens": 640
           }
         }
-      }
+      },
+      "error_code": null
     }
+  },
+  "model_call_operations": [
+    "agent_cycle",
+    "session_memory",
+    "memory_compaction"
+  ],
+  "model_call_statuses": [
+    "completed",
+    "failed",
+    "ambiguous"
+  ],
+  "model_call_rules": {
+    "call_id_unique_within_run": true,
+    "record_scope": "locally_admitted_dispatch_attempt",
+    "remote_provider_receipt_is_not_implied": true,
+    "operation_id_stable_across_logical_retry": true,
+    "attempt_is_one_based": true,
+    "logical_retry_increments_attempt_and_changes_call_id": true,
+    "durable_replay_adds_no_record": true,
+    "provider_usage_captured_before_after_model_hook": true,
+    "completed_error_code_is_null": true,
+    "failed_or_ambiguous_error_code_is_non_empty": true,
+    "failed_or_ambiguous_unknown_usage_makes_aggregate_unknown": true,
+    "cycle_record_duplicates_usage": false,
+    "prompts_outputs_and_error_bodies_are_forbidden": true
+  },
+  "task_usage_rules": {
+    "schema_version": "vv-agent.task-token-usage.v2",
+    "required_fields": [
+      "schema_version",
+      "input_tokens",
+      "output_tokens",
+      "total_tokens",
+      "reasoning_tokens",
+      "cache_usage",
+      "model_calls"
+    ],
+    "unknown_fields_rejected": true,
+    "model_calls_are_the_complete_durable_ledger_in_dispatch_order": true,
+    "aggregate_fields_must_equal_model_calls": true,
+    "duplicate_call_ids_rejected": true,
+    "empty_ledger_has_exact_zero_token_totals": true,
+    "failed_or_ambiguous_unknown_usage_makes_token_totals_null": true
   },
   "usage_sources": [
     "provider_reported",
@@ -355,7 +407,7 @@
   "aggregation_cases": [
     {
       "name": "complete_provider_cache_observations",
-      "cycles": [
+      "model_calls": [
         {
           "status": "provider_reported",
           "read_input_tokens": 640,
@@ -381,7 +433,7 @@
     },
     {
       "name": "partial_observation_is_not_a_partial_total",
-      "cycles": [
+      "model_calls": [
         {
           "status": "provider_reported",
           "read_input_tokens": 640,
@@ -406,8 +458,8 @@
       }
     },
     {
-      "name": "all_cycles_explicitly_unsupported",
-      "cycles": [
+      "name": "all_model_calls_explicitly_unsupported",
+      "model_calls": [
         {
           "status": "unsupported",
           "read_input_tokens": null,
@@ -429,6 +481,231 @@
         "write_input_tokens": null,
         "uncached_input_tokens": null,
         "source": "aggregate"
+      }
+    }
+  ],
+  "task_aggregation_cases": [
+    {
+      "name": "no_dispatched_calls_are_exact_zero",
+      "model_calls": [],
+      "expected": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_usage": {
+          "status": "accounting_missing",
+          "read_input_tokens": null,
+          "write_input_tokens": null,
+          "uncached_input_tokens": null,
+          "source": "aggregate"
+        },
+        "model_call_count": 0
+      }
+    },
+    {
+      "name": "primary_and_internal_calls_are_all_counted",
+      "model_calls": [
+        {
+          "call_id": "op_model_cycle_1_session:attempt:1",
+          "operation_id": "op_model_cycle_1_session",
+          "attempt": 1,
+          "operation": "session_memory",
+          "cycle_index": 1,
+          "backend": "test",
+          "model": "memory-model",
+          "status": "completed",
+          "usage": {
+            "schema_version": "vv-agent.token-usage.v1",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "reasoning_tokens": null,
+            "usage_source": "provider_reported",
+            "cache_usage": {
+              "status": "provider_reported",
+              "read_input_tokens": 80,
+              "write_input_tokens": null,
+              "uncached_input_tokens": 20,
+              "source": "provider_usage"
+            },
+            "provider_usage": {}
+          },
+          "error_code": null
+        },
+        {
+          "call_id": "op_model_cycle_1_main:attempt:1",
+          "operation_id": "op_model_cycle_1_main",
+          "attempt": 1,
+          "operation": "agent_cycle",
+          "cycle_index": 1,
+          "backend": "test",
+          "model": "agent-model",
+          "status": "completed",
+          "usage": {
+            "schema_version": "vv-agent.token-usage.v1",
+            "input_tokens": 900,
+            "output_tokens": 80,
+            "total_tokens": 980,
+            "reasoning_tokens": 10,
+            "usage_source": "provider_reported",
+            "cache_usage": {
+              "status": "provider_reported",
+              "read_input_tokens": 500,
+              "write_input_tokens": null,
+              "uncached_input_tokens": 400,
+              "source": "provider_usage"
+            },
+            "provider_usage": {}
+          },
+          "error_code": null
+        }
+      ],
+      "expected": {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "total_tokens": 1100,
+        "reasoning_tokens": null,
+        "cache_usage": {
+          "status": "provider_reported",
+          "read_input_tokens": 580,
+          "write_input_tokens": null,
+          "uncached_input_tokens": 420,
+          "source": "aggregate"
+        },
+        "model_call_count": 2
+      }
+    },
+    {
+      "name": "ambiguous_attempt_keeps_totals_unknown_after_retry",
+      "attempts": [
+        {
+          "call_id": "op_model_cycle_2_main:attempt:1",
+          "operation_id": "op_model_cycle_2_main",
+          "attempt": 1,
+          "status": "ambiguous",
+          "usage_source": "accounting_missing"
+        },
+        {
+          "call_id": "op_model_cycle_2_main:attempt:2",
+          "operation_id": "op_model_cycle_2_main",
+          "attempt": 2,
+          "status": "completed",
+          "usage_source": "provider_reported"
+        }
+      ],
+      "expected": {
+        "model_call_count": 2,
+        "input_tokens": null,
+        "output_tokens": null,
+        "total_tokens": null,
+        "cache_status": "accounting_missing"
+      }
+    }
+  ],
+  "invalid_task_wire_cases": [
+    {
+      "name": "missing_schema_version",
+      "base_fixture": "result_public.json#/agent_result/token_usage",
+      "mutation": {
+        "remove": "schema_version"
+      }
+    },
+    {
+      "name": "unsupported_schema_version",
+      "base_fixture": "result_public.json#/agent_result/token_usage",
+      "mutation": {
+        "replace": {
+          "schema_version": "vv-agent.task-token-usage.v1"
+        }
+      }
+    },
+    {
+      "name": "unknown_field",
+      "base_fixture": "result_public.json#/agent_result/token_usage",
+      "mutation": {
+        "add": {
+          "cycles": []
+        }
+      }
+    },
+    {
+      "name": "missing_model_calls",
+      "base_fixture": "result_public.json#/agent_result/token_usage",
+      "mutation": {
+        "remove": "model_calls"
+      }
+    },
+    {
+      "name": "model_calls_not_array",
+      "base_fixture": "result_public.json#/agent_result/token_usage",
+      "mutation": {
+        "replace": {
+          "model_calls": null
+        }
+      }
+    },
+    {
+      "name": "negative_total_tokens",
+      "base_fixture": "result_public.json#/agent_result/token_usage",
+      "mutation": {
+        "replace": {
+          "total_tokens": -1
+        }
+      }
+    },
+    {
+      "name": "aggregate_does_not_match_model_calls",
+      "base_fixture": "result_public.json#/agent_result/token_usage",
+      "mutation": {
+        "replace": {
+          "total_tokens": 999999
+        }
+      }
+    },
+    {
+      "name": "duplicate_model_call_id",
+      "base_fixture": "result_public.json#/agent_result/token_usage",
+      "mutation": {
+        "append_duplicate_model_call_index": 0
+      }
+    }
+  ],
+  "invalid_model_call_cases": [
+    {
+      "name": "duplicate_call_id",
+      "error": "model_call_id_duplicate"
+    },
+    {
+      "name": "zero_attempt",
+      "replace": {
+        "attempt": 0
+      }
+    },
+    {
+      "name": "unknown_operation",
+      "replace": {
+        "operation": "business_research"
+      }
+    },
+    {
+      "name": "completed_with_error_code",
+      "replace": {
+        "status": "completed",
+        "error_code": "provider_failed"
+      }
+    },
+    {
+      "name": "failed_without_error_code",
+      "replace": {
+        "status": "failed",
+        "error_code": null
+      }
+    },
+    {
+      "name": "unknown_field",
+      "add": {
+        "prompt": "forbidden"
       }
     }
   ],

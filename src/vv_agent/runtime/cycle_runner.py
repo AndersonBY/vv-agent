@@ -13,12 +13,11 @@ from vv_agent.memory.manager import CompactionMode
 from vv_agent.memory.provider import MemoryCompactCompleted, MemoryCompactStarted, MemoryProvider, MemoryProviderResult
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.model_settings import ModelSettings
-from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.hooks import RuntimeHookManager
-from vv_agent.runtime.token_usage import normalize_token_usage
+from vv_agent.runtime.model_calls import ModelCallDispatchResult
 from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools import ToolRegistry
-from vv_agent.types import AgentTask, CycleRecord, LLMResponse, Message, ToolCall
+from vv_agent.types import AgentTask, CycleRecord, LLMResponse, Message, ModelCallOperation, ToolCall
 
 if TYPE_CHECKING:
     from vv_agent.runtime.context import ExecutionContext
@@ -184,9 +183,9 @@ class CycleRunner:
                         _event_handler(event)
 
             try:
-                llm_response = self._complete_llm(
+                dispatch = self._complete_llm(
                     cycle_index=cycle_index,
-                    operation_slot=f"main:{ptl_retries + 1}",
+                    operation_slot=("main" if ptl_retries == 0 else f"prompt_too_long_{ptl_retries}"),
                     model=task.model,
                     messages=request_messages,
                     tools=request_tool_schemas,
@@ -195,6 +194,7 @@ class CycleRunner:
                     model_settings=self._effective_model_settings(task, ctx),
                     ctx=ctx,
                 )
+                llm_response = dispatch.response
                 break
             except Exception as exc:
                 if not self._is_prompt_too_long_error(exc):
@@ -292,11 +292,6 @@ class CycleRunner:
             assistant_message=llm_response.content,
             tool_calls=deepcopy(llm_response.tool_calls),
             memory_compacted=memory_compacted,
-            token_usage=normalize_token_usage(
-                llm_response.raw.get("usage"),
-                usage_source=llm_response.raw.get("usage_source"),
-                cache_status=llm_response.raw.get("cache_status"),
-            ),
             _planned_tool_names=tuple(
                 name
                 for schema in request_tool_schemas
@@ -347,7 +342,7 @@ class CycleRunner:
         stream_callback: Any,
         model_settings: ModelSettings | None,
         ctx: ExecutionContext | None,
-    ) -> LLMResponse:
+    ) -> ModelCallDispatchResult:
         request = LlmRequest(
             model=model,
             messages=messages,
@@ -355,8 +350,6 @@ class CycleRunner:
             metadata=metadata,
             model_settings=model_settings,
         )
-        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
-
         def invoke() -> LLMResponse:
             return complete_llm_request(
                 self.llm_client,
@@ -364,14 +357,20 @@ class CycleRunner:
                 stream_callback=stream_callback,
             )
 
-        if isinstance(checkpoint_controller, CheckpointResumeController):
-            return checkpoint_controller.complete_model(
-                cycle_index=cycle_index,
-                operation_slot=operation_slot,
-                request=request,
-                invoke=invoke,
-            )
-        return invoke()
+        if ctx is None or ctx.model_call_coordinator is None:
+            raise RuntimeError("model call coordinator is not initialized")
+        coordinator = ctx.model_call_coordinator
+        backend = str(ctx.metadata.get("_vv_agent_resolved_backend") or getattr(self.llm_client, "backend", "direct"))
+        resolved_model = str(ctx.metadata.get("_vv_agent_resolved_model") or model)
+        return coordinator.dispatch(
+            operation=ModelCallOperation.AGENT_CYCLE,
+            cycle_index=cycle_index,
+            operation_slot=operation_slot,
+            backend=backend,
+            model=resolved_model,
+            request=request,
+            invoke=invoke,
+        )
 
     @staticmethod
     def _optional_identity(value: Any) -> str | None:

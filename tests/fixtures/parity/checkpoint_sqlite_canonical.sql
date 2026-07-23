@@ -2,8 +2,8 @@ PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v2'),
-    run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v1'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v3'),
+    run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v2'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,
     root_run_id TEXT NOT NULL,
@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     status TEXT NOT NULL,
     messages TEXT NOT NULL,
     cycles TEXT NOT NULL,
+    model_calls TEXT NOT NULL,
     shared_state TEXT NOT NULL,
     budget_usage TEXT,
     event_cursor TEXT,

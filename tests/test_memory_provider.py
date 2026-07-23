@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from support import model_call_context
 
 from vv_agent.events import event_from_dict
 from vv_agent.llm import ScriptedLLM
@@ -17,7 +18,6 @@ from vv_agent.memory.provider import (
     MemorySearchResult,
 )
 from vv_agent.run_config import RunConfig
-from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, LLMResponse, Message
@@ -150,7 +150,7 @@ def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any])
         cycle_index=3,
         memory_manager=_build_memory_manager(),
         previous_prompt_tokens=160,
-        ctx=ExecutionContext(
+        ctx=model_call_context(
             event_handler=emitted.append,
             metadata={
                 "_vv_agent_memory_providers": [provider],

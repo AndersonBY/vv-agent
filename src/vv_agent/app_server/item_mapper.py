@@ -4,10 +4,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vv_agent.app_server.protocol import ApprovalDecision, ApprovalRequestParams, ApprovalResolveParams, ThreadItem, WarningParams
+from vv_agent.app_server.usage_projection import token_usage_to_wire
 from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    ModelCallCompletedEvent,
+    ModelCallFailedEvent,
+    ModelCallStartedEvent,
     ModelToolCallProgressEvent,
     RunCompletedEvent,
     RunEvent,
@@ -69,6 +73,41 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
             payload={"toolCallId": delta["toolCallId"], "toolName": delta["toolName"]},
         )
         return _projection(item, "item/toolCall/delta", {"delta": delta})
+    if isinstance(event, ModelCallCompletedEvent):
+        item = _item(
+            event,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_type="modelCall",
+            status="completed",
+            payload={**_model_call_identity_payload(event), "usage": token_usage_to_wire(event.usage)},
+        )
+        return _projection(item, "item/completed")
+    if isinstance(event, ModelCallFailedEvent):
+        item = _item(
+            event,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_type="modelCall",
+            status="failed",
+            payload={
+                **_model_call_identity_payload(event),
+                "outcome": event.outcome,
+                "usage": token_usage_to_wire(event.usage),
+                "errorCode": event.error_code,
+            },
+        )
+        return _projection(item, "item/completed")
+    if isinstance(event, ModelCallStartedEvent):
+        item = _item(
+            event,
+            thread_id=thread_id,
+            turn_id=turn_id,
+            item_type="modelCall",
+            status="started",
+            payload=_model_call_identity_payload(event),
+        )
+        return _projection(item, "item/started")
     if event.type == "cycle_llm_response":
         assistant_message = event.metadata.get("assistant_message")
         if assistant_message:
@@ -245,6 +284,20 @@ def _tool_item_status(status: str) -> str:
         "error": "failed",
         "wait_response": "inProgress",
     }.get(status, "completed")
+
+
+def _model_call_identity_payload(
+    event: ModelCallStartedEvent | ModelCallCompletedEvent | ModelCallFailedEvent,
+) -> dict[str, Any]:
+    return {
+        "callId": event.call_id,
+        "operationId": event.operation_id,
+        "attempt": event.attempt,
+        "operation": event.operation.value,
+        "cycleIndex": event.cycle_index,
+        "backend": event.backend,
+        "model": event.model,
+    }
 
 
 def _tool_metadata_payload(metadata: Any) -> dict[str, Any] | None:

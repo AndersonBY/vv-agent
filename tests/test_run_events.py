@@ -8,7 +8,7 @@ from vv_agent import (
     Agent,
     AgentStartedEvent,
     CycleStartedEvent,
-    LLMStartedEvent,
+    ModelCallStartedEvent,
     RunConfig,
     Runner,
     ToolCallCompletedEvent,
@@ -66,7 +66,7 @@ def test_runner_emits_tool_call_started_and_completed_events(tmp_path: Path) -> 
     assert finished[0].tool_call_id == "finish"
 
 
-def test_runner_emits_cycle_and_llm_started_events(tmp_path: Path) -> None:
+def test_runner_emits_cycle_and_model_call_started_events(tmp_path: Path) -> None:
     model_provider = FixedModelProvider(
         ScriptedLLM(
             steps=[
@@ -89,9 +89,10 @@ def test_runner_emits_cycle_and_llm_started_events(tmp_path: Path) -> None:
         "run_started",
         "agent_started",
         "cycle_started",
-        "llm_started",
+        "model_call_started",
     ]
     assert isinstance(result.events[1], AgentStartedEvent)
     assert isinstance(result.events[2], CycleStartedEvent)
-    assert isinstance(result.events[3], LLMStartedEvent)
+    assert isinstance(result.events[3], ModelCallStartedEvent)
     assert result.events[3].to_dict()["model"] == "m"
+    assert result.events[3].to_dict()["operation"] == "agent_cycle"

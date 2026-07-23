@@ -124,6 +124,7 @@ _SUB_AGENT_FIELDS = frozenset(
         "backend",
         "system_prompt",
         "max_cycles",
+        "session_memory_enabled",
         "exclude_tools",
         "denied_side_effects",
         "denied_capability_tags",

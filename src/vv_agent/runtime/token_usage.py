@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vv_agent.types import CacheUsage, CacheUsageStatus, TaskTokenUsage, TokenUsage, UsageSource
+from vv_agent.types import CacheUsage, CacheUsageStatus, ModelCallRecord, TaskTokenUsage, TokenUsage, UsageSource
 
 
 def normalize_token_usage(
@@ -107,12 +107,10 @@ def normalize_token_usage(
     )
 
 
-def summarize_task_token_usage(cycles: list[Any]) -> TaskTokenUsage:
+def summarize_task_token_usage(model_calls: list[ModelCallRecord]) -> TaskTokenUsage:
     summary = TaskTokenUsage()
-    for cycle in cycles:
-        usage = getattr(cycle, "token_usage", None)
-        if isinstance(usage, TokenUsage):
-            summary.add_cycle(cycle.index, usage)
+    for model_call in model_calls:
+        summary.add_model_call(model_call)
     return summary
 
 

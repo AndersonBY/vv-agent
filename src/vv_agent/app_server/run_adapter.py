@@ -17,6 +17,7 @@ from vv_agent.app_server.protocol import (
 )
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore, TurnRecord
+from vv_agent.app_server.usage_projection import task_token_usage_to_wire
 from vv_agent.checkpoint import CheckpointError, ResumeObservation, ResumePolicy
 from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
@@ -336,7 +337,7 @@ class RunAdapter:
                 "status": status,
             }
             if result.status is not AgentStatus.RECONCILIATION_REQUIRED:
-                payload["tokenUsage"] = result.token_usage.to_dict()
+                payload["tokenUsage"] = task_token_usage_to_wire(result.token_usage)
             if result.budget_usage is not None and result.status is not AgentStatus.RECONCILIATION_REQUIRED:
                 budget_usage = result.budget_usage.to_dict()
                 payload["budgetUsage"] = budget_usage

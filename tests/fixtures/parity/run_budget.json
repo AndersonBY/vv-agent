@@ -1,6 +1,6 @@
 {
   "contract": "run_budget",
-  "version": 1,
+  "version": 2,
   "integer_bounds": {
     "minimum": 0,
     "maximum": 9007199254740991
@@ -22,7 +22,7 @@
     "boundaries": [
       "run_start",
       "cycle_start",
-      "llm_complete",
+      "model_call_complete",
       "tool_batch_preflight",
       "tool_batch_complete",
       "terminal"
@@ -108,8 +108,31 @@
       "overshoot": 50,
       "unit": "tokens",
       "currency": null,
-      "enforcement_boundary": "llm_complete",
+      "enforcement_boundary": "model_call_complete",
       "unavailable_reason": null
+    }
+  },
+  "model_call_accounting": {
+    "operations": [
+      "agent_cycle",
+      "session_memory",
+      "memory_compaction"
+    ],
+    "every_dispatched_attempt_is_observed": true,
+    "physical_attempt_is_observed_once": true,
+    "receipt_replay_increment": 0,
+    "missing_failed_or_ambiguous_usage_latches_unavailable": true,
+    "post_internal_call_check_precedes_next_model_dispatch": true,
+    "checkpoint_terminal_record_and_budget_snapshot_are_atomic": true,
+    "opaque_host_model_callbacks_are_not_fabricated": true,
+    "internal_call_exhaustion_case": {
+      "limit": 100,
+      "session_memory_total_tokens": 120,
+      "primary_agent_cycle_dispatch_count": 0,
+      "completion_reason": "budget_exhausted",
+      "enforcement_boundary": "model_call_complete",
+      "observed": 120,
+      "overshoot": 20
     }
   },
   "runner_cases": [
@@ -219,7 +242,7 @@
           "overshoot": 2,
           "unit": "tokens",
           "currency": null,
-          "enforcement_boundary": "llm_complete",
+          "enforcement_boundary": "model_call_complete",
           "unavailable_reason": null
         }
       }
@@ -347,7 +370,7 @@
           "overshoot": null,
           "unit": "tokens",
           "currency": null,
-          "enforcement_boundary": "llm_complete",
+          "enforcement_boundary": "model_call_complete",
           "unavailable_reason": "usage_missing"
         }
       }
@@ -584,7 +607,7 @@
           "overshoot": 20,
           "unit": "credits",
           "currency": null,
-          "enforcement_boundary": "llm_complete",
+          "enforcement_boundary": "model_call_complete",
           "unavailable_reason": null
         }
       }
@@ -776,7 +799,7 @@
           }
         },
         {
-          "boundary": "llm_complete",
+          "boundary": "model_call_complete",
           "elapsed_ms": 1,
           "host_cost": {
             "unit": "credits",
@@ -917,7 +940,7 @@
         "reason": "metric_unavailable",
         "unavailable_reason": "integer_overflow",
         "total_tokens": null,
-        "enforcement_boundary": "llm_complete"
+        "enforcement_boundary": "model_call_complete"
       }
     },
     {

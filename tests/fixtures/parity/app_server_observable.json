@@ -148,7 +148,62 @@
         "checkpointField": "present",
         "interruptionField": "present"
       }
-    ]
+    ],
+    "tokenUsageProjection": {
+      "sourceSchemaVersion": "vv-agent.task-token-usage.v2",
+      "field": "tokenUsage",
+      "fieldNaming": "camelCase_contract_fields_with_providerUsage_keys_preserved",
+      "value": {
+        "schemaVersion": "vv-agent.task-token-usage.v2",
+        "inputTokens": 1000,
+        "outputTokens": 120,
+        "totalTokens": 1120,
+        "reasoningTokens": null,
+        "cacheUsage": {
+          "status": "provider_reported",
+          "readInputTokens": 640,
+          "writeInputTokens": null,
+          "uncachedInputTokens": 360,
+          "source": "aggregate"
+        },
+        "modelCalls": [
+          {
+            "callId": "op_model_cycle_2_main:attempt:1",
+            "operationId": "op_model_cycle_2_main",
+            "attempt": 1,
+            "operation": "agent_cycle",
+            "cycleIndex": 2,
+            "backend": "test",
+            "model": "model-parity",
+            "status": "completed",
+            "usage": {
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "inputTokens": 1000,
+              "outputTokens": 120,
+              "totalTokens": 1120,
+              "reasoningTokens": null,
+              "usageSource": "provider_reported",
+              "cacheUsage": {
+                "status": "provider_reported",
+                "readInputTokens": 640,
+                "writeInputTokens": null,
+                "uncachedInputTokens": 360,
+                "source": "provider_usage"
+              },
+              "providerUsage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "total_tokens": 1120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 640
+                }
+              }
+            },
+            "errorCode": null
+          }
+        ]
+      }
+    }
   },
   "nullability": {
     "threadStartResponse": {
@@ -373,6 +428,138 @@
         }
       ]
     }
+  },
+  "modelLifecycle": {
+    "itemType": "modelCall",
+    "identityFields": [
+      "callId",
+      "operationId",
+      "attempt",
+      "operation",
+      "cycleIndex",
+      "backend",
+      "model"
+    ],
+    "forbiddenPayloadFields": [
+      "prompt",
+      "messages",
+      "output",
+      "error",
+      "errorBody"
+    ],
+    "startedNotifications": [
+      {
+        "jsonrpc": "2.0",
+        "method": "item/started",
+        "params": {
+          "itemId": "item_evt_model_started",
+          "threadId": "thread-model",
+          "turnId": "turn-model",
+          "type": "modelCall",
+          "status": "started",
+          "payload": {
+            "callId": "op_model_cycle_2_main:attempt:1",
+            "operationId": "op_model_cycle_2_main",
+            "attempt": 1,
+            "operation": "agent_cycle",
+            "cycleIndex": 2,
+            "backend": "test",
+            "model": "model-parity"
+          },
+          "createdAt": 100.4,
+          "updatedAt": 100.4
+        }
+      }
+    ],
+    "completedNotifications": [
+      {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "itemId": "item_evt_model_completed",
+          "threadId": "thread-model",
+          "turnId": "turn-model",
+          "type": "modelCall",
+          "status": "completed",
+          "payload": {
+            "callId": "op_model_cycle_2_main:attempt:1",
+            "operationId": "op_model_cycle_2_main",
+            "attempt": 1,
+            "operation": "agent_cycle",
+            "cycleIndex": 2,
+            "backend": "test",
+            "model": "model-parity",
+            "usage": {
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "inputTokens": 1000,
+              "outputTokens": 120,
+              "totalTokens": 1120,
+              "reasoningTokens": null,
+              "usageSource": "provider_reported",
+              "cacheUsage": {
+                "status": "provider_reported",
+                "readInputTokens": 640,
+                "writeInputTokens": null,
+                "uncachedInputTokens": 360,
+                "source": "provider_usage"
+              },
+              "providerUsage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "total_tokens": 1120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 640
+                }
+              }
+            }
+          },
+          "createdAt": 100.5,
+          "updatedAt": 100.5
+        }
+      }
+    ],
+    "failedNotifications": [
+      {
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": {
+          "itemId": "item_evt_model_failed",
+          "threadId": "thread-model",
+          "turnId": "turn-model",
+          "type": "modelCall",
+          "status": "failed",
+          "payload": {
+            "callId": "op_model_cycle_2_session:attempt:1",
+            "operationId": "op_model_cycle_2_session",
+            "attempt": 1,
+            "operation": "session_memory",
+            "cycleIndex": 2,
+            "backend": "memory-test",
+            "model": "memory-model",
+            "outcome": "definitive",
+            "usage": {
+              "schemaVersion": "vv-agent.token-usage.v1",
+              "inputTokens": null,
+              "outputTokens": null,
+              "totalTokens": null,
+              "reasoningTokens": null,
+              "usageSource": "accounting_missing",
+              "cacheUsage": {
+                "status": "accounting_missing",
+                "readInputTokens": null,
+                "writeInputTokens": null,
+                "uncachedInputTokens": null,
+                "source": null
+              },
+              "providerUsage": {}
+            },
+            "errorCode": "provider_rejected"
+          },
+          "createdAt": 100.6,
+          "updatedAt": 100.6
+        }
+      }
+    ]
   },
   "durableResume": {
     "method": "turn/resume",

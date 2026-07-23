@@ -5,6 +5,9 @@ from vv_agent.types import (
     CacheUsage,
     CacheUsageStatus,
     CycleRecord,
+    ModelCallOperation,
+    ModelCallRecord,
+    ModelCallStatus,
     SubAgentConfig,
     TaskTokenUsage,
     TokenUsage,
@@ -32,48 +35,71 @@ def test_agent_task_round_trips_sub_agents_and_metadata() -> None:
     assert restored.metadata == {"scope": "research", "trace_id": "trace-1"}
 
 
-def test_cycle_record_round_trips_token_usage() -> None:
+def test_cycle_record_round_trips_without_model_usage() -> None:
     cycle = CycleRecord(
         index=1,
         assistant_message="answer",
-        token_usage=TokenUsage(
-            input_tokens=11,
-            output_tokens=4,
-            total_tokens=15,
-            reasoning_tokens=2,
-            usage_source=UsageSource.PROVIDER_REPORTED,
-            cache_usage=CacheUsage(
-                status=CacheUsageStatus.PROVIDER_REPORTED,
-                read_input_tokens=3,
-                write_input_tokens=1,
-                uncached_input_tokens=7,
-                source="provider_usage",
-            ),
-            provider_usage={"provider": "raw"},
-        ),
     )
 
-    restored = CycleRecord.from_dict(cycle.to_dict())
+    payload = cycle.to_dict()
+    restored = CycleRecord.from_dict(payload)
 
-    assert restored.token_usage.total_tokens == 15
-    assert restored.token_usage.reasoning_tokens == 2
-    assert restored.token_usage.input_tokens == 11
-    assert restored.token_usage.output_tokens == 4
-    assert restored.token_usage.usage_source is UsageSource.PROVIDER_REPORTED
-    assert restored.token_usage.cache_usage.read_input_tokens == 3
-    assert restored.token_usage.cache_usage.uncached_input_tokens == 7
-    assert restored.token_usage.provider_usage == {"provider": "raw"}
+    assert "token_usage" not in payload
+    assert restored.index == 1
+    assert restored.assistant_message == "answer"
 
 
-def test_task_token_usage_round_trips_cycle_breakdown() -> None:
+def test_task_token_usage_round_trips_model_call_breakdown() -> None:
     usage = TaskTokenUsage()
-    usage.add_cycle(1, TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15))
-    usage.add_cycle(2, TokenUsage(input_tokens=8, output_tokens=7, total_tokens=15))
+    usage.add_model_call(
+        ModelCallRecord(
+            call_id="op_model_cycle_1_main:attempt:1",
+            operation_id="op_model_cycle_1_main",
+            attempt=1,
+            operation=ModelCallOperation.AGENT_CYCLE,
+            cycle_index=1,
+            backend="test",
+            model="model-a",
+            status=ModelCallStatus.COMPLETED,
+            usage=TokenUsage(
+                input_tokens=11,
+                output_tokens=4,
+                total_tokens=15,
+                reasoning_tokens=2,
+                usage_source=UsageSource.PROVIDER_REPORTED,
+                cache_usage=CacheUsage(
+                    status=CacheUsageStatus.PROVIDER_REPORTED,
+                    read_input_tokens=3,
+                    write_input_tokens=1,
+                    uncached_input_tokens=7,
+                    source="provider_usage",
+                ),
+                provider_usage={"provider": "raw"},
+            ),
+        )
+    )
+    usage.add_model_call(
+        ModelCallRecord(
+            call_id="op_model_cycle_2_main:attempt:1",
+            operation_id="op_model_cycle_2_main",
+            attempt=1,
+            operation=ModelCallOperation.AGENT_CYCLE,
+            cycle_index=2,
+            backend="test",
+            model="model-a",
+            status=ModelCallStatus.COMPLETED,
+            usage=TokenUsage(input_tokens=8, output_tokens=7, total_tokens=15),
+        )
+    )
 
     restored = TaskTokenUsage.from_dict(usage.to_dict())
 
-    assert len(restored.cycles) == 2
-    assert restored.cycles[0].cycle_index == 1
-    assert restored.cycles[0].usage.input_tokens == 10
-    assert restored.cycles[1].cycle_index == 2
-    assert restored.cycles[1].usage.output_tokens == 7
+    assert len(restored.model_calls) == 2
+    assert restored.model_calls[0].cycle_index == 1
+    assert restored.model_calls[0].usage.input_tokens == 11
+    assert restored.model_calls[0].usage.reasoning_tokens == 2
+    assert restored.model_calls[0].usage.usage_source is UsageSource.PROVIDER_REPORTED
+    assert restored.model_calls[0].usage.cache_usage.read_input_tokens == 3
+    assert restored.model_calls[0].usage.provider_usage == {"provider": "raw"}
+    assert restored.model_calls[1].cycle_index == 2
+    assert restored.model_calls[1].usage.output_tokens == 7

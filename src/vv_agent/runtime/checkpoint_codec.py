@@ -14,7 +14,7 @@ from vv_agent.checkpoint import (
     canonical_json_bytes,
     validate_checkpoint_extension,
 )
-from vv_agent.types import AgentResult, AgentStatus, CycleRecord, Message
+from vv_agent.types import AgentResult, AgentStatus, CycleRecord, Message, ModelCallRecord
 
 from .state import (
     CHECKPOINT_SCHEMA,
@@ -40,6 +40,7 @@ _KNOWN_FIELDS = frozenset(
         "status",
         "messages",
         "cycles",
+        "model_calls",
         "shared_state",
         "budget_usage",
         "event_cursor",
@@ -84,6 +85,7 @@ def checkpoint_to_dict(
         "status": checkpoint.status.value,
         "messages": [message.to_dict() for message in checkpoint.messages],
         "cycles": [_cycle_to_dict(cycle) for cycle in checkpoint.cycles],
+        "model_calls": [record.to_dict() for record in checkpoint.model_calls],
         "shared_state": checkpoint.shared_state,
         "budget_usage": (checkpoint.budget_usage.to_dict() if checkpoint.budget_usage is not None else None),
         "event_cursor": (checkpoint.event_cursor.to_dict() if checkpoint.event_cursor is not None else None),
@@ -98,7 +100,7 @@ def checkpoint_to_dict(
         "terminal_result": (checkpoint.terminal_result.to_dict() if checkpoint.terminal_result is not None else None),
         "terminal_acknowledged": checkpoint.terminal_acknowledged,
     }
-    return _json_object(payload, "checkpoint v2")
+    return _json_object(payload, "checkpoint v3")
 
 
 def checkpoint_from_dict(
@@ -108,7 +110,7 @@ def checkpoint_from_dict(
     registered_extensions: Iterable[Any] | None = None,
 ) -> Checkpoint:
     if not isinstance(payload, dict):
-        raise ValueError("checkpoint v2 payload must be an object")
+        raise ValueError("checkpoint v3 payload must be an object")
     unknown_fields = set(payload) - _KNOWN_FIELDS
     if unknown_fields:
         names = ", ".join(sorted(unknown_fields))
@@ -150,6 +152,7 @@ def checkpoint_from_dict(
         raise ValueError(f"unknown checkpoint status: {status_raw}") from exc
     messages_raw = _array(payload.get("messages"), "checkpoint messages")
     cycles_raw = _array(payload.get("cycles"), "checkpoint cycles")
+    model_calls_raw = _array(payload.get("model_calls"), "checkpoint model_calls")
     shared_state = _object(payload.get("shared_state"), "checkpoint shared_state")
     budget_raw = payload.get("budget_usage")
     if budget_raw is not None and not isinstance(budget_raw, dict):
@@ -186,6 +189,10 @@ def checkpoint_from_dict(
         status=status,
         messages=[Message.from_dict(_object(item, "checkpoint message")) for item in messages_raw],
         cycles=[CycleRecord.from_dict(_object(item, "checkpoint cycle")) for item in cycles_raw],
+        model_calls=[
+            ModelCallRecord.from_dict(_object(item, "checkpoint model call"))
+            for item in model_calls_raw
+        ],
         shared_state=shared_state,
         budget_usage=BudgetUsageSnapshot.from_dict(budget_raw) if budget_raw is not None else None,
         event_cursor=EventCursor.from_dict(cursor_raw) if cursor_raw is not None else None,
@@ -221,7 +228,7 @@ def checkpoint_to_json(
             checkpoint,
             max_extension_state_bytes=max_extension_state_bytes,
         ),
-        "checkpoint v2",
+        "checkpoint v3",
     ).decode("utf-8")
 
 
@@ -232,11 +239,11 @@ def checkpoint_from_json(
     registered_extensions: Iterable[Any] | None = None,
 ) -> Checkpoint:
     if not isinstance(payload, str | bytes):
-        raise TypeError("checkpoint v2 JSON must be str or bytes")
+        raise TypeError("checkpoint v3 JSON must be str or bytes")
     try:
         decoded = _strict_json_loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("checkpoint v2 JSON is invalid") from exc
+        raise ValueError("checkpoint v3 JSON is invalid") from exc
     return checkpoint_from_dict(
         decoded,
         max_extension_state_bytes=max_extension_state_bytes,
@@ -360,8 +367,4 @@ def _strict_json_loads(payload: str | bytes) -> Any:
 
 
 def _cycle_to_dict(cycle: CycleRecord) -> dict[str, Any]:
-    payload = cycle.to_dict()
-    token_usage = payload.get("token_usage")
-    if isinstance(token_usage, dict) and token_usage.get("raw") == {}:
-        token_usage.pop("raw")
-    return payload
+    return cycle.to_dict()

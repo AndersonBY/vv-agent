@@ -29,6 +29,7 @@ from vv_agent.runtime.state import (
     checkpoint_definition_matches,
     prepare_claimed_terminal,
     prepare_event_delivery,
+    validate_model_journal_accounting,
 )
 from vv_agent.types import AgentStatus
 
@@ -55,7 +56,7 @@ class RedisCheckpointStore:
 
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
         if checkpoint.revision != 0 or checkpoint.resume_attempt != 1 or checkpoint.claim_token is not None:
-            raise ValueError("new checkpoint v2 records must be unclaimed at revision zero")
+            raise ValueError("new checkpoint v3 records must be unclaimed at revision zero")
         data_key, _lease_key = self._keys(checkpoint.checkpoint_key)
         payload, _lease = _checkpoint_to_storage(checkpoint)
         return bool(self._client.set(data_key, payload, nx=True))
@@ -69,7 +70,7 @@ class RedisCheckpointStore:
             lease = self._client.get(lease_key)
             if self._client.get(data_key) == raw and self._client.get(lease_key) == lease:
                 return _checkpoint_from_storage(raw, lease)
-        raise RuntimeError("redis checkpoint v2 load could not obtain a stable snapshot")
+        raise RuntimeError("redis checkpoint v3 load could not obtain a stable snapshot")
 
     def claim_checkpoint(
         self,
@@ -115,7 +116,7 @@ class RedisCheckpointStore:
                     return checkpoint
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v2 claim exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v3 claim exceeded transaction retry limit")
 
     def progress_checkpoint(
         self,
@@ -158,7 +159,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v2 progress exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v3 progress exceeded transaction retry limit")
 
     def suspend_checkpoint(
         self,
@@ -204,7 +205,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v2 suspend exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v3 suspend exceeded transaction retry limit")
 
     def commit_checkpoint(
         self,
@@ -240,12 +241,14 @@ class RedisCheckpointStore:
                     if checkpoint.cycle_index != claimed_cycle:
                         pipe.unwatch()
                         return False
+                    validate_model_journal_accounting(checkpoint)
                     committed = replace(
                         checkpoint,
                         revision=expected_revision + 1,
                         claim_token=None,
                         claimed_cycle=None,
                         lease_expires_at_ms=None,
+                        event_outbox=[entry for entry in checkpoint.event_outbox if entry.state == "pending"],
                         model_call_journal=[],
                         tool_journal=[],
                     )
@@ -257,7 +260,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v2 commit exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v3 commit exceeded transaction retry limit")
 
     def finalize_checkpoint(
         self,
@@ -266,7 +269,7 @@ class RedisCheckpointStore:
         expected_revision: int,
     ) -> bool:
         if checkpoint.terminal_result is None or checkpoint.claim_token is not None:
-            raise ValueError("finalized checkpoint v2 must be terminal and unclaimed")
+            raise ValueError("finalized checkpoint v3 must be terminal and unclaimed")
         data_key, lease_key = self._keys(checkpoint.checkpoint_key)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -295,7 +298,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v2 finalization exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v3 finalization exceeded transaction retry limit")
 
     def finalize_claimed_checkpoint(
         self,
@@ -331,7 +334,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis claimed checkpoint v2 finalization exceeded transaction retry limit")
+        raise RuntimeError("redis claimed checkpoint v3 finalization exceeded transaction retry limit")
 
     def record_event_delivery(
         self,
@@ -373,7 +376,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v2 event delivery exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v3 event delivery exceeded transaction retry limit")
 
     def renew_checkpoint_claim(
         self,
@@ -409,7 +412,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v2 renewal exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v3 renewal exceeded transaction retry limit")
 
     def acknowledge_terminal(self, checkpoint_key: str, *, expected_revision: int) -> bool:
         data_key, lease_key = self._keys(checkpoint_key)
@@ -440,7 +443,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v2 acknowledgement exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v3 acknowledgement exceeded transaction retry limit")
 
     def delete_checkpoint(self, checkpoint_key: str) -> None:
         self._client.delete(*self._keys(checkpoint_key))
@@ -459,16 +462,16 @@ class RedisCheckpointStore:
 def _checkpoint_to_storage(checkpoint: Checkpoint) -> tuple[str, int | None]:
     payload = checkpoint_to_dict(checkpoint)
     lease = payload.pop("lease_expires_at_ms")
-    return canonical_json_bytes(payload, "redis checkpoint v2").decode("utf-8"), lease
+    return canonical_json_bytes(payload, "redis checkpoint v3").decode("utf-8"), lease
 
 
 def _checkpoint_from_storage(raw: str | bytes, raw_lease: object | None) -> Checkpoint:
     try:
         payload = _strict_json_loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("redis checkpoint v2 payload is invalid") from exc
+        raise ValueError("redis checkpoint v3 payload is invalid") from exc
     if not isinstance(payload, dict):
-        raise ValueError("redis checkpoint v2 payload must be an object")
+        raise ValueError("redis checkpoint v3 payload must be an object")
     payload["lease_expires_at_ms"] = _lease_from_storage(raw_lease)
     return checkpoint_from_dict(payload)
 
@@ -477,11 +480,11 @@ def _lease_from_storage(raw_lease: object | None) -> int | None:
     if raw_lease is None:
         return None
     if isinstance(raw_lease, bool) or not isinstance(raw_lease, str | bytes | int):
-        raise ValueError("redis checkpoint v2 lease must be an integer")
+        raise ValueError("redis checkpoint v3 lease must be an integer")
     try:
         return int(raw_lease)
     except ValueError as exc:
-        raise ValueError("redis checkpoint v2 lease must be an integer") from exc
+        raise ValueError("redis checkpoint v3 lease must be an integer") from exc
 
 
 def _redis_server_now_ms(client: Any) -> int:

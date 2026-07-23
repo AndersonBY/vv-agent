@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
+from support import model_call_context
 
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import (
@@ -91,6 +92,7 @@ def test_cycle_runner_retries_prompt_too_long_with_forced_compaction() -> None:
         messages=messages,
         cycle_index=1,
         memory_manager=_build_memory_manager(),
+        ctx=model_call_context(),
     )
 
     assert cycle_record.memory_compacted is True
@@ -141,6 +143,7 @@ def test_cycle_runner_retries_prompt_too_long_then_emergency_compact(monkeypatch
         ],
         cycle_index=1,
         memory_manager=memory_manager,
+        ctx=model_call_context(),
     )
 
     assert cycle_record.memory_compacted is True
@@ -177,6 +180,7 @@ def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> Non
             messages=messages,
             cycle_index=1,
             memory_manager=_build_memory_manager(),
+            ctx=model_call_context(),
         )
 
     assert exc_info.value.attempts == MAX_PTL_RETRIES + 1
@@ -199,6 +203,7 @@ def test_cycle_runner_does_not_swallow_non_ptl_errors() -> None:
             messages=[Message(role="system", content="sys"), Message(role="user", content="hello")],
             cycle_index=1,
             memory_manager=_build_memory_manager(),
+            ctx=model_call_context(),
         )
 
 
@@ -261,6 +266,7 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
         messages=messages,
         cycle_index=3,
         memory_manager=memory_manager,
+        ctx=model_call_context(),
     )
 
     assert cycle_record.memory_compacted is True
@@ -307,6 +313,7 @@ def test_cycle_runner_reapplies_session_memory_after_full_compaction() -> None:
         cycle_index=2,
         memory_manager=memory_manager,
         previous_prompt_tokens=150,
+        ctx=model_call_context(),
     )
 
     assert cycle_record.memory_compacted is True

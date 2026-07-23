@@ -26,7 +26,7 @@ class BudgetDimension(StrEnum):
 class BudgetEnforcementBoundary(StrEnum):
     RUN_START = "run_start"
     CYCLE_START = "cycle_start"
-    LLM_COMPLETE = "llm_complete"
+    MODEL_CALL_COMPLETE = "model_call_complete"
     TOOL_BATCH_PREFLIGHT = "tool_batch_preflight"
     TOOL_BATCH_COMPLETE = "tool_batch_complete"
     TERMINAL = "terminal"
@@ -475,7 +475,7 @@ class BudgetEvaluator:
         unavailable = self._strict_unavailable(boundary)
         if unavailable is not None:
             return unavailable
-        return self._check_admission_limits(
+        exhaustion = self._check_admission_limits(
             boundary,
             dimensions=(
                 BudgetDimension.WALL_TIME,
@@ -484,10 +484,12 @@ class BudgetEvaluator:
                 BudgetDimension.HOST_COST,
             ),
         )
+        if exhaustion is None:
+            self._cycles += 1
+        return exhaustion
 
-    def llm_complete(self, token_usage: Any) -> BudgetExhaustion | None:
-        boundary = BudgetEnforcementBoundary.LLM_COMPLETE
-        self._cycles += 1
+    def model_call_complete(self, token_usage: Any) -> BudgetExhaustion | None:
+        boundary = BudgetEnforcementBoundary.MODEL_CALL_COMPLETE
         self._observe_token_usage(token_usage)
         self._observe_boundary(boundary)
         unavailable = self._strict_unavailable(boundary)

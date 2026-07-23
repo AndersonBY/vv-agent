@@ -248,8 +248,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     cycle_payload = next(
         event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "cycle_llm_response"
     )
-    assert "token_usage" in cycle_payload
-    assert isinstance(cycle_payload["token_usage"], dict)
+    assert "token_usage" not in cycle_payload
     assert isinstance(cycle_payload.get("assistant_message"), str)
     assert isinstance(cycle_payload.get("tool_calls"), list)
     assert cycle_payload.get("memory_compacted") is False
@@ -261,6 +260,9 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     assert first_tool_call_map.get("name") == TASK_LIST_TOOL_NAME
     assert isinstance(first_tool_call_map.get("arguments"), dict)
     assert cycle_payload.get("tool_call_names") == [TASK_LIST_TOOL_NAME]
+    model_call_completed = next(event.to_dict() for event in events if event.type == "model_call_completed")
+    assert model_call_completed["operation"] == "agent_cycle"
+    assert model_call_completed["usage"]["usage_source"] == "accounting_missing"
 
     tool_payload = next(event.details for event in events if isinstance(event, DiagnosticEvent) and event.code == "tool_result")
     assert isinstance(tool_payload.get("content"), str)
@@ -292,8 +294,7 @@ def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, mo
     assert manager.reserved_output_source == "framework_fallback_capped_by_model_capability"
     assert manager.autocompact_buffer_tokens == 13_000
     assert manager.autocompact_threshold == 43_000
-    assert manager.session_memory is not None
-    assert manager.session_memory.config.extraction_model == "demo-model"
+    assert manager.session_memory is None
 
 
 def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_path: Path, monkeypatch) -> None:
@@ -317,6 +318,7 @@ def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_
             "microcompact_keep_recent_cycles": 5,
             "microcompact_min_result_length": 900,
             "microcompact_compactable_tools": ["read_file", "bash"],
+            "session_memory_enabled": True,
             "session_memory_min_tokens": 2_000,
             "session_memory_max_tokens": 9_000,
             "session_memory_min_text_messages": 7,
@@ -383,6 +385,7 @@ def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path
         user_prompt="run",
         max_cycles=1,
         no_tool_policy="finish",
+        metadata={"session_memory_enabled": True},
     )
 
     result = runtime.run(task)
@@ -818,15 +821,17 @@ def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
 
-    assert len(result.token_usage.cycles) == 2
-    assert result.token_usage.cycles[0].usage.input_tokens == 100
-    assert result.token_usage.cycles[0].usage.output_tokens == 25
-    assert result.token_usage.cycles[0].usage.cache_usage.read_input_tokens == 40
-    assert result.token_usage.cycles[0].usage.cache_usage.uncached_input_tokens == 60
-    assert result.token_usage.cycles[1].usage.input_tokens == 50
-    assert result.token_usage.cycles[1].usage.output_tokens == 30
-    assert result.token_usage.cycles[1].usage.cache_usage.write_input_tokens == 12
-    assert result.token_usage.cycles[1].usage.cache_usage.uncached_input_tokens is None
+    assert len(result.token_usage.model_calls) == 2
+    assert [call.operation.value for call in result.token_usage.model_calls] == ["agent_cycle", "agent_cycle"]
+    assert [call.cycle_index for call in result.token_usage.model_calls] == [1, 2]
+    assert result.token_usage.model_calls[0].usage.input_tokens == 100
+    assert result.token_usage.model_calls[0].usage.output_tokens == 25
+    assert result.token_usage.model_calls[0].usage.cache_usage.read_input_tokens == 40
+    assert result.token_usage.model_calls[0].usage.cache_usage.uncached_input_tokens == 60
+    assert result.token_usage.model_calls[1].usage.input_tokens == 50
+    assert result.token_usage.model_calls[1].usage.output_tokens == 30
+    assert result.token_usage.model_calls[1].usage.cache_usage.write_input_tokens == 12
+    assert result.token_usage.model_calls[1].usage.cache_usage.uncached_input_tokens is None
 
     assert result.token_usage.input_tokens == 150
     assert result.token_usage.output_tokens == 55

@@ -149,11 +149,11 @@
           "error": null,
           "shared_state": {},
           "token_usage": {
-            "schema_version": "vv-agent.task-token-usage.v1",
-            "input_tokens": null,
-            "output_tokens": null,
-            "total_tokens": null,
-            "reasoning_tokens": null,
+            "schema_version": "vv-agent.task-token-usage.v2",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
             "cache_usage": {
               "status": "accounting_missing",
               "read_input_tokens": null,
@@ -161,7 +161,7 @@
               "uncached_input_tokens": null,
               "source": "aggregate"
             },
-            "cycles": []
+            "model_calls": []
           },
           "checkpoint_key": null,
           "resume_observation": null
@@ -186,11 +186,11 @@
           "error": null,
           "shared_state": {},
           "token_usage": {
-            "schema_version": "vv-agent.task-token-usage.v1",
-            "input_tokens": null,
-            "output_tokens": null,
-            "total_tokens": null,
-            "reasoning_tokens": null,
+            "schema_version": "vv-agent.task-token-usage.v2",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
             "cache_usage": {
               "status": "accounting_missing",
               "read_input_tokens": null,
@@ -198,7 +198,7 @@
               "uncached_input_tokens": null,
               "source": "aggregate"
             },
-            "cycles": []
+            "model_calls": []
           },
           "checkpoint_key": null,
           "resume_observation": null

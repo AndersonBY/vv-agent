@@ -14,8 +14,8 @@ from vv_agent import (
     CycleStartedEvent,
     HandoffCompletedEvent,
     HandoffStartedEvent,
-    LLMStartedEvent,
     MemoryCompactStarted,
+    ModelCallStartedEvent,
     ModelToolCallProgressEvent,
     ModelToolCallStartedEvent,
     ReasoningDeltaEvent,
@@ -41,17 +41,22 @@ PARITY_EVENT_TYPES = [
     "run_started",
     "agent_started",
     "cycle_started",
-    "llm_started",
+    "model_call_started",
+    "model_call_failed",
+    "model_call_started",
     "assistant_delta",
     "reasoning_delta",
     "model_tool_call_started",
     "model_tool_call_progress",
+    "model_call_completed",
     "tool_call_planned",
     "tool_call_started",
     "tool_call_completed",
     "approval_requested",
     "approval_resolved",
     "memory_compact_started",
+    "model_call_started",
+    "model_call_completed",
     "memory_compact_completed",
     "sub_run_started",
     "sub_run_completed",
@@ -329,7 +334,18 @@ def test_concrete_event_constructors_can_preserve_replayed_identity_and_timing()
     events = [
         RunStartedEvent(run_id="run_replay", trace_id="trace_replay", input="hello", **_replay_fields()),
         AgentStartedEvent(run_id="run_replay", trace_id="trace_replay", **_replay_fields()),
-        LLMStartedEvent(run_id="run_replay", trace_id="trace_replay", model="model", **_replay_fields()),
+        ModelCallStartedEvent(
+            run_id="run_replay",
+            trace_id="trace_replay",
+            call_id="op_model_cycle_1_main:attempt:1",
+            operation_id="op_model_cycle_1_main",
+            attempt=1,
+            operation="agent_cycle",
+            cycle_index=1,
+            backend="test",
+            model="model",
+            **_replay_fields(),
+        ),
         AssistantDeltaEvent(run_id="run_replay", trace_id="trace_replay", delta="hi", **_replay_fields()),
         ToolCallStartedEvent(
             run_id="run_replay",
@@ -449,7 +465,7 @@ def test_run_events_parity_fixture_round_trips_current_wire() -> None:
     assert [event.type for event in events] == PARITY_EVENT_TYPES
     for index, (line, event) in enumerate(zip(lines, events, strict=True)):
         if event.run_id == "run_parity":
-            assert event.event_id == "evt_parity"
+            assert event.event_id.startswith("evt_")
             assert event.run_id == "run_parity"
             assert event.trace_id == "trace_parity"
             assert event.created_at == 123.456789

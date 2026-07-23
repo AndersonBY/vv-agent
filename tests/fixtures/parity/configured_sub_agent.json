@@ -25,6 +25,7 @@
       "backend": null,
       "system_prompt": null,
       "max_cycles": 8,
+      "session_memory_enabled": false,
       "exclude_tools": [],
       "metadata": {},
       "denied_side_effects": [],
@@ -35,6 +36,7 @@
     "wire_rejections": {
       "backend_non_string": 123,
       "max_cycles_negative": -1,
+      "session_memory_enabled_non_boolean": 1,
       "denied_side_effects_non_array": "network",
       "denied_capability_tags_non_array": "network.unrestricted",
       "deny_terminal_tools_non_boolean": 1,
@@ -90,6 +92,7 @@
     "model": "child-model",
     "user_prompt": "Collect facts\n\n<Output Requirements>\nReturn JSON\n</Output Requirements>",
     "max_cycles": 4,
+    "session_memory_enabled": false,
     "memory_compact_threshold": 250000,
     "memory_threshold_percentage": 80,
     "no_tool_policy": "continue",
@@ -143,6 +146,16 @@
     "_vv_agent_session_id": "child-session",
     "_vv_agent_parent_run_id": "parent-run",
     "_vv_agent_parent_tool_call_id": "delegate"
+  },
+  "session_memory_projection": {
+    "framework_default": false,
+    "configured_child_default": false,
+    "explicit_true_is_projected": true,
+    "parent_value_is_not_inherited": true,
+    "metadata_cannot_override_public_control": true,
+    "accepted_aliases": [],
+    "seed_implies_enabled": false,
+    "existing_storage_implies_enabled": false
   },
   "reserved_metadata_keys": [
     "_vv_agent_agent_name",

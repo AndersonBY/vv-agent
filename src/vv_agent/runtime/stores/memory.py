@@ -17,6 +17,7 @@ from vv_agent.runtime.state import (
     claim_matches,
     prepare_claimed_terminal,
     prepare_event_delivery,
+    validate_model_journal_accounting,
 )
 from vv_agent.types import AgentStatus
 
@@ -150,6 +151,7 @@ class InMemoryCheckpointStore:
                 or checkpoint.cycle_index != current.claimed_cycle
             ):
                 return False
+            validate_model_journal_accounting(checkpoint)
             snapshot = clone_checkpoint(
                 replace(
                     checkpoint,
@@ -157,6 +159,7 @@ class InMemoryCheckpointStore:
                     claim_token=None,
                     claimed_cycle=None,
                     lease_expires_at_ms=None,
+                    event_outbox=[entry for entry in checkpoint.event_outbox if entry.state == "pending"],
                     model_call_journal=[],
                     tool_journal=[],
                 )

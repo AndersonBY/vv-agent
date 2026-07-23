@@ -113,8 +113,9 @@ def test_frozen_checkpoint_uses_current_threshold_and_metadata_without_rewriting
         "agent": {"type": None},
         "tools": [],
         "runtime_controls": {
-            "max_cycles": 8,
-            "memory_compact_threshold": 128_000,
+                "max_cycles": 8,
+                "session_memory_enabled": False,
+                "memory_compact_threshold": 128_000,
             "memory_threshold_percentage": 90,
             "no_tool_policy": "continue",
             "allow_interruption": True,
@@ -167,8 +168,9 @@ def test_frozen_checkpoint_restores_run_metadata_when_system_metadata_is_empty()
         "agent": {"type": None},
         "tools": [],
         "runtime_controls": {
-            "max_cycles": 8,
-            "memory_compact_threshold": 128_000,
+                "max_cycles": 8,
+                "session_memory_enabled": False,
+                "memory_compact_threshold": 128_000,
             "memory_threshold_percentage": 90,
             "no_tool_policy": "continue",
             "allow_interruption": True,

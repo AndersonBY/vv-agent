@@ -1,7 +1,7 @@
 {
   "schema_version": "vv-agent.distributed-run.v2",
   "run_definition_schema_rules": {
-    "writer_value": "vv-agent.run-definition.v1",
+    "writer_value": "vv-agent.run-definition.v2",
     "complete_definition_source": "embedded_run_definition_in_checkpoint",
     "envelope_digest_must_match_checkpoint_digest": true,
     "missing_or_unknown_error": "checkpoint_definition_schema_unsupported",
@@ -199,7 +199,7 @@
     "lease_duration_ms": 120000,
     "root_run_id": "run-123",
     "trace_id": "trace-run-123",
-    "run_definition_schema": "vv-agent.run-definition.v1",
+    "run_definition_schema": "vv-agent.run-definition.v2",
     "run_definition_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "claim_mode": "recovery",
     "resume_attempt": 2,
@@ -239,7 +239,7 @@
       "path": [
         "run_definition_schema"
       ],
-      "value": "vv-agent.run-definition.v2",
+      "value": "vv-agent.run-definition.v3",
       "error": "checkpoint_definition_schema_unsupported"
     },
     {

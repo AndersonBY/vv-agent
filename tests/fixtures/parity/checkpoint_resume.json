@@ -1,7 +1,7 @@
 {
   "contract": "checkpoint_resume",
-  "version": 1,
-  "run_definition_schema": "vv-agent.run-definition.v1",
+  "version": 2,
+  "run_definition_schema": "vv-agent.run-definition.v2",
   "public_entrypoints": {
     "run": "Runner.run with RunConfig.checkpoint_config",
     "start": "Runner.start with RunConfig.checkpoint_config",
@@ -35,7 +35,8 @@
         "status": "completed",
         "completion_reason": "no_tool_finish",
         "checkpoint_key": null,
-        "model_calls": 1,
+        "model_dispatches": 1,
+        "model_call_records": 1,
         "checkpoint_events": []
       }
     },
@@ -100,7 +101,8 @@
         "status": "completed",
         "completion_reason": "no_tool_finish",
         "resume_attempt": 2,
-        "model_calls": 1,
+        "model_dispatches": 1,
+        "model_call_records": 2,
         "completed_cycles": 2
       }
     },
@@ -126,6 +128,7 @@
         },
         "initial_checkpoint": {
           "status": "completed",
+          "model_call_records": 1,
           "terminal_result": {
             "status": "completed",
             "final_answer": "already done"
@@ -135,7 +138,8 @@
       "expected": {
         "status": "completed",
         "final_output": "already done",
-        "model_calls": 0,
+        "model_dispatches": 0,
+        "model_call_records": 1,
         "tool_calls": 0,
         "terminal_replayed": true
       }
@@ -174,7 +178,8 @@
       },
       "expected": {
         "status": "completed",
-        "model_calls": 1,
+        "model_dispatches": 1,
+        "model_call_records": 1,
         "operation_id_reused": true
       }
     },
@@ -208,7 +213,10 @@
         "status": "reconciliation_required",
         "completion_reason": null,
         "interruption_reason": "resume_requires_reconciliation",
-        "model_calls": 0,
+        "model_dispatches": 0,
+        "model_call_records": 1,
+        "ambiguous_model_call_records": 1,
+        "aggregate_usage_available": false,
         "tool_calls": 0,
         "checkpoint_retained": true
       }
@@ -248,7 +256,10 @@
       },
       "expected": {
         "status": "completed",
-        "model_calls": 1,
+        "model_dispatches": 1,
+        "model_call_records": 2,
+        "ambiguous_model_call_records": 1,
+        "aggregate_usage_available": false,
         "duplicate_cost_risk_event_count": 1
       }
     },
@@ -711,34 +722,41 @@
     },
     {
       "id": "F4",
+      "point": "after_model_receipt_ledger_budget_and_event_before_cycle_commit",
+      "durable_state": "model_succeeded_and_accounted",
+      "resume": "replay_receipt_without_usage_or_budget_increment",
+      "ambiguity": false
+    },
+    {
+      "id": "F5",
       "point": "after_tool_planned_before_started",
       "durable_state": "tool_planned",
       "resume": "invoke_tool",
       "ambiguity": false
     },
     {
-      "id": "F5",
+      "id": "F6",
       "point": "after_tool_started_and_side_effect_before_receipt",
       "durable_state": "tool_started",
       "resume": "policy_or_reconciliation",
       "ambiguity": true
     },
     {
-      "id": "F6",
+      "id": "F7",
       "point": "after_tool_receipt_before_cycle_commit",
       "durable_state": "tool_succeeded",
       "resume": "replay_receipt",
       "ambiguity": false
     },
     {
-      "id": "F7",
+      "id": "F8",
       "point": "after_cycle_commit_before_scheduler_ack",
       "durable_state": "cycle_committed",
       "resume": "next_cycle",
       "ambiguity": false
     },
     {
-      "id": "F8",
+      "id": "F9",
       "point": "after_terminal_commit_before_terminal_ack",
       "durable_state": "terminal_committed",
       "resume": "replay_terminal",
@@ -750,7 +768,7 @@
     "process_sigkill_canary": true,
     "barrier_for_store_races": true,
     "sleep_only_fault_timing": false,
-    "preserve_messages_cycles_usage_budget": true,
+    "preserve_messages_cycles_model_call_ledger_budget": true,
     "event_dedupe_with_idempotent_store": true,
     "cross_language_sqlite": true
   },

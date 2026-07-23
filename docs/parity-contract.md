@@ -7,14 +7,11 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `2.0.0` at revision
-`8ef7153e9b1f26b90a9fad85bbfcb4642d6462fa`. The central support matrix is
-`verified`. Recording run
-[`29934473634`](https://github.com/AndersonBY/vv-agent-contract/actions/runs/29934473634)
-passed against Python revision
-`64743760634fa70c76bf523bf4b51601713ccfb0` and Rust revision
-`91a53cd1be9ad560f99c93c4437bc2d830271a09`. The central matrix remains the
-authoritative current verification record.
+`contract.lock.json` selects contract `3.0.0` at revision
+`a0c7c22e4416446f66712cf4484583fcfe2c4969`. The central support matrix remains
+`in-progress` while Python and Rust adoption is being completed. It may move to
+`verified` only after both implementation revisions pass their full gates and
+the central cross-repository workflow records those exact revisions.
 
 The lock records the exact release artifact, artifact digest, vendored fixture
 path, and canonical fixture-manifest digest. `tests/fixtures/parity/` is a
@@ -45,8 +42,8 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-2.0.0.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v2.0.0/vv-agent-contract-2.0.0.zip
+  --artifact /path/to/vv-agent-contract-3.0.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v3.0.0/vv-agent-contract-3.0.0.zip
 ```
 
 ## Python Producer Map
@@ -64,11 +61,11 @@ python3 scripts/contract_snapshot.py sync \
 | Configured children | `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/sub_task_manager.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_sub_agent_runtime.py` |
 | Sessions | `src/vv_agent/sessions/`, `src/vv_agent/interactive.py`, `tests/test_session_store_parity.py`, `tests/test_interactive_lifecycle_contract.py` |
 | Memory and compaction | `src/vv_agent/memory/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_memory_lifecycle_contract.py`, `tests/test_memory_provider.py` |
-| Token and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py` |
+| Model-call ledger, token, and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/model_calls.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py`, `tests/test_runtime_task_serialization.py` |
 | Run budgets | `src/vv_agent/budget.py`, `src/vv_agent/runtime/engine.py`, `tests/test_run_budget.py` |
 | Durable checkpoint and resume | `src/vv_agent/checkpoint.py`, `src/vv_agent/runtime/checkpoint_codec.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/run_definition.py`, `tests/test_checkpoint.py`, `tests/test_checkpoint_runner.py`, `tests/test_checkpoint_fault_matrix.py` |
 | Distributed execution | `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/backends/celery_tasks.py`, `tests/test_distributed_checkpoint.py` |
-| App Server | `src/vv_agent/app_server/`, `tests/test_app_server_contract_parity.py`, `tests/test_app_server_item_mapper.py` |
+| App Server | `src/vv_agent/app_server/usage_projection.py`, `src/vv_agent/app_server/item_mapper.py`, `src/vv_agent/app_server/run_adapter.py`, `tests/test_app_server_contract_parity.py`, `tests/test_app_server_item_mapper.py` |
 | Output validation | `src/vv_agent/output_validation.py`, `src/vv_agent/runner.py`, `tests/test_output_validation_contract.py` |
 
 A parser-only test cannot prove producer parity. Every declared field must be
@@ -80,10 +77,12 @@ owns its behavior.
 ### Events
 
 The public runtime accepts and emits only typed `RunEvent` values. Runtime
-producers create semantic lifecycle events directly. Provider stream payloads
-remain inside the LLM adapter and are projected to typed assistant, reasoning,
-and model-tool-call events at that boundary; malformed or unknown provider
-payloads are dropped.
+producers create semantic lifecycle events directly. Every primary and internal
+model dispatch emits `model_call_started` and exactly one terminal
+`model_call_completed` or `model_call_failed` event with the same call identity
+as the durable ledger. Provider stream payloads remain inside the LLM adapter
+and are projected to typed assistant, reasoning, and model-tool-call events at
+that boundary; malformed or unknown provider payloads are dropped.
 
 Task-neutral observations use `DiagnosticEvent(level, code, details)`. A
 diagnostic cannot replace lifecycle, approval, budget, cancellation, tool, or
@@ -123,11 +122,19 @@ own ambiguity and replay decisions.
 
 ### Persistence
 
-Checkpoint records require `vv-agent.checkpoint.v2`; run definitions require
-`vv-agent.run-definition.v1`; distributed envelopes require their one current
-discriminator. Readers reject every other shape before claim or external work.
-There is no namespace probe, alternate decoder, field synthesis, or in-place
-repair.
+Checkpoint records require `vv-agent.checkpoint.v3`; run definitions require
+`vv-agent.run-definition.v2`; distributed envelopes require
+`vv-agent.distributed-run.v2`. Readers reject every other shape before claim or
+external work. There is no namespace probe, alternate decoder, field synthesis,
+or in-place repair.
+
+The checkpoint owns the complete run-level model-call ledger. A started journal
+entry and started event become durable together. After dispatch, the terminal
+journal state, ledger record, budget observation, and terminal event become
+durable together. Journal, started event, terminal event, and ledger must agree
+exactly on call id, operation id, attempt, operation, cycle, backend, and model.
+A definitive pre-dispatch failure is the only terminal model journal state with
+no dispatch evidence.
 
 Distributed worker responses use only the closed
 `vv-agent.distributed-worker-response.v1` wire. Python owns the typed value and
@@ -138,9 +145,30 @@ the replaced `finished` and terminal boolean combination is rejected. A
 candidate accepts reconciliation-required or terminal/interrupted results; a
 replay rejects reconciliation-required and must equal the retained durable
 result. The scheduler reloads the authoritative checkpoint after every response
-or transport failure. Public `AgentResult` readers require all 13 current
-fields, reject unknown fields, and require absent optional budget/error fields
-to be omitted rather than encoded as null.
+or transport failure. Public `AgentResult` readers require the complete current
+shape, reject unknown fields, and require absent optional fields to be omitted
+rather than encoded as null.
+
+### Model Usage And Memory
+
+`TaskTokenUsage v2` contains the ordered `model_calls` ledger for primary agent
+cycles, Session Memory extraction, and memory compaction. Aggregate counts are
+null when any dispatched attempt lacks that measurement; an empty ledger has
+exact zero token totals. `CycleRecord` does not duplicate usage, and the
+low-level `CycleRunner` is not a public export.
+
+Session Memory defaults to disabled. Only the exact public
+`session_memory_enabled=true` control enables prompt injection, store access,
+workspace writes, or Session Memory model calls. Existing files, supplied
+context, seed data, parent configuration, and historical aliases do not enable
+it implicitly.
+
+### App Server
+
+Model-call events project to `modelCall` items carrying the same seven identity
+fields and terminal accounting. Terminal `tokenUsage` recursively camel-cases
+the complete task usage object, including `modelCalls` and `cacheUsage`, while
+opaque provider-native keys inside `providerUsage` remain unchanged.
 
 ## Python Adaptations
 

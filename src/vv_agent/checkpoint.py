@@ -18,7 +18,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EXTENSION_NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.[a-z0-9._-]+$")
 _CAPABILITY_SLOT_RE = re.compile(r"^[a-z][a-z0-9_.:-]*$")
 _JSON_POINTER_ESCAPE_RE = re.compile(r"~(?:0|1)")
-RUN_DEFINITION_SCHEMA = "vv-agent.run-definition.v1"
+RUN_DEFINITION_SCHEMA = "vv-agent.run-definition.v2"
 OPERATION_REQUEST_SCHEMA = "vv-agent.operation-request.v1"
 CREDENTIAL_REDACTION_VALUE = "<credential-redacted>"
 
@@ -53,6 +53,7 @@ _RUN_DEFINITION_RUNTIME_CONTROL_FIELDS = frozenset(
         "max_cycles",
         "max_handoffs",
         "no_tool_policy",
+        "session_memory_enabled",
         "memory_compact_threshold",
         "memory_threshold_percentage",
         "allow_interruption",
@@ -652,6 +653,10 @@ def _validate_run_definition_shape(definition: dict[str, Any]) -> None:
     _definition_integer(controls["max_handoffs"], "run_definition.runtime_controls.max_handoffs")
     if controls["no_tool_policy"] not in {"continue", "wait_user", "finish"}:
         raise ValueError("run_definition.runtime_controls.no_tool_policy is invalid")
+    _definition_boolean(
+        controls["session_memory_enabled"],
+        "run_definition.runtime_controls.session_memory_enabled",
+    )
     _definition_integer(
         controls["memory_compact_threshold"],
         "run_definition.runtime_controls.memory_compact_threshold",

@@ -7,8 +7,20 @@ from typing import Any
 from vv_agent.runtime.backends.base import CycleExecutor
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.token_usage import summarize_task_token_usage
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, CompletionReason, CycleRecord, Message, _last_assistant_output
+from vv_agent.types import (
+    AgentResult,
+    AgentStatus,
+    AgentTask,
+    CompletionReason,
+    CycleRecord,
+    Message,
+    TaskTokenUsage,
+    _last_assistant_output,
+)
+
+
+def _task_token_usage(ctx: ExecutionContext | None) -> TaskTokenUsage:
+    return ctx.model_call_ledger.usage() if ctx is not None else TaskTokenUsage()
 
 
 class ThreadBackend:
@@ -57,7 +69,7 @@ class ThreadBackend:
                         cycles=cycles,
                         error="Operation was cancelled",
                         shared_state=shared_state,
-                        token_usage=summarize_task_token_usage(cycles),
+                        token_usage=_task_token_usage(ctx),
                     )
 
             result = cycle_executor(
@@ -87,7 +99,7 @@ class ThreadBackend:
             cycles=cycles,
             final_answer="Reached max cycles without finish signal.",
             shared_state=shared_state,
-            token_usage=summarize_task_token_usage(cycles),
+            token_usage=_task_token_usage(ctx),
         )
 
     def submit(self, fn: Callable[..., Any], *args: Any) -> Future[Any]:

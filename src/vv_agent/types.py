@@ -183,7 +183,20 @@ class CacheUsageStatus(StrEnum):
 
 
 TOKEN_USAGE_SCHEMA_VERSION = "vv-agent.token-usage.v1"
-TASK_TOKEN_USAGE_SCHEMA_VERSION = "vv-agent.task-token-usage.v1"
+TASK_TOKEN_USAGE_SCHEMA_VERSION = "vv-agent.task-token-usage.v2"
+MODEL_CALL_SCHEMA_VERSION = "vv-agent.model-call.v1"
+
+
+class ModelCallOperation(StrEnum):
+    AGENT_CYCLE = "agent_cycle"
+    SESSION_MEMORY = "session_memory"
+    MEMORY_COMPACTION = "memory_compaction"
+
+
+class ModelCallStatus(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    AMBIGUOUS = "ambiguous"
 
 
 @dataclass(slots=True)
@@ -237,7 +250,7 @@ class CacheUsage:
 
 def _aggregate_cache_usage(observations: list[CacheUsage]) -> CacheUsage:
     if not observations:
-        return CacheUsage()
+        return CacheUsage(source="aggregate")
     statuses = {observation.status for observation in observations}
     if statuses == {CacheUsageStatus.PROVIDER_REPORTED}:
         status = CacheUsageStatus.PROVIDER_REPORTED
@@ -361,54 +374,121 @@ class TokenUsage:
         )
 
 
+def _required_non_empty_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not _trim_portable_whitespace(value):
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value
+
+
 @dataclass(slots=True)
-class CycleTokenUsage:
+class ModelCallRecord:
+    call_id: str
+    operation_id: str
+    attempt: int
+    operation: ModelCallOperation
     cycle_index: int
+    backend: str
+    model: str
+    status: ModelCallStatus
     usage: TokenUsage
+    error_code: str | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.cycle_index, bool) or not isinstance(self.cycle_index, int):
-            raise TypeError("cycle_index must be an integer")
-        if not 1 <= self.cycle_index <= _MAX_U32:
+        self.call_id = _required_non_empty_string(self.call_id, "call_id")
+        self.operation_id = _required_non_empty_string(self.operation_id, "operation_id")
+        if isinstance(self.attempt, bool) or not isinstance(self.attempt, int) or not 1 <= self.attempt <= _MAX_U32:
+            raise ValueError("attempt must be between 1 and 4294967295")
+        if not isinstance(self.operation, ModelCallOperation):
+            self.operation = ModelCallOperation(self.operation)
+        if isinstance(self.cycle_index, bool) or not isinstance(self.cycle_index, int) or not 1 <= self.cycle_index <= _MAX_U32:
             raise ValueError("cycle_index must be between 1 and 4294967295")
+        self.backend = _required_non_empty_string(self.backend, "backend")
+        self.model = _required_non_empty_string(self.model, "model")
+        if not isinstance(self.status, ModelCallStatus):
+            self.status = ModelCallStatus(self.status)
         if not isinstance(self.usage, TokenUsage):
             raise TypeError("usage must be a TokenUsage")
+        if self.status is ModelCallStatus.COMPLETED:
+            if self.error_code is not None:
+                raise ValueError("completed model calls require error_code=null")
+        else:
+            self.error_code = _required_non_empty_string(self.error_code, "error_code")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"cycle_index": self.cycle_index, "usage": self.usage.to_dict()}
+        return {
+            "call_id": self.call_id,
+            "operation_id": self.operation_id,
+            "attempt": self.attempt,
+            "operation": self.operation.value,
+            "cycle_index": self.cycle_index,
+            "backend": self.backend,
+            "model": self.model,
+            "status": self.status.value,
+            "usage": self.usage.to_dict(),
+            "error_code": self.error_code,
+        }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> CycleTokenUsage:
-        _require_exact_keys(data, {"cycle_index", "usage"}, "CycleTokenUsage")
+    def from_dict(cls, data: dict[str, Any]) -> ModelCallRecord:
+        _require_exact_keys(
+            data,
+            {
+                "call_id",
+                "operation_id",
+                "attempt",
+                "operation",
+                "cycle_index",
+                "backend",
+                "model",
+                "status",
+                "usage",
+                "error_code",
+            },
+            "ModelCallRecord",
+        )
         nested = data["usage"]
         if not isinstance(nested, dict):
-            raise TypeError("CycleTokenUsage usage must be an object")
+            raise TypeError("ModelCallRecord usage must be an object")
         return cls(
+            call_id=data["call_id"],
+            operation_id=data["operation_id"],
+            attempt=data["attempt"],
+            operation=ModelCallOperation(data["operation"]),
             cycle_index=data["cycle_index"],
+            backend=data["backend"],
+            model=data["model"],
+            status=ModelCallStatus(data["status"]),
             usage=TokenUsage.from_dict(nested),
+            error_code=data["error_code"],
         )
 
 
 @dataclass(slots=True)
 class TaskTokenUsage:
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    total_tokens: int | None = None
-    reasoning_tokens: int | None = None
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
+    total_tokens: int | None = 0
+    reasoning_tokens: int | None = 0
     cache_usage: CacheUsage = field(default_factory=lambda: CacheUsage(source="aggregate"))
-    cycles: list[CycleTokenUsage] = field(default_factory=list)
+    model_calls: list[ModelCallRecord] = field(default_factory=list)
 
-    def add_cycle(self, cycle_index: int, usage: TokenUsage) -> None:
-        self.cycles.append(CycleTokenUsage(cycle_index=cycle_index, usage=usage))
+    def add_model_call(self, model_call: ModelCallRecord) -> None:
+        if not isinstance(model_call, ModelCallRecord):
+            raise TypeError("model_call must be a ModelCallRecord")
+        if any(item.call_id == model_call.call_id for item in self.model_calls):
+            raise ValueError("model_call_id_duplicate")
+        self.model_calls.append(model_call)
         self.input_tokens = self._complete_sum("input_tokens")
         self.output_tokens = self._complete_sum("output_tokens")
         self.total_tokens = self._complete_sum("total_tokens")
         self.reasoning_tokens = self._complete_sum("reasoning_tokens")
-        self.cache_usage = _aggregate_cache_usage([item.usage.cache_usage for item in self.cycles])
+        self.cache_usage = _aggregate_cache_usage([item.usage.cache_usage for item in self.model_calls])
 
     def _complete_sum(self, name: str) -> int | None:
-        values = [getattr(item.usage, name) for item in self.cycles]
-        if not values or any(value is None for value in values):
+        values = [getattr(item.usage, name) for item in self.model_calls]
+        if not values:
+            return 0
+        if any(value is None for value in values):
             return None
         return sum(cast(int, value) for value in values)
 
@@ -420,7 +500,7 @@ class TaskTokenUsage:
             "total_tokens": self.total_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "cache_usage": self.cache_usage.to_dict(),
-            "cycles": [item.to_dict() for item in self.cycles],
+            "model_calls": [item.to_dict() for item in self.model_calls],
         }
 
     @classmethod
@@ -434,24 +514,23 @@ class TaskTokenUsage:
                 "total_tokens",
                 "reasoning_tokens",
                 "cache_usage",
-                "cycles",
+                "model_calls",
             },
             "TaskTokenUsage",
         )
         if data["schema_version"] != TASK_TOKEN_USAGE_SCHEMA_VERSION:
             raise ValueError(f"unsupported TaskTokenUsage schema: {data['schema_version']!r}")
-        cycles = data["cycles"]
-        if not isinstance(cycles, list):
-            raise TypeError("TaskTokenUsage cycles must be a list")
+        model_calls = data["model_calls"]
+        if not isinstance(model_calls, list):
+            raise TypeError("TaskTokenUsage model_calls must be a list")
         usage = cls()
-        for item in cycles:
+        for item in model_calls:
             if not isinstance(item, dict):
-                raise TypeError("TaskTokenUsage cycle must be an object")
-            cycle = CycleTokenUsage.from_dict(item)
-            usage.add_cycle(cycle.cycle_index, cycle.usage)
+                raise TypeError("TaskTokenUsage model call must be an object")
+            usage.add_model_call(ModelCallRecord.from_dict(item))
         expected = usage.to_dict()
         if data != expected:
-            raise ValueError("TaskTokenUsage aggregate does not match cycle usage")
+            raise ValueError("TaskTokenUsage aggregate does not match model_calls")
         return usage
 
 
@@ -539,8 +618,21 @@ class CycleRecord:
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_results: list[ToolExecutionResult] = field(default_factory=list)
     memory_compacted: bool = False
-    token_usage: TokenUsage = field(default_factory=TokenUsage)
     _planned_tool_names: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.index, bool) or not isinstance(self.index, int) or not 1 <= self.index <= _MAX_U32:
+            raise ValueError("cycle index must be between 1 and 4294967295")
+        if not isinstance(self.assistant_message, str):
+            raise TypeError("cycle assistant_message must be a string")
+        if not isinstance(self.tool_calls, list) or not all(isinstance(item, ToolCall) for item in self.tool_calls):
+            raise TypeError("cycle tool_calls must contain ToolCall values")
+        if not isinstance(self.tool_results, list) or not all(
+            isinstance(item, ToolExecutionResult) for item in self.tool_results
+        ):
+            raise TypeError("cycle tool_results must contain ToolExecutionResult values")
+        if not isinstance(self.memory_compacted, bool):
+            raise TypeError("cycle memory_compacted must be a boolean")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -549,18 +641,27 @@ class CycleRecord:
             "tool_calls": [tc.to_dict() for tc in self.tool_calls],
             "tool_results": [tr.to_dict() for tr in self.tool_results],
             "memory_compacted": self.memory_compacted,
-            "token_usage": self.token_usage.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CycleRecord:
+        _require_exact_keys(
+            data,
+            {"index", "assistant_message", "tool_calls", "tool_results", "memory_compacted"},
+            "CycleRecord",
+        )
+        tool_calls = data["tool_calls"]
+        tool_results = data["tool_results"]
+        if not isinstance(tool_calls, list):
+            raise TypeError("CycleRecord tool_calls must be a list")
+        if not isinstance(tool_results, list):
+            raise TypeError("CycleRecord tool_results must be a list")
         return cls(
             index=data["index"],
-            assistant_message=data.get("assistant_message", ""),
-            tool_calls=[ToolCall.from_dict(tc) for tc in data.get("tool_calls", [])],
-            tool_results=[ToolExecutionResult.from_dict(tr) for tr in data.get("tool_results", [])],
-            memory_compacted=data.get("memory_compacted", False),
-            token_usage=TokenUsage.from_dict(data.get("token_usage", {})),
+            assistant_message=data["assistant_message"],
+            tool_calls=[ToolCall.from_dict(tc) for tc in tool_calls],
+            tool_results=[ToolExecutionResult.from_dict(tr) for tr in tool_results],
+            memory_compacted=data["memory_compacted"],
         )
 
 
@@ -571,6 +672,7 @@ class SubAgentConfig:
     backend: str | None = None
     system_prompt: str | None = None
     max_cycles: int = 8
+    session_memory_enabled: bool = False
     exclude_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     denied_side_effects: list[str] = field(default_factory=list)
@@ -596,6 +698,8 @@ class SubAgentConfig:
             raise TypeError("sub-agent max_cycles must be an integer")
         if not 0 <= self.max_cycles <= _MAX_U32:
             raise ValueError("sub-agent max_cycles must be in the u32 range")
+        if not isinstance(self.session_memory_enabled, bool):
+            raise TypeError("sub-agent session_memory_enabled must be a boolean")
         if not isinstance(self.exclude_tools, list) or not all(isinstance(tool_name, str) for tool_name in self.exclude_tools):
             raise TypeError("sub-agent exclude_tools must be a list of strings")
         if not isinstance(self.metadata, dict) or not all(isinstance(key, str) for key in self.metadata):
@@ -624,6 +728,7 @@ class SubAgentConfig:
             "backend": self.backend,
             "system_prompt": self.system_prompt,
             "max_cycles": self.max_cycles,
+            "session_memory_enabled": self.session_memory_enabled,
             "exclude_tools": list(self.exclude_tools),
             "denied_side_effects": list(self.denied_side_effects),
             "denied_capability_tags": list(self.denied_capability_tags),
@@ -644,6 +749,7 @@ class SubAgentConfig:
                 "backend",
                 "system_prompt",
                 "max_cycles",
+                "session_memory_enabled",
                 "exclude_tools",
                 "denied_side_effects",
                 "denied_capability_tags",
@@ -659,6 +765,7 @@ class SubAgentConfig:
             backend=data.get("backend"),
             system_prompt=data.get("system_prompt"),
             max_cycles=data.get("max_cycles", 8),
+            session_memory_enabled=data.get("session_memory_enabled", False),
             exclude_tools=data.get("exclude_tools", []),
             denied_side_effects=data.get("denied_side_effects", []),
             denied_capability_tags=data.get("denied_capability_tags", []),

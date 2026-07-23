@@ -10,6 +10,7 @@
           "backend": "test",
           "system_prompt": "Research carefully.",
           "max_cycles": 4,
+          "session_memory_enabled": true,
           "exclude_tools": [
             "bash"
           ],
@@ -38,6 +39,7 @@
           "backend": null,
           "system_prompt": null,
           "max_cycles": 8,
+          "session_memory_enabled": false,
           "exclude_tools": [],
           "metadata": {},
           "denied_side_effects": [],
@@ -60,6 +62,7 @@
       "backend": "test",
       "system_prompt": "Research carefully.",
       "max_cycles": 4,
+      "session_memory_enabled": true,
       "exclude_tools": [
         "bash"
       ],

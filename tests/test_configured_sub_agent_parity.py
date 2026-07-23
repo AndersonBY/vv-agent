@@ -336,6 +336,7 @@ def test_configured_sub_agent_task_projection_matches_shared_contract(tmp_path: 
         "model": task.model,
         "user_prompt": task.user_prompt,
         "max_cycles": task.max_cycles,
+        "session_memory_enabled": task.metadata["session_memory_enabled"],
         "memory_compact_threshold": task.memory_compact_threshold,
         "memory_threshold_percentage": task.memory_threshold_percentage,
         "no_tool_policy": task.no_tool_policy,
@@ -501,6 +502,7 @@ def test_sub_agent_config_from_wire_normalizes_model() -> None:
         "backend": restored.backend,
         "system_prompt": restored.system_prompt,
         "max_cycles": restored.max_cycles,
+        "session_memory_enabled": restored.session_memory_enabled,
         "exclude_tools": restored.exclude_tools,
         "denied_side_effects": restored.denied_side_effects,
         "denied_capability_tags": restored.denied_capability_tags,
@@ -1132,17 +1134,19 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
         return ToolExecutionResult(tool_call_id="", content=json.dumps(outcome.to_dict()))
 
     registry.register_tool("contract_delegate", contract_delegate, "Run the configured sub-agent contract request")
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="delegate", name="contract_delegate", arguments={})],
+            ),
+            _finish("child done", tool_call_id="child-finish"),
+            _finish("parent done", tool_call_id="parent-finish"),
+        ]
+    )
     runtime = AgentRuntime(
-        llm_client=ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="",
-                    tool_calls=[ToolCall(id="delegate", name="contract_delegate", arguments={})],
-                ),
-                _finish("child done", tool_call_id="child-finish"),
-                _finish("parent done", tool_call_id="parent-finish"),
-            ]
-        ),
+        llm_client=llm,
+        model_provider=ScriptedModelProvider(backend="test", default_model="child-model", llm=llm),
         tool_registry=registry,
         default_workspace=tmp_path,
     )
@@ -1225,7 +1229,14 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
         sub_agents={"researcher": invalid_child},
     )
 
-    failure_result = failure_runtime.run(failure_task, ctx=context, sub_task_manager=_manager())
+    failure_context = ExecutionContext(
+        event_handler=events.append,
+        metadata={
+            "_vv_agent_run_id": "parent-run",
+            "_vv_agent_trace_id": "trace-parity",
+        },
+    )
+    failure_result = failure_runtime.run(failure_task, ctx=failure_context, sub_task_manager=_manager())
 
     assert failure_result.status == AgentStatus.COMPLETED
     sub_events = _sub_events(events)
@@ -2519,10 +2530,19 @@ def test_failed_child_preserves_usage_after_a_completed_cycle(tmp_path: Path) ->
     assert completed.metadata["error_code"] == _contract()["lifecycle"]["failure_error_code_fallback"]
     assert _contract()["lifecycle"]["preserve_failed_usage_after_completed_cycle"] is True
     assert completed.token_usage is not None
-    assert completed.token_usage["input_tokens"] == 11
-    assert completed.token_usage["output_tokens"] == 7
-    assert completed.token_usage["total_tokens"] == 18
-    assert completed.token_usage["cycles"][0]["cycle_index"] == 1
+    assert completed.token_usage["input_tokens"] is None
+    assert completed.token_usage["output_tokens"] is None
+    assert completed.token_usage["total_tokens"] is None
+    model_calls = completed.token_usage["model_calls"]
+    assert len(model_calls) == 2
+    assert model_calls[0]["cycle_index"] == 1
+    assert model_calls[0]["status"] == "completed"
+    assert model_calls[0]["usage"]["input_tokens"] == 11
+    assert model_calls[0]["usage"]["output_tokens"] == 7
+    assert model_calls[0]["usage"]["total_tokens"] == 18
+    assert model_calls[1]["cycle_index"] == 2
+    assert model_calls[1]["status"] == "ambiguous"
+    assert model_calls[1]["usage"]["total_tokens"] is None
 
 
 @pytest.mark.parametrize(

@@ -33,12 +33,23 @@ def test_build_system_prompt_can_include_session_memory_context() -> None:
     prompt = build_system_prompt(
         "You are a test agent.",
         language="en-US",
+        session_memory_enabled=True,
         session_memory_context="<Session Memory>\n## key_fact\n- prior decision\n</Session Memory>",
     )
 
     assert "<Session Memory>" in prompt
     assert prompt.index("</Agent Definition>") < prompt.index("<Session Memory>")
     assert prompt.index("<Session Memory>") < prompt.index("<Tools>")
+
+
+def test_build_system_prompt_ignores_session_memory_context_when_disabled() -> None:
+    prompt = build_system_prompt(
+        "You are a test agent.",
+        language="en-US",
+        session_memory_context="<Session Memory>\n- must not render\n</Session Memory>",
+    )
+
+    assert "<Session Memory>" not in prompt
 
 
 def test_prompt_includes_tool_governance_rules() -> None:
@@ -131,6 +142,7 @@ def test_build_system_prompt_bundle_includes_cacheable_sections() -> None:
         "Agent",
         language="en-US",
         current_time_utc=datetime(2026, 2, 17, 15, 0, 0, tzinfo=UTC),
+        session_memory_enabled=True,
         session_memory_context="<Session Memory>\n- note\n</Session Memory>",
     )
 

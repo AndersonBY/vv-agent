@@ -85,30 +85,7 @@
             }
           }
         ],
-        "memory_compacted": false,
-        "token_usage": {
-          "schema_version": "vv-agent.token-usage.v1",
-          "input_tokens": 1000,
-          "output_tokens": 100,
-          "total_tokens": 1100,
-          "reasoning_tokens": 0,
-          "usage_source": "provider_reported",
-          "cache_usage": {
-            "status": "provider_reported",
-            "read_input_tokens": 600,
-            "write_input_tokens": null,
-            "uncached_input_tokens": 400,
-            "source": "provider_usage"
-          },
-          "provider_usage": {
-            "prompt_tokens": 1000,
-            "completion_tokens": 100,
-            "total_tokens": 1100,
-            "prompt_tokens_details": {
-              "cached_tokens": 600
-            }
-          }
-        }
+        "memory_compacted": false
       }
     ],
     "final_answer": null,
@@ -116,7 +93,7 @@
     "error": null,
     "shared_state": {},
     "token_usage": {
-      "schema_version": "vv-agent.task-token-usage.v1",
+      "schema_version": "vv-agent.task-token-usage.v2",
       "input_tokens": 1000,
       "output_tokens": 100,
       "total_tokens": 1100,
@@ -128,9 +105,16 @@
         "uncached_input_tokens": 400,
         "source": "aggregate"
       },
-      "cycles": [
+      "model_calls": [
         {
+          "call_id": "op_model_cycle_2_main:attempt:1",
+          "operation_id": "op_model_cycle_2_main",
+          "attempt": 1,
+          "operation": "agent_cycle",
           "cycle_index": 2,
+          "backend": "test",
+          "model": "test-model",
+          "status": "completed",
           "usage": {
             "schema_version": "vv-agent.token-usage.v1",
             "input_tokens": 1000,
@@ -153,7 +137,8 @@
                 "cached_tokens": 600
               }
             }
-          }
+          },
+          "error_code": null
         }
       ]
     },

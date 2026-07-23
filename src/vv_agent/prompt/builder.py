@@ -141,6 +141,7 @@ def build_system_prompt(
     available_skills: list[dict[str, Any] | str] | None = None,
     workspace: str | Path | None = None,
     current_time_utc: datetime | None = None,
+    session_memory_enabled: bool = False,
     session_memory_context: str = "",
 ) -> str:
     return build_system_prompt_bundle(
@@ -154,6 +155,7 @@ def build_system_prompt(
         available_skills=available_skills,
         workspace=workspace,
         current_time_utc=current_time_utc,
+        session_memory_enabled=session_memory_enabled,
         session_memory_context=session_memory_context,
     ).prompt
 
@@ -170,6 +172,7 @@ def build_system_prompt_sections(
     available_skills: list[dict[str, Any] | str] | None = None,
     workspace: str | Path | None = None,
     current_time_utc: datetime | None = None,
+    session_memory_enabled: bool = False,
     session_memory_context: str = "",
 ) -> list[dict[str, Any]]:
     return build_system_prompt_bundle(
@@ -183,6 +186,7 @@ def build_system_prompt_sections(
         available_skills=available_skills,
         workspace=workspace,
         current_time_utc=current_time_utc,
+        session_memory_enabled=session_memory_enabled,
         session_memory_context=session_memory_context,
     ).sections
 
@@ -199,6 +203,7 @@ def build_system_prompt_bundle(
     available_skills: list[dict[str, Any] | str] | None = None,
     workspace: str | Path | None = None,
     current_time_utc: datetime | None = None,
+    session_memory_enabled: bool = False,
     session_memory_context: str = "",
 ) -> BuiltSystemPrompt:
     return create_system_prompt_builder(
@@ -212,6 +217,7 @@ def build_system_prompt_bundle(
         available_skills=available_skills,
         workspace=workspace,
         current_time_utc=current_time_utc,
+        session_memory_enabled=session_memory_enabled,
         session_memory_context=session_memory_context,
     ).build_result()
 
@@ -228,6 +234,7 @@ def create_system_prompt_builder(
     available_skills: list[dict[str, Any] | str] | None = None,
     workspace: str | Path | None = None,
     current_time_utc: datetime | None = None,
+    session_memory_enabled: bool = False,
     session_memory_context: str = "",
 ) -> SystemPromptBuilder:
     builder = SystemPromptBuilder()
@@ -239,7 +246,7 @@ def create_system_prompt_builder(
         )
     )
 
-    if session_memory_context:
+    if session_memory_enabled and session_memory_context:
         builder.add_section(
             PromptSection(
                 id="session_memory",

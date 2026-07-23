@@ -160,7 +160,7 @@ class CeleryBackend:
                     cycles=cycles,
                     error=cancellation_reason,
                     shared_state=shared_state,
-                    token_usage=summarize_task_token_usage(cycles),
+                    token_usage=summarize_task_token_usage(current.model_calls if current is not None else []),
                     budget_usage=(current.budget_usage if current is not None else None),
                 )
 
@@ -190,7 +190,7 @@ class CeleryBackend:
                     cycles=cycles,
                     error=cancellation_reason,
                     shared_state=shared_state,
-                    token_usage=summarize_task_token_usage(cycles),
+                    token_usage=summarize_task_token_usage(current.model_calls if current is not None else []),
                     budget_usage=(current.budget_usage if current is not None else None),
                 )
             assert response is not None
@@ -231,6 +231,7 @@ class CeleryBackend:
             shared_state.clear()
             shared_state.update(deepcopy(checkpoint.shared_state))
             checkpoint_controller.checkpoint = checkpoint
+            ctx.model_call_ledger.replace(checkpoint.model_calls)
             checkpoint_controller.set_next_claim_mode("continue")
 
         current = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
@@ -242,7 +243,7 @@ class CeleryBackend:
             cycles=cycles,
             final_answer="Reached max cycles without finish signal.",
             shared_state=shared_state,
-            token_usage=summarize_task_token_usage(cycles),
+            token_usage=summarize_task_token_usage(current.model_calls if current is not None else []),
             budget_usage=(current.budget_usage if current is not None else None),
         )
 

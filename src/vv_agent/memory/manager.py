@@ -973,7 +973,9 @@ class MemoryManager:
                 summarized = self.summary_callback(prompt, self.summary_backend, self.summary_model)
                 if isinstance(summarized, str) and summarized.strip():
                     return summarized.strip()
-            except Exception:
+            except Exception as exc:
+                if getattr(exc, "vv_agent_control_flow", False):
+                    raise
                 logging.getLogger(__name__).debug("Memory summary callback failed", exc_info=True)
 
         return self._build_local_summary(messages, artifacts)

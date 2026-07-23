@@ -1468,6 +1468,8 @@ class Runner:
                 "_vv_agent_input": user_input,
                 "_vv_agent_model_settings": resolved_model_settings,
                 "_vv_agent_model_provider": run_config.model_provider,
+                "_vv_agent_resolved_backend": resolved.backend,
+                "_vv_agent_resolved_model": resolved.model_id,
                 "_vv_agent_run_context": guardrail_context,
                 "_vv_agent_session": run_config.session,
                 "_vv_agent_session_id": event_session_id,
@@ -2816,8 +2818,8 @@ class Runner:
         return merged
 
     @staticmethod
-    def _resolve_workspace(workspace: Any | None) -> Path | None:
-        if workspace is None or hasattr(workspace, "read_text"):
+    def _resolve_workspace(workspace: str | Path | None) -> Path | None:
+        if workspace is None:
             return None
         return Path(workspace).expanduser().resolve()
 

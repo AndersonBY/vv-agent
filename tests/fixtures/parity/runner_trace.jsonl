@@ -1,13 +1,15 @@
 {"type":"run_started","agent_name":"trace-agent"}
 {"type":"cycle_started","cycle_index":1,"agent_name":"trace-agent"}
-{"type":"llm_started","cycle_index":1,"agent_name":"trace-agent","model":"direct"}
+{"type":"model_call_started","cycle_index":1,"agent_name":"trace-agent","call_id":"op_model_cycle_1_main:attempt:1","operation_id":"op_model_cycle_1_main","attempt":1,"operation":"agent_cycle","backend":"test","model":"direct"}
 {"type":"assistant_delta","cycle_index":1,"agent_name":"trace-agent","delta":"lookup"}
+{"type":"model_call_completed","cycle_index":1,"agent_name":"trace-agent","call_id":"op_model_cycle_1_main:attempt:1","operation_id":"op_model_cycle_1_main","attempt":1,"operation":"agent_cycle","backend":"test","model":"direct","usage":{"schema_version":"vv-agent.token-usage.v1","input_tokens":null,"output_tokens":null,"total_tokens":null,"reasoning_tokens":null,"usage_source":"accounting_missing","cache_usage":{"status":"accounting_missing","read_input_tokens":null,"write_input_tokens":null,"uncached_input_tokens":null,"source":null},"provider_usage":{}}}
 {"type":"tool_call_planned","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","arguments":{"query":"parity"}}
 {"type":"tool_call_started","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","arguments":{"query":"parity"}}
 {"type":"tool_call_completed","cycle_index":1,"agent_name":"trace-agent","tool_name":"lookup","tool_call_id":"lookup-call","status":"success","directive":"continue","error_code":null,"execution_started":true,"duration_ms":0}
 {"type":"cycle_started","cycle_index":2,"agent_name":"trace-agent"}
-{"type":"llm_started","cycle_index":2,"agent_name":"trace-agent","model":"direct"}
+{"type":"model_call_started","cycle_index":2,"agent_name":"trace-agent","call_id":"op_model_cycle_2_main:attempt:1","operation_id":"op_model_cycle_2_main","attempt":1,"operation":"agent_cycle","backend":"test","model":"direct"}
 {"type":"assistant_delta","cycle_index":2,"agent_name":"trace-agent","delta":"finish"}
+{"type":"model_call_completed","cycle_index":2,"agent_name":"trace-agent","call_id":"op_model_cycle_2_main:attempt:1","operation_id":"op_model_cycle_2_main","attempt":1,"operation":"agent_cycle","backend":"test","model":"direct","usage":{"schema_version":"vv-agent.token-usage.v1","input_tokens":null,"output_tokens":null,"total_tokens":null,"reasoning_tokens":null,"usage_source":"accounting_missing","cache_usage":{"status":"accounting_missing","read_input_tokens":null,"write_input_tokens":null,"uncached_input_tokens":null,"source":null},"provider_usage":{}}}
 {"type":"tool_call_planned","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","arguments":{"message":"done"}}
 {"type":"tool_call_started","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","arguments":{"message":"done"}}
 {"type":"tool_call_completed","cycle_index":2,"agent_name":"trace-agent","tool_name":"task_finish","tool_call_id":"finish-call","status":"success","directive":"finish","error_code":null,"execution_started":true,"duration_ms":0}

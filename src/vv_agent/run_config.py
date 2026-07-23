@@ -158,9 +158,10 @@ class RunConfig:
     model: str | ModelRef | ResolvedModelConfig | None = None
     model_provider: ModelProvider | None = None
     model_settings: ModelSettings | None = None
-    workspace: str | Path | Any | None = None
+    workspace: str | Path | None = None
     workspace_backend: Any | None = None
     session: Any | None = None
+    session_memory_enabled: bool = False
     max_cycles: int | None = None
     max_handoffs: int | None = None
     tool_policy: ToolPolicy | None = None
@@ -199,6 +200,10 @@ class RunConfig:
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
         _validate_bounded_int(self.max_handoffs, "max_handoffs", minimum=0)
         _validate_no_tool_policy(self.no_tool_policy, "RunConfig.no_tool_policy")
+        if not isinstance(self.session_memory_enabled, bool):
+            raise TypeError("RunConfig.session_memory_enabled must be a boolean")
+        if self.workspace is not None and not isinstance(self.workspace, (str, Path)):
+            raise TypeError("RunConfig.workspace must be a string or Path; use workspace_backend for custom storage")
         if self.model_provider is not None:
             missing = [
                 name

@@ -1,7 +1,7 @@
 {
   "contract": "checkpoint_store",
-  "version": 2,
-  "run_definition_schema": "vv-agent.run-definition.v1",
+  "version": 3,
+  "run_definition_schema": "vv-agent.run-definition.v2",
   "run_definition_storage": "credential_redacted_object_embedded_and_immutable_beside_matching_digest",
   "namespaces": {
     "sqlite_table": "checkpoints",
@@ -105,6 +105,14 @@
     "outbox_event_ids_unique": true,
     "identical_event_enqueue_reuses_existing_entry": true,
     "conflicting_event_enqueue_error": "event_identity_conflict",
+    "terminal_model_progress_atomically_updates_journal_ledger_budget_and_outbox": true,
+    "terminal_model_outbox_order": [
+      "model_terminal_event",
+      "budget_snapshot_or_budget_exhausted_if_configured"
+    ],
+    "model_call_ids_are_unique": true,
+    "receipt_replay_does_not_append_model_call_or_budget": true,
+    "cycle_commit_preserves_model_call_ledger": true,
     "run_definition_and_digest_immutable_after_create": true,
     "operator_abort_finalize_preserves_ambiguous_journal": true
   },
@@ -292,20 +300,91 @@
         "status": "running",
         "claim_token": "owner-b",
         "claimed_cycle": 1,
-        "lease_expires_at_ms": 300
+        "lease_expires_at_ms": 300,
+        "model_journal_state": "planned",
+        "model_call_count": 0,
+        "outbox_event_types": []
       },
       "operation": {
         "kind": "progress",
         "expected_revision": 2,
         "claim_token": "owner-b",
-        "journal_state": "started"
+        "model_identity": {
+          "call_id": "op_model_cycle_1_main:attempt:1",
+          "operation_id": "op_model_cycle_1_main",
+          "attempt": 1,
+          "operation": "agent_cycle",
+          "cycle_index": 1,
+          "backend": "test",
+          "model": "test-model"
+        },
+        "journal_state": "started",
+        "append_outbox_event_types": [
+          "model_call_started"
+        ]
       },
       "expected": {
         "updated": true,
         "revision": 3,
         "claim_token": "owner-b",
         "claimed_cycle": 1,
-        "journal_state": "started"
+        "journal_state": "started",
+        "model_call_count": 0,
+        "outbox_event_types": [
+          "model_call_started"
+        ]
+      }
+    },
+    {
+      "name": "terminal_model_progress_updates_ledger_budget_and_outbox",
+      "initial": {
+        "revision": 3,
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": "owner-b",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 300,
+        "model_journal_state": "started",
+        "model_call_count": 0,
+        "budget_total_tokens": 0,
+        "outbox_event_types": [
+          "model_call_started"
+        ]
+      },
+      "operation": {
+        "kind": "progress",
+        "expected_revision": 3,
+        "claim_token": "owner-b",
+        "model_identity": {
+          "call_id": "op_model_cycle_1_main:attempt:1",
+          "operation_id": "op_model_cycle_1_main",
+          "attempt": 1,
+          "operation": "agent_cycle",
+          "cycle_index": 1,
+          "backend": "test",
+          "model": "test-model"
+        },
+        "journal_state": "succeeded",
+        "ledger_status": "completed",
+        "budget_total_tokens": 20,
+        "append_outbox_event_types": [
+          "model_call_completed",
+          "budget_snapshot"
+        ]
+      },
+      "expected": {
+        "updated": true,
+        "revision": 4,
+        "claim_token": "owner-b",
+        "claimed_cycle": 1,
+        "journal_state": "succeeded",
+        "model_call_count": 1,
+        "budget_total_tokens": 20,
+        "outbox_event_types": [
+          "model_call_started",
+          "model_call_completed",
+          "budget_snapshot"
+        ]
       }
     },
     {
@@ -478,6 +557,7 @@
         "cycle_index": 0,
         "claim_token": "owner-b",
         "claimed_cycle": 1,
+        "model_call_count": 1,
         "model_journal_count": 1,
         "tool_journal_count": 1
       },
@@ -492,6 +572,7 @@
         "revision": 5,
         "cycle_index": 1,
         "claim_token": null,
+        "model_call_count": 1,
         "model_journal_count": 0,
         "tool_journal_count": 0
       }

@@ -1,9 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "framework_defaults": {
     "max_cycles": 10,
     "max_handoffs": 10,
     "no_tool_policy": "continue",
+    "session_memory_enabled": false,
     "budget_limits": null,
     "host_cost_meter": null,
     "checkpoint_config": null,
@@ -61,6 +62,17 @@
       "python": "session",
       "rust": "session",
       "status": "equivalent"
+    },
+    {
+      "capability": "session_memory",
+      "python": "session_memory_enabled",
+      "rust": "session_memory_enabled",
+      "status": "equivalent",
+      "default": false,
+      "parent_to_child_inheritance": false,
+      "metadata_override": false,
+      "legacy_aliases": [],
+      "seed_implies_enabled": false
     },
     {
       "capability": "cycle_and_handoff_limits",

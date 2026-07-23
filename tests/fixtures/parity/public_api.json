@@ -226,6 +226,21 @@
           "rust": "vv_agent::TokenUsage"
         },
         {
+          "id": "result.model_call_operation",
+          "python": "vv_agent.ModelCallOperation",
+          "rust": "vv_agent::ModelCallOperation"
+        },
+        {
+          "id": "result.model_call_status",
+          "python": "vv_agent.ModelCallStatus",
+          "rust": "vv_agent::ModelCallStatus"
+        },
+        {
+          "id": "result.model_call_record",
+          "python": "vv_agent.ModelCallRecord",
+          "rust": "vv_agent::ModelCallRecord"
+        },
+        {
           "id": "result.task_token_usage",
           "python": "vv_agent.TaskTokenUsage",
           "rust": "vv_agent::TaskTokenUsage"
@@ -782,11 +797,6 @@
           "rust": "vv_agent::AgentRuntime"
         },
         {
-          "id": "runtime_backend.cycle_runner",
-          "python": "vv_agent.runtime.CycleRunner",
-          "rust": "vv_agent::CycleRunner"
-        },
-        {
           "id": "runtime_backend.tool_call_runner",
           "python": "vv_agent.runtime.ToolCallRunner",
           "rust": "vv_agent::ToolCallRunner"
@@ -1226,6 +1236,19 @@
           }
         },
         {
+          "id": "session_memory_enabled",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "session_memory_enabled"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "session_memory_enabled"
+          }
+        },
+        {
           "id": "exclude_tools",
           "kind": "field",
           "python": {
@@ -1542,6 +1565,19 @@
           "rust": {
             "kind": "field",
             "name": "session"
+          }
+        },
+        {
+          "id": "session_memory_enabled",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "session_memory_enabled"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "session_memory_enabled"
           }
         },
         {

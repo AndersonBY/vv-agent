@@ -288,11 +288,105 @@
     }
   },
   "session_memory": {
+    "enabled_by_default": false,
+    "explicit_control": "session_memory_enabled",
+    "accepted_aliases": [],
+    "seed_implies_enabled": false,
+    "existing_storage_implies_enabled": false,
+    "parent_value_inherited_by_child": false,
+    "gate_cases": [
+      {
+        "name": "explicitly_enabled",
+        "control": true,
+        "provided_context": "fresh decision",
+        "stored_entries_present": true,
+        "expected": {
+          "context_sections_rendered": 1,
+          "storage_reads_allowed": true,
+          "storage_writes_allowed": true,
+          "session_memory_model_dispatches_allowed": true
+        }
+      },
+      {
+        "name": "explicitly_disabled_ignores_all_memory_inputs",
+        "control": false,
+        "provided_context": "must not be rendered",
+        "seed_entries_present": true,
+        "stored_entries_present": true,
+        "expected": {
+          "context_sections_rendered": 0,
+          "storage_read_count": 0,
+          "storage_write_count": 0,
+          "session_memory_model_dispatch_count": 0
+        }
+      },
+      {
+        "name": "omitted_control_uses_disabled_default",
+        "control": "omitted",
+        "provided_context": "must not be rendered",
+        "seed_entries_present": true,
+        "stored_entries_present": true,
+        "expected": {
+          "context_sections_rendered": 0,
+          "storage_read_count": 0,
+          "storage_write_count": 0,
+          "session_memory_model_dispatch_count": 0
+        }
+      },
+      {
+        "name": "child_does_not_inherit_enabled_parent",
+        "parent_control": true,
+        "child_control": "omitted",
+        "expected": {
+          "child_effective_control": false,
+          "child_context_sections_rendered": 0,
+          "child_storage_read_count": 0,
+          "child_storage_write_count": 0,
+          "child_session_memory_model_dispatch_count": 0
+        }
+      }
+    ],
     "stale_fact": "stale decision",
     "fresh_fact": "fresh decision",
     "block_count": 1,
     "initialized_after_compaction": true,
-    "baseline_includes_injected_context": true
+    "baseline_includes_injected_context": true,
+    "invalid_output_diagnostic": {
+      "type": "diagnostic",
+      "level": "warning",
+      "code": "session_memory_output_invalid",
+      "details_required": [
+        "reason",
+        "backend",
+        "model"
+      ],
+      "reason_values": [
+        "empty_output",
+        "json_array_missing",
+        "no_valid_entries"
+      ],
+      "forbidden_details": [
+        "prompt",
+        "output",
+        "messages",
+        "error_text"
+      ]
+    },
+    "checkpoint_receipt_replay": {
+      "new_model_dispatches": 0,
+      "new_model_call_records": 0,
+      "new_budget_increment": 0,
+      "derived_mutation_is_reapplied": true,
+      "entry_merge_uses_canonical_category_and_content_key": true,
+      "extraction_baseline_advances_after_merge": true,
+      "replay_is_idempotent": true
+    },
+    "control_outcomes_propagate": [
+      "cancellation",
+      "budget_exhaustion",
+      "checkpoint_ambiguity",
+      "checkpoint_integrity_failure"
+    ]
   },
   "artifacts": {
     "fallback_pattern": "^tool_result_[0-9a-f]{32}\\.txt$",

@@ -38,6 +38,9 @@ from vv_agent.app_server.schema import _schema_bundle, typescript_schema_bundle
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadStore
 from vv_agent.events import (
+    ModelCallCompletedEvent,
+    ModelCallFailedEvent,
+    ModelCallStartedEvent,
     ToolCallCompletedEvent,
     ToolCallPlannedEvent,
     ToolCallStartedEvent,
@@ -46,7 +49,19 @@ from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
 from vv_agent.runner import Runner
 from vv_agent.tools.metadata import ToolMetadata
-from vv_agent.types import AgentResult, AgentStatus, CompletionReason
+from vv_agent.types import (
+    AgentResult,
+    AgentStatus,
+    CacheUsage,
+    CacheUsageStatus,
+    CompletionReason,
+    ModelCallOperation,
+    ModelCallRecord,
+    ModelCallStatus,
+    TaskTokenUsage,
+    TokenUsage,
+    UsageSource,
+)
 
 
 def _observable_contract() -> dict[str, Any]:
@@ -58,8 +73,13 @@ def _status_projection(name: str) -> dict[str, Any]:
     return next(case for case in _observable_contract()["terminal"]["agentStatusProjection"] if case["name"] == name)
 
 
-def _mapped_notifications(event: Any) -> list[dict[str, Any]]:
-    projection = map_run_event(event, thread_id="thread-tool", turn_id="turn-tool")
+def _mapped_notifications(
+    event: Any,
+    *,
+    thread_id: str = "thread-tool",
+    turn_id: str = "turn-tool",
+) -> list[dict[str, Any]]:
+    projection = map_run_event(event, thread_id=thread_id, turn_id=turn_id)
     messages: list[dict[str, Any]] = []
     if projection.notification_method is not None:
         messages.append(
@@ -147,6 +167,157 @@ def test_tool_lifecycle_app_server_projection_matches_shared_fixture() -> None:
         ),
     )
     assert _mapped_notifications(denied) == contract["policyDenial"]["completedNotifications"]
+
+
+def _provider_reported_model_usage() -> TokenUsage:
+    return TokenUsage(
+        input_tokens=1000,
+        output_tokens=120,
+        total_tokens=1120,
+        reasoning_tokens=None,
+        usage_source=UsageSource.PROVIDER_REPORTED,
+        cache_usage=CacheUsage(
+            status=CacheUsageStatus.PROVIDER_REPORTED,
+            read_input_tokens=640,
+            write_input_tokens=None,
+            uncached_input_tokens=360,
+            source="provider_usage",
+        ),
+        provider_usage={
+            "prompt_tokens": 1000,
+            "completion_tokens": 120,
+            "total_tokens": 1120,
+            "prompt_tokens_details": {"cached_tokens": 640},
+        },
+    )
+
+
+def test_model_lifecycle_app_server_projection_matches_shared_fixture() -> None:
+    contract = _observable_contract()["modelLifecycle"]
+    shared: dict[str, Any] = {
+        "run_id": "run_model",
+        "trace_id": "trace_model",
+        "attempt": 1,
+        "cycle_index": 2,
+    }
+    started = ModelCallStartedEvent(
+        **shared,
+        event_id="evt_model_started",
+        created_at=100.4,
+        call_id="op_model_cycle_2_main:attempt:1",
+        operation_id="op_model_cycle_2_main",
+        operation="agent_cycle",
+        backend="test",
+        model="model-parity",
+    )
+    completed = ModelCallCompletedEvent(
+        **shared,
+        event_id="evt_model_completed",
+        created_at=100.5,
+        call_id="op_model_cycle_2_main:attempt:1",
+        operation_id="op_model_cycle_2_main",
+        operation="agent_cycle",
+        backend="test",
+        model="model-parity",
+        usage=_provider_reported_model_usage(),
+    )
+    failed = ModelCallFailedEvent(
+        **shared,
+        event_id="evt_model_failed",
+        created_at=100.6,
+        call_id="op_model_cycle_2_session:attempt:1",
+        operation_id="op_model_cycle_2_session",
+        operation="session_memory",
+        backend="memory-test",
+        model="memory-model",
+        outcome="definitive",
+        usage=TokenUsage(),
+        error_code="provider_rejected",
+    )
+
+    assert _mapped_notifications(started, thread_id="thread-model", turn_id="turn-model") == contract[
+        "startedNotifications"
+    ]
+    assert _mapped_notifications(completed, thread_id="thread-model", turn_id="turn-model") == contract[
+        "completedNotifications"
+    ]
+    assert _mapped_notifications(failed, thread_id="thread-model", turn_id="turn-model") == contract[
+        "failedNotifications"
+    ]
+    notifications = [
+        *contract["startedNotifications"],
+        *contract["completedNotifications"],
+        *contract["failedNotifications"],
+    ]
+    for notification in notifications:
+        payload = notification["params"]["payload"]
+        assert not set(payload).intersection(contract["forbiddenPayloadFields"])
+
+
+def test_terminal_token_usage_projection_matches_shared_fixture_and_store() -> None:
+    expected = _observable_contract()["terminal"]["tokenUsageProjection"]["value"]
+    usage = TaskTokenUsage()
+    usage.add_model_call(
+        ModelCallRecord(
+            call_id="op_model_cycle_2_main:attempt:1",
+            operation_id="op_model_cycle_2_main",
+            attempt=1,
+            operation=ModelCallOperation.AGENT_CYCLE,
+            cycle_index=2,
+            backend="test",
+            model="model-parity",
+            status=ModelCallStatus.COMPLETED,
+            usage=_provider_reported_model_usage(),
+        )
+    )
+    processor, transport, store, state = _initialized_processor()
+    thread = store.create_thread(agent_key="default")
+    turn = store.create_turn(thread_id=thread.thread_id, input=[], status="running")
+    state.subscribe(thread.thread_id, "conn_1")
+    adapter = RunAdapter(
+        host=_ContractHost(),
+        store=store,
+        state_manager=state,
+        router=processor._router,
+    )
+    raw_result = AgentResult(
+        status=AgentStatus.COMPLETED,
+        messages=[],
+        cycles=[],
+        final_answer="done",
+        completion_reason=CompletionReason.TOOL_FINISH,
+        token_usage=usage,
+    )
+    result = RunResult(
+        input="run",
+        new_items=[],
+        final_output="done",
+        status=AgentStatus.COMPLETED,
+        raw_result=raw_result,
+        token_usage=usage,
+        run_id="run_model_usage",
+        trace_id="trace_model_usage",
+        agent_name="default",
+    )
+
+    adapter._complete_turn(
+        "conn_1",
+        StartedTurn(thread=thread, turn=turn, handle=cast(RunHandle, object())),
+        result=result,
+        error=None,
+    )
+
+    messages: list[dict[str, Any]] = []
+    while True:
+        message = transport.receive_outbound(timeout=1)
+        messages.append(message)
+        if message.get("method") == "turn/completed":
+            break
+    payload = next(message["params"] for message in messages if message.get("method") == "turn/completed")
+    stored_turn = store.read_thread(thread.thread_id).turns[0]
+
+    assert payload["tokenUsage"] == expected
+    assert stored_turn.result["tokenUsage"] == expected
 
 
 class _ContractHost:
@@ -499,7 +670,7 @@ def test_budget_exhaustion_projects_typed_usage_to_turn_and_store() -> None:
         attempted_increment=None,
         overshoot=2,
         unit="tokens",
-        enforcement_boundary=BudgetEnforcementBoundary.LLM_COMPLETE,
+        enforcement_boundary=BudgetEnforcementBoundary.MODEL_CALL_COMPLETE,
     )
     raw_result = AgentResult(
         status=AgentStatus.FAILED,

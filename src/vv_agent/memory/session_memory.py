@@ -173,7 +173,9 @@ class SessionMemory:
                 self.config.extraction_backend,
                 self.config.extraction_model,
             )
-        except Exception:
+        except Exception as exc:
+            if getattr(exc, "vv_agent_control_flow", False):
+                raise
             logger.debug("Session memory extraction callback failed", exc_info=True)
             return 0
 

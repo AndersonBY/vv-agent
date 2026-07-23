@@ -67,6 +67,7 @@ class AgentCompiler:
         model = run_config.model or agent.model or resolved.selected_model
         metadata = dict(agent.metadata)
         metadata.update(run_config.metadata)
+        metadata["session_memory_enabled"] = run_config.session_memory_enabled
         _apply_tool_policy_metadata(metadata, run_config.tool_policy)
         metadata.setdefault("trace_id", trace_id)
         project_resolved_model_limits(
@@ -200,6 +201,7 @@ class AgentCompiler:
             max_output_tokens=resolved.max_output_tokens,
         )
         metadata["_vv_agent_tool_use_behavior"] = controls["tool_use_behavior"]
+        metadata["session_memory_enabled"] = controls["session_memory_enabled"]
         if controls["stop_at_tool_names"]:
             metadata["_vv_agent_stop_at_tool_names"] = list(controls["stop_at_tool_names"])
         _apply_tool_policy_metadata(metadata, run_config.tool_policy)

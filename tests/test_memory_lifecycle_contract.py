@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
-from support import FixedModelProvider, ModelMapProvider
+from support import FixedModelProvider, ModelMapProvider, model_call_context
 
 from vv_agent import Agent, RunConfig, Runner
 from vv_agent.config import ResolvedModelConfig
@@ -377,7 +377,7 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
         ],
         cycle_index=2,
         memory_manager=_ptl_memory_manager(),
-        ctx=ExecutionContext(
+        ctx=model_call_context(
             event_handler=emitted.append,
             metadata={
                 "_vv_agent_memory_providers": [provider],
@@ -481,7 +481,7 @@ def test_preemptive_compaction_producer_reports_content_aware_outcome(
         cycle_index=4,
         memory_manager=manager,
         previous_prompt_tokens=3_500,
-        ctx=ExecutionContext(event_handler=emitted.append),
+        ctx=model_call_context(event_handler=emitted.append),
     )
 
     started, completed = emitted
@@ -521,7 +521,7 @@ def test_preemptive_microcompact_runs_before_optional_warning() -> None:
         cycle_index=4,
         memory_manager=manager,
         previous_prompt_tokens=3_800,
-        ctx=ExecutionContext(event_handler=emitted.append),
+        ctx=model_call_context(event_handler=emitted.append),
     )
 
     assert contract["order"] == [
@@ -778,7 +778,7 @@ def test_memory_provider_attempt_errors_are_fail_open() -> None:
                 summary_callback=lambda _prompt, _backend, _model: _summary_payload(),
             ),
             previous_prompt_tokens=160,
-            ctx=ExecutionContext(
+            ctx=model_call_context(
                 event_handler=emitted.append,
                 metadata={
                     "_vv_agent_memory_providers": [provider],

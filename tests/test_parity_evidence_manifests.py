@@ -329,6 +329,21 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::TokenUsage",
             },
             {
+                "id": "result.model_call_operation",
+                "python": "vv_agent.ModelCallOperation",
+                "rust": "vv_agent::ModelCallOperation",
+            },
+            {
+                "id": "result.model_call_status",
+                "python": "vv_agent.ModelCallStatus",
+                "rust": "vv_agent::ModelCallStatus",
+            },
+            {
+                "id": "result.model_call_record",
+                "python": "vv_agent.ModelCallRecord",
+                "rust": "vv_agent::ModelCallRecord",
+            },
+            {
                 "id": "result.task_token_usage",
                 "python": "vv_agent.TaskTokenUsage",
                 "rust": "vv_agent::TaskTokenUsage",
@@ -825,11 +840,6 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::AgentRuntime",
             },
             {
-                "id": "runtime_backend.cycle_runner",
-                "python": "vv_agent.runtime.CycleRunner",
-                "rust": "vv_agent::CycleRunner",
-            },
-            {
                 "id": "runtime_backend.tool_call_runner",
                 "python": "vv_agent.runtime.ToolCallRunner",
                 "rust": "vv_agent::ToolCallRunner",
@@ -943,6 +953,7 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _field("backend", "backend", "backend"),
             _field("system_prompt", "system_prompt", "system_prompt"),
             _field("max_cycles", "max_cycles", "max_cycles"),
+            _field("session_memory_enabled", "session_memory_enabled", "session_memory_enabled"),
             _field("exclude_tools", "exclude_tools", "exclude_tools"),
             _field("metadata", "metadata", "metadata"),
             _field("denied_side_effects", "denied_side_effects", "denied_side_effects"),
@@ -994,6 +1005,7 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _field("workspace", "workspace", "workspace"),
             _field("workspace_backend", "workspace_backend", "workspace_backend"),
             _field("session", "session", "session"),
+            _field("session_memory_enabled", "session_memory_enabled", "session_memory_enabled"),
             _field("initial_messages", "initial_messages", "initial_messages"),
             _field("max_cycles", "max_cycles", "max_cycles"),
             _field("no_tool_policy", "no_tool_policy", "no_tool_policy"),
@@ -1595,6 +1607,7 @@ PROMPT_SCENARIOS: tuple[dict[str, Any], ...] = (
             "enable_todo_management": True,
             "language": "en-US",
             "original_system_prompt": "You are a careful coding agent.",
+            "session_memory_enabled": True,
             "session_memory_context": "<Session Memory>\n- Keep source evidence.\n</Session Memory>",
             "use_workspace": True,
         },
@@ -1623,6 +1636,7 @@ PROMPT_SCENARIOS: tuple[dict[str, Any], ...] = (
             "enable_todo_management": True,
             "language": "zh-CN",
             "original_system_prompt": "你是一个严谨的编码 Agent。",
+            "session_memory_enabled": True,
             "session_memory_context": "<Session Memory>\n- 保留源码证据。\n</Session Memory>",
             "use_workspace": True,
         },
@@ -1640,7 +1654,8 @@ PROMPT_SCENARIOS: tuple[dict[str, Any], ...] = (
             "enable_todo_management": False,
             "language": "en-US",
             "original_system_prompt": "Return only verified facts.",
-            "session_memory_context": "",
+            "session_memory_enabled": False,
+            "session_memory_context": "<Session Memory>\n- MUST NOT RENDER.\n</Session Memory>",
             "use_workspace": False,
         },
     },
@@ -1677,7 +1692,7 @@ PROMPT_SCENARIOS: tuple[dict[str, Any], ...] = (
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode()
 
 
 def _resolve_python_target(path: str) -> Any:
@@ -1806,6 +1821,7 @@ def _render_prompt_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
             available_sub_agents=deepcopy(inputs["available_sub_agents"]),
             available_skills=deepcopy(inputs["available_skills"]),
             current_time_utc=current_time,
+            session_memory_enabled=bool(inputs.get("session_memory_enabled", False)),
             session_memory_context=str(inputs["session_memory_context"]),
         )
     elif producer == "SystemPromptBuilder":
@@ -1834,6 +1850,40 @@ def _build_prompt_bundle_manifest() -> dict[str, Any]:
         scenario = deepcopy(source)
         scenario["output"] = _render_prompt_scenario(scenario)
         scenarios.append(scenario)
+    session_memory_gate = {
+        "context_presence_does_not_enable_session_memory": True,
+        "control": "session_memory_enabled",
+        "default": False,
+        "disabled_or_omitted_context_behavior": "ignore_without_rendering",
+        "enabled_value": True,
+        "probe_cases": [
+            {
+                "base_scenario": "en-US-minimal",
+                "expected_prompt_equals_base_output": True,
+                "expected_session_memory_section_count": 0,
+                "name": "explicit_false_ignores_nonempty_context",
+            },
+            {
+                "base_scenario": "en-US-minimal",
+                "expected_prompt_equals_base_output": True,
+                "expected_session_memory_section_count": 0,
+                "input_mutation": {"remove": "session_memory_enabled"},
+                "name": "omitted_control_ignores_nonempty_context",
+            },
+        ],
+        "session_memory_section_requires_enabled_true": True,
+    }
+    minimal = next(scenario for scenario in scenarios if scenario["id"] == "en-US-minimal")
+    for probe in session_memory_gate["probe_cases"]:
+        probe_scenario = deepcopy(next(source for source in PROMPT_SCENARIOS if source["id"] == probe["base_scenario"]))
+        mutation = probe.get("input_mutation")
+        if isinstance(mutation, dict):
+            probe_scenario["input"].pop(str(mutation["remove"]), None)
+        output = _render_prompt_scenario(probe_scenario)
+        assert sum(section["id"] == "session_memory" for section in output["sections"]) == probe[
+            "expected_session_memory_section_count"
+        ]
+        assert (output["prompt"] == minimal["output"]["prompt"]) is probe["expected_prompt_equals_base_output"]
     return {
         "contract": "vv-agent-system-prompt-v1",
         "normalization_rules": {
@@ -1841,6 +1891,7 @@ def _build_prompt_bundle_manifest() -> dict[str, Any]:
         },
         "scenarios": scenarios,
         "schema_version": 1,
+        "session_memory_gate": session_memory_gate,
     }
 
 
@@ -1945,7 +1996,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 149
+    assert len(capability_ids) == 151
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -1955,7 +2006,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 247
+        == 249
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

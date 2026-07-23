@@ -13,11 +13,12 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
     contract = json.loads(FIXTURE.read_text(encoding="utf-8"))
     controls = {entry["capability"]: entry for entry in contract["per_run_controls"]}
 
-    assert contract["version"] == 1
+    assert contract["version"] == 2
     assert contract["framework_defaults"] == {
         "max_cycles": 10,
         "max_handoffs": 10,
         "no_tool_policy": "continue",
+        "session_memory_enabled": False,
         "budget_limits": None,
         "host_cost_meter": None,
         "checkpoint_config": None,
@@ -31,6 +32,7 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "model_settings",
         "workspace",
         "session_history",
+        "session_memory",
         "cycle_and_handoff_limits",
         "run_budget",
         "durable_checkpoint_resume",
@@ -59,6 +61,7 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
         "workspace",
         "workspace_backend",
         "session",
+        "session_memory_enabled",
         "max_cycles",
         "max_handoffs",
         "no_tool_policy",
