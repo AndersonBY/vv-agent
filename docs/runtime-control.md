@@ -134,9 +134,13 @@ returns `False` and the completed result remains authoritative.
 ## Typed Event Producers
 
 The core Runner emits `run_started` followed by `agent_started`, then
-`cycle_started` and `llm_started` for every cycle. `assistant_delta` is emitted
-only when the LLM adapter projects a valid provider stream delta; the complete
-`cycle_llm_response` diagnostic is not projected as a duplicate delta.
+`cycle_started` for every cycle. Every model dispatch admitted at the provider
+boundary emits `model_call_started` followed by exactly one terminal
+`model_call_completed` or `model_call_failed` event. Agent cycles, Session
+Memory, and full memory compaction use this same task-neutral lifecycle.
+`assistant_delta` is emitted only when the LLM adapter projects a valid
+provider stream delta; the complete `cycle_llm_response` diagnostic is not
+projected as a duplicate delta.
 
 Actual tool execution uses a three-event lifecycle after serialized arguments
 have been normalized:
@@ -161,7 +165,7 @@ events. Unknown tools, policy denials, and approval short-circuits emit planned
 plus completed with `execution_started=False`, no started event, and null
 duration. Cancellation or process loss after started may leave no completed
 event; these observations do not provide exactly-once execution or replace the
-checkpoint v2 operation journal.
+checkpoint v3 operation journal.
 
 When a configured session accepts the current turn through `add_items()`, the
 Runner emits `session_persisted`. Run, trace, agent, and session identities are

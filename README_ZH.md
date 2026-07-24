@@ -4,6 +4,36 @@
 
 从 VectorVein 生产环境抽象出的轻量 Agent 框架。基于 cycle 的执行模型，支持可插拔 LLM 后端、工具分发、上下文压缩和分布式调度。
 
+## 安装
+
+当前稳定版本为 `0.8.0`。它和 Rust `vv-agent` crate 都实现语言无关的
+Contract `3.0.0`，两边能力一致，只保留符合各自语言习惯的 API 写法。
+
+```bash
+python -m pip install "vv-agent==0.8.0"
+```
+
+需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
+`vv-agent[s3]`。Contract 3 和仓库 `HEAD` 采用 forward-only 设计：当前版本只读取
+当前严格定义的公共 API 与传输数据结构。需要旧协议的应用应固定旧包版本。
+
+### 0.8.0 重点能力
+
+- 每次真正进入模型调用边界的尝试都会写入
+  `result.token_usage.model_calls`，包括 Agent 主循环、Session Memory、完整上下文
+  压缩、失败、重试和结果不确定的调用。Provider 没有返回 token 或缓存字段时会明确
+  保持“不可用”，不会伪装成 0。
+- 工具参数会在审批和副作用发生前，按照 JSON Schema Draft 2020-12 对完整参数做
+  校验。无效调用返回结构化的 `invalid_tool_arguments`，不会执行工具 handler。
+- 可选的宿主输出校验默认关闭；开启后最多执行一次不携带任何工具的修复回调，之后
+  才提交终态结果。
+- 持久化执行统一使用 `vv-agent.checkpoint.v3`、
+  `vv-agent.run-definition.v2`、`vv-agent.distributed-run.v2` 和
+  `vv-agent.distributed-worker-response.v1`，严格限定恢复与分布式 controller 边界。
+
+详细规则见[输出校验](docs/output-validation.md)和
+[Checkpoint 与恢复](docs/checkpoint-resume.md)。
+
 ## 架构
 
 ```
@@ -24,9 +54,11 @@ interactive session API。位于包模块中的扩展点包括 `vv_agent.memory.
 和 `vv_agent.tools.ToolExecutor`。底层 runtime 实现细节包括 `AgentTask`、
 `AgentResult`、`Message`、`CycleRecord` 和 `ToolCall`。
 
-任务完成由工具显式触发：agent 调用 `task_finish` 或 `ask_user` 来标记终态，不做"最后一条消息即答案"的隐式推断。
+默认由工具显式控制任务状态：Agent 调用 `task_finish` 完成，或调用 `ask_user`
+暂停。宿主也可以声明 no-tool policy，让普通 assistant 回复直接完成或等待用户；框架只
+执行该声明，不会根据文本是否“像最终答案”自行判断任务类型。
 
-## 配置
+## 仓库配置
 
 ```bash
 cp local_settings.example.py local_settings.py
@@ -129,12 +161,13 @@ for event in Runner.stream_sync(agent, "继续刚才的话题并汇报进度", r
 runtime 事件入口只有强类型 `RunEvent`；任务无关的内部观测统一使用
 `DiagnosticEvent`。
 
-一个参数已规范化的工具调用依次发出 `tool_call_planned`、可选审批事件、在可能产生
-副作用前紧邻发出的 `tool_call_started`，以及结果形成后的
-`tool_call_completed`。参数解析失败不会发出这些事件；策略拒绝、审批短路和未知工具
-只发出 planned 与 completed，不发 started。completed 事件包含 `directive`、可空的
+一个参数已规范化且通过 schema 校验的工具调用依次发出 `tool_call_planned`、可选
+审批事件、在可能产生副作用前紧邻发出的 `tool_call_started`，以及结果形成后的
+`tool_call_completed`。参数解析失败不会发出这些事件；schema 校验失败、策略拒绝、
+审批短路和未知工具只发出 planned 与 completed，不发 started。completed 事件包含
+`directive`、可空的
 `error_code`、`execution_started` 和可空的单调时钟 `duration_ms`。取消或进程退出可能
-留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v2 operation journal
+留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v3 operation journal
 为准。
 
 需要直接控制 cycle loop 的后端集成仍可使用底层 `AgentRuntime` API。

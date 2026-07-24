@@ -4,6 +4,41 @@
 
 A lightweight agent framework extracted from VectorVein's production runtime. Cycle-based execution with pluggable LLM backends, tool dispatch, memory compression, and distributed scheduling.
 
+## Install
+
+The current stable release is `0.8.0`. It implements the same language-neutral
+Contract `3.0.0` behavior as the Rust `vv-agent` crate while keeping a
+Python-idiomatic API.
+
+```bash
+python -m pip install "vv-agent==0.8.0"
+```
+
+Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
+integrations are needed. Contract 3 and repository `HEAD` are forward-only:
+current readers accept only the current strict public and wire shapes. Pin an
+older package release when an application must retain an older protocol.
+
+### 0.8.0 Highlights
+
+- Every admitted model dispatch is recorded in
+  `result.token_usage.model_calls`, including agent cycles, Session Memory,
+  full memory compaction, failures, retries, and ambiguous outcomes. Missing
+  provider token or cache fields remain unavailable instead of being reported
+  as zero.
+- Tool arguments are validated as a complete JSON Schema Draft 2020-12 value
+  before approval or side effects. Invalid calls return structured
+  `invalid_tool_arguments` details without invoking the handler.
+- Optional host output validation is disabled by default and can make at most
+  one tools-free repair callback before a terminal result is committed.
+- Durable execution uses `vv-agent.checkpoint.v3`,
+  `vv-agent.run-definition.v2`, `vv-agent.distributed-run.v2`, and
+  `vv-agent.distributed-worker-response.v1` for strict recovery and
+  distributed-controller boundaries.
+
+See [output validation](docs/output-validation.md) and
+[checkpoint/resume](docs/checkpoint-resume.md) for the detailed contracts.
+
 ## Architecture
 
 ```
@@ -30,7 +65,7 @@ Task completion is explicit: tool directives are the default, while a declared
 no-tool policy can finish or pause on a normal assistant response. No implicit
 "last message = answer" heuristic is used.
 
-## Setup
+## Repository Setup
 
 ```bash
 cp local_settings.example.py local_settings.py
@@ -139,14 +174,14 @@ whose `parent_run_id` points at the requested run. Typed `RunEvent` is the only
 public runtime event boundary; task-neutral observations use
 `DiagnosticEvent`.
 
-For a normalized tool call, the execution lifecycle is
+For a normalized and schema-valid tool call, the execution lifecycle is
 `tool_call_planned`, optional approval events, `tool_call_started` immediately
 before effects may begin, and `tool_call_completed` after a result exists.
-Argument parse failures emit none of these events. Policy, approval, and
-unknown-tool short-circuits emit planned plus completed without started;
-completed events report `directive`, nullable `error_code`,
+Argument parse failures emit none of these events. Schema validation, policy,
+approval, and unknown-tool short-circuits emit planned plus completed without
+started; completed events report `directive`, nullable `error_code`,
 `execution_started`, and nullable monotonic `duration_ms`. A started event may
-remain unmatched after cancellation or process loss, so checkpoint v2's
+remain unmatched after cancellation or process loss, so checkpoint v3's
 operation journal remains the recovery authority.
 
 The lower-level `AgentRuntime` API remains available for backend integrations

@@ -7,8 +7,8 @@ to the Python implementation and shows the supported public entry point.
 ## Opt In
 
 Durable execution is disabled unless a `CheckpointConfig` is attached to the
-run. Enabled records require `schema_version=vv-agent.checkpoint.v2` and
-`run_definition_schema=vv-agent.run-definition.v1`; no other record shape is
+run. Enabled records require `schema_version=vv-agent.checkpoint.v3` and
+`run_definition_schema=vv-agent.run-definition.v2`; no other record shape is
 read or repaired.
 
 ```python
@@ -101,6 +101,22 @@ A host can provide a `ReconciliationProvider` to defer, retry, replay a receipt,
 record a definitive failure, or abort while retaining the unknown-outcome
 evidence.
 
+## Model Call Ledger
+
+Every model dispatch attempt admitted across the local provider boundary adds
+one `ModelCallRecord` to the checkpoint and to the public
+`result.token_usage.model_calls` ledger. The ledger covers `agent_cycle`,
+`session_memory`, and `memory_compaction` operations. Logical retries retain
+their `operation_id`, receive a new `call_id`, and increment `attempt`; failed
+and ambiguous attempts remain visible. Replaying a durable receipt does not add
+another record or charge the budget again.
+
+The terminal `TaskTokenUsage` aggregate is derived from this complete ledger.
+Provider-omitted token and cache observations remain null with
+`accounting_missing` status; only an explicit provider-reported zero is treated
+as zero. Ledger, budget snapshot, terminal model event, and durable operation
+transition share the same checkpoint progress boundary.
+
 ## Durable Boundaries
 
 Only a complete cycle advances checkpoint messages and cycle records. In-flight
@@ -122,8 +138,8 @@ For a normal terminal, Runner orders work as follows:
 Terminal records remain replayable after acknowledgement. Session and event
 stores reject reuse of the same identity with different payload bytes.
 
-Distributed workers return only the closed tagged
-`vv-agent.distributed-worker-response.v1` object: `pending`, `committed`,
+Distributed workers accept only `vv-agent.distributed-run.v2` and return only
+the closed tagged `vv-agent.distributed-worker-response.v1` object: `pending`, `committed`,
 `terminal_candidate`, or `terminal_replay`. The response is an observation, so
 the scheduler reloads the authoritative checkpoint after every response,
 timeout, or transport error. A candidate still needs controller-side terminal
@@ -132,7 +148,7 @@ result. The old `finished` and terminal Boolean fields are rejected.
 
 ## Scope And Limits
 
-Checkpoint v2 provides durable resume with explicit ambiguity. It does not make
+Checkpoint v3 provides durable resume with explicit ambiguity. It does not make
 an arbitrary external API exactly-once, recover a provider response that was
 never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,
