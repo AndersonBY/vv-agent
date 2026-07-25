@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from vv_agent.constants import ACTIVATE_SKILL_TOOL_NAME
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import AgentTask, ToolCall, ToolResultStatus
@@ -12,8 +13,10 @@ from vv_agent.workspace import LocalWorkspaceBackend
 
 def _context(tmp_path: Path) -> ToolContext:
     return ToolContext(
-        workspace=tmp_path, shared_state={"todo_list": []},
-        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+        workspace=tmp_path,
+        shared_state={"todo_list": []},
+        cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
 
@@ -21,7 +24,7 @@ def _task(**overrides: object) -> AgentTask:
     task = AgentTask(
         task_id="task_ext",
         model="dummy",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="u",
     )
     for key, value in overrides.items():

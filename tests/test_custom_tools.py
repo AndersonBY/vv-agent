@@ -5,6 +5,7 @@ from pathlib import Path
 
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
@@ -96,7 +97,7 @@ def test_register_tool_default_parameters() -> None:
     task = AgentTask(
         task_id="custom_schema",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="u",
         extra_tool_names=[CUSTOM_WORKFLOW_TOOL_NAME],
     )
@@ -130,7 +131,7 @@ def test_runtime_executes_custom_workflow_tool(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="custom_runtime",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="u",
         extra_tool_names=[CUSTOM_WORKFLOW_TOOL_NAME],
         max_cycles=4,

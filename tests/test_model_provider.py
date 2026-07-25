@@ -16,7 +16,6 @@ from vv_agent import (
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
-from vv_agent.llm.base import complete_llm_request
 from vv_agent.model import ModelError
 from vv_agent.types import LLMResponse, Message, ToolCall
 
@@ -60,7 +59,8 @@ def test_scripted_model_provider_runs_through_the_shared_request_contract(tmp_pa
     assert requests[0].model == "demo-model"
     assert requests[0].model_settings == ModelSettings(temperature=0.2, max_tokens=300)
     assert requests[0].metadata["trace_id"] == result.trace_id
-    assert requests[0].metadata["system_prompt_sections"]
+    assert requests[0].prompt_bundle is not None
+    assert requests[0].prompt_bundle.sections
 
 
 def test_scripted_llm_callback_receives_the_complete_request() -> None:
@@ -74,41 +74,13 @@ def test_scripted_llm_callback_receives_the_complete_request() -> None:
         model_settings=ModelSettings(temperature=0.2),
     )
 
-    response = llm.complete_request(request)
+    response = llm.complete(request)
 
     assert response.content == "done"
     assert requests == [request]
     assert requests[0].tools[0]["function"] == {"name": "lookup"}
     assert requests[0].metadata == {"trace_id": "trace-1"}
     assert requests[0].model_settings == ModelSettings(temperature=0.2)
-
-
-def test_kwargs_llm_fallback_preserves_request_metadata() -> None:
-    seen_metadata: list[dict[str, object]] = []
-
-    class KwargsLLM:
-        def complete(
-            self,
-            *,
-            model,
-            messages,
-            tools,
-            stream_callback=None,
-            model_settings=None,
-            request_metadata=None,
-        ) -> LLMResponse:
-            del model, messages, tools, stream_callback, model_settings
-            seen_metadata.append(dict(request_metadata or {}))
-            return LLMResponse(content="done")
-
-    response = complete_llm_request(
-        KwargsLLM(),
-        LlmRequest(model="demo", messages=[], metadata={"trace_id": "trace-1"}),
-    )
-
-    assert response.content == "done"
-    assert seen_metadata == [{"trace_id": "trace-1"}]
-
 
 def test_scripted_provider_default_model_is_runner_fallback(tmp_path: Path) -> None:
     provider = ScriptedModelProvider.new(

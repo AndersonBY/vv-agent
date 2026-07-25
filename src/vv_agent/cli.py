@@ -374,7 +374,6 @@ def _build_cli_task(
     )
     metadata: dict[str, Any] = {
         "language": args.language,
-        "system_prompt_sections": prompt_bundle.sections,
         "function_call_available": resolved.function_call_available,
         "response_format_available": resolved.response_format_available,
         "native_multimodal": resolved.native_multimodal,
@@ -387,7 +386,7 @@ def _build_cli_task(
     return AgentTask(
         task_id=task_id,
         model=resolved.model_id,
-        system_prompt=prompt_bundle.prompt,
+        prompt_bundle=prompt_bundle,
         user_prompt=args.prompt,
         max_cycles=max(args.max_cycles, 1),
         agent_type=args.agent_type,

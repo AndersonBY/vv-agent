@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -8,6 +9,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+
+import pytest
 
 from vv_agent.constants import BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME
 from vv_agent.runtime import background_sessions as background_runtime
@@ -40,11 +43,10 @@ def test_bash_tool_executes_command(tmp_path: Path) -> None:
         context,
     )
 
-    payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
-    assert payload["exit_code"] == 0
-    assert "hello" in payload["output"]
-    assert "command" not in payload
+    assert result.content == "hello\n"
+    assert result.metadata["exit_code"] == 0
+    assert "command" not in result.metadata
 
 
 def test_bash_tool_blocks_dangerous_command(tmp_path: Path) -> None:
@@ -84,9 +86,9 @@ def test_bash_tool_allows_absolute_exec_dir_when_enabled(tmp_path: Path) -> None
         context,
     )
 
-    payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
-    assert payload["cwd"] == str(outside_dir)
+    assert result.content == "outside\n"
+    assert result.metadata["cwd"] == str(outside_dir)
 
 
 def test_background_command_lifecycle(tmp_path: Path) -> None:
@@ -112,7 +114,7 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
     assert "command" not in start_payload
     session_id = start_payload["session_id"]
 
-    final_payload: dict[str, object] | None = None
+    final_result = None
     for _ in range(20):
         probe = registry.execute(
             ToolCall(
@@ -122,19 +124,16 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
             ),
             context,
         )
-        probe_payload = json.loads(probe.content)
         if probe.status_code == ToolResultStatus.RUNNING:
+            json.loads(probe.content)
             time.sleep(0.05)
             continue
-        final_payload = probe_payload
+        final_result = probe
         break
 
-    assert final_payload is not None
-    assert final_payload["status"] == "completed"
-    assert final_payload["command"] == (
-        f'"{sys.executable}" -c "import time; time.sleep(0.2); print(\'done\')"'
-    )
-    assert "done" in str(final_payload.get("output", ""))
+    assert final_result is not None
+    assert final_result.metadata["status"] == "completed"
+    assert "done" in final_result.content
 
 
 def test_background_command_listener_receives_terminal_event(tmp_path: Path) -> None:
@@ -217,9 +216,9 @@ def test_bash_tool_uses_context_shell_defaults(tmp_path: Path, monkeypatch) -> N
         context,
     )
 
-    payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
-    assert payload["exit_code"] == 0
+    assert result.content == "ok\n"
+    assert result.metadata["exit_code"] == 0
     assert captured["shell"] == "powershell"
     assert captured["windows_shell_priority"] == ["git-bash", "powershell", "cmd"]
 
@@ -284,9 +283,9 @@ def test_bash_tool_applies_context_bash_env(tmp_path: Path, monkeypatch) -> None
         context,
     )
 
-    payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
-    assert payload["exit_code"] == 0
+    assert result.content == "ok\n"
+    assert result.metadata["exit_code"] == 0
     raw_env = captured.get("env")
     assert isinstance(raw_env, dict)
     process_env = cast("dict[str, str]", raw_env)
@@ -492,6 +491,9 @@ def test_bash_tool_timeout_moves_process_to_background_and_returns_session(tmp_p
         output_path: Path,
         shell: str | None = None,
         started_at: float | None = None,
+        artifact_backend=None,
+        artifact_task_id: str = "",
+        artifact_tool_call_id: str = "",
     ) -> str:
         captured["command"] = command
         captured["cwd"] = cwd
@@ -500,6 +502,9 @@ def test_bash_tool_timeout_moves_process_to_background_and_returns_session(tmp_p
         captured["output_path"] = output_path
         captured["shell"] = shell
         captured["started_at"] = started_at
+        captured["artifact_backend"] = artifact_backend
+        captured["artifact_task_id"] = artifact_task_id
+        captured["artifact_tool_call_id"] = artifact_tool_call_id
         return "bg_timeout_123"
 
     monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
@@ -573,12 +578,6 @@ def test_background_session_timeout_kills_process_tree_and_reads_output(tmp_path
     monkeypatch.setattr(background_runtime, "prepare_shell_execution", fake_prepare)
     monkeypatch.setattr(background_runtime, "start_captured_process", fake_start)
     monkeypatch.setattr(background_runtime, "kill_process_tree", fake_kill)
-    monkeypatch.setattr(
-        background_runtime,
-        "read_captured_output",
-        lambda path, *, limit_chars: Path(path).read_text(encoding="utf-8")[:limit_chars],
-    )
-
     manager = background_runtime.BackgroundSessionManager()
     session_id = manager.start(command="sleep 10", cwd=tmp_path, timeout_seconds=1)
     manager._sessions[session_id].started_at -= 5
@@ -609,3 +608,225 @@ def test_bash_tool_rejects_invalid_bash_env_metadata(tmp_path: Path) -> None:
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "invalid_shell_config"
     assert "bash_env" in payload["error"]
+
+
+def test_foreground_bash_uses_exact_preview_boundary_and_persists_complete_artifact(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+    context.task_id = "task-7"
+
+    exact = registry.execute(
+        ToolCall(
+            id="bash_exact",
+            name=BASH_TOOL_NAME,
+            arguments={
+                "command": f'"{sys.executable}" -c "import sys;sys.stdout.write(\'A\'*12000)"',
+            },
+        ),
+        context,
+    )
+
+    assert exact.status_code is ToolResultStatus.SUCCESS
+    assert len(exact.content) == 12_000
+    assert exact.truncated is None
+    assert exact.artifact is None
+
+    context.tool_call_id = "bash_truncated"
+    complete = "A" * 6_000 + "M" * 48 + "Z" * 5_953
+    truncated = registry.execute(
+        ToolCall(
+            id="bash_truncated",
+            name=BASH_TOOL_NAME,
+            arguments={
+                "command": (
+                    f'"{sys.executable}" -c "import sys;sys.stdout.write('
+                    "'A'*6000+'M'*48+'Z'*5953)\""
+                ),
+            },
+        ),
+        context,
+    )
+
+    assert truncated.status_code is ToolResultStatus.SUCCESS
+    assert truncated.truncated is True
+    assert truncated.content == (
+        "A" * 6_000
+        + "\n... output omitted; full text in artifact ...\n"
+        + "Z" * 5_953
+    )
+    assert len(truncated.content) == 12_000
+    assert truncated.original_bytes == 12_001
+    assert truncated.visible_bytes == 12_000
+    assert truncated.artifact is not None
+    assert truncated.artifact.path.startswith(".vv-agent/artifacts/task-7/bash_truncated-")
+    assert truncated.artifact.sha256 == hashlib.sha256(complete.encode()).hexdigest()
+    assert (tmp_path / truncated.artifact.path).read_text(encoding="utf-8") == complete
+
+
+def test_foreground_bash_artifact_failure_keeps_complete_capture(tmp_path: Path, monkeypatch) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+    output_file = tmp_path / "artifact-failure.log"
+    output_file.write_text("x" * 12_001, encoding="utf-8")
+
+    class _FakeProcess:
+        returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+    class _FailingArtifactBackend(LocalWorkspaceBackend):
+        def write_text_exclusive(self, path: str, content: str) -> int:
+            del path, content
+            raise RuntimeError("artifact store unavailable")
+
+    monkeypatch.setattr(
+        bash_handler,
+        "start_captured_process",
+        lambda *args, **kwargs: SimpleNamespace(process=_FakeProcess(), output_path=output_file),
+    )
+    context.workspace_backend = _FailingArtifactBackend(tmp_path)
+
+    result = registry.execute(
+        ToolCall(id="artifact_failure", name=BASH_TOOL_NAME, arguments={"command": "printf ignored"}),
+        context,
+    )
+
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == "artifact_persist_failed"
+    assert output_file.read_text(encoding="utf-8") == "x" * 12_001
+
+
+def test_foreground_bash_rejects_artifact_symlink_segment(tmp_path: Path, monkeypatch) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+    output_file = tmp_path / "artifact-symlink.log"
+    output_file.write_text("x" * 12_001, encoding="utf-8")
+    external = tmp_path / "external-artifacts"
+    external.mkdir()
+    (tmp_path / ".vv-agent").mkdir()
+    try:
+        (tmp_path / ".vv-agent" / "artifacts").symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    class _FakeProcess:
+        returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+    monkeypatch.setattr(
+        bash_handler,
+        "start_captured_process",
+        lambda *args, **kwargs: SimpleNamespace(process=_FakeProcess(), output_path=output_file),
+    )
+
+    result = registry.execute(
+        ToolCall(id="artifact_symlink", name=BASH_TOOL_NAME, arguments={"command": "printf ignored"}),
+        context,
+    )
+
+    assert result.status_code is ToolResultStatus.ERROR
+    assert result.error_code == "artifact_path_invalid"
+    assert output_file.read_text(encoding="utf-8") == "x" * 12_001
+    assert list(external.iterdir()) == []
+
+
+def test_background_bash_reuses_terminal_artifact_across_polls(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+    context.task_id = "background-task"
+    context.tool_call_id = "background-large"
+    start = registry.execute(
+        ToolCall(
+            id="background-large",
+            name=BASH_TOOL_NAME,
+            arguments={
+                "command": f'"{sys.executable}" -c "import sys;sys.stdout.write(\'0\'*12001)"',
+                "run_in_background": True,
+            },
+        ),
+        context,
+    )
+    session_id = json.loads(start.content)["session_id"]
+
+    deadline = time.monotonic() + 10
+    while True:
+        probe = registry.execute(
+            ToolCall(
+                id="background-large-check",
+                name=CHECK_BACKGROUND_COMMAND_TOOL_NAME,
+                arguments={"session_id": session_id},
+            ),
+            context,
+        )
+        if probe.status_code is not ToolResultStatus.RUNNING:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+
+    assert probe.truncated is True
+    assert probe.artifact is not None
+    first_artifact = probe.artifact
+    second = registry.execute(
+        ToolCall(
+            id="background-large-check-again",
+            name=CHECK_BACKGROUND_COMMAND_TOOL_NAME,
+            arguments={"session_id": session_id},
+        ),
+        context,
+    )
+
+    assert second.artifact == first_artifact
+    assert second.content == probe.content
+    assert (tmp_path / first_artifact.path).read_text(encoding="utf-8") == "0" * 12_001
+
+
+def test_background_bash_artifact_failure_keeps_complete_capture(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    context = _context(tmp_path)
+
+    class _FailingArtifactBackend(LocalWorkspaceBackend):
+        def write_text_exclusive(self, path: str, content: str) -> int:
+            del path, content
+            raise RuntimeError("artifact store unavailable")
+
+    context.workspace_backend = _FailingArtifactBackend(tmp_path)
+    start = registry.execute(
+        ToolCall(
+            id="background-artifact-failure",
+            name=BASH_TOOL_NAME,
+            arguments={
+                "command": f'"{sys.executable}" -c "import sys;sys.stdout.write(\'x\'*12001)"',
+                "run_in_background": True,
+            },
+        ),
+        context,
+    )
+    session_id = json.loads(start.content)["session_id"]
+
+    deadline = time.monotonic() + 10
+    while True:
+        probe = registry.execute(
+            ToolCall(
+                id="background-artifact-failure-check",
+                name=CHECK_BACKGROUND_COMMAND_TOOL_NAME,
+                arguments={"session_id": session_id},
+            ),
+            context,
+        )
+        if probe.status_code is not ToolResultStatus.RUNNING:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+
+    session = background_runtime.background_session_manager._sessions[session_id]
+    try:
+        assert probe.status_code is ToolResultStatus.ERROR
+        assert probe.error_code == "artifact_persist_failed"
+        assert session.output_path.read_text(encoding="utf-8") == "x" * 12_001
+    finally:
+        session.output_path.unlink(missing_ok=True)

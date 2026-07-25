@@ -15,17 +15,11 @@ from typing import Any, Protocol, cast, overload
 from vv_agent.agent import Agent
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider
 from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
-from vv_agent.context_providers import (
-    ContextFragment,
-    ContextProvider,
-    ContextRequest,
-    assemble_context_fragments,
-    collect_context_fragments,
-)
+from vv_agent.context_providers import ContextProvider, ContextRequest, collect_context_fragments
 from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.memory.provider import MemoryProvider
 from vv_agent.model import ModelProvider, ModelRef
-from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
+from vv_agent.prompt import PromptBundle, PromptSection, build_raw_system_prompt_bundle, build_system_prompt_bundle
 from vv_agent.result import RunResult
 from vv_agent.run_config import RunConfig, ToolPolicy
 from vv_agent.runner import Runner
@@ -945,8 +939,7 @@ class InteractiveAgentClient:
                 available_skills = None
 
         if definition.system_prompt is not None:
-            system_prompt = definition.system_prompt
-            generated_sections = build_raw_system_prompt_sections(system_prompt)
+            prompt_bundle = build_raw_system_prompt_bundle(definition.system_prompt)
         else:
             prompt_bundle = build_system_prompt_bundle(
                 definition.description,
@@ -961,15 +954,11 @@ class InteractiveAgentClient:
                 available_skills=available_skills,
                 workspace=effective_workspace,
             )
-            system_prompt = prompt_bundle.prompt
-            generated_sections = prompt_bundle.sections
-        if generated_sections:
-            metadata.setdefault("system_prompt_sections", generated_sections)
 
         return AgentTask(
             task_id=f"{effective_task_name}_{uuid.uuid4().hex[:8]}",
             model=resolved_model_id,
-            system_prompt=system_prompt,
+            prompt_bundle=prompt_bundle,
             user_prompt=prompt,
             max_cycles=max(definition.max_cycles, 1),
             memory_compact_threshold=self._to_non_negative_int(
@@ -1068,7 +1057,7 @@ class InteractiveAgentClient:
 
         sdk_agent = Agent(
             name=run_name,
-            instructions=task.system_prompt,
+            instructions=task.prompt_bundle,
             model=definition.model,
             metadata=dict(task.metadata),
         )
@@ -1178,25 +1167,28 @@ class InteractiveAgentClient:
             workspace=workspace,
             metadata=dict(task.metadata),
         )
-        fragments = [
-            ContextFragment(
-                id="agent_instructions",
-                text=task.system_prompt,
-                stable=True,
-                priority=0,
-                source="agent.instructions",
+        fragments = sorted(
+            collect_context_fragments(request, context_providers),
+            key=lambda item: (
+                int(item.priority),
+                0 if item.stable else 1,
+                str(item.id).encode("utf-16-be"),
+            ),
+        )
+        sections = list(task.prompt_bundle.sections)
+        sections.extend(
+            PromptSection(
+                id=fragment.id,
+                text=fragment.text,
+                stable=fragment.stable,
+                source=fragment.source or None,
+                cache_hint=fragment.cache_hint,
+                metadata=dict(fragment.metadata),
             )
-        ]
-        fragments.extend(collect_context_fragments(request, context_providers))
-        bundle = assemble_context_fragments(request, fragments)
-        task.system_prompt = bundle.prompt
-        if bundle.sections:
-            task.metadata["system_prompt_sections"] = bundle.metadata_sections()
-        if bundle.sources:
-            task.metadata["system_prompt_sources"] = bundle.sources
-        if bundle.omitted_section_ids:
-            task.metadata["system_prompt_omitted_sections"] = list(bundle.omitted_section_ids)
-        task.metadata["system_prompt_stable_hash"] = bundle.stable_hash
+            for fragment in fragments
+            if str(fragment.text or "").strip("\t\n\v\f\r ")
+        )
+        task.prompt_bundle = PromptBundle(sections=tuple(sections))
 
     def _apply_startup_shell_defaults(self, definition: InteractiveAgentDefinition) -> InteractiveAgentDefinition:
         effective_definition = definition

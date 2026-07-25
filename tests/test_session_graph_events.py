@@ -16,6 +16,7 @@ from vv_agent.events import (
 )
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model import ModelRef
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.tools import build_default_registry
@@ -162,7 +163,7 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
     task = AgentTask(
         task_id="parent",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent task",
         max_cycles=4,
         sub_agents={

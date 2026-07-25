@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import errno
 import os
 import re
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
-from vv_agent.workspace.base import FileInfo
+from vv_agent.workspace.artifacts import ArtifactPathInvalidError, is_reserved_artifact_path
+from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments
 
 
 def _glob_match(path: str, pattern: str) -> bool:
@@ -92,12 +95,24 @@ class LocalWorkspaceBackend:
         return self._resolve(path).read_bytes()
 
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
+        if is_reserved_artifact_path(path):
+            raise PermissionError("artifact paths are immutable")
         target = self._resolve(path)
+        if self._is_reserved_target(target):
+            raise PermissionError("artifact paths are immutable")
         target.parent.mkdir(parents=True, exist_ok=True)
         data = content.encode("utf-8")
         mode = "ab" if append else "wb"
         with target.open(mode) as fh:
             return fh.write(data)
+
+    def write_text_exclusive(self, path: str, content: str) -> int:
+        segments = _exclusive_workspace_path_segments(path)
+        self._root.mkdir(parents=True, exist_ok=True)
+        data = content.encode("utf-8")
+        if os.name != "nt" and hasattr(os, "O_NOFOLLOW"):
+            return _write_exclusive_at(self._root, segments, data)
+        return _write_exclusive_portable(self._root, segments, data)
 
     def file_info(self, path: str) -> FileInfo | None:
         target = self._resolve(path)
@@ -127,3 +142,88 @@ class LocalWorkspaceBackend:
 
     def mkdir(self, path: str) -> None:
         self._resolve(path).mkdir(parents=True, exist_ok=True)
+
+    def _is_reserved_target(self, target: Path) -> bool:
+        try:
+            relative = target.relative_to(self._root).as_posix()
+        except ValueError:
+            return False
+        return is_reserved_artifact_path(relative)
+
+
+def _write_all(file_descriptor: int, data: bytes) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(file_descriptor, remaining)
+        if written <= 0:
+            raise OSError("exclusive workspace write made no progress")
+        remaining = remaining[written:]
+
+
+def _write_exclusive_at(root: Path, segments: tuple[str, ...], data: bytes) -> int:
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_fd = os.open(root, directory_flags)
+    try:
+        for segment in segments[:-1]:
+            try:
+                os.mkdir(segment, mode=0o700, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            else:
+                os.fsync(directory_fd)
+            segment_stat = os.stat(segment, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(segment_stat.st_mode):
+                raise ArtifactPathInvalidError("artifact_path_invalid")
+            if not stat.S_ISDIR(segment_stat.st_mode):
+                raise NotADirectoryError(segment)
+            try:
+                next_fd = os.open(segment, directory_flags, dir_fd=directory_fd)
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise ArtifactPathInvalidError("artifact_path_invalid") from exc
+                raise
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        file_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        file_fd = os.open(segments[-1], file_flags, 0o600, dir_fd=directory_fd)
+        try:
+            _write_all(file_fd, data)
+            os.fsync(file_fd)
+        finally:
+            os.close(file_fd)
+        os.fsync(directory_fd)
+        return len(data)
+    finally:
+        os.close(directory_fd)
+
+
+def _write_exclusive_portable(root: Path, segments: tuple[str, ...], data: bytes) -> int:
+    parent = root
+    for segment in segments[:-1]:
+        parent /= segment
+        try:
+            parent.lstat()
+        except FileNotFoundError:
+            parent.mkdir(mode=0o700)
+            continue
+        if parent.is_symlink():
+            raise ArtifactPathInvalidError("artifact_path_invalid")
+        if not parent.is_dir():
+            raise NotADirectoryError(parent)
+
+    target = parent / segments[-1]
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    file_fd = os.open(target, flags, 0o600)
+    try:
+        _write_all(file_fd, data)
+        os.fsync(file_fd)
+    finally:
+        os.close(file_fd)
+    return len(data)

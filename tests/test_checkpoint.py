@@ -339,6 +339,20 @@ def test_checkpoint_round_trip_uses_jcs() -> None:
     assert checkpoint_from_json(wire) == checkpoint
 
 
+def test_checkpoint_and_operation_receipt_preserve_bounded_tool_result_fields() -> None:
+    checkpoint_payload = _fixture("checkpoint_codec.json")["canonical_checkpoint"]
+    expected_cycle_result = checkpoint_payload["cycles"][0]["tool_results"][0]
+    checkpoint = checkpoint_from_dict(checkpoint_payload)
+
+    assert checkpoint.cycles[0].tool_results[0].to_dict() == expected_cycle_result
+    assert checkpoint_to_dict(checkpoint)["cycles"][0]["tool_results"][0] == expected_cycle_result
+
+    expected_receipt = _journal_case("tool_succeeded_truncated_bash")
+    entry = OperationJournalEntry.from_dict(expected_receipt)
+    assert entry.result == expected_receipt["result"]
+    assert entry.to_dict() == expected_receipt
+
+
 def test_checkpoint_round_trip_restores_jcs_large_float_through_codec_and_sqlite(
     tmp_path: Path,
 ) -> None:
@@ -401,7 +415,7 @@ def test_checkpoint_validates_embedded_definition_schema_and_digest() -> None:
     assert error.value.code == "checkpoint_definition_mismatch"
 
     unknown = deepcopy(payload)
-    unknown["schema_version"] = "vv-agent.checkpoint.v4"
+    unknown["schema_version"] = "vv-agent.checkpoint.v3"
     with pytest.raises(CheckpointError) as error:
         checkpoint_from_dict(unknown)
     assert error.value.code == "checkpoint_schema_unsupported"

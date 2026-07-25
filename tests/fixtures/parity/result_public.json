@@ -1,5 +1,6 @@
 {
-  "version": "result_public",
+  "contract": "result_public",
+  "version": 2,
   "agent_result_wire": {
     "required_fields": [
       "status",
@@ -82,6 +83,23 @@
             "metadata": {
               "request_id": "not_approval",
               "mode": "ordinary"
+            }
+          },
+          {
+            "tool_call_id": "call-bash",
+            "content": "first output\n... output omitted; full text in artifact ...\nlast output",
+            "status_code": "SUCCESS",
+            "directive": "continue",
+            "truncated": true,
+            "truncation_reason": "output_limit",
+            "original_bytes": 100000,
+            "visible_bytes": 70,
+            "artifact": {
+              "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+              "media_type": "text/plain",
+              "encoding": "utf-8",
+              "size_bytes": 100000,
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             }
           }
         ],

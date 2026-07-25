@@ -6,20 +6,20 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current stable release is `0.8.0`. It implements the same language-neutral
-Contract `3.0.0` behavior as the Rust `vv-agent` crate while keeping a
-Python-idiomatic API.
+The current release is `0.9.0`. It implements language-neutral Contract
+`4.0.5` behavior with the Rust `vv-agent` crate while keeping a Python-idiomatic
+API.
 
 ```bash
-python -m pip install "vv-agent==0.8.0"
+python -m pip install "vv-agent==0.9.0"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
-integrations are needed. Contract 3 and repository `HEAD` are forward-only:
+integrations are needed. Contract 4 and repository `HEAD` are forward-only:
 current readers accept only the current strict public and wire shapes. Pin an
 older package release when an application must retain an older protocol.
 
-### 0.8.0 Highlights
+### 0.9.0 Highlights
 
 - Every admitted model dispatch is recorded in
   `result.token_usage.model_calls`, including agent cycles, Session Memory,
@@ -31,9 +31,17 @@ older package release when an application must retain an older protocol.
   `invalid_tool_arguments` details without invoking the handler.
 - Optional host output validation is disabled by default and can make at most
   one tools-free repair callback before a terminal result is committed.
-- Durable execution uses `vv-agent.checkpoint.v3`,
-  `vv-agent.run-definition.v2`, `vv-agent.distributed-run.v2`, and
-  `vv-agent.distributed-worker-response.v1` for strict recovery and
+- A resolved `PromptBundle` freezes the prompt sections and run time once for a
+  run. Checkpoint resume and distributed workers reuse that bundle instead of
+  rerunning instruction or context producers.
+- The canonical 15-tool surface uses compact schemas. `compress_memory` is no
+  longer model-callable; framework-owned automatic compaction remains internal.
+- Large bash output returns a bounded 12,000-character preview plus a secure
+  workspace artifact. Large file reads return bounded text plus a verified
+  cursor, so recovery does not repeat the original operation.
+- Durable execution uses `vv-agent.checkpoint.v4`,
+  `vv-agent.run-definition.v3`, `vv-agent.distributed-run.v3`, and
+  `vv-agent.distributed-worker-response.v2` for strict recovery and
   distributed-controller boundaries.
 
 See [output validation](docs/output-validation.md) and
@@ -54,9 +62,10 @@ Agent / RunConfig / ModelSettings
 
 The public SDK entry points are exported from `vv_agent`: `Agent`, `Runner`,
 `RunConfig`, `RunHandle`, `ModelSettings`, `function_tool`, `Session`,
-typed `RunEvent` objects, `ApprovalProvider`, `ContextProvider`,
-`RunEventStore`, and the interactive session API for desktop/runtime
-integrations. Extension points that live in package modules include
+`PromptBundle`, `PromptSection`, `ToolExecutionResult`, `ToolArtifactRef`,
+`ToolResultCursor`, typed `RunEvent` objects, `ApprovalProvider`,
+`ContextProvider`, `RunEventStore`, and the interactive session API for
+desktop/runtime integrations. Extension points that live in package modules include
 `vv_agent.memory.MemoryProvider` and `vv_agent.tools.ToolExecutor`.
 Lower-level runtime implementation details include `AgentTask`, `AgentResult`,
 `Message`, `CycleRecord`, and `ToolCall`.
@@ -424,10 +433,11 @@ result = Runner.run_sync(
   shell metadata.
 - The `bash` tool schema description includes a runtime shell hint (resolved shell kind + invocation prefix), so the model sees which shell command style is expected before calling the tool.
 - The runtime shell hint is frozen per task/session-run to keep tool schemas stable across cycles and preserve LLM prompt cache efficiency.
-- Runner/CLI-generated runtime tasks attach structured `system_prompt_sections`
-  metadata to the system message when prompt sections are available, so
-  Anthropic prompt-cache breakpoints can keep the stable prompt prefix hot while
-  treating current time and session-memory blocks as volatile.
+- Runner/CLI-generated tasks carry one resolved `PromptBundle` explicitly
+  through `AgentTask`, each `LlmRequest`, the run definition, checkpoints, and
+  distributed execution. Generic metadata is not a prompt-section transport.
+  Anthropic projection may use the canonical sections for cache breakpoints;
+  other providers receive the deterministic flattened prompt.
 
 ```python
 from vv_agent import Agent, RunConfig, Runner
@@ -524,18 +534,14 @@ result = runtime.run(task, ctx=ctx)
 
 ### Runtime Log Payloads
 
-`tool_result` runtime events carry full tool output in `content` and any structured tool payload in `metadata` (no implicit truncation of `content`).
-`content_preview` and `assistant_preview` are still emitted for UI convenience.
-
-If you need shorter previews for logs/transport, configure an explicit preview limit:
-
-```python
-from vv_agent import RunConfig
-
-config = RunConfig(
-    log_preview_chars=220,  # optional: enable preview truncation explicitly
-)
-```
+The `tool_result` diagnostic contains the model-visible `content`, ordinary
+metadata, and a bounded `content_preview`; it does not duplicate artifact or
+cursor fields. Structured recovery belongs to `ToolExecutionResult` and is
+preserved in cycle results, checkpoints, and distributed wire records. A
+bounded bash result points to an immutable workspace artifact, while a bounded
+`read_file` result points to a source-verified cursor. Hosts must read artifacts
+through normal workspace policy; cursors reject changed sources, path
+mismatches, and invalid offsets.
 
 ## Workspace Backends
 
@@ -757,7 +763,7 @@ Priority is strict:
 
 ## Built-in Tools
 
-`find_files`, `file_info`, `read_file`, `write_file`, `edit_file`, `search_files`, `compress_memory`, `todo_write`, `task_finish`, `ask_user`, `bash`, `read_image`, `create_sub_task`, `sub_task_status`.
+`find_files`, `file_info`, `read_file`, `write_file`, `edit_file`, `search_files`, `todo_write`, `task_finish`, `ask_user`, `bash`, `check_background_command`, `read_image`, `create_sub_task`, `sub_task_status`, `activate_skill`.
 
 Custom tools can be registered via `ToolRegistry.register()`.
 

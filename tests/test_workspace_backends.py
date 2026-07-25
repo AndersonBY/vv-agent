@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,11 +15,14 @@ from vv_agent.workspace import (
     LocalWorkspaceBackend,
     MemoryWorkspaceBackend,
 )
+from vv_agent.workspace import artifacts as artifact_runtime
 from vv_agent.workspace.s3 import S3WorkspaceBackend
 
 
 class _FakeClientError(Exception):
-    pass
+    def __init__(self, message: str, *, response: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.response = response or {}
 
 
 class _FakeNoSuchKey(_FakeClientError):
@@ -44,6 +48,7 @@ class _FakeS3Client:
     def __init__(self) -> None:
         self.exceptions = _FakeS3Exceptions()
         self.objects: dict[str, bytes] = {}
+        self.put_requests: list[dict[str, Any]] = []
 
     def get_paginator(self, _name: str) -> _FakePaginator:
         return _FakePaginator(self.objects)
@@ -58,6 +63,15 @@ class _FakeS3Client:
         key = str(kwargs["Key"])
         body = bytes(kwargs["Body"])
         assert kwargs["ContentLength"] == len(body)
+        self.put_requests.append(dict(kwargs))
+        if kwargs.get("IfNoneMatch") == "*" and key in self.objects:
+            raise _FakeClientError(
+                key,
+                response={
+                    "Error": {"Code": "PreconditionFailed"},
+                    "ResponseMetadata": {"HTTPStatusCode": 412},
+                },
+            )
         self.objects[key] = body
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]:
@@ -89,6 +103,95 @@ def test_workspace_backends_report_utf8_bytes_written(tmp_path: Path) -> None:
     for backend in backends:
         assert backend.write_text("unicode.txt", content) == len(content.encode("utf-8"))
         assert backend.read_text("unicode.txt") == content
+
+
+def test_workspace_backends_create_artifacts_exclusively_and_keep_them_immutable(tmp_path: Path) -> None:
+    backends = [
+        LocalWorkspaceBackend(tmp_path / "local-exclusive"),
+        MemoryWorkspaceBackend(),
+        _make_s3_backend(),
+    ]
+    path = ".vv-agent/artifacts/task-7/call-7.txt"
+
+    for backend in backends:
+        assert backend.write_text_exclusive(path, "complete 中") == len("complete 中".encode())
+        with pytest.raises(FileExistsError):
+            backend.write_text_exclusive(path, "replacement")
+        with pytest.raises(PermissionError, match="immutable"):
+            backend.write_text(path, "replacement")
+        assert backend.read_text(path) == "complete 中"
+
+
+def test_s3_exclusive_create_uses_conditional_put() -> None:
+    backend = _make_s3_backend()
+
+    backend.write_text_exclusive(".vv-agent/artifacts/task/call.txt", "payload")
+
+    request = backend._client.put_requests[-1]
+    assert request["IfNoneMatch"] == "*"
+
+
+def test_artifact_persistence_retries_collision_without_overwrite(monkeypatch) -> None:
+    backend = MemoryWorkspaceBackend()
+    suffixes = iter(("a" * 32, "b" * 32))
+    monkeypatch.setattr(
+        artifact_runtime.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex=next(suffixes)),
+    )
+    collided_path = f".vv-agent/artifacts/task-7/call-7-{'a' * 32}.txt"
+    backend.write_text_exclusive(collided_path, "existing")
+
+    artifact = artifact_runtime.persist_text_artifact(backend, "task-7", "call-7", "complete")
+
+    assert artifact.path == f".vv-agent/artifacts/task-7/call-7-{'b' * 32}.txt"
+    assert backend.read_text(collided_path) == "existing"
+    assert backend.read_text(artifact.path) == "complete"
+
+
+def test_memory_exclusive_write_treats_existing_directory_as_collision() -> None:
+    backend = MemoryWorkspaceBackend()
+    path = ".vv-agent/artifacts/task-7/call-7.txt"
+    backend.mkdir(path)
+
+    with pytest.raises(FileExistsError):
+        backend.write_text_exclusive(path, "must not replace a directory")
+
+
+def test_local_exclusive_artifact_write_rejects_symlink_segment(tmp_path: Path) -> None:
+    backend = LocalWorkspaceBackend(tmp_path / "workspace")
+    external = tmp_path / "external"
+    external.mkdir()
+    (backend.root / ".vv-agent").mkdir(parents=True)
+    artifact_link = backend.root / ".vv-agent" / "artifacts"
+    try:
+        artifact_link.symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    with pytest.raises(artifact_runtime.ArtifactPathInvalidError, match="artifact_path_invalid"):
+        backend.write_text_exclusive(
+            ".vv-agent/artifacts/task/call.txt",
+            "must stay inside workspace",
+        )
+
+    assert not (external / "task" / "call.txt").exists()
+
+
+def test_local_regular_write_cannot_alias_into_artifact_root(tmp_path: Path) -> None:
+    backend = LocalWorkspaceBackend(tmp_path / "workspace-alias")
+    path = ".vv-agent/artifacts/task/call.txt"
+    backend.write_text_exclusive(path, "immutable")
+    alias = backend.root / "artifact-alias"
+    try:
+        alias.symlink_to(backend.root / ".vv-agent" / "artifacts", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    with pytest.raises(PermissionError, match="immutable"):
+        backend.write_text("artifact-alias/task/call.txt", "replacement")
+
+    assert backend.read_text(path) == "immutable"
 
 
 def test_local_workspace_backend_replaces_invalid_utf8_when_reading_text(tmp_path: Path) -> None:
@@ -177,6 +280,9 @@ def test_discovery_filtered_workspace_hides_only_listed_paths() -> None:
     assert filtered.is_file("logs/run.log") is True
     assert filtered.file_info("generated/cache.bin") is not None
     assert filtered.write_text("generated/new.bin", "new") == 3
+    assert filtered.write_text_exclusive("generated/exclusive.bin", "once") == 4
+    with pytest.raises(FileExistsError):
+        filtered.write_text_exclusive("generated/exclusive.bin", "twice")
     filtered.mkdir("logs/archive")
     assert backend.exists("generated/new.bin") is True
     assert backend.exists("logs/archive") is True

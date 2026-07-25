@@ -28,9 +28,10 @@ from vv_agent.types import (
     ModelCallOperation,
     ModelCallRecord,
     ModelCallStatus,
+    ToolExecutionResult,
 )
 
-CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v3"
+CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v4"
 MAX_WIRE_INTEGER = (1 << 53) - 1
 ClaimMode = Literal["continue", "recovery"]
 
@@ -220,11 +221,6 @@ class OperationJournalEntry:
                     code="operation_kind_fields_invalid",
                 )
             canonical_json_bytes(self.arguments, "tool journal arguments")
-            if not isinstance(self.idempotency_key, str) or not self.idempotency_key:
-                raise CheckpointError(
-                    "tool journal entry requires idempotency_key",
-                    code="tool_idempotency_key_required",
-                )
             if not isinstance(self.idempotency_support, ToolIdempotency):
                 try:
                     self.idempotency_support = ToolIdempotency(self.idempotency_support)
@@ -233,6 +229,13 @@ class OperationJournalEntry:
                         "tool idempotency support is invalid",
                         code="operation_kind_fields_invalid",
                     ) from exc
+            if self.idempotency_support is ToolIdempotency.SUPPORTED and (
+                not isinstance(self.idempotency_key, str) or not self.idempotency_key
+            ):
+                raise CheckpointError(
+                    "idempotent tool journal entry requires idempotency_key",
+                    code="tool_idempotency_key_required",
+                )
             if self.response is not None:
                 raise CheckpointError(
                     "tool journal entry cannot contain a model response",
@@ -246,6 +249,19 @@ class OperationJournalEntry:
                     code="operation_receipt_required",
                 )
             canonical_json_bytes(receipt, "operation success receipt")
+            if self.kind is OperationKind.TOOL:
+                try:
+                    parsed_result = ToolExecutionResult.from_dict(receipt)
+                except (TypeError, ValueError) as exc:
+                    raise CheckpointError(
+                        "tool operation receipt is not a current ToolExecutionResult",
+                        code="operation_receipt_invalid",
+                    ) from exc
+                if parsed_result.to_dict() != receipt:
+                    raise CheckpointError(
+                        "tool operation receipt is not canonical",
+                        code="operation_receipt_invalid",
+                    )
         elif self.state is OperationState.FAILED:
             if self.error is None or self.response is not None or self.result is not None:
                 raise CheckpointError(

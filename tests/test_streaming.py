@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from vv_agent.events import AssistantDeltaEvent, RunEvent
+from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptedLLM
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.tools import build_default_registry
-from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, ToolCall
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse, ToolCall
 
 
 class StreamCapturingLLM:
@@ -15,17 +17,14 @@ class StreamCapturingLLM:
         self.tokens = tokens
         self.tool_calls = tool_calls or []
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback=None,
-        model_settings=None,
-        request_metadata=None,
-    ) -> LLMResponse:
-        del model, messages, tools, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return self._respond(request, None)
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        return self._respond(request, stream_callback)
+
+    def _respond(self, request: LlmRequest, stream_callback) -> LLMResponse:
+        del request
         content_parts = []
         for token in self.tokens:
             content_parts.append(token)
@@ -48,7 +47,7 @@ class TestStreamCallback:
         task = AgentTask(
             task_id="stream-test",
             model="test",
-            system_prompt="sys",
+            prompt_bundle=build_raw_system_prompt_bundle("sys"),
             user_prompt="hi",
             max_cycles=1,
             no_tool_policy="finish",
@@ -72,7 +71,7 @@ class TestStreamCallback:
         task = AgentTask(
             task_id="no-stream-test",
             model="test",
-            system_prompt="sys",
+            prompt_bundle=build_raw_system_prompt_bundle("sys"),
             user_prompt="hi",
             max_cycles=1,
             no_tool_policy="finish",
@@ -90,7 +89,7 @@ class TestStreamCallback:
         task = AgentTask(
             task_id="scripted-stream",
             model="test",
-            system_prompt="sys",
+            prompt_bundle=build_raw_system_prompt_bundle("sys"),
             user_prompt="hi",
             max_cycles=1,
             no_tool_policy="finish",

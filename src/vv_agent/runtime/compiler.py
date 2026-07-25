@@ -11,9 +11,9 @@ from vv_agent.constants import WORKSPACE_TOOLS
 from vv_agent.context_providers import (
     ContextFragment,
     ContextRequest,
-    assemble_context_fragments,
     collect_context_fragments,
 )
+from vv_agent.prompt import PromptBundle, PromptSection
 from vv_agent.prompt.templates import render_sub_agents
 from vv_agent.run_config import RunConfig, ToolPolicy, _validate_bounded_int
 from vv_agent.tools.executor import ToolExposure
@@ -102,39 +102,30 @@ class AgentCompiler:
             metadata=metadata,
             max_prompt_chars=run_config.max_context_chars,
         )
-        fragments = [
-            ContextFragment(
-                id="agent_instructions",
-                text=resolved_instructions,
-                stable=True,
-                priority=0,
-                source="agent.instructions",
-            )
-        ]
+        compiler_sections: list[PromptSection] = []
         if agent.sub_agents:
-            fragments.append(
-                ContextFragment(
+            compiler_sections.append(
+                PromptSection(
                     id="configured_sub_agents",
                     text=render_sub_agents(
                         "en-US",
                         {name: config.description for name, config in agent.sub_agents.items()},
                     ),
                     stable=True,
-                    priority=10,
                     source="agent.sub_agents",
                 )
             )
+        provider_fragments: list[ContextFragment] = []
         if run_config.context_providers:
-            fragments.extend(collect_context_fragments(request, run_config.context_providers))
-        context_bundle = assemble_context_fragments(request, fragments)
-        system_prompt = context_bundle.prompt
-        if context_bundle.sections:
-            metadata["system_prompt_sections"] = context_bundle.metadata_sections()
-        if context_bundle.sources:
-            metadata["system_prompt_sources"] = context_bundle.sources
-        if context_bundle.omitted_section_ids:
-            metadata["system_prompt_omitted_sections"] = list(context_bundle.omitted_section_ids)
-        metadata["system_prompt_stable_hash"] = context_bundle.stable_hash
+            provider_fragments = collect_context_fragments(request, run_config.context_providers)
+        prompt_bundle, omitted_section_ids = self._assemble_prompt_bundle(
+            instructions=resolved_instructions,
+            compiler_sections=compiler_sections,
+            provider_fragments=provider_fragments,
+            max_prompt_chars=run_config.max_context_chars,
+        )
+        if omitted_section_ids:
+            metadata["omitted_prompt_section_ids"] = omitted_section_ids
 
         max_cycles = _validate_bounded_int(
             run_config.max_cycles if run_config.max_cycles is not None else 10,
@@ -145,14 +136,14 @@ class AgentCompiler:
         return AgentTask(
             task_id=f"{agent.name}_{uuid.uuid4().hex[:8]}",
             model=str(resolved.model_id or model),
-            system_prompt=system_prompt,
+            prompt_bundle=prompt_bundle,
             user_prompt=input,
             max_cycles=max_cycles,
             no_tool_policy=no_tool_policy,
             sub_agents=deepcopy(agent.sub_agents),
             native_multimodal=resolved.native_multimodal,
             extra_tool_names=[
-                *[tool.name for tool in agent.tools if isinstance(tool, FunctionTool) and tool.exposure != ToolExposure.HIDDEN],
+                *[tool.name for tool in agent.tools if isinstance(tool, FunctionTool) and tool.exposure == ToolExposure.DIRECT],
                 *handoff_tool_names,
             ],
             model_settings=run_config.model_settings,
@@ -160,6 +151,61 @@ class AgentCompiler:
             initial_shared_state=dict(run_config.shared_state or {}),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _assemble_prompt_bundle(
+        *,
+        instructions: str | PromptBundle,
+        compiler_sections: list[PromptSection],
+        provider_fragments: list[ContextFragment],
+        max_prompt_chars: int | None,
+    ) -> tuple[PromptBundle, list[str]]:
+        if isinstance(instructions, PromptBundle):
+            sections = list(instructions.sections)
+        else:
+            sections = [
+                PromptSection(
+                    id="agent_instructions",
+                    text=instructions,
+                    stable=True,
+                    source="agent.instructions",
+                )
+            ]
+
+        omitted_section_ids: list[str] = []
+
+        def append_bounded(section: PromptSection) -> None:
+            current_chars = sum(len(item.text) for item in sections) + max(0, len(sections) - 1) * 2
+            next_chars = current_chars + (2 if sections else 0) + len(section.text)
+            if max_prompt_chars is not None and next_chars > max(int(max_prompt_chars), 0):
+                omitted_section_ids.append(section.id)
+                return
+            sections.append(section)
+
+        for section in compiler_sections:
+            append_bounded(section)
+        for fragment in sorted(
+            provider_fragments,
+            key=lambda item: (
+                int(item.priority),
+                0 if item.stable else 1,
+                str(item.id).encode("utf-16-be"),
+            ),
+        ):
+            text = str(fragment.text or "").strip("\t\n\v\f\r ")
+            if not text:
+                continue
+            append_bounded(
+                PromptSection(
+                    id=fragment.id,
+                    text=text,
+                    stable=fragment.stable,
+                    source=fragment.source or None,
+                    cache_hint=fragment.cache_hint,
+                    metadata=dict(fragment.metadata),
+                )
+            )
+        return PromptBundle(sections=tuple(sections)), omitted_section_ids
 
     def compile_frozen_checkpoint(
         self,
@@ -184,13 +230,16 @@ class AgentCompiler:
                 "checkpoint run definition has invalid runtime fields",
                 code="checkpoint_definition_invalid",
             )
-        messages = getattr(checkpoint, "messages", None)
-        system_metadata: dict[str, object] = {}
-        if isinstance(messages, list) and messages and isinstance(messages[0], Message) and messages[0].role == "system":
-            system_metadata = deepcopy(messages[0].metadata)
-        self._validate_frozen_static_prompt(agent, definition, system_metadata)
+        try:
+            prompt_bundle = PromptBundle.from_dict(cast(dict[str, Any], definition["prompt_bundle"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CheckpointError(
+                "checkpoint run definition has an invalid prompt bundle",
+                code="checkpoint_definition_invalid",
+            ) from exc
+        self._validate_frozen_static_prompt(agent, prompt_bundle)
 
-        metadata = dict(system_metadata)
+        metadata: dict[str, Any] = {}
         run_metadata = definition.get("run_metadata")
         if isinstance(run_metadata, dict):
             metadata.update(deepcopy(run_metadata))
@@ -219,7 +268,7 @@ class AgentCompiler:
         return AgentTask(
             task_id=str(checkpoint.task_id),
             model=str(model["model_id"]),
-            system_prompt=str(definition["compiled_prompt"]),
+            prompt_bundle=prompt_bundle,
             user_prompt=str(definition["root_input"]),
             max_cycles=int(controls["max_cycles"]),
             memory_compact_threshold=int(controls["memory_compact_threshold"]),
@@ -231,7 +280,7 @@ class AgentCompiler:
             agent_type=agent_definition.get("type"),
             native_multimodal=bool(controls["native_multimodal"]),
             extra_tool_names=[
-                *[tool.name for tool in agent.tools if isinstance(tool, FunctionTool) and tool.exposure != ToolExposure.HIDDEN],
+                *[tool.name for tool in agent.tools if isinstance(tool, FunctionTool) and tool.exposure == ToolExposure.DIRECT],
                 *handoff_tool_names,
             ],
             model_settings=run_config.model_settings,
@@ -243,20 +292,23 @@ class AgentCompiler:
     @staticmethod
     def _validate_frozen_static_prompt(
         agent: Agent,
-        definition: dict[str, object],
-        system_metadata: dict[str, object],
+        prompt_bundle: PromptBundle,
     ) -> None:
-        sections = system_metadata.get("system_prompt_sections")
-        section_items: list[Any] = sections if isinstance(sections, list) else []
-        section_map = {str(item.get("id")): str(item.get("text") or "") for item in section_items if isinstance(item, dict)}
+        section_map = {section.id: section.text for section in prompt_bundle.sections}
         if isinstance(agent.instructions, str):
             expected = agent.instructions.strip()
             observed = section_map.get("agent_instructions")
-            if observed is None:
-                observed = str(definition["compiled_prompt"]).strip()
-            if observed != expected and not str(definition["compiled_prompt"]).startswith(expected):
+            if observed != expected:
                 raise CheckpointError(
                     "static agent instructions do not match the frozen checkpoint prompt",
+                    code="checkpoint_definition_mismatch",
+                )
+        elif isinstance(agent.instructions, PromptBundle):
+            expected_sections = agent.instructions.sections
+            observed_prefix = prompt_bundle.sections[: len(expected_sections)]
+            if observed_prefix != expected_sections:
+                raise CheckpointError(
+                    "static agent prompt bundle does not match the frozen checkpoint prompt",
                     code="checkpoint_definition_mismatch",
                 )
         if agent.sub_agents:

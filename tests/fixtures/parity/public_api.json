@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v1",
+  "contract": "vv-agent-public-api-v2",
   "domains": [
     {
       "capabilities": [
@@ -37,6 +37,16 @@
           "id": "agent.background_task",
           "python": "vv_agent.BackgroundAgentTask",
           "rust": "vv_agent::BackgroundAgentTask"
+        },
+        {
+          "id": "agent.prompt_bundle",
+          "python": "vv_agent.PromptBundle",
+          "rust": "vv_agent::PromptBundle"
+        },
+        {
+          "id": "agent.prompt_section",
+          "python": "vv_agent.PromptSection",
+          "rust": "vv_agent::PromptSection"
         },
         {
           "adaptation": "Python names the value GuardrailResult; Rust names it GuardrailOutcome.",
@@ -469,6 +479,21 @@
           "rust": "vv_agent::ToolOutput"
         },
         {
+          "id": "tools.execution_result",
+          "python": "vv_agent.ToolExecutionResult",
+          "rust": "vv_agent::ToolExecutionResult"
+        },
+        {
+          "id": "tools.artifact_ref",
+          "python": "vv_agent.ToolArtifactRef",
+          "rust": "vv_agent::ToolArtifactRef"
+        },
+        {
+          "id": "tools.result_cursor",
+          "python": "vv_agent.ToolResultCursor",
+          "rust": "vv_agent::ToolResultCursor"
+        },
+        {
           "adaptation": "Python adapts registry handlers; Rust adapts ToolSpec values.",
           "id": "tools.spec_executor",
           "python": "vv_agent.tools.RegistryToolExecutor",
@@ -840,7 +865,7 @@
       "id": "runtime_backend"
     }
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "surfaces": [
     {
       "id": "agent",
@@ -1485,6 +1510,37 @@
       ],
       "python_target": "vv_agent.Runner",
       "rust_target": "vv_agent::Runner"
+    },
+    {
+      "id": "agent_task",
+      "members": [
+        {
+          "id": "task_id",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "task_id"},
+          "rust": {"kind": "field", "name": "task_id"}
+        },
+        {
+          "id": "model",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "model"},
+          "rust": {"kind": "field", "name": "model"}
+        },
+        {
+          "id": "prompt_bundle",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "prompt_bundle"},
+          "rust": {"kind": "field", "name": "prompt_bundle"}
+        },
+        {
+          "id": "user_prompt",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "user_prompt"},
+          "rust": {"kind": "field", "name": "user_prompt"}
+        }
+      ],
+      "python_target": "vv_agent.AgentTask",
+      "rust_target": "vv_agent::AgentTask"
     },
     {
       "id": "run_config",
@@ -4020,6 +4076,166 @@
       "rust_target": "vv_agent::ToolMetadata"
     },
     {
+      "id": "tool_execution_result",
+      "members": [
+        {
+          "id": "tool_call_id",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "tool_call_id"},
+          "rust": {"kind": "field", "name": "tool_call_id"}
+        },
+        {
+          "id": "content",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "content"},
+          "rust": {"kind": "field", "name": "content"}
+        },
+        {
+          "adaptation": "Python uses the canonical status_code spelling; Rust exposes the same typed value as status.",
+          "id": "status_code",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "status_code"},
+          "rust": {"kind": "field", "name": "status"}
+        },
+        {
+          "id": "directive",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "directive"},
+          "rust": {"kind": "field", "name": "directive"}
+        },
+        {
+          "id": "error_code",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "error_code"},
+          "rust": {"kind": "field", "name": "error_code"}
+        },
+        {
+          "id": "metadata",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "metadata"},
+          "rust": {"kind": "field", "name": "metadata"}
+        },
+        {
+          "id": "image_url",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "image_url"},
+          "rust": {"kind": "field", "name": "image_url"}
+        },
+        {
+          "id": "image_path",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "image_path"},
+          "rust": {"kind": "field", "name": "image_path"}
+        },
+        {
+          "id": "truncated",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "truncated"},
+          "rust": {"kind": "field", "name": "truncated"}
+        },
+        {
+          "id": "truncation_reason",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "truncation_reason"},
+          "rust": {"kind": "field", "name": "truncation_reason"}
+        },
+        {
+          "id": "original_bytes",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "original_bytes"},
+          "rust": {"kind": "field", "name": "original_bytes"}
+        },
+        {
+          "id": "visible_bytes",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "visible_bytes"},
+          "rust": {"kind": "field", "name": "visible_bytes"}
+        },
+        {
+          "id": "artifact",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "artifact"},
+          "rust": {"kind": "field", "name": "artifact"}
+        },
+        {
+          "id": "cursor",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "cursor"},
+          "rust": {"kind": "field", "name": "cursor"}
+        }
+      ],
+      "python_target": "vv_agent.ToolExecutionResult",
+      "rust_target": "vv_agent::ToolExecutionResult"
+    },
+    {
+      "id": "tool_artifact_ref",
+      "members": [
+        {
+          "id": "path",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "path"},
+          "rust": {"kind": "field", "name": "path"}
+        },
+        {
+          "id": "media_type",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "media_type"},
+          "rust": {"kind": "field", "name": "media_type"}
+        },
+        {
+          "id": "encoding",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "encoding"},
+          "rust": {"kind": "field", "name": "encoding"}
+        },
+        {
+          "id": "size_bytes",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "size_bytes"},
+          "rust": {"kind": "field", "name": "size_bytes"}
+        },
+        {
+          "id": "sha256",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "sha256"},
+          "rust": {"kind": "field", "name": "sha256"}
+        }
+      ],
+      "python_target": "vv_agent.ToolArtifactRef",
+      "rust_target": "vv_agent::ToolArtifactRef"
+    },
+    {
+      "id": "tool_result_cursor",
+      "members": [
+        {
+          "id": "kind",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "kind"},
+          "rust": {"kind": "field", "name": "kind"}
+        },
+        {
+          "id": "path",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "path"},
+          "rust": {"kind": "field", "name": "path"}
+        },
+        {
+          "id": "offset_chars",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "offset_chars"},
+          "rust": {"kind": "field", "name": "offset_chars"}
+        },
+        {
+          "id": "sha256",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "sha256"},
+          "rust": {"kind": "field", "name": "sha256"}
+        }
+      ],
+      "python_target": "vv_agent.ToolResultCursor",
+      "rust_target": "vv_agent::ToolResultCursor"
+    },
+    {
       "id": "tool",
       "members": [
         {
@@ -5787,6 +6003,94 @@
       "rust_target": "vv_agent::TraceSink"
     },
     {
+      "id": "prompt_bundle",
+      "members": [
+        {
+          "id": "sections",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "sections"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "sections"
+          }
+        },
+        {
+          "id": "stable_hash",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "stable_hash"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "stable_hash"
+          }
+        },
+        {
+          "id": "flatten",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "flatten"
+          },
+          "rust": {
+            "kind": "method",
+            "name": "flatten"
+          }
+        }
+      ],
+      "python_target": "vv_agent.PromptBundle",
+      "rust_target": "vv_agent::PromptBundle"
+    },
+    {
+      "id": "prompt_section",
+      "members": [
+        {
+          "id": "id",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "id"},
+          "rust": {"kind": "field", "name": "id"}
+        },
+        {
+          "id": "text",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "text"},
+          "rust": {"kind": "field", "name": "text"}
+        },
+        {
+          "id": "stable",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "stable"},
+          "rust": {"kind": "field", "name": "stable"}
+        },
+        {
+          "id": "source",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "source"},
+          "rust": {"kind": "field", "name": "source"}
+        },
+        {
+          "id": "cache_hint",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "cache_hint"},
+          "rust": {"kind": "field", "name": "cache_hint"}
+        },
+        {
+          "id": "metadata",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "metadata"},
+          "rust": {"kind": "field", "name": "metadata"}
+        }
+      ],
+      "python_target": "vv_agent.PromptSection",
+      "rust_target": "vv_agent::PromptSection"
+    },
+    {
       "id": "llm_request",
       "members": [
         {
@@ -5853,6 +6157,19 @@
             "kind": "field",
             "name": "model_settings"
           }
+        },
+        {
+          "id": "prompt_bundle",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "prompt_bundle"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "prompt_bundle"
+          }
         }
       ],
       "python_target": "vv_agent.llm.LlmRequest",
@@ -5876,34 +6193,9 @@
                   "required": true
                 },
                 {
-                  "kind": "keyword_only",
-                  "name": "model",
+                  "kind": "positional_or_keyword",
+                  "name": "request",
                   "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "messages",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "tools",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "stream_callback",
-                  "required": false
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "model_settings",
-                  "required": false
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "request_metadata",
-                  "required": false
                 }
               ]
             }
@@ -5914,12 +6206,11 @@
           }
         },
         {
-          "adaptation": "Python passes stream_callback to complete; Rust exposes a separate defaulted method.",
           "id": "complete_with_stream",
           "kind": "operation",
           "python": {
             "kind": "method",
-            "name": "complete",
+            "name": "complete_with_stream",
             "signature": {
               "async": false,
               "parameters": [
@@ -5929,33 +6220,13 @@
                   "required": true
                 },
                 {
-                  "kind": "keyword_only",
-                  "name": "model",
+                  "kind": "positional_or_keyword",
+                  "name": "request",
                   "required": true
                 },
                 {
-                  "kind": "keyword_only",
-                  "name": "messages",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "tools",
-                  "required": true
-                },
-                {
-                  "kind": "keyword_only",
+                  "kind": "positional_or_keyword",
                   "name": "stream_callback",
-                  "required": false
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "model_settings",
-                  "required": false
-                },
-                {
-                  "kind": "keyword_only",
-                  "name": "request_metadata",
                   "required": false
                 }
               ]

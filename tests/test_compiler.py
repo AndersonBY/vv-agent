@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 from vv_agent import Agent, RunConfig, ToolPolicy, function_tool, handoff
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.types import AgentTask, Message
 
@@ -25,6 +28,34 @@ def _resolved(
         context_length=context_length,
         max_output_tokens=max_output_tokens,
     )
+
+
+def _frozen_definition(*, run_metadata: dict[str, object]) -> dict[str, object]:
+    fixture_path = Path(__file__).parent / "fixtures" / "parity" / "run_definition.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    definition = deepcopy(next(case["definition"] for case in fixture["golden_cases"] if case["name"] == "minimal"))
+    definition["root_input"] = "go"
+    definition["prompt_bundle"] = build_raw_system_prompt_bundle("Answer.").to_dict()
+    definition["initial_messages"] = []
+    definition["initial_shared_state"] = {}
+    definition["run_metadata"] = run_metadata
+    definition["model"]["model_id"] = "model-id"
+    definition["agent"]["type"] = None
+    definition["runtime_controls"].update(
+        {
+            "max_cycles": 8,
+            "session_memory_enabled": False,
+            "memory_compact_threshold": 128_000,
+            "memory_threshold_percentage": 90,
+            "no_tool_policy": "continue",
+            "allow_interruption": True,
+            "native_multimodal": False,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": [],
+        }
+    )
+    definition["tools"] = []
+    return definition
 
 
 def test_agent_compiler_builds_runtime_task_from_public_contract() -> None:
@@ -59,7 +90,8 @@ def test_agent_compiler_builds_runtime_task_from_public_contract() -> None:
     assert isinstance(task, AgentTask)
     assert task.task_id.startswith("ops_")
     assert task.model == "model-id"
-    assert task.system_prompt == "Check facts."
+    assert task.prompt_bundle.flatten() == "Check facts."
+    assert task.prompt_bundle.sections[0].id == "agent_instructions"
     assert task.user_prompt == "analyze order"
     assert task.max_cycles == 12
     assert task.extra_tool_names == ["lookup", "transfer_to_writer"]
@@ -103,27 +135,7 @@ def test_agent_compiler_treats_non_positive_context_metadata_as_absent() -> None
 
 
 def test_frozen_checkpoint_uses_current_threshold_and_metadata_without_rewriting_record() -> None:
-    definition = {
-        "compiled_prompt": "Answer.",
-        "root_input": "go",
-        "initial_messages": [],
-        "initial_shared_state": {},
-        "run_metadata": {},
-        "model": {"model_id": "model-id"},
-        "agent": {"type": None},
-        "tools": [],
-        "runtime_controls": {
-                "max_cycles": 8,
-                "session_memory_enabled": False,
-                "memory_compact_threshold": 128_000,
-            "memory_threshold_percentage": 90,
-            "no_tool_policy": "continue",
-            "allow_interruption": True,
-            "native_multimodal": False,
-            "tool_use_behavior": "run_llm_again",
-            "stop_at_tool_names": [],
-        },
-    }
+    definition = _frozen_definition(run_metadata={"reserved_output_tokens": 4_096})
     system_message = Message(
         role="system",
         content="Answer.",
@@ -154,31 +166,13 @@ def test_frozen_checkpoint_uses_current_threshold_and_metadata_without_rewriting
 
 
 def test_frozen_checkpoint_restores_run_metadata_when_system_metadata_is_empty() -> None:
-    definition = {
-        "compiled_prompt": "Answer.",
-        "root_input": "go",
-        "initial_messages": [],
-        "initial_shared_state": {},
-        "run_metadata": {
+    definition = _frozen_definition(
+        run_metadata={
             "reserved_output_tokens": 4_096,
             "host_request_id": "request-42",
             "model_context_window": 48_000,
-        },
-        "model": {"model_id": "model-id"},
-        "agent": {"type": None},
-        "tools": [],
-        "runtime_controls": {
-                "max_cycles": 8,
-                "session_memory_enabled": False,
-                "memory_compact_threshold": 128_000,
-            "memory_threshold_percentage": 90,
-            "no_tool_policy": "continue",
-            "allow_interruption": True,
-            "native_multimodal": False,
-            "tool_use_behavior": "run_llm_again",
-            "stop_at_tool_names": [],
-        },
-    }
+        }
+    )
     system_message = Message(role="system", content="Answer.", metadata={})
     checkpoint = SimpleNamespace(
         run_definition=definition,

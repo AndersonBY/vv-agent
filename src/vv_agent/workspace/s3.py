@@ -16,7 +16,8 @@ import importlib.util
 from datetime import UTC, datetime
 from typing import Any
 
-from vv_agent.workspace.base import FileInfo, _normalize_workspace_path
+from vv_agent.workspace.artifacts import is_reserved_artifact_path
+from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments, _normalize_workspace_path
 
 _BOTO3_AVAILABLE = importlib.util.find_spec("boto3") is not None
 
@@ -151,6 +152,8 @@ class S3WorkspaceBackend:
         return resp["Body"].read()
 
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
+        if is_reserved_artifact_path(path):
+            raise PermissionError("artifact paths are immutable")
         key = self._key(path)
         if append:
             try:
@@ -165,6 +168,28 @@ class S3WorkspaceBackend:
             Body=data,
             ContentLength=len(data),
         )
+        return len(data)
+
+    def write_text_exclusive(self, path: str, content: str) -> int:
+        normalized = "/".join(_exclusive_workspace_path_segments(path))
+        data = content.encode("utf-8")
+        try:
+            self._client.put_object(
+                Bucket=self._bucket,
+                Key=self._key(normalized),
+                Body=data,
+                ContentLength=len(data),
+                IfNoneMatch="*",
+            )
+        except self._client.exceptions.ClientError as exc:
+            response = getattr(exc, "response", {})
+            error = response.get("Error", {}) if isinstance(response, dict) else {}
+            metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+            code = str(error.get("Code", "")) if isinstance(error, dict) else ""
+            status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+            if code in {"PreconditionFailed", "ConditionalRequestConflict", "412", "409"} or status in {409, 412}:
+                raise FileExistsError(path) from exc
+            raise
         return len(data)
 
     def file_info(self, path: str) -> FileInfo | None:

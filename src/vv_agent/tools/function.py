@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol, Union, get_args, get_origin, ge
 
 from vv_agent.tools.argument_validation import assert_valid_tool_schema, close_object_schemas
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.executor import ToolExposure
+from vv_agent.tools.executor import ToolExposure, normalize_tool_exposure
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
 from vv_agent.tools.outputs import ToolOutput, ToolOutputError, ToolOutputFile, ToolOutputImage, ToolOutputJson, ToolOutputText
 from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
@@ -54,6 +54,7 @@ class FunctionTool:
     def __post_init__(self) -> None:
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
+        self.exposure = normalize_tool_exposure(self.exposure)
         self.params_json_schema = close_object_schemas(self.params_json_schema)
         assert_valid_tool_schema(self.params_json_schema)
         self.tool_metadata = normalize_tool_metadata(self.tool_metadata)
@@ -278,7 +279,7 @@ def adapt_tool(tool: Tool) -> FunctionTool:
 
     raw_exposure = getattr(tool, "exposure", ToolExposure.DIRECT)
     try:
-        exposure = ToolExposure(raw_exposure)
+        exposure = normalize_tool_exposure(raw_exposure)
     except ValueError as exc:
         raise TypeError(f"Unsupported tool exposure: {raw_exposure!r}") from exc
     metadata = getattr(tool, "metadata", {})

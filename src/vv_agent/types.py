@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import posixpath
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, cast
 
-from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
-from vv_agent.checkpoint import ResumeObservation
+from vv_agent.budget import MAX_WIRE_INTEGER, BudgetExhaustion, BudgetUsageSnapshot
+from vv_agent.checkpoint import ResumeObservation, canonical_json_bytes, validate_sha256
 from vv_agent.model_settings import ModelSettings
+from vv_agent.prompt import PromptBundle
 
 Role = Literal["system", "user", "assistant", "tool"]
 NoToolPolicy = Literal["continue", "wait_user", "finish"]
@@ -534,6 +537,109 @@ class TaskTokenUsage:
         return usage
 
 
+_ARTIFACT_PATH_RE = re.compile(
+    r"^\.vv-agent/artifacts/(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}/)*[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+)
+_TOOL_RESULT_FORBIDDEN_METADATA_KEYS = frozenset({"content", "instructions", "output", "stderr", "stdout"})
+
+
+@dataclass(frozen=True, slots=True)
+class ToolArtifactRef:
+    path: str
+    media_type: str
+    encoding: str
+    size_bytes: int
+    sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            path_bytes = self.path.encode("utf-8") if isinstance(self.path, str) else b""
+        except UnicodeEncodeError as exc:
+            raise ValueError("artifact_path_invalid") from exc
+        if not path_bytes or len(path_bytes) > 512 or not _ARTIFACT_PATH_RE.fullmatch(self.path):
+            raise ValueError("artifact_path_invalid")
+        if self.media_type != "text/plain" or self.encoding != "utf-8":
+            raise ValueError("tool_result_invalid: artifact must use text/plain with utf-8 encoding")
+        if (
+            isinstance(self.size_bytes, bool)
+            or not isinstance(self.size_bytes, int)
+            or not 0 <= self.size_bytes <= MAX_WIRE_INTEGER
+        ):
+            raise ValueError("tool_result_invalid: artifact size_bytes must be a JSON-safe non-negative integer")
+        try:
+            validate_sha256(self.sha256, "tool artifact sha256")
+        except ValueError as exc:
+            raise ValueError("tool_result_invalid: artifact sha256 is invalid") from exc
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "media_type": self.media_type,
+            "encoding": self.encoding,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ToolArtifactRef:
+        if not isinstance(payload, dict) or set(payload) != {"path", "media_type", "encoding", "size_bytes", "sha256"}:
+            raise ValueError("tool_result_invalid: artifact fields do not match the current wire")
+        try:
+            return cls(**payload)
+        except TypeError as exc:
+            raise ValueError("tool_result_invalid: artifact fields are invalid") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResultCursor:
+    kind: str
+    path: str
+    offset_chars: int
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if self.kind != "read_file":
+            raise ValueError("tool_result_invalid: cursor kind must be read_file")
+        try:
+            path_bytes = self.path.encode("utf-8") if isinstance(self.path, str) else b""
+        except UnicodeEncodeError as exc:
+            raise ValueError("tool_result_invalid: cursor path must be a normalized caller-visible path") from exc
+        if (
+            not path_bytes
+            or "\x00" in self.path
+            or "\\" in self.path
+            or posixpath.normpath(self.path) != self.path
+        ):
+            raise ValueError("tool_result_invalid: cursor path must be a normalized caller-visible path")
+        if (
+            isinstance(self.offset_chars, bool)
+            or not isinstance(self.offset_chars, int)
+            or not 0 <= self.offset_chars <= MAX_WIRE_INTEGER
+        ):
+            raise ValueError("tool_result_invalid: cursor offset_chars must be a JSON-safe non-negative integer")
+        try:
+            validate_sha256(self.sha256, "tool result cursor sha256")
+        except ValueError as exc:
+            raise ValueError("tool_result_invalid: cursor sha256 is invalid") from exc
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "path": self.path,
+            "offset_chars": self.offset_chars,
+            "sha256": self.sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ToolResultCursor:
+        if not isinstance(payload, dict) or set(payload) != {"kind", "path", "offset_chars", "sha256"}:
+            raise ValueError("tool_result_invalid: cursor fields do not match the current wire")
+        try:
+            return cls(**payload)
+        except TypeError as exc:
+            raise ValueError("tool_result_invalid: cursor fields are invalid") from exc
+
+
 @dataclass(slots=True)
 class ToolExecutionResult:
     tool_call_id: str
@@ -544,17 +650,89 @@ class ToolExecutionResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     image_url: str | None = None
     image_path: str | None = None
+    truncated: bool | None = None
+    truncation_reason: str | None = None
+    original_bytes: int | None = None
+    visible_bytes: int | None = None
+    artifact: ToolArtifactRef | None = None
+    cursor: ToolResultCursor | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status_code, ToolResultStatus):
             self.status_code = ToolResultStatus(self.status_code)
         if not isinstance(self.directive, ToolDirective):
             self.directive = ToolDirective(self.directive)
+        self._validate()
+
+    def _validate(self) -> None:
+        if not isinstance(self.tool_call_id, str) or not isinstance(self.content, str):
+            raise ValueError("tool_result_invalid: tool_call_id and content must be strings")
+        for value, name in (
+            (self.error_code, "error_code"),
+            (self.image_url, "image_url"),
+            (self.image_path, "image_path"),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"tool_result_invalid: {name} must be a string when present")
+        if not isinstance(self.metadata, dict) or not all(isinstance(key, str) for key in self.metadata):
+            raise ValueError("tool_result_invalid: metadata must be an object with string keys")
+        forbidden_metadata = sorted(set(self.metadata).intersection(_TOOL_RESULT_FORBIDDEN_METADATA_KEYS))
+        if forbidden_metadata:
+            raise ValueError(f"tool_result_invalid: metadata contains model-visible payload keys: {forbidden_metadata}")
+        try:
+            canonical_json_bytes(self.metadata, "tool result metadata")
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ValueError("tool_result_invalid: metadata must be RFC 8785 I-JSON") from exc
+        recovery_values = (
+            self.truncation_reason,
+            self.original_bytes,
+            self.visible_bytes,
+            self.artifact,
+            self.cursor,
+        )
+        if self.truncated is None:
+            if any(value is not None for value in recovery_values):
+                raise ValueError("tool_result_invalid: ordinary results cannot contain recovery fields")
+            return
+        if self.truncated is not True:
+            raise ValueError("tool_result_invalid: truncated must be omitted or true")
+        if self.truncation_reason not in {"output_limit", "read_limit"}:
+            raise ValueError("tool_result_invalid: truncated result has an invalid truncation_reason")
+        for value, name in ((self.original_bytes, "original_bytes"), (self.visible_bytes, "visible_bytes")):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_WIRE_INTEGER:
+                raise ValueError(f"tool_result_invalid: {name} must be a JSON-safe non-negative integer")
+        visible_bytes = len(self.content.encode("utf-8"))
+        if self.visible_bytes != visible_bytes or self.original_bytes is None or self.original_bytes < visible_bytes:
+            raise ValueError("tool_result_invalid: truncated result byte sizes do not match content")
+        if self.truncation_reason == "output_limit":
+            if not isinstance(self.artifact, ToolArtifactRef) or self.cursor is not None:
+                raise ValueError("tool_result_invalid: output_limit requires only an artifact recovery pointer")
+        elif not isinstance(self.cursor, ToolResultCursor) or self.artifact is not None:
+            raise ValueError("tool_result_invalid: read_limit requires only a cursor recovery pointer")
 
     def to_tool_message(self) -> Message:
-        return Message(role="tool", content=self.content, tool_call_id=self.tool_call_id)
+        self._validate()
+        content = self.content
+        if self.truncated is True:
+            recovery = {
+                key: value
+                for key, value in self.to_dict().items()
+                if key
+                in {
+                    "truncated",
+                    "truncation_reason",
+                    "original_bytes",
+                    "visible_bytes",
+                    "artifact",
+                    "cursor",
+                }
+            }
+            recovery_json = canonical_json_bytes({"vv_agent_recovery": recovery}, "tool result recovery").decode("utf-8")
+            content = f"{content}\n{recovery_json}"
+        return Message(role="tool", content=content, tool_call_id=self.tool_call_id)
 
     def to_dict(self) -> dict[str, Any]:
+        self._validate()
         d: dict[str, Any] = {
             "tool_call_id": self.tool_call_id,
             "content": self.content,
@@ -569,6 +747,18 @@ class ToolExecutionResult:
             d["image_url"] = self.image_url
         if self.image_path is not None:
             d["image_path"] = self.image_path
+        if self.truncated is not None:
+            d["truncated"] = self.truncated
+        if self.truncation_reason is not None:
+            d["truncation_reason"] = self.truncation_reason
+        if self.original_bytes is not None:
+            d["original_bytes"] = self.original_bytes
+        if self.visible_bytes is not None:
+            d["visible_bytes"] = self.visible_bytes
+        if self.artifact is not None:
+            d["artifact"] = self.artifact.to_dict()
+        if self.cursor is not None:
+            d["cursor"] = self.cursor.to_dict()
         return d
 
     @classmethod
@@ -584,24 +774,62 @@ class ToolExecutionResult:
             "metadata",
             "image_url",
             "image_path",
+            "truncated",
+            "truncation_reason",
+            "original_bytes",
+            "visible_bytes",
+            "artifact",
+            "cursor",
         }
         unknown = sorted(set(data) - allowed)
         missing = sorted({"tool_call_id", "content", "status_code", "directive"} - set(data))
         if missing or unknown:
-            raise ValueError(f"ToolExecutionResult fields do not match the current wire: missing={missing}, unknown={unknown}")
-        metadata = data.get("metadata", {})
-        if not isinstance(metadata, dict):
-            raise TypeError("ToolExecutionResult metadata must be an object")
-        return cls(
-            tool_call_id=data["tool_call_id"],
-            content=data["content"],
-            status_code=ToolResultStatus(data["status_code"]),
-            directive=ToolDirective(data["directive"]),
-            error_code=data.get("error_code"),
-            metadata=dict(metadata),
-            image_url=data.get("image_url"),
-            image_path=data.get("image_path"),
-        )
+            raise ValueError(
+                "tool_result_invalid: "
+                f"ToolExecutionResult fields do not match the current wire: missing={missing}, unknown={unknown}"
+            )
+        try:
+            metadata = data.get("metadata", {})
+            if not isinstance(metadata, dict):
+                raise ValueError("tool_result_invalid: metadata must be an object")
+            optional_strings: dict[str, str | None] = {}
+            for key in ("error_code", "image_url", "image_path"):
+                value = data.get(key)
+                if key in data and not isinstance(value, str):
+                    raise ValueError(f"tool_result_invalid: {key} must be a string")
+                optional_strings[key] = value
+            truncated = data.get("truncated")
+            if "truncated" in data and truncated is not True:
+                raise ValueError("tool_result_invalid: truncated must be omitted or true")
+            for key in ("truncation_reason", "original_bytes", "visible_bytes", "artifact", "cursor"):
+                if key in data and data[key] is None:
+                    raise ValueError(f"tool_result_invalid: {key} must be omitted instead of null")
+            artifact = data.get("artifact")
+            cursor = data.get("cursor")
+            if artifact is not None and not isinstance(artifact, dict):
+                raise ValueError("tool_result_invalid: artifact must be an object")
+            if cursor is not None and not isinstance(cursor, dict):
+                raise ValueError("tool_result_invalid: cursor must be an object")
+            return cls(
+                tool_call_id=data["tool_call_id"],
+                content=data["content"],
+                status_code=ToolResultStatus(data["status_code"]),
+                directive=ToolDirective(data["directive"]),
+                error_code=optional_strings["error_code"],
+                metadata=dict(metadata),
+                image_url=optional_strings["image_url"],
+                image_path=optional_strings["image_path"],
+                truncated=truncated,
+                truncation_reason=data.get("truncation_reason"),
+                original_bytes=data.get("original_bytes"),
+                visible_bytes=data.get("visible_bytes"),
+                artifact=ToolArtifactRef.from_dict(artifact) if artifact is not None else None,
+                cursor=ToolResultCursor.from_dict(cursor) if cursor is not None else None,
+            )
+        except (TypeError, ValueError) as exc:
+            if str(exc) == "artifact_path_invalid":
+                raise ValueError("artifact_path_invalid") from exc
+            raise ValueError("tool_result_invalid") from exc
 
 
 @dataclass(slots=True)
@@ -899,7 +1127,7 @@ def _agent_task_messages(data: dict[str, Any]) -> list[Message]:
 class AgentTask:
     task_id: str
     model: str
-    system_prompt: str
+    prompt_bundle: PromptBundle
     user_prompt: str
     max_cycles: int = 8
     memory_compact_threshold: int = 250_000
@@ -925,7 +1153,7 @@ class AgentTask:
         return {
             "task_id": self.task_id,
             "model": self.model,
-            "system_prompt": self.system_prompt,
+            "prompt_bundle": self.prompt_bundle.to_dict(),
             "user_prompt": self.user_prompt,
             "max_cycles": self.max_cycles,
             "memory_compact_threshold": self.memory_compact_threshold,
@@ -946,7 +1174,7 @@ class AgentTask:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentTask:
-        """Restore the public dict form; only the four constructor fields are required."""
+        """Restore the current public dict form."""
         if not isinstance(data, dict):
             raise TypeError("AgentTask payload must be a dict")
         _reject_unknown_fields(
@@ -954,7 +1182,7 @@ class AgentTask:
             {
                 "task_id",
                 "model",
-                "system_prompt",
+                "prompt_bundle",
                 "user_prompt",
                 "max_cycles",
                 "memory_compact_threshold",
@@ -977,7 +1205,7 @@ class AgentTask:
         return cls(
             task_id=_agent_task_required_string(data, "task_id"),
             model=_agent_task_required_string(data, "model"),
-            system_prompt=_agent_task_required_string(data, "system_prompt"),
+            prompt_bundle=PromptBundle.from_dict(data["prompt_bundle"]),
             user_prompt=_agent_task_required_string(data, "user_prompt"),
             max_cycles=_agent_task_integer(data, "max_cycles", default=8, maximum=_MAX_U32),
             memory_compact_threshold=_agent_task_integer(

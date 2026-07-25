@@ -26,6 +26,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model_settings import ModelSettings, RetrySettings
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.backends.celery import CeleryBackend, register_cycle_task
 from vv_agent.runtime.backends.celery_tasks import run_single_cycle
 from vv_agent.runtime.backends.distributed import (
@@ -87,7 +88,7 @@ def _strict_envelope() -> DistributedRunEnvelope:
     task = AgentTask(
         task_id="strict-run",
         model="test-model",
-        system_prompt="Use current wire only.",
+        prompt_bundle=build_raw_system_prompt_bundle("Use current wire only."),
         user_prompt="Inspect the payload.",
         sub_agents={
             "research": SubAgentConfig(
@@ -362,6 +363,27 @@ def test_distributed_worker_response_matches_all_canonical_and_invalid_cases() -
             DistributedWorkerResponse.from_dict(_worker_response_case_payload(fixture, case))
 
 
+def test_distributed_worker_response_producer_preserves_bounded_tool_result_fields() -> None:
+    fixture = json.loads(WORKER_RESPONSE_FIXTURE_PATH.read_text(encoding="utf-8"))
+    payload = next(
+        case["response"]
+        for case in fixture["valid_cases"]
+        if case["name"] == "terminal_candidate"
+    )
+    decoded = DistributedWorkerResponse.from_dict(payload)
+    assert decoded.result is not None
+    assert decoded.checkpoint_revision is not None
+
+    produced = DistributedWorkerResponse.terminal_candidate(
+        checkpoint_revision=decoded.checkpoint_revision,
+        result=decoded.result,
+    ).to_dict()
+    expected_result = payload["result"]["cycles"][0]["tool_results"][0]
+
+    assert produced == payload
+    assert produced["result"]["cycles"][0]["tool_results"][0] == expected_result
+
+
 @pytest.mark.parametrize(
     "object_path",
     [
@@ -444,10 +466,10 @@ def test_distributed_reader_rejects_missing_current_wire_field(
     [
         ("schema_version", None),
         ("schema_version", "vv-agent.distributed-run.v1"),
-        ("schema_version", "vv-agent.distributed-run.v3"),
+        ("schema_version", "vv-agent.distributed-run.v4"),
         ("run_definition_schema", None),
         ("run_definition_schema", "vv-agent.run-definition.v0"),
-        ("run_definition_schema", "vv-agent.run-definition.v3"),
+        ("run_definition_schema", "vv-agent.run-definition.v4"),
     ],
 )
 def test_distributed_reader_rejects_missing_stale_or_unknown_versions(

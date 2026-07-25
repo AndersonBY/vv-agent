@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from vv_agent.events import MemoryCompactTrigger, RunEvent, _project_provider_stream_payload
-from vv_agent.llm.base import LLMClient, LlmRequest, complete_llm_request
+from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import CompactionExhaustedError, MemoryManager
 from vv_agent.memory.manager import CompactionMode
 from vv_agent.memory.provider import MemoryCompactCompleted, MemoryCompactStarted, MemoryProvider, MemoryProviderResult
@@ -190,6 +190,7 @@ class CycleRunner:
                     messages=request_messages,
                     tools=request_tool_schemas,
                     metadata=dict(task.metadata),
+                    prompt_bundle=task.prompt_bundle,
                     stream_callback=stream_callback,
                     model_settings=self._effective_model_settings(task, ctx),
                     ctx=ctx,
@@ -339,6 +340,7 @@ class CycleRunner:
         messages: list[Message],
         tools: list[dict[str, object]],
         metadata: dict[str, Any],
+        prompt_bundle: Any,
         stream_callback: Any,
         model_settings: ModelSettings | None,
         ctx: ExecutionContext | None,
@@ -349,13 +351,12 @@ class CycleRunner:
             tools=tools,
             metadata=metadata,
             model_settings=model_settings,
+            prompt_bundle=prompt_bundle,
         )
         def invoke() -> LLMResponse:
-            return complete_llm_request(
-                self.llm_client,
-                request,
-                stream_callback=stream_callback,
-            )
+            if stream_callback is None:
+                return self.llm_client.complete(request)
+            return self.llm_client.complete_with_stream(request, stream_callback)
 
         if ctx is None or ctx.model_call_coordinator is None:
             raise RuntimeError("model call coordinator is not initialized")

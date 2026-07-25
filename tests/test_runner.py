@@ -257,22 +257,16 @@ def test_runner_passes_resolved_model_settings_to_llm_complete(tmp_path: Path) -
     seen_settings: list[ModelSettings | None] = []
 
     class CapturingLLM:
-        def complete(
-            self,
-            *,
-            model: str,
-            messages: list[Message],
-            tools: list[dict[str, object]],
-            stream_callback=None,
-            model_settings: ModelSettings | None = None,
-            request_metadata=None,
-        ) -> LLMResponse:
-            del model, messages, tools, stream_callback, request_metadata
-            seen_settings.append(model_settings)
+        def complete(self, request: LlmRequest) -> LLMResponse:
+            seen_settings.append(request.model_settings)
             return LLMResponse(
                 content="done",
                 tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
             )
+
+        def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+            del stream_callback
+            return self.complete(request)
 
     Runner.run_sync(
         Agent(
@@ -300,24 +294,18 @@ def test_runner_keeps_hidden_tools_executable_but_out_of_model_schemas(tmp_path:
         return "internal"
 
     class CapturingLLM:
-        def complete(
-            self,
-            *,
-            model: str,
-            messages: list[Message],
-            tools: list[dict[str, object]],
-            stream_callback=None,
-            model_settings: ModelSettings | None = None,
-            request_metadata=None,
-        ) -> LLMResponse:
-            del model, messages, stream_callback, model_settings, request_metadata
-            for schema in tools:
+        def complete(self, request: LlmRequest) -> LLMResponse:
+            for schema in request.tools:
                 function = cast(dict[str, object], schema["function"])
                 captured_tool_names.append(str(function["name"]))
             return LLMResponse(
                 content="",
                 tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
             )
+
+        def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+            del stream_callback
+            return self.complete(request)
 
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Finish.", model="m", tools=[internal_lookup]),
@@ -461,18 +449,8 @@ def test_runner_exposes_read_image_for_resolved_multimodal_model(tmp_path: Path)
     seen_tool_names: set[str] = set()
 
     class CapturingLLM:
-        def complete(
-            self,
-            *,
-            model: str,
-            messages: list[Message],
-            tools: list[dict[str, object]],
-            stream_callback=None,
-            model_settings: ModelSettings | None = None,
-            request_metadata=None,
-        ) -> LLMResponse:
-            del model, messages, stream_callback, model_settings, request_metadata
-            for schema in tools:
+        def complete(self, request: LlmRequest) -> LLMResponse:
+            for schema in request.tools:
                 function = schema.get("function")
                 if isinstance(function, dict):
                     typed_function = cast(dict[str, object], function)
@@ -481,6 +459,10 @@ def test_runner_exposes_read_image_for_resolved_multimodal_model(tmp_path: Path)
                 content="done",
                 tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
             )
+
+        def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+            del stream_callback
+            return self.complete(request)
 
     result = Runner.run_sync(
         Agent(name="assistant", instructions="Inspect images.", model="m"),
@@ -544,17 +526,15 @@ def test_runner_prefers_resolved_catalog_token_limits_for_memory(tmp_path: Path,
 
 def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
     class StreamingLLM:
-        def complete(
-            self,
-            *,
-            model: str,
-            messages: list[Message],
-            tools: list[dict[str, object]],
-            stream_callback=None,
-            model_settings: ModelSettings | None = None,
-            request_metadata=None,
-        ) -> LLMResponse:
-            del model, messages, tools, model_settings, request_metadata
+        def complete(self, request: LlmRequest) -> LLMResponse:
+            return self._respond(request, None)
+
+        def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+            return self._respond(request, stream_callback)
+
+        @staticmethod
+        def _respond(request: LlmRequest, stream_callback) -> LLMResponse:
+            del request
             if stream_callback is not None:
                 stream_callback({"event": "assistant_delta", "content_delta": "hel"})
                 stream_callback({"event": "assistant_delta", "content_delta": "lo"})

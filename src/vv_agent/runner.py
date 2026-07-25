@@ -2095,7 +2095,7 @@ class Runner:
         for candidate in agent.tools:
             if is_tool_executor(candidate):
                 executor = cast(ToolExecutor, candidate)
-                is_model_visible = executor.exposure != ToolExposure.HIDDEN
+                is_model_visible = executor.exposure == ToolExposure.DIRECT
                 registry.register_executor(
                     executor,
                     expose_to_model=is_model_visible,
@@ -2106,7 +2106,7 @@ class Runner:
             if not cls._tool_is_enabled(tool=tool, agent=agent, run_config=run_config):
                 continue
             if not isinstance(candidate, FunctionTool):
-                is_model_visible = tool.exposure != ToolExposure.HIDDEN
+                is_model_visible = tool.exposure == ToolExposure.DIRECT
                 registry.register_executor(
                     tool.to_executor(),
                     expose_to_model=is_model_visible,
@@ -2117,7 +2117,7 @@ class Runner:
             def handler(context: ToolContext, arguments: dict[str, Any], *, _tool: FunctionTool = tool) -> ToolExecutionResult:
                 return cls._execute_function_tool(_tool, context=context, arguments=arguments, run_config=run_config)
 
-            is_model_visible = tool.exposure != ToolExposure.HIDDEN
+            is_model_visible = tool.exposure == ToolExposure.DIRECT
             registry.register_executor(
                 RegistryToolExecutor(
                     name=tool.name,

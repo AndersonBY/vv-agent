@@ -35,12 +35,12 @@ from vv_agent.events import (
     SubRunCompletedEvent,
     SubRunStartedEvent,
 )
-from vv_agent.llm.base import LLMClient, LlmRequest, complete_llm_request
+from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.token_utils import resolve_model_token_limits
 from vv_agent.model import ModelProvider, ModelRef
 from vv_agent.model_settings import ModelSettings
-from vv_agent.prompt import build_raw_system_prompt_sections, build_system_prompt_bundle
+from vv_agent.prompt import build_raw_system_prompt_bundle, build_system_prompt_bundle
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
@@ -1505,7 +1505,7 @@ class AgentRuntime:
         if initial_messages:
             prepared = [self._copy_message(message) for message in initial_messages]
             if not prepared or prepared[0].role != "system":
-                prepared.insert(0, Message(role="system", content=task.system_prompt, metadata=dict(task.metadata)))
+                prepared.insert(0, Message(role="system", content=task.prompt_bundle.flatten(), metadata=dict(task.metadata)))
             elif task.metadata:
                 merged_metadata = dict(task.metadata)
                 merged_metadata.update(prepared[0].metadata)
@@ -1523,7 +1523,7 @@ class AgentRuntime:
 
         first_user_message = task.user_prompt if user_message is None else user_message
         return [
-            Message(role="system", content=task.system_prompt, metadata=dict(task.metadata)),
+            Message(role="system", content=task.prompt_bundle.flatten(), metadata=dict(task.metadata)),
             Message(role="user", content=first_user_message),
         ]
 
@@ -1688,7 +1688,7 @@ class AgentRuntime:
             summary_backend=summary_backend,
             summary_model=summary_model,
             summary_callback=summarize_compaction,
-            base_system_prompt=task.system_prompt,
+            base_system_prompt=task.prompt_bundle.flatten(),
             session_memory=session_memory,
         )
 
@@ -1759,7 +1759,7 @@ class AgentRuntime:
         cycle_index = ctx.metadata.get("_vv_agent_active_cycle_index") if ctx is not None else None
 
         def invoke() -> Any:
-            return complete_llm_request(client, request)
+            return client.complete(request)
 
         if ctx is None or ctx.model_call_coordinator is None or not isinstance(cycle_index, int):
             raise RuntimeError("model call coordinator is not initialized for memory inference")
@@ -2187,7 +2187,7 @@ class AgentRuntime:
                 extra_tool_names=list(sub_task.extra_tool_names),
                 exclude_tools=list(sub_task.exclude_tools),
                 metadata=dict(sub_task.metadata),
-                system_prompt=sub_task.system_prompt,
+                system_prompt=sub_task.prompt_bundle.flatten(),
             )
 
             sub_run_invocation = 0
@@ -2720,10 +2720,8 @@ class AgentRuntime:
         if not isinstance(available_skills, list):
             available_skills = None
 
-        generated_sections: list[dict[str, Any]] = []
         if sub_agent.system_prompt:
-            system_prompt = sub_agent.system_prompt
-            generated_sections = build_raw_system_prompt_sections(system_prompt)
+            prompt_bundle = build_raw_system_prompt_bundle(sub_agent.system_prompt)
         else:
             prompt_bundle = build_system_prompt_bundle(
                 sub_agent.description,
@@ -2735,8 +2733,6 @@ class AgentRuntime:
                 available_skills=available_skills,
                 workspace=workspace_path,
             )
-            system_prompt = prompt_bundle.prompt
-            generated_sections = prompt_bundle.sections
 
         user_prompt = request.task_description
         if request.output_requirements:
@@ -2786,8 +2782,6 @@ class AgentRuntime:
             context_length=resolved_context_length,
             max_output_tokens=resolved_max_output_tokens,
         )
-        if generated_sections:
-            metadata.setdefault("system_prompt_sections", generated_sections)
         metadata.update(
             {
                 "is_sub_task": True,
@@ -2811,7 +2805,7 @@ class AgentRuntime:
         return AgentTask(
             task_id=sub_task_id,
             model=resolved_model_id,
-            system_prompt=system_prompt,
+            prompt_bundle=prompt_bundle,
             user_prompt=user_prompt,
             max_cycles=max(sub_agent.max_cycles, 1),
             memory_compact_threshold=parent_task.memory_compact_threshold,

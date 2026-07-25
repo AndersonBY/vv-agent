@@ -16,8 +16,9 @@ from vv_agent.events import (
     SubRunCompletedEvent,
     SubRunStartedEvent,
 )
-from vv_agent.llm import LLMClient, ScriptedLLM
+from vv_agent.llm import LLMClient, LlmRequest, ScriptedLLM
 from vv_agent.model import ModelRef
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.context import ExecutionContext
@@ -153,7 +154,7 @@ def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="parent",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent task",
         max_cycles=4,
         sub_agents={
@@ -223,7 +224,7 @@ def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> N
     task = AgentTask(
         task_id="parent_batch",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent batch task",
         max_cycles=4,
         sub_agents={
@@ -304,7 +305,7 @@ def test_create_sub_task_batch_uses_execution_backend_parallel_map(tmp_path: Pat
     task = AgentTask(
         task_id="parent_batch_parallel",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent batch task",
         max_cycles=4,
         sub_agents={
@@ -331,7 +332,7 @@ def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> No
     parent_task = AgentTask(
         task_id="parent",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent task",
         max_cycles=4,
         metadata={"language": "zh-CN"},
@@ -372,7 +373,7 @@ def test_sub_task_metadata_contains_isolated_browser_scope(tmp_path: Path) -> No
     assert sub_task.metadata["browser_scope_key"] == "sub-session-1"
 
 
-def test_sub_task_metadata_inherits_sub_agent_prompt_cache_metadata(tmp_path: Path) -> None:
+def test_sub_task_uses_prompt_bundle_instead_of_prompt_section_metadata(tmp_path: Path) -> None:
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(steps=[]),
         tool_registry=build_default_registry(),
@@ -381,7 +382,7 @@ def test_sub_task_metadata_inherits_sub_agent_prompt_cache_metadata(tmp_path: Pa
     parent_task = AgentTask(
         task_id="parent",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent task",
         max_cycles=4,
         metadata={"language": "zh-CN"},
@@ -390,12 +391,7 @@ def test_sub_task_metadata_inherits_sub_agent_prompt_cache_metadata(tmp_path: Pa
         model="claude-sonnet-4-5-20250929",
         backend="anthropic",
         description="collect facts",
-        metadata={
-            "anthropic_prompt_cache_enabled": True,
-            "system_prompt_sections": [
-                {"id": "core_identity", "text": "stable section", "stable": True},
-            ],
-        },
+        metadata={"anthropic_prompt_cache_enabled": True},
     )
 
     sub_task = runtime._build_sub_agent_task(
@@ -415,7 +411,8 @@ def test_sub_task_metadata_inherits_sub_agent_prompt_cache_metadata(tmp_path: Pa
     )
 
     assert sub_task.metadata["anthropic_prompt_cache_enabled"] is True
-    assert sub_task.metadata["system_prompt_sections"][0]["id"] == "core_identity"
+    assert "system_prompt_sections" not in sub_task.metadata
+    assert [section.id for section in sub_task.prompt_bundle.sections] == ["agent_definition", "tools", "current_time"]
 
 
 def test_sub_task_metadata_generates_prompt_cache_sections_for_default_prompt(tmp_path: Path) -> None:
@@ -427,7 +424,7 @@ def test_sub_task_metadata_generates_prompt_cache_sections_for_default_prompt(tm
     parent_task = AgentTask(
         task_id="parent",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent task",
         max_cycles=4,
         metadata={"language": "zh-CN"},
@@ -454,9 +451,10 @@ def test_sub_task_metadata_generates_prompt_cache_sections_for_default_prompt(tm
         workspace_path=tmp_path,
     )
 
-    assert sub_task.metadata["system_prompt_sections"][0]["id"] == "agent_definition"
-    assert sub_task.metadata["system_prompt_sections"][-1]["id"] == "current_time"
-    assert sub_task.metadata["system_prompt_sections"][-1]["stable"] is False
+    assert "system_prompt_sections" not in sub_task.metadata
+    assert sub_task.prompt_bundle.sections[0].id == "agent_definition"
+    assert sub_task.prompt_bundle.sections[-1].id == "current_time"
+    assert sub_task.prompt_bundle.sections[-1].stable is False
 
 
 def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: Path) -> None:
@@ -505,7 +503,7 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
     task = AgentTask(
         task_id="parent_session_events",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent task",
         max_cycles=4,
         sub_agents={
@@ -559,17 +557,15 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
     )
 
     class StreamingSubLLM:
-        def complete(
-            self,
-            *,
-            model,
-            messages,
-            tools,
-            stream_callback=None,
-            model_settings=None,
-            request_metadata=None,
-        ):
-            del model, messages, tools, model_settings, request_metadata
+        def complete(self, request: LlmRequest) -> LLMResponse:
+            return self._respond(request, None)
+
+        def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+            return self._respond(request, stream_callback)
+
+        @staticmethod
+        def _respond(request: LlmRequest, stream_callback) -> LLMResponse:
+            del request
             if stream_callback is not None:
                 stream_callback(
                     {
@@ -617,7 +613,7 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
     task = AgentTask(
         task_id="parent_stream_events",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent task",
         max_cycles=4,
         sub_agents={
@@ -679,7 +675,7 @@ def test_create_sub_task_reports_error_without_sub_agent_model_resolution(tmp_pa
     task = AgentTask(
         task_id="parent_err",
         model="parent-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run parent task",
         max_cycles=1,
         sub_agents={

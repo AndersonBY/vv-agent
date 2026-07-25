@@ -98,7 +98,7 @@ class ToolRegistry:
         if executor.name in self._executors or executor.name in self._tools:
             raise ValueError(f"Tool already registered: {executor.name}")
         self._executors[executor.name] = executor
-        is_model_visible = executor.exposure != ToolExposure.HIDDEN
+        is_model_visible = executor.exposure == ToolExposure.DIRECT
         if expose_to_model and is_model_visible:
             self.register_schema(executor.name, executor.openai_schema(None))
         self._tools[executor.name] = executor.spec(None)
@@ -120,7 +120,7 @@ class ToolRegistry:
 
     def _is_model_visible(self, name: str) -> bool:
         executor = self._executors.get(name)
-        return executor is None or executor.exposure != ToolExposure.HIDDEN
+        return executor is not None and executor.exposure == ToolExposure.DIRECT
 
     def register_tool(
         self,

@@ -2,7 +2,6 @@ from vv_agent.tools.handlers.background import check_background_command
 from vv_agent.tools.handlers.bash import run_bash_command
 from vv_agent.tools.handlers.control import ask_user, task_finish
 from vv_agent.tools.handlers.image import read_image
-from vv_agent.tools.handlers.memory import compress_memory
 from vv_agent.tools.handlers.search import search_files
 from vv_agent.tools.handlers.skills import activate_skill
 from vv_agent.tools.handlers.sub_agents import create_sub_task
@@ -14,7 +13,6 @@ __all__ = [
     "activate_skill",
     "ask_user",
     "check_background_command",
-    "compress_memory",
     "create_sub_task",
     "edit_file",
     "file_info",

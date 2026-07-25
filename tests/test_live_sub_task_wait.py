@@ -8,7 +8,7 @@ import pytest
 
 from vv_agent.config import build_vv_llm_from_local_settings
 from vv_agent.model import VvLlmModelProvider
-from vv_agent.prompt import build_system_prompt
+from vv_agent.prompt import build_raw_system_prompt_bundle, build_system_prompt
 from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, SubAgentConfig
@@ -65,7 +65,7 @@ def test_live_agent_waits_for_background_sub_task_completion(tmp_path: Path) -> 
     task = AgentTask(
         task_id="live_sub_task_wait",
         model=resolved.model_id,
-        system_prompt=parent_prompt,
+        prompt_bundle=build_raw_system_prompt_bundle(parent_prompt),
         user_prompt="Run the exact live sub-task wait verification now.",
         max_cycles=8,
         sub_agents={

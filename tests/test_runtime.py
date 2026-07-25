@@ -14,6 +14,7 @@ from vv_agent.constants import (
 from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import SessionMemoryEntry, SessionMemoryState
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import (
@@ -60,7 +61,7 @@ def test_runtime_finishes_via_task_finish(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="task1",
         model="dummy-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="finish this",
         max_cycles=4,
     )
@@ -87,7 +88,9 @@ def test_runtime_waits_for_user_when_ask_user_called(tmp_path: Path) -> None:
         ]
     )
     runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
-    task = AgentTask(task_id="task2", model="m", system_prompt="sys", user_prompt="ask", max_cycles=3)
+    task = AgentTask(
+        task_id="task2", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="ask", max_cycles=3
+    )
 
     result = runtime.run(task)
     assert result.status == AgentStatus.WAIT_USER
@@ -128,7 +131,9 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
         ]
     )
     runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
-    task = AgentTask(task_id="task3", model="m", system_prompt="sys", user_prompt="todo", max_cycles=6)
+    task = AgentTask(
+        task_id="task3", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="todo", max_cycles=6
+    )
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
@@ -143,7 +148,7 @@ def test_runtime_hits_max_cycles_with_continue_policy(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="task4",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="do",
         max_cycles=2,
         no_tool_policy="continue",
@@ -167,7 +172,7 @@ def test_runtime_emits_run_max_cycles_log(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="task4_log",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="do",
         max_cycles=2,
         no_tool_policy="continue",
@@ -187,7 +192,7 @@ def test_runtime_can_finish_without_tool_on_policy(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="task5",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="answer",
         max_cycles=3,
         no_tool_policy="finish",
@@ -231,7 +236,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="task_log",
         model="dummy-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="finish this",
         max_cycles=4,
     )
@@ -281,7 +286,7 @@ def test_runtime_build_memory_manager_uses_model_token_limits(tmp_path: Path, mo
     task = AgentTask(
         task_id="task_memory_defaults",
         model="demo-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run",
     )
 
@@ -308,7 +313,7 @@ def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_
     task = AgentTask(
         task_id="task_memory_override",
         model="demo-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run",
         metadata={
             "model_context_window": 32_000,
@@ -381,7 +386,7 @@ def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path
     task = AgentTask(
         task_id="task_session_memory",
         model="demo-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run",
         max_cycles=1,
         no_tool_policy="finish",
@@ -431,7 +436,7 @@ def test_runtime_does_not_load_session_memory_from_other_task_scope(tmp_path: Pa
     task = AgentTask(
         task_id="fresh_task",
         model="demo-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run",
         max_cycles=1,
         no_tool_policy="finish",
@@ -452,7 +457,7 @@ def test_runtime_disables_session_memory_for_subtasks_by_default(tmp_path: Path)
     parent_task = AgentTask(
         task_id="parent",
         model="demo-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run",
         metadata={"language": "en-US"},
         sub_agents={
@@ -508,7 +513,7 @@ def test_runtime_uses_prompt_tokens_for_followup_compaction_budget(tmp_path: Pat
     task = AgentTask(
         task_id="task_prompt_budget",
         model="dummy-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="keep context",
         max_cycles=2,
         no_tool_policy="continue",
@@ -556,7 +561,7 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="task_img",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="read image",
         max_cycles=4,
         native_multimodal=True,
@@ -597,7 +602,7 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
     task = AgentTask(
         task_id="task_long_tool_result",
         model="dummy-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="go",
         max_cycles=4,
     )
@@ -644,7 +649,7 @@ def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path:
     task = AgentTask(
         task_id="task_long_tool_result_truncated",
         model="dummy-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="go",
         max_cycles=4,
     )
@@ -718,7 +723,7 @@ def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path
     task = AgentTask(
         task_id="task_image_order",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="go",
         max_cycles=4,
         native_multimodal=True,
@@ -767,7 +772,7 @@ def test_runtime_skips_image_notifications_when_multimodal_disabled(tmp_path: Pa
     task = AgentTask(
         task_id="task_no_multimodal",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="go",
         max_cycles=4,
         extra_tool_names=["_demo_image"],
@@ -816,7 +821,9 @@ def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
         ]
     )
     runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
-    task = AgentTask(task_id="task_usage", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
+    task = AgentTask(
+        task_id="task_usage", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="go", max_cycles=4
+    )
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
@@ -865,7 +872,7 @@ def test_runtime_propagates_available_skills_into_tool_context(tmp_path: Path) -
     task = AgentTask(
         task_id="task_skill",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="activate",
         max_cycles=4,
         metadata={"available_skills": [{"name": "demo", "description": "Demo skill", "instructions": "Use this"}]},
@@ -911,7 +918,7 @@ Body
     task = AgentTask(
         task_id="task_skill_dir",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="activate",
         max_cycles=4,
         metadata={"available_skills": ["skills"]},
@@ -930,7 +937,7 @@ def test_memory_summary_model_uses_explicit_task_metadata(tmp_path: Path) -> Non
     task = AgentTask(
         task_id="task_memory_priority_metadata",
         model="task-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="go",
         metadata={
             "memory_summary_backend": "metadata-backend",
@@ -952,7 +959,7 @@ def test_memory_summary_model_defaults_to_task_model_without_backend(tmp_path: P
     task = AgentTask(
         task_id="task_memory_default",
         model="task-model",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="go",
     )
 

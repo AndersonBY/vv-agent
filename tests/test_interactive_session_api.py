@@ -227,7 +227,7 @@ def test_interactive_client_prepare_task_maps_definition_to_runtime_task(tmp_pat
     )
 
     assert task.model == "kimi-k2.6"
-    assert task.system_prompt == "custom system prompt"
+    assert task.prompt_bundle.flatten() == "custom system prompt"
     assert task.user_prompt == "open browser"
     assert task.max_cycles == 5
     assert task.memory_compact_threshold == 2048
@@ -428,10 +428,11 @@ def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> N
     assert metadata["trace_id"]
     assert requests[0].model_settings == ModelSettings(temperature=0.25, max_tokens=321)
     assert requests[0].metadata["session_id"] == "public-agent-session"
-    assert requests[0].metadata["system_prompt_sources"] == {
-        "agent_instructions": "agent.instructions",
-        "configured_sub_agents": "agent.sub_agents",
-    }
+    assert requests[0].prompt_bundle is not None
+    assert [(section.id, section.source) for section in requests[0].prompt_bundle.sections] == [
+        ("agent_instructions", "agent.instructions"),
+        ("configured_sub_agents", "agent.sub_agents"),
+    ]
     assert configured_child.description == "Research the request."
 
 

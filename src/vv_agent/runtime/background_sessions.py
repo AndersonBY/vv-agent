@@ -7,17 +7,20 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vv_agent.runtime.processes import (
     kill_process_tree,
-    read_captured_output,
     remove_captured_output,
     start_captured_process,
 )
 from vv_agent.runtime.shell import prepare_shell_execution
+from vv_agent.types import ToolArtifactRef
+from vv_agent.workspace.artifacts import ArtifactPathInvalidError, bounded_text_preview, persist_text_artifact
 
-_OUTPUT_LIMIT = 50_000
+if TYPE_CHECKING:
+    from vv_agent.workspace.base import WorkspaceBackend
+
 _WATCH_POLL_INTERVAL_SECONDS = 0.2
 
 BackgroundSessionListener = Callable[[dict[str, Any]], None]
@@ -37,6 +40,12 @@ class _SessionState:
     output: str = ""
     exit_code: int | None = None
     listeners: list[BackgroundSessionListener] | None = None
+    artifact: ToolArtifactRef | None = None
+    artifact_error: str | None = None
+    artifact_error_code: str | None = None
+    artifact_backend: WorkspaceBackend | None = None
+    artifact_task_id: str = ""
+    artifact_tool_call_id: str = ""
 
     def __post_init__(self) -> None:
         if self.listeners is None:
@@ -58,6 +67,9 @@ class BackgroundSessionManager:
         output_path: Path,
         shell: str | None = None,
         started_at: float | None = None,
+        artifact_backend: WorkspaceBackend | None = None,
+        artifact_task_id: str = "",
+        artifact_tool_call_id: str = "",
     ) -> str:
         session_id = f"bg_{uuid.uuid4().hex[:12]}"
         session = _SessionState(
@@ -69,6 +81,9 @@ class BackgroundSessionManager:
             timeout_seconds=max(1, int(timeout_seconds)),
             process=process,
             output_path=output_path,
+            artifact_backend=artifact_backend,
+            artifact_task_id=artifact_task_id,
+            artifact_tool_call_id=artifact_tool_call_id,
         )
 
         with self._lock:
@@ -87,6 +102,9 @@ class BackgroundSessionManager:
         shell: str | None = None,
         windows_shell_priority: list[str] | None = None,
         env: Mapping[str, str] | None = None,
+        artifact_backend: WorkspaceBackend | None = None,
+        artifact_task_id: str = "",
+        artifact_tool_call_id: str = "",
     ) -> str:
         shell_command, prepared_stdin = prepare_shell_execution(
             command,
@@ -110,6 +128,9 @@ class BackgroundSessionManager:
             process=started_process.process,
             output_path=started_process.output_path,
             shell=shell,
+            artifact_backend=artifact_backend,
+            artifact_task_id=artifact_task_id,
+            artifact_tool_call_id=artifact_tool_call_id,
         )
 
     def adopt_running_process(
@@ -122,6 +143,9 @@ class BackgroundSessionManager:
         output_path: Path,
         shell: str | None = None,
         started_at: float | None = None,
+        artifact_backend: WorkspaceBackend | None = None,
+        artifact_task_id: str = "",
+        artifact_tool_call_id: str = "",
     ) -> str:
         return self._register_session(
             command=command,
@@ -131,6 +155,9 @@ class BackgroundSessionManager:
             output_path=output_path,
             shell=shell,
             started_at=started_at,
+            artifact_backend=artifact_backend,
+            artifact_task_id=artifact_task_id,
+            artifact_tool_call_id=artifact_tool_call_id,
         )
 
     def check(self, session_id: str) -> dict[str, Any]:
@@ -165,6 +192,29 @@ class BackgroundSessionManager:
         payload, listeners = self._finalize_completed(session_id)
         self._notify_listeners(listeners, payload)
         return payload
+
+    def check_for_tool(
+        self,
+        session_id: str,
+        workspace_backend: WorkspaceBackend,
+        task_id: str,
+        tool_call_id: str,
+    ) -> dict[str, Any]:
+        payload = self.check(session_id)
+        if payload.get("status") not in {"completed", "failed", "timeout"}:
+            return payload
+
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return payload
+            self._ensure_artifact(
+                session,
+                fallback_backend=workspace_backend,
+                fallback_task_id=task_id,
+                fallback_tool_call_id=tool_call_id,
+            )
+            return self._snapshot(session)
 
     def subscribe(
         self,
@@ -247,7 +297,7 @@ class BackgroundSessionManager:
             if session.status in {"completed", "failed", "timeout"}:
                 return self._snapshot(session), []
 
-            session.output = read_captured_output(session.output_path, limit_chars=_OUTPUT_LIMIT)
+            session.output = self._read_complete_output(session.output_path)
             process_returncode = getattr(session.process, "returncode", None)
             session.exit_code = process_returncode if process_returncode is not None else 0
             session.status = "completed" if session.exit_code == 0 else "failed"
@@ -255,7 +305,8 @@ class BackgroundSessionManager:
             listeners = list(session.listeners or [])
             session.listeners = []
 
-        remove_captured_output(session.output_path)
+        if not bounded_text_preview(session.output).truncated:
+            remove_captured_output(session.output_path)
         return payload, listeners
 
     def _finalize_timeout(self, session_id: str) -> tuple[dict[str, Any], list[Any]]:
@@ -289,15 +340,57 @@ class BackgroundSessionManager:
             session.status = "timeout"
             process_returncode = getattr(session.process, "returncode", None)
             session.exit_code = process_returncode if process_returncode is not None else -9
-            session.output = read_captured_output(session.output_path, limit_chars=_OUTPUT_LIMIT)
+            session.output = self._read_complete_output(session.output_path)
             if not session.output:
                 session.output = "Command timed out in background session"
             payload = self._snapshot(session)
             listeners = list(session.listeners or [])
             session.listeners = []
 
-        remove_captured_output(session.output_path)
+        if not bounded_text_preview(session.output).truncated:
+            remove_captured_output(session.output_path)
         return payload, listeners
+
+    @staticmethod
+    def _read_complete_output(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    @staticmethod
+    def _ensure_artifact(
+        session: _SessionState,
+        *,
+        fallback_backend: WorkspaceBackend,
+        fallback_task_id: str,
+        fallback_tool_call_id: str,
+    ) -> None:
+        preview = bounded_text_preview(session.output)
+        if session.status not in {"completed", "failed", "timeout"} or not preview.truncated:
+            return
+        if session.artifact is not None:
+            return
+
+        backend = session.artifact_backend or fallback_backend
+        task_id = session.artifact_task_id.strip() or fallback_task_id
+        tool_call_id = session.artifact_tool_call_id.strip() or fallback_tool_call_id
+        try:
+            session.artifact = persist_text_artifact(
+                backend,
+                task_id,
+                tool_call_id,
+                session.output,
+            )
+        except Exception as exc:
+            session.artifact_error = str(exc)
+            session.artifact_error_code = (
+                "artifact_path_invalid" if isinstance(exc, ArtifactPathInvalidError) else "artifact_persist_failed"
+            )
+            return
+        session.artifact_error = None
+        session.artifact_error_code = None
+        remove_captured_output(session.output_path)
 
     @staticmethod
     def _notify_listeners(
@@ -312,14 +405,25 @@ class BackgroundSessionManager:
 
     @staticmethod
     def _snapshot(session: _SessionState) -> dict[str, Any]:
-        return {
+        preview = bounded_text_preview(session.output)
+        payload: dict[str, Any] = {
             "status": session.status,
             "session_id": session.session_id,
             "command": session.command,
             "shell": session.shell,
             "exit_code": session.exit_code,
-            "output": session.output,
+            "output": preview.content,
+            "output_truncated": preview.truncated,
         }
+        if preview.truncated:
+            payload["output_original_bytes"] = preview.original_bytes
+            payload["output_visible_bytes"] = preview.visible_bytes
+        if session.artifact is not None:
+            payload["artifact"] = session.artifact.to_dict()
+        if session.artifact_error is not None:
+            payload["artifact_error"] = session.artifact_error
+            payload["artifact_error_code"] = session.artifact_error_code or "artifact_persist_failed"
+        return payload
 
 
 background_session_manager = BackgroundSessionManager()

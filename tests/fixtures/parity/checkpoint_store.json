@@ -1,7 +1,8 @@
 {
   "contract": "checkpoint_store",
-  "version": 3,
-  "run_definition_schema": "vv-agent.run-definition.v2",
+  "version": 4,
+  "checkpoint_schema": "vv-agent.checkpoint.v4",
+  "run_definition_schema": "vv-agent.run-definition.v3",
   "run_definition_storage": "credential_redacted_object_embedded_and_immutable_beside_matching_digest",
   "namespaces": {
     "sqlite_table": "checkpoints",

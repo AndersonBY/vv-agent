@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -12,10 +13,10 @@ from typing import Any
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
-from vv_agent.types import ToolExecutionResult, ToolResultStatus
+from vv_agent.types import ToolExecutionResult, ToolResultCursor, ToolResultStatus
 
 READ_FILE_MAX_LINES = 2_000
-READ_FILE_MAX_CHARS = 50_000
+READ_FILE_MAX_CHARS = 12_000
 FILE_BASELINES_STATE_KEY = "_workspace_file_baselines"
 READ_FILE_BASELINE_SOURCE = "read_file"
 WRITE_FILE_BASELINE_SOURCE = "write_file"
@@ -670,6 +671,39 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         )
     path = str(arguments["path"])
 
+    raw_cursor = arguments.get("cursor")
+    cursor: ToolResultCursor | None = None
+    if "cursor" in arguments:
+        if not isinstance(raw_cursor, dict):
+            return _workspace_error(
+                "`cursor` must be an object",
+                error_code="invalid_arguments",
+                path=path,
+            )
+        try:
+            cursor = ToolResultCursor.from_dict(raw_cursor)
+        except ValueError:
+            return _workspace_error(
+                "`cursor` is invalid",
+                error_code="invalid_arguments",
+                path=path,
+            )
+
+    if cursor is not None and ("start_line" in arguments or "end_line" in arguments):
+        return _workspace_error(
+            "`cursor` is incompatible with `start_line` and `end_line`",
+            error_code="invalid_arguments",
+            path=path,
+        )
+
+    cursor_path = _normalize_cursor_path(path)
+    if cursor is not None and cursor.path != cursor_path:
+        return _workspace_error(
+            "cursor path does not match requested path",
+            error_code="cursor_path_mismatch",
+            path=path,
+        )
+
     if not backend.is_file(path):
         return _workspace_error(
             f"file not found: {path}",
@@ -693,7 +727,21 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
     show_line_numbers = bool(arguments.get("show_line_numbers", False))
 
-    raw = backend.read_bytes(path)
+    try:
+        raw = backend.read_bytes(path)
+    except (OSError, ValueError) as exc:
+        return _workspace_error(
+            str(exc),
+            error_code="workspace_backend_error",
+            path=path,
+        )
+    source_digest = _content_hash(raw)
+    if cursor is not None and cursor.sha256 != source_digest:
+        return _workspace_error(
+            "source changed after cursor was issued",
+            error_code="stale_cursor",
+            path=path,
+        )
     try:
         text, _has_bom = _decode_workspace_text(raw)
     except ValueError:
@@ -702,65 +750,36 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
             error_code="unsupported_encoding",
             path=path,
         )
-    lines = text.splitlines()
+    if cursor is not None:
+        start_offset = cursor.offset_chars
+        if start_offset > len(text):
+            return _workspace_error(
+                "cursor offset is outside the source",
+                error_code="cursor_offset_invalid",
+                path=path,
+            )
+    else:
+        start_offset = _line_start_offset(text, start_line)
 
-    start_idx = max(start_line - 1, 0)
-    end_idx = len(lines) if end_line_int is None else max(end_line_int, start_idx)
-    selected = lines[start_idx:end_idx]
-    selected_line_count = len(selected)
-    actual_start_line = start_idx + 1
-    actual_end_line = start_idx + selected_line_count
-
-    rendered_lines = selected
-    if show_line_numbers:
-        rendered_lines = [f"{start_idx + offset + 1}: {line}" for offset, line in enumerate(selected)]
-    content = "\n".join(rendered_lines)
-
-    if selected_line_count > READ_FILE_MAX_LINES or len(content) > READ_FILE_MAX_CHARS:
-        total_lines = len(lines)
-        total_chars = len(text)
-        suggested_start = min(start_line, total_lines)
-        suggested_end = min(suggested_start + READ_FILE_MAX_LINES - 1, total_lines)
-        _record_file_baseline(
-            context,
-            path=path,
-            raw=raw,
-            text=text,
-            is_partial=True,
-            source=READ_FILE_BASELINE_SOURCE,
+    end_offset = len(text) if cursor is not None else max(_line_end_offset(text, end_line_int), start_offset)
+    content, next_offset = _bounded_source_slice(
+        text,
+        start_offset=start_offset,
+        end_offset=end_offset,
+        show_line_numbers=show_line_numbers,
+    )
+    truncated = next_offset < end_offset
+    original_bytes = (
+        _rendered_source_size_bytes(
+            text,
+            start_offset=start_offset,
+            end_offset=end_offset,
+            show_line_numbers=show_line_numbers,
         )
-        return ToolExecutionResult(
-            tool_call_id="",
-            status_code=ToolResultStatus.SUCCESS,
-            content=to_json(
-                {
-                    "path": path,
-                    "start_line": actual_start_line,
-                    "end_line": actual_end_line,
-                    "show_line_numbers": show_line_numbers,
-                    "content": None,
-                    "file_info": {
-                        "total_lines": total_lines,
-                        "total_chars": total_chars,
-                    },
-                    "requested": {
-                        "line_count": selected_line_count,
-                        "char_count": len(content),
-                    },
-                    "limits": {
-                        "max_lines": READ_FILE_MAX_LINES,
-                        "max_chars": READ_FILE_MAX_CHARS,
-                    },
-                    "suggested_range": {
-                        "start_line": suggested_start,
-                        "end_line": suggested_end,
-                    },
-                    "message": "Requested read exceeds limits. Use start_line/end_line for a smaller range.",
-                }
-            ),
-        )
-
-    is_partial = start_line != 1 or end_line_int is not None
+        if truncated
+        else None
+    )
+    is_partial = start_line != 1 or end_line_int is not None or cursor is not None or truncated
     _record_file_baseline(
         context,
         path=path,
@@ -773,16 +792,110 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
     return ToolExecutionResult(
         tool_call_id="",
         status_code=ToolResultStatus.SUCCESS,
-        content=to_json(
-            {
-                "path": path,
-                "start_line": actual_start_line,
-                "end_line": actual_end_line,
-                "show_line_numbers": show_line_numbers,
-                "content": content,
-            }
+        content=content,
+        truncated=True if truncated else None,
+        truncation_reason="read_limit" if truncated else None,
+        original_bytes=original_bytes,
+        visible_bytes=len(content.encode("utf-8")) if truncated else None,
+        cursor=(
+            ToolResultCursor(
+                kind="read_file",
+                path=cursor_path,
+                offset_chars=next_offset,
+                sha256=source_digest,
+            )
+            if truncated
+            else None
         ),
     )
+
+
+def _normalize_cursor_path(path: str) -> str:
+    normalized = posixpath.normpath(path.replace("\\", "/"))
+    return "" if normalized == "." else normalized
+
+
+def _line_start_offset(text: str, start_line: int) -> int:
+    if start_line <= 1:
+        return 0
+    lines_seen = 1
+    for offset, character in enumerate(text):
+        if character == "\n":
+            lines_seen += 1
+            if lines_seen == start_line:
+                return offset + 1
+    return len(text)
+
+
+def _line_end_offset(text: str, end_line: int | None) -> int:
+    if end_line is None:
+        return len(text)
+    lines_seen = 1
+    for offset, character in enumerate(text):
+        if character == "\n":
+            if lines_seen == end_line:
+                return offset
+            lines_seen += 1
+    return len(text)
+
+
+def _bounded_source_slice(
+    text: str,
+    *,
+    start_offset: int,
+    end_offset: int,
+    show_line_numbers: bool,
+) -> tuple[str, int]:
+    prefix_text = text[:start_offset]
+    start_line = prefix_text.count("\n") + 1
+    output: list[str] = []
+    visible_chars = 0
+    consumed = 0
+    line_count = 0
+    at_line_start = start_offset == 0 or prefix_text.endswith("\n")
+
+    for character in text[start_offset:end_offset]:
+        if at_line_start and line_count >= READ_FILE_MAX_LINES:
+            break
+        prefix = f"{start_line + line_count}: " if show_line_numbers and at_line_start else ""
+        added_chars = len(prefix) + 1
+        if visible_chars + added_chars > READ_FILE_MAX_CHARS:
+            break
+        if prefix:
+            output.append(prefix)
+        output.append(character)
+        visible_chars += added_chars
+        consumed += 1
+        at_line_start = character == "\n"
+        if at_line_start:
+            line_count += 1
+
+    return "".join(output), start_offset + consumed
+
+
+def _rendered_source_size_bytes(
+    text: str,
+    *,
+    start_offset: int,
+    end_offset: int,
+    show_line_numbers: bool,
+) -> int:
+    source_slice = text[start_offset:end_offset]
+    size_bytes = len(source_slice.encode("utf-8"))
+    if not show_line_numbers or not source_slice:
+        return size_bytes
+
+    line_number = text.count("\n", 0, start_offset) + 1
+    at_line_start = start_offset == 0 or text[start_offset - 1] == "\n"
+    if at_line_start:
+        size_bytes += len(str(line_number)) + 2
+
+    for index, character in enumerate(source_slice):
+        if character == "\n" and index + 1 < len(source_slice):
+            line_number += 1
+            size_bytes += len(str(line_number)) + 2
+
+    return size_bytes
 
 
 def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:

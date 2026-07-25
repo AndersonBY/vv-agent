@@ -32,11 +32,11 @@ from vv_agent.tools.metadata import (
 )
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, SubAgentConfig
 
-DISTRIBUTED_RUN_SCHEMA_VERSION = "vv-agent.distributed-run.v2"
-DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION = "vv-agent.distributed-worker-response.v1"
+DISTRIBUTED_RUN_SCHEMA_VERSION = "vv-agent.distributed-run.v3"
+DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION = "vv-agent.distributed-worker-response.v2"
 DEFAULT_TOOLSET_ID = "vv-agent.builtin-tools"
 DEFAULT_TOOLSET_VERSION = "1"
-DEFAULT_TOOLSET_SCHEMA_DIGEST = "24d8f7bde18b11374820f742cfa244c83666626a315e09d4b6e1b69e899a70aa"
+DEFAULT_TOOLSET_SCHEMA_DIGEST = "d266963bff5d4dc90f4fd4c9897381aa589375078f0c08c23af474e27f6b0269"
 DEFAULT_CYCLE_NAME = "vv_agent.distributed.run_single_cycle"
 DEFAULT_LEASE_DURATION_MS = 5 * 60 * 1000
 _MAX_U64 = (1 << 64) - 1
@@ -98,7 +98,7 @@ _TASK_FIELDS = frozenset(
     {
         "task_id",
         "model",
-        "system_prompt",
+        "prompt_bundle",
         "user_prompt",
         "max_cycles",
         "memory_compact_threshold",

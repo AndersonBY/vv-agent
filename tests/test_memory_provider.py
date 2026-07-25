@@ -17,6 +17,7 @@ from vv_agent.memory.provider import (
     MemorySearchRequest,
     MemorySearchResult,
 )
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.run_config import RunConfig
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
@@ -137,7 +138,7 @@ def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any])
         task=AgentTask(
             task_id="task_1",
             model="gpt-5.4",
-            system_prompt="sys",
+            prompt_bundle=build_raw_system_prompt_bundle("sys"),
             user_prompt="start",
             max_cycles=1,
         ),

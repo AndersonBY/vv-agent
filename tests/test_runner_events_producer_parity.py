@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +11,6 @@ from vv_agent import (
     AssistantDeltaEvent,
     DiagnosticEvent,
     MemorySession,
-    ModelSettings,
     ModelToolCallProgressEvent,
     ModelToolCallStartedEvent,
     ReasoningDeltaEvent,
@@ -22,8 +20,9 @@ from vv_agent import (
     ToolCallStartedEvent,
 )
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.llm import LlmRequest
 from vv_agent.model import ScriptedModelProvider
-from vv_agent.types import LLMResponse, Message, ToolCall
+from vv_agent.types import LLMResponse, ToolCall
 
 RUNNER_EVENTS_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "runner_events.jsonl"
 STREAM_PROJECTION_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "llm_stream_projection.json"
@@ -36,17 +35,15 @@ def _provider(model: str, llm: Any) -> ScriptedModelProvider:
 class StreamingGoldenLLM:
     model_id = "golden-model"
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, messages, tools, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return self._respond(request, None)
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        return self._respond(request, stream_callback)
+
+    @staticmethod
+    def _respond(request: LlmRequest, stream_callback) -> LLMResponse:
+        del request
         if stream_callback is not None:
             stream_callback(
                 {
@@ -79,17 +76,14 @@ class ContractStreamLLM:
         self.raw_events = raw_events
         self.calls = 0
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, messages, tools, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return self._respond(request, None)
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        return self._respond(request, stream_callback)
+
+    def _respond(self, request: LlmRequest, stream_callback) -> LLMResponse:
+        del request
         self.calls += 1
         if self.calls < 3:
             return LLMResponse(content=f"draft {self.calls}")

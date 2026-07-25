@@ -1,78 +1,36 @@
+# ruff: noqa: RUF001
+
 from __future__ import annotations
 
 import platform
 from pathlib import Path
 from typing import Any
 
-from vv_agent.constants import (
-    ASK_USER_TOOL_NAME,
-    BASH_TOOL_NAME,
-    CREATE_SUB_TASK_TOOL_NAME,
-    EDIT_FILE_TOOL_NAME,
-    READ_FILE_TOOL_NAME,
-    SEARCH_FILES_TOOL_NAME,
-    SUB_TASK_STATUS_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
-    TODO_WRITE_TOOL_NAME,
-    WORKSPACE_TOOLS,
-    WRITE_FILE_TOOL_NAME,
-)
 from vv_agent.skills import normalize_skill_list, render_skills_xml
 
 TASK_FINISH_PROMPT = {
     "en-US": (
-        f"When you confirm task completion, you must call `{TASK_FINISH_TOOL_NAME}` "
-        "and put the final user-facing result in its `message` field."
+        "Use task_finish for an explicit final result. Natural completion is allowed when the configured "
+        "no-tool policy permits it."
     ),
-    "zh-CN": (
-        f"当你确认任务完成时, 必须调用 `{TASK_FINISH_TOOL_NAME}`, "
-        "并在 `message` 字段里给出面向用户的最终结果."
-    ),
+    "zh-CN": "可使用 task_finish 显式返回最终结果；若配置的 no-tool policy 允许，也可自然结束。",
 }
 
 ASK_USER_PROMPT = {
-    "en-US": (
-        f"When you need clarification or decision from the user, call `{ASK_USER_TOOL_NAME}`. "
-        "You may provide options and set selection mode."
-    ),
-    "zh-CN": (
-        f"当你需要用户补充信息或做出选择时, 调用 `{ASK_USER_TOOL_NAME}`. "
-        "你可以提供 options 并设置选择模式."
-    ),
+    "en-US": "Ask the user only for a required decision that cannot be resolved from context or available tools.",
+    "zh-CN": "只有缺少无法从上下文或可用工具中获得的必要决策时才询问用户。",
 }
 
 WORKSPACE_PROMPT_TEMPLATE = {
-    "en-US": "You can operate workspace files with tools: {tools}.",
-    "zh-CN": "你可以使用这些工具操作工作区文件: {tools}.",
+    "en-US": "Prefer specialized workspace tools for direct file operations; use bash when they are insufficient.",
+    "zh-CN": "直接操作文件时优先使用工作区专用工具；仅在专用工具不足时使用 bash。",
 }
 
 TODO_PROMPT = {
-    "en-US": (
-        f"Use `{TODO_WRITE_TOOL_NAME}` for multi-step tasks and keep progress updated. "
-        "Only one item should be in progress at a time."
-    ),
-    "zh-CN": (
-        f"多步骤任务请使用 `{TODO_WRITE_TOOL_NAME}` 管理任务清单并及时更新状态, "
-        "任意时刻仅保留一个 in_progress."
-    ),
+    "en-US": "For multi-step work, keep the TODO state current with at most one item in progress.",
+    "zh-CN": "多步骤工作中，同一时间只保留一个进行中的 TODO。",
 }
 
-TOOL_PRIORITY_PROMPT = {
-    "en-US": (
-        "Tool priority: prefer specialized tools over shell commands. "
-        "Find candidate files with `find_files`, "
-        f"read with `{READ_FILE_TOOL_NAME}`, search file contents with `{SEARCH_FILES_TOOL_NAME}`, "
-        f"write with `{WRITE_FILE_TOOL_NAME}`, edit with `{EDIT_FILE_TOOL_NAME}`. "
-        f"Use `{BASH_TOOL_NAME}` only when specialized tools are insufficient."
-    ),
-    "zh-CN": (
-        "工具优先级: 优先使用专用工具而不是 shell. "
-        "查找候选文件用 `find_files`, "
-        f"读取用 `{READ_FILE_TOOL_NAME}`, 搜索文件内容用 `{SEARCH_FILES_TOOL_NAME}`, "
-        f"写入用 `{WRITE_FILE_TOOL_NAME}`, 编辑用 `{EDIT_FILE_TOOL_NAME}`. "
-        f"仅在专用工具不足时使用 `{BASH_TOOL_NAME}`."
-    ),
-}
 
 def _os_label() -> str:
     system = platform.system()
@@ -102,22 +60,8 @@ CURRENT_TIME_PROMPT = {
 }
 
 SUB_AGENT_PROMPT = {
-    "en-US": (
-        f"If sub-agents are configured, delegate work with `{CREATE_SUB_TASK_TOOL_NAME}`. "
-        f"Use `agent_id` to select the target sub-agent, `task_description` for one task, "
-        f"`tasks` for multiple independent tasks of the same sub-agent, "
-        f"`wait_for_completion=false` for background execution, and `{SUB_TASK_STATUS_TOOL_NAME}` "
-        "to query progress or send follow-up messages. If background work must finish before "
-        f"you can continue, call `{SUB_TASK_STATUS_TOOL_NAME}` with `wait_for_completion=true` "
-        "and a longer `check_interval_seconds` instead of repeatedly polling."
-    ),
-    "zh-CN": (
-        f"如果已配置子 Agent, 可使用 `{CREATE_SUB_TASK_TOOL_NAME}` 委派任务: 用 `agent_id` 指定目标子 Agent, "
-        f"单任务用 `task_description`, 同一子 Agent 的并行任务用 `tasks`, 后台执行用 `wait_for_completion=false`; "
-        f"需要查询进度或追加消息时使用 `{SUB_TASK_STATUS_TOOL_NAME}`。如果后台任务完成前主任务无法继续, "
-        f"请调用 `{SUB_TASK_STATUS_TOOL_NAME}` 并设置 `wait_for_completion=true` 和较长的 "
-        "`check_interval_seconds`, 不要连续轮询。"
-    ),
+    "en-US": "Configured sub-agents:",
+    "zh-CN": "已配置的子 Agent：",
 }
 
 SKILL_PROMPT_HEADER = {
@@ -128,15 +72,12 @@ SKILL_PROMPT_HEADER = {
 
 def render_workspace_tools(language: str) -> str:
     template = WORKSPACE_PROMPT_TEMPLATE.get(language, WORKSPACE_PROMPT_TEMPLATE["en-US"])
-    return template.format(tools=", ".join(WORKSPACE_TOOLS))
+    return template
 
 
 def render_sub_agents(language: str, available_sub_agents: dict[str, str]) -> str:
     header = SUB_AGENT_PROMPT.get(language, SUB_AGENT_PROMPT["en-US"])
-    list_header = "Available sub-agents (use the agent_id exactly as shown):"
-    if language == "zh-CN":
-        list_header = "可用子 Agent 列表 (调用时请直接使用下列 agent_id):"
-    lines = [header, list_header]
+    lines = [header]
     for name, description in sorted(available_sub_agents.items()):
         lines.append(f"- agent_id=`{name}`: {description}")
     return "\n".join(lines)

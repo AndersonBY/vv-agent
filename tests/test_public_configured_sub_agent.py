@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import hashlib
 import json
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-import vv_agent.runtime.compiler as compiler_module
 from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
-from vv_agent.context_providers import ContextBundle, ContextFragment, ContextRequest
 from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.tool_planner import plan_tool_names
 from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
@@ -109,26 +106,12 @@ def test_agent_rejects_empty_and_colliding_normalized_sub_agent_ids() -> None:
     assert str(collision_error.value) == normalization["collision_error"]
 
 
-def test_compiler_projects_configured_sub_agents_and_prompt_contract(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_compiler_projects_configured_sub_agents_and_prompt_contract() -> None:
     contract = _contract()
     normalization = cast(dict[str, Any], contract["normalization"])
     projection = cast(dict[str, Any], contract["projection"])
     public_runner = cast(dict[str, Any], contract["public_runner"])
     expected_sections = cast(list[dict[str, Any]], projection["sections"])
-    captured_fragments: list[ContextFragment] = []
-    original_assemble = compiler_module.assemble_context_fragments
-
-    def capture_fragments(
-        request: ContextRequest,
-        fragments: Iterable[ContextFragment],
-    ) -> ContextBundle:
-        materialized = list(fragments)
-        captured_fragments.extend(materialized)
-        return original_assemble(request, materialized)
-
-    monkeypatch.setattr(compiler_module, "assemble_context_fragments", capture_fragments)
     agent = _agent_from_contract(contract)
     task = AgentCompiler().compile(
         agent=agent,
@@ -152,19 +135,19 @@ def test_compiler_projects_configured_sub_agents_and_prompt_contract(
     assert [name for name in plan_tool_names(task) if name in configured_names] == configured_names
 
     fragment_contract = cast(dict[str, Any], projection["fragment"])
-    fragment = next(item for item in captured_fragments if item.id == fragment_contract["id"])
+    fragment = next(section for section in task.prompt_bundle.sections if section.id == fragment_contract["id"])
     assert fragment.text == fragment_contract["text"]
     assert fragment.stable is fragment_contract["stable"]
-    assert fragment.priority == fragment_contract["priority"]
     assert fragment.source == fragment_contract["source"]
 
-    assert task.system_prompt == projection["prompt"]
-    assert task.metadata["system_prompt_sections"] == [
+    assert task.prompt_bundle.flatten() == projection["prompt"]
+    assert [section.to_dict() for section in task.prompt_bundle.sections] == [
         {key: value for key, value in section.items() if key != "priority"} for section in expected_sections
     ]
-    assert task.metadata["system_prompt_sources"] == projection["sources"]
-    assert task.metadata["system_prompt_stable_hash"] == projection["stable_hash"]
-    assert len(task.system_prompt) == projection["total_chars"]
+    assert {section.id: section.source for section in task.prompt_bundle.sections} == projection["sources"]
+    assert task.prompt_bundle.stable_hash == projection["stable_hash"]
+    assert len(task.prompt_bundle.flatten()) == projection["total_chars"]
+    assert "system_prompt_sections" not in task.metadata
 
 
 def test_configured_sub_agent_fragment_participates_in_context_budget() -> None:
@@ -181,10 +164,12 @@ def test_configured_sub_agent_fragment_participates_in_context_budget() -> None:
         trace_id="trace-budgeted-public-configured-sub-agent",
     )
 
-    assert task.system_prompt == instruction
-    assert task.metadata["system_prompt_omitted_sections"] == ["configured_sub_agents"]
-    assert task.metadata["system_prompt_sources"] == {"agent_instructions": "agent.instructions"}
-    assert task.metadata["system_prompt_stable_hash"] == hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+    assert task.prompt_bundle.flatten() == instruction
+    assert task.metadata["omitted_prompt_section_ids"] == ["configured_sub_agents"]
+    assert [section.to_dict() for section in task.prompt_bundle.sections] == [
+        {"id": "agent_instructions", "text": instruction, "stable": True, "source": "agent.instructions"}
+    ]
+    assert task.prompt_bundle.stable_hash == build_raw_system_prompt_bundle(instruction).stable_hash
 
 
 def test_public_runner_executes_configured_child_without_runtime_task(tmp_path: Path) -> None:

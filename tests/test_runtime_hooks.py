@@ -6,6 +6,7 @@ from vv_agent import constants as constants_module
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.events import DiagnosticEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import (
     AfterLLMEvent,
     AfterToolCallEvent,
@@ -53,7 +54,13 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
         default_workspace=tmp_path,
         hooks=[InjectMessageHook()],
     )
-    task = AgentTask(task_id="hook_before_llm", model="m", system_prompt="sys", user_prompt="start", max_cycles=2)
+    task = AgentTask(
+        task_id="hook_before_llm",
+        model="m",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
+        user_prompt="start",
+        max_cycles=2,
+    )
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
@@ -98,7 +105,13 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
         default_workspace=tmp_path,
         hooks=[BlockTodoHook()],
     )
-    task = AgentTask(task_id="hook_tool_short_circuit", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
+    task = AgentTask(
+        task_id="hook_tool_short_circuit",
+        model="m",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
+        user_prompt="go",
+        max_cycles=4,
+    )
 
     result = runtime.run(
         task,
@@ -155,7 +168,13 @@ def test_runtime_completed_event_contains_after_hook_result(tmp_path: Path) -> N
         hooks=[FinishAfterTodoHook()],
     )
     result = runtime.run(
-        AgentTask(task_id="hook_completed_event", model="m", system_prompt="sys", user_prompt="go", max_cycles=2),
+        AgentTask(
+            task_id="hook_completed_event",
+            model="m",
+            prompt_bundle=build_raw_system_prompt_bundle("sys"),
+            user_prompt="go",
+            max_cycles=2,
+        ),
         ctx=ExecutionContext(
             event_handler=lifecycle_events.append,
             metadata={
@@ -208,7 +227,9 @@ def test_runtime_hook_can_patch_after_tool_call_to_finish(tmp_path: Path) -> Non
         default_workspace=tmp_path,
         hooks=[FinishAfterTodoHook()],
     )
-    task = AgentTask(task_id="hook_after_tool", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
+    task = AgentTask(
+        task_id="hook_after_tool", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="go", max_cycles=4
+    )
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
@@ -250,7 +271,13 @@ def test_runtime_hook_after_tool_call_with_blank_id_is_normalized(tmp_path: Path
         default_workspace=tmp_path,
         hooks=[BlankIdAfterHook()],
     )
-    task = AgentTask(task_id="hook_after_tool_blank_id", model="m", system_prompt="sys", user_prompt="go", max_cycles=4)
+    task = AgentTask(
+        task_id="hook_after_tool_blank_id",
+        model="m",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
+        user_prompt="go",
+        max_cycles=4,
+    )
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
@@ -272,7 +299,9 @@ def test_runtime_hook_can_replace_llm_response(tmp_path: Path) -> None:
         default_workspace=tmp_path,
         hooks=[ReplaceResponseHook()],
     )
-    task = AgentTask(task_id="hook_after_llm", model="m", system_prompt="sys", user_prompt="go", max_cycles=2)
+    task = AgentTask(
+        task_id="hook_after_llm", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="go", max_cycles=2
+    )
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
@@ -332,7 +361,7 @@ def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
     task = AgentTask(
         task_id="steer_skip",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="go",
         max_cycles=4,
         extra_tool_names=["_demo_noop"],

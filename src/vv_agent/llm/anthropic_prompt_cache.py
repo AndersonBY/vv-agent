@@ -4,8 +4,9 @@ import json
 from copy import deepcopy
 from typing import Any
 
+from vv_agent.prompt.builder import PromptBundle
+
 CACHE_CONTROL_EPHEMERAL = {"type": "ephemeral"}
-SYSTEM_PROMPT_SECTIONS_KEY = "system_prompt_sections"
 PROMPT_CACHE_ENABLED_KEY = "anthropic_prompt_cache_enabled"
 _MAX_BREAKPOINTS = 4
 _THINKING_BLOCK_TYPES = {"thinking", "redacted_thinking"}
@@ -20,6 +21,7 @@ def apply_claude_prompt_cache(
     tools: list[dict[str, Any]],
     extra_body: dict[str, Any] | None,
     metadata: dict[str, Any] | None,
+    prompt_bundle: PromptBundle | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     normalized_endpoint = str(endpoint_type or "").strip().lower()
     normalized_model = str(model or "").strip().lower()
@@ -42,7 +44,7 @@ def apply_claude_prompt_cache(
     budget_ref = [breakpoint_budget]
     system_char_count = _apply_system_cache_breakpoint(
         messages=planned_messages,
-        metadata=request_metadata,
+        prompt_bundle=prompt_bundle,
         token_threshold=token_threshold,
         breakpoint_budget_ref=budget_ref,
     )
@@ -71,7 +73,7 @@ def apply_claude_prompt_cache(
 def _apply_system_cache_breakpoint(
     *,
     messages: list[dict[str, Any]],
-    metadata: dict[str, Any],
+    prompt_bundle: PromptBundle | None,
     token_threshold: int,
     breakpoint_budget_ref: list[int],
 ) -> int:
@@ -83,10 +85,18 @@ def _apply_system_cache_breakpoint(
         return 0
 
     system_message = messages[system_index]
-    sections = _normalize_system_prompt_sections(metadata.get(SYSTEM_PROMPT_SECTIONS_KEY))
-    if sections:
-        blocks = [{"type": "text", "text": section["text"]} for section in sections]
+    blocks: list[dict[str, Any]]
+    sections = list(prompt_bundle.sections) if prompt_bundle is not None else []
+    if prompt_bundle is not None and sections and _system_message_text(system_message) == prompt_bundle.flatten():
+        blocks = [
+            {
+                "type": "text",
+                "text": section.text + ("\n\n" if index < len(sections) - 1 else ""),
+            }
+            for index, section in enumerate(sections)
+        ]
     else:
+        sections = []
         blocks = _ensure_content_blocks(system_message)
 
     if not blocks:
@@ -94,14 +104,14 @@ def _apply_system_cache_breakpoint(
 
     system_message["content"] = blocks
     prefix_char_count = sum(_estimate_block_chars(block) for block in blocks)
-    if _estimate_tokens(prefix_char_count) < token_threshold:
-        return prefix_char_count
-
-    stable_indexes = (
-        [index for index, section in enumerate(sections) if section.get("stable", True)]
-        if sections
-        else list(range(len(blocks)))
-    )
+    stable_indexes: list[int] = []
+    if sections:
+        for index, section in enumerate(sections):
+            if not section.stable:
+                break
+            stable_indexes.append(index)
+    elif _estimate_tokens(prefix_char_count) >= token_threshold:
+        stable_indexes = list(range(len(blocks)))
     if not stable_indexes:
         return prefix_char_count
 
@@ -217,24 +227,17 @@ def _ensure_content_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _normalize_system_prompt_sections(raw: Any) -> list[dict[str, Any]]:
-    if not isinstance(raw, list):
-        return []
-    sections: list[dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        text = str(item.get("text") or "").strip()
-        if not text:
-            continue
-        sections.append(
-            {
-                "id": str(item.get("id") or "").strip(),
-                "text": text,
-                "stable": bool(item.get("stable", True)),
-            }
+def _system_message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text") or "")
+            for item in content
+            if isinstance(item, dict) and str(item.get("type") or "text") == "text"
         )
-    return sections
+    return ""
 
 
 def _estimate_tokens(char_count: int) -> int:

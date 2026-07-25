@@ -1,7 +1,7 @@
 {
-  "schema_version": "vv-agent.distributed-run.v2",
+  "schema_version": "vv-agent.distributed-run.v3",
   "run_definition_schema_rules": {
-    "writer_value": "vv-agent.run-definition.v2",
+    "writer_value": "vv-agent.run-definition.v3",
     "complete_definition_source": "embedded_run_definition_in_checkpoint",
     "envelope_digest_must_match_checkpoint_digest": true,
     "missing_or_unknown_error": "checkpoint_definition_schema_unsupported",
@@ -28,13 +28,23 @@
     "missing_or_unknown_error": "checkpoint_claim_mode_invalid"
   },
   "canonical_envelope": {
-    "schema_version": "vv-agent.distributed-run.v2",
+    "schema_version": "vv-agent.distributed-run.v3",
     "job_id": "run-123:cycle:2",
     "run_id": "run-123",
     "task": {
       "task_id": "run-123",
       "model": "model-x",
-      "system_prompt": "system",
+      "prompt_bundle": {
+        "sections": [
+          {
+            "id": "agent_instructions",
+            "text": "system",
+            "stable": true,
+            "source": "agent.instructions"
+          }
+        ],
+        "stable_hash": "b53c6f835e1e07827228c6a4d2774a33315d5d283253271be302c17686575ff5"
+      },
       "user_prompt": "prompt",
       "max_cycles": 8,
       "memory_compact_threshold": 250000,
@@ -81,7 +91,7 @@
         "toolset_ref": {
           "id": "vv-agent.builtin-tools",
           "version": "1",
-          "schema_digest": "24d8f7bde18b11374820f742cfa244c83666626a315e09d4b6e1b69e899a70aa"
+          "schema_digest": "d266963bff5d4dc90f4fd4c9897381aa589375078f0c08c23af474e27f6b0269"
         },
         "tool_policy": {
           "allowed_tools": [
@@ -199,7 +209,7 @@
     "lease_duration_ms": 120000,
     "root_run_id": "run-123",
     "trace_id": "trace-run-123",
-    "run_definition_schema": "vv-agent.run-definition.v2",
+    "run_definition_schema": "vv-agent.run-definition.v3",
     "run_definition_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "claim_mode": "recovery",
     "resume_attempt": 2,
@@ -223,7 +233,7 @@
       "path": [
         "schema_version"
       ],
-      "value": "vv-agent.distributed-run.v3",
+      "value": "vv-agent.distributed-run.v4",
       "error": "unsupported distributed schema_version"
     },
     {
@@ -239,7 +249,7 @@
       "path": [
         "run_definition_schema"
       ],
-      "value": "vv-agent.run-definition.v3",
+      "value": "vv-agent.run-definition.v2",
       "error": "checkpoint_definition_schema_unsupported"
     },
     {

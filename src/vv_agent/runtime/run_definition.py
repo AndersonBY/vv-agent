@@ -7,6 +7,7 @@ from typing import Any
 from vv_agent.agent import Agent
 from vv_agent.checkpoint import (
     CREDENTIAL_REDACTION_VALUE,
+    RUN_DEFINITION_SCHEMA,
     CheckpointError,
     compute_run_definition_digest,
     utf16_sort_key,
@@ -90,10 +91,10 @@ def build_run_definition(
     )
 
     definition: dict[str, Any] = {
-        "schema_version": "vv-agent.run-definition.v2",
+        "schema_version": RUN_DEFINITION_SCHEMA,
         "agent": {"name": agent.name, "type": task.agent_type},
         "root_input": root_input,
-        "compiled_prompt": task.system_prompt,
+        "prompt_bundle": task.prompt_bundle.to_dict(),
         "initial_messages": [message.to_dict() for message in initial_messages],
         "initial_shared_state": deepcopy(run_config.shared_state or {}),
         "run_metadata": _behavior_metadata(agent=agent, run_config=run_config),

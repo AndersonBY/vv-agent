@@ -22,6 +22,7 @@ from vv_agent.memory import (
     SessionMemoryEntry,
 )
 from vv_agent.model_settings import ModelSettings
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
@@ -84,7 +85,7 @@ def test_runtime_resolves_memory_capacity_from_contract_cases(
     task = AgentTask(
         task_id=case["name"],
         model="capacity-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="run",
         memory_compact_threshold=inputs["configured_threshold"],
         model_settings=settings,
@@ -114,15 +115,15 @@ def test_omitted_memory_compact_threshold_defaults_match_contract() -> None:
     task = AgentTask(
         task_id="default-capacity",
         model="capacity-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="run",
     )
     restored = AgentTask.from_dict(
         {
-            "task_id": "restored-default-capacity",
-            "model": "capacity-model",
-            "system_prompt": "system",
-            "user_prompt": "run",
+                "task_id": "restored-default-capacity",
+                "model": "capacity-model",
+                "prompt_bundle": build_raw_system_prompt_bundle("system").to_dict(),
+                "user_prompt": "run",
         }
     )
 
@@ -149,7 +150,7 @@ def test_runtime_context_window_resolution_matches_contract(
     task = AgentTask(
         task_id=case["name"],
         model="capacity-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="run",
         metadata={
             "model_context_window": inputs["task_metadata_model_context_window"],
@@ -196,7 +197,7 @@ def test_runtime_routes_summary_through_configured_backend_model_pair(tmp_path: 
     task = AgentTask(
         task_id="memory_route",
         model="main-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="continue",
         initial_messages=[
             Message(role="system", content="system"),
@@ -261,7 +262,7 @@ def test_runtime_routes_session_extraction_through_its_own_backend_model_pair(
     task = AgentTask(
         task_id="session_memory_route",
         model="main-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="remember this decision",
         max_cycles=1,
         no_tool_policy="finish",
@@ -328,7 +329,7 @@ def _ptl_task() -> AgentTask:
     return AgentTask(
         task_id="memory_ptl",
         model="main-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="continue",
         no_tool_policy="finish",
     )
@@ -724,7 +725,7 @@ def test_direct_runtime_memory_logs_are_emitted_and_observer_failures_are_isolat
     task = AgentTask(
         task_id="direct-memory-observer",
         model="capacity-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="finish",
         initial_messages=[
             Message(role="user", content="u" * 120),
