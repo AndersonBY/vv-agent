@@ -133,6 +133,7 @@ jobs:
           python3 - <<'PY'
           import hashlib
           import json
+          import os
           import tomllib
           from pathlib import Path
 
@@ -146,7 +147,7 @@ jobs:
                   for path in artifacts
               },
           }
-          (dist / "release-artifacts.json").write_text(
+          (Path(os.environ["RUNNER_TEMP"]) / "release-artifacts.json").write_text(
               json.dumps(manifest, sort_keys=True, separators=(",", ":")),
               encoding="utf-8",
           )
@@ -172,12 +173,15 @@ jobs:
         run: |
           python3 - <<'PY'
           import json
+          import os
           import time
           import urllib.parse
           import urllib.request
           from pathlib import Path
 
-          expected = json.loads(Path("dist/release-artifacts.json").read_text(encoding="utf-8"))
+          expected = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "release-artifacts.json").read_text(encoding="utf-8")
+          )
           url = "https://pypi.org/pypi/{}/{}/json".format(
               urllib.parse.quote(expected["package"]),
               urllib.parse.quote(expected["version"]),
