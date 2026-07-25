@@ -4,6 +4,7 @@ import pytest
 from support import FixedModelProvider
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.runtime.context import ExecutionContext
 
@@ -113,7 +114,7 @@ class TestCancellationInRuntime:
         task = AgentTask(
             task_id="cancel-test",
             model="test",
-            system_prompt="sys",
+            prompt_bundle=build_raw_system_prompt_bundle("sys"),
             user_prompt="hi",
             max_cycles=3,
             no_tool_policy="finish",
@@ -143,7 +144,7 @@ class TestCancellationInRuntime:
         task = AgentTask(
             task_id="cancel-test-2",
             model="test",
-            system_prompt="sys",
+            prompt_bundle=build_raw_system_prompt_bundle("sys"),
             user_prompt="hi",
             max_cycles=3,
             no_tool_policy="continue",

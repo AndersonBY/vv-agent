@@ -1,21 +1,31 @@
 {
   "contract": "checkpoint_codec",
-  "version": 3,
+  "version": 4,
   "discriminator": {
-    "required_value": "vv-agent.checkpoint.v3",
+    "required_value": "vv-agent.checkpoint.v4",
     "missing_or_unknown_error": "checkpoint_schema_unsupported"
   },
   "canonical_checkpoint": {
-    "schema_version": "vv-agent.checkpoint.v3",
-    "run_definition_schema": "vv-agent.run-definition.v2",
+    "schema_version": "vv-agent.checkpoint.v4",
+    "run_definition_schema": "vv-agent.run-definition.v3",
     "run_definition": {
-      "schema_version": "vv-agent.run-definition.v2",
+      "schema_version": "vv-agent.run-definition.v3",
       "agent": {
         "name": "checkpoint-agent",
         "type": null
       },
       "root_input": "Summarize the status.",
-      "compiled_prompt": "You are a careful assistant.",
+      "prompt_bundle": {
+        "sections": [
+          {
+            "id": "agent_instructions",
+            "text": "You are a careful assistant.",
+            "stable": true,
+            "source": "agent.instructions"
+          }
+        ],
+        "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+      },
       "initial_messages": [],
       "initial_shared_state": {},
       "run_metadata": {},
@@ -67,7 +77,7 @@
     "task_id": "research_8a4c21fe",
     "root_run_id": "run_01JZCHECKPOINT",
     "trace_id": "trace_01JZCHECKPOINT",
-    "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+    "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
     "resume_attempt": 2,
     "cycle_index": 1,
     "status": "running",
@@ -89,8 +99,34 @@
       {
         "index": 1,
         "assistant_message": "I will inspect it.",
-        "tool_calls": [],
-        "tool_results": [],
+        "tool_calls": [
+          {
+            "id": "call-bash",
+            "name": "bash",
+            "arguments": {
+              "command": "python generate_large_output.py"
+            }
+          }
+        ],
+        "tool_results": [
+          {
+            "tool_call_id": "call-bash",
+            "content": "first output\n... output omitted; full text in artifact ...\nlast output",
+            "status_code": "SUCCESS",
+            "directive": "continue",
+            "truncated": true,
+            "truncation_reason": "output_limit",
+            "original_bytes": 100000,
+            "visible_bytes": 70,
+            "artifact": {
+              "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+              "media_type": "text/plain",
+              "encoding": "utf-8",
+              "size_bytes": 100000,
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }
+          }
+        ],
         "memory_compacted": false
       }
     ],
@@ -102,8 +138,10 @@
       "cycles": 1,
       "total_tokens": 20,
       "uncached_input_tokens": null,
-      "tool_calls": 0,
-      "tool_calls_by_name": {},
+      "tool_calls": 1,
+      "tool_calls_by_name": {
+        "bash": 1
+      },
       "elapsed_ms": 125,
       "host_cost": null,
       "unavailable_dimensions": [
@@ -185,26 +223,7 @@
         "call_id": "op_model_cycle_2_main:attempt:1"
       }
     ],
-    "tool_journal": [
-      {
-        "kind": "tool",
-        "operation_id": "op_tool_cycle_2_call_1",
-        "cycle_index": 2,
-        "attempt": 1,
-        "state": "planned",
-        "request_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "tool_call_id": "call_2",
-        "tool_name": "write_record",
-        "arguments": {
-          "record_id": "42",
-          "value": "approved"
-        },
-        "idempotency_key": "idem_7f5ca6d5",
-        "idempotency_support": "supported",
-        "result": null,
-        "error": null
-      }
-    ],
+    "tool_journal": [],
     "revision": 9,
     "claim_token": "claim_worker_7",
     "claimed_cycle": 2,
@@ -346,7 +365,7 @@
     }
   ],
   "run_definition_schema_rules": {
-    "required_value": "vv-agent.run-definition.v2",
+    "required_value": "vv-agent.run-definition.v3",
     "missing_or_unknown_error": "checkpoint_definition_schema_unsupported",
     "failure_boundary": "before_claim_model_or_tool"
   },
@@ -377,7 +396,7 @@
       "base_valid_case": "minimal_running",
       "mutation": {
         "replace": {
-          "run_definition_schema": "vv-agent.run-definition.v3"
+          "run_definition_schema": "vv-agent.run-definition.v2"
         }
       },
       "expected_error_code": "checkpoint_definition_schema_unsupported",
@@ -393,7 +412,7 @@
     {
       "name": "embedded_minimal_definition_matches_digest",
       "valid_case": "minimal_running",
-      "expected_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+      "expected_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
       "valid": true
     },
     {
@@ -412,22 +431,140 @@
         "value": "Different input"
       },
       "error_code": "checkpoint_definition_mismatch"
+    },
+    {
+      "name": "embedded_prompt_bundle_hash_mismatch_fails_before_claim",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace_json_pointer": "/run_definition/prompt_bundle/stable_hash",
+        "value": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "error_code": "checkpoint_definition_invalid",
+      "expected": {
+        "capability_resolution_count": 0,
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "embedded_prompt_bundle_malformed_hash_fails_before_claim",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace_json_pointer": "/run_definition/prompt_bundle/stable_hash",
+        "value": "not-a-sha256"
+      },
+      "error_code": "checkpoint_definition_invalid",
+      "expected": {
+        "capability_resolution_count": 0,
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "embedded_prompt_bundle_malformed_sections_fails_before_claim",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace_json_pointer": "/run_definition/prompt_bundle/sections",
+        "value": "not-an-array"
+      },
+      "error_code": "checkpoint_definition_invalid",
+      "expected": {
+        "capability_resolution_count": 0,
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "embedded_prompt_bundle_unknown_field_fails_before_claim",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "add_json_pointer": "/run_definition/prompt_bundle/flat_prompt",
+        "value": "You are a careful assistant."
+      },
+      "error_code": "checkpoint_definition_invalid",
+      "expected": {
+        "capability_resolution_count": 0,
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "embedded_prompt_section_missing_stable_fails_before_claim",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "remove_json_pointer": "/run_definition/prompt_bundle/sections/0/stable"
+      },
+      "error_code": "checkpoint_definition_invalid",
+      "expected": {
+        "capability_resolution_count": 0,
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "embedded_prompt_section_duplicate_id_fails_before_claim",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "append_json_pointer": "/run_definition/prompt_bundle/sections",
+        "value": {
+          "id": "agent_instructions",
+          "text": "duplicate",
+          "stable": false
+        }
+      },
+      "error_code": "checkpoint_definition_invalid",
+      "expected": {
+        "capability_resolution_count": 0,
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "embedded_prompt_section_unknown_field_fails_before_claim",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "add_json_pointer": "/run_definition/prompt_bundle/sections/0/priority",
+        "value": 1
+      },
+      "error_code": "checkpoint_definition_invalid",
+      "expected": {
+        "capability_resolution_count": 0,
+        "claim_count": 0,
+        "model_calls": 0,
+        "tool_calls": 0
+      }
     }
   ],
   "valid_cases": [
     {
       "name": "minimal_running",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -479,7 +616,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -504,16 +641,26 @@
     {
       "name": "reconciliation_required_retains_ambiguous_journal",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -565,7 +712,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 2,
         "cycle_index": 1,
         "status": "reconciliation_required",
@@ -609,16 +756,26 @@
     {
       "name": "claimed_active_cycle",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -670,7 +827,7 @@
         "task_id": "research_8a4c21fe",
         "root_run_id": "run_01JZCHECKPOINT",
         "trace_id": "trace_01JZCHECKPOINT",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 2,
         "cycle_index": 1,
         "status": "running",
@@ -851,16 +1008,26 @@
     {
       "name": "acknowledged_terminal_is_retained",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -912,7 +1079,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "completed",
@@ -970,16 +1137,26 @@
     {
       "name": "unknown_optional_extension_is_preserved",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1031,7 +1208,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1066,12 +1243,12 @@
     {
       "name": "unknown_schema",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v4",
+        "schema_version": "vv-agent.checkpoint.v3",
         "checkpoint_key": "fresh",
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1097,16 +1274,26 @@
     {
       "name": "blank_checkpoint_key",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1158,7 +1345,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1184,16 +1371,26 @@
     {
       "name": "bad_definition_digest",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1271,16 +1468,26 @@
     {
       "name": "zero_resume_attempt",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1332,7 +1539,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 0,
         "cycle_index": 0,
         "status": "running",
@@ -1358,16 +1565,26 @@
     {
       "name": "partial_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1419,7 +1636,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1445,16 +1662,26 @@
     {
       "name": "claimed_cycle_not_next",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1506,7 +1733,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1532,16 +1759,26 @@
     {
       "name": "terminal_with_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1593,7 +1830,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "completed",
@@ -1652,16 +1889,26 @@
     {
       "name": "journal_cycle_not_active",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1713,7 +1960,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1755,16 +2002,26 @@
     {
       "name": "unknown_required_extension",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1816,7 +2073,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1851,16 +2108,26 @@
     {
       "name": "invalid_extension_namespace",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -1912,7 +2179,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
@@ -1944,16 +2211,26 @@
     {
       "name": "unknown_top_level_is_rejected",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v3",
-        "run_definition_schema": "vv-agent.run-definition.v2",
+        "schema_version": "vv-agent.checkpoint.v4",
+        "run_definition_schema": "vv-agent.run-definition.v3",
         "run_definition": {
-          "schema_version": "vv-agent.run-definition.v2",
+          "schema_version": "vv-agent.run-definition.v3",
           "agent": {
             "name": "checkpoint-agent",
             "type": null
           },
           "root_input": "Summarize the status.",
-          "compiled_prompt": "You are a careful assistant.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
           "initial_messages": [],
           "initial_shared_state": {},
           "run_metadata": {},
@@ -2005,7 +2282,7 @@
         "task_id": "task-1",
         "root_run_id": "run-1",
         "trace_id": "trace-1",
-        "run_definition_digest": "09b8bf3fd75e98219166f4ff5335a993b8f048a161e3f89fcaf7731e8f4c0fe8",
+        "run_definition_digest": "ae9b361a4251cc822b7245921860a4ab897f6398ce47726086ebbdd32199ee8e",
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",

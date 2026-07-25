@@ -49,11 +49,7 @@ def test_task_finish_schema_exposes_todo_completion_guard() -> None:
     assert parameters["required"] == []
     assert require_all_todos_completed == {
         "type": "boolean",
-        "description": (
-            "Default true. When true, finish is rejected while TODO items remain pending or in_progress. "
-            "Set false only when intentionally finishing with remaining TODOs, such as when the user "
-            "explicitly accepts deferred work."
-        ),
+        "description": "Reject finish while TODOs remain unless false.",
     }
 
 
@@ -112,7 +108,7 @@ def test_search_files_schema_uses_clean_search_contract() -> None:
         "case_sensitive",
     }
     assert properties["output_mode"]["enum"] == ["files_with_matches", "content", "count"]
-    assert "Default is 'files_with_matches'" in properties["output_mode"]["description"]
+    assert properties["output_mode"]["description"] == "files_with_matches, content, or count."
     assert "literal" in properties
     assert "offset" in properties
     assert "include_sensitive" in properties
@@ -157,4 +153,7 @@ def test_sub_task_status_schema_supports_long_wait_without_polling() -> None:
     assert properties["wait_for_completion"]["type"] == "boolean"
     assert properties["check_interval_seconds"]["type"] == "integer"
     assert properties["max_wait_seconds"]["type"] == ["integer", "null"]
-    assert "without repeated polling" in description
+    assert "optionally wait" in description
+    assert properties["wait_for_completion"]["default"] is False
+    assert properties["check_interval_seconds"]["default"] == 300
+    assert properties["max_wait_seconds"]["default"] is None

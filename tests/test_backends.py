@@ -6,6 +6,7 @@ from typing import Any, Literal, TypedDict, Unpack
 import pytest
 
 from vv_agent.llm.scripted import ScriptedLLM
+from vv_agent.prompt import PromptBundle, build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.backends.thread import ThreadBackend
@@ -18,7 +19,7 @@ from vv_agent.types import AgentStatus, AgentTask, LLMResponse
 class _TaskOverrides(TypedDict, total=False):
     task_id: str
     model: str
-    system_prompt: str
+    prompt_bundle: PromptBundle
     user_prompt: str
     max_cycles: int
     no_tool_policy: Literal["continue", "wait_user", "finish"]
@@ -29,7 +30,7 @@ def _make_task(**overrides: Unpack[_TaskOverrides]) -> AgentTask:
     defaults: _TaskOverrides = {
         "task_id": "backend-test",
         "model": "test",
-        "system_prompt": "sys",
+        "prompt_bundle": build_raw_system_prompt_bundle("sys"),
         "user_prompt": "hi",
         "max_cycles": 2,
         "no_tool_policy": "finish",
@@ -187,7 +188,7 @@ class TestCeleryBackend:
         restored = AgentTask.from_dict(d)
         assert restored.task_id == task.task_id
         assert restored.model == task.model
-        assert restored.system_prompt == task.system_prompt
+        assert restored.prompt_bundle == task.prompt_bundle
         assert restored.user_prompt == task.user_prompt
         assert restored.max_cycles == task.max_cycles
         assert restored.no_tool_policy == task.no_tool_policy

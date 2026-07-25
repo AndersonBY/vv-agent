@@ -10,7 +10,6 @@ import pytest
 from vv_agent import constants as constants_module
 from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
-    COMPRESS_MEMORY_TOOL_NAME,
     EDIT_FILE_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
     FIND_FILES_TOOL_NAME,
@@ -23,7 +22,7 @@ from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.tools.handlers import search as search_handler
 from vv_agent.tools.handlers import workspace_io
 from vv_agent.tools.registry import ToolNotFoundError
-from vv_agent.types import ToolCall, ToolDirective, ToolResultStatus
+from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
 TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
@@ -48,7 +47,6 @@ def tool_context(tmp_path: Path) -> ToolContext:
     ("tool_name", "arguments", "invalid_path"),
     [
         ("read_image", {"path": 123}, "/path"),
-        ("compress_memory", {"core_information": 123}, "/core_information"),
         (
             "create_sub_task",
             {"agent_id": "researcher", "task_description": "inspect", "include_main_summary": "true"},
@@ -90,9 +88,8 @@ def test_edit_file_is_registered_in_default_tools(registry) -> None:
     properties = parameters["properties"]
 
     assert edit_schema["function"]["name"] == "edit_file"
-    assert "read_file" in edit_description
-    assert "write_file" in edit_description
-    assert "exact `old_string` matching" in edit_description
+    assert "Replace exact text" in edit_description
+    assert "current read/write baseline" in edit_description
     assert parameters["required"] == ["path", "old_string", "new_string"]
     assert set(properties) == {"path", "old_string", "new_string", "replace_all"}
 
@@ -187,8 +184,10 @@ def test_workspace_write_and_read(registry, tool_context: ToolContext) -> None:
 
     read_call = ToolCall(id="call2", name=READ_FILE_TOOL_NAME, arguments={"path": "notes/test.txt"})
     read_result = registry.execute(read_call, tool_context)
-    payload = json.loads(read_result.content)
-    assert payload["content"] == "hello"
+    assert read_result.status_code is ToolResultStatus.SUCCESS
+    assert read_result.content == "hello"
+    assert read_result.truncated is None
+    assert read_result.cursor is None
 
 
 def test_read_file_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
@@ -202,10 +201,9 @@ def test_read_file_allows_absolute_path_when_enabled(registry, tool_context: Too
 
     read_call = ToolCall(id="call_abs_read", name=READ_FILE_TOOL_NAME, arguments={"path": str(outside)})
     read_result = registry.execute(read_call, tool_context)
-    payload = json.loads(read_result.content)
 
     assert read_result.status_code is ToolResultStatus.SUCCESS
-    assert payload["content"] == "outside"
+    assert read_result.content == "outside"
 
 
 def test_find_files_allows_absolute_path_when_enabled(registry, tool_context: ToolContext) -> None:
@@ -553,40 +551,54 @@ def test_read_file_can_show_line_numbers(registry, tool_context: ToolContext) ->
         arguments={"path": "notes.txt", "start_line": 2, "show_line_numbers": True},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
 
-    assert payload["show_line_numbers"] is True
-    assert payload["content"] == "2: beta\n3: gamma"
+    assert result.status_code is ToolResultStatus.SUCCESS
+    assert result.content == "2: beta\n3: gamma"
+    assert result.truncated is None
 
 
-def test_read_file_returns_file_info_when_line_limit_exceeded(registry, tool_context: ToolContext) -> None:
+def _assert_truncated_read(result: ToolExecutionResult, *, path: str) -> None:
+    assert result.status_code is ToolResultStatus.SUCCESS
+    assert result.truncated is True
+    assert result.truncation_reason == "read_limit"
+    original_bytes = result.original_bytes
+    visible_bytes = result.visible_bytes
+    assert original_bytes is not None
+    assert visible_bytes is not None
+    assert visible_bytes == len(result.content.encode("utf-8"))
+    assert original_bytes > visible_bytes
+    assert result.artifact is None
+    assert result.cursor is not None
+    assert result.cursor.kind == "read_file"
+    assert result.cursor.path == path
+    assert result.cursor.offset_chars > 0
+    assert len(result.cursor.sha256) == 64
+
+
+def test_read_file_returns_cursor_when_line_limit_exceeded(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "long.txt"
     target.write_text("\n".join(f"line-{index}" for index in range(1, 2002)), encoding="utf-8")
 
     call = ToolCall(id="call_read", name=READ_FILE_TOOL_NAME, arguments={"path": "long.txt"})
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
 
-    assert payload["content"] is None
-    assert payload["limits"] == {"max_lines": 2000, "max_chars": 50000}
-    assert payload["file_info"]["total_lines"] == 2001
-    assert payload["requested"]["line_count"] == 2001
+    _assert_truncated_read(result, path="long.txt")
+    assert result.content.startswith("line-1\nline-2\n")
+    assert "line-2001" not in result.content
 
 
-def test_read_file_returns_file_info_when_char_limit_exceeded(registry, tool_context: ToolContext) -> None:
+def test_read_file_returns_cursor_when_char_limit_exceeded(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "chars.txt"
     target.write_text("a" * 50001, encoding="utf-8")
 
     call = ToolCall(id="call_read", name=READ_FILE_TOOL_NAME, arguments={"path": "chars.txt"})
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
 
-    assert payload["content"] is None
-    assert payload["requested"]["char_count"] > 50000
-    assert payload["file_info"]["total_chars"] == 50001
+    _assert_truncated_read(result, path="chars.txt")
+    assert result.content == "a" * 12000
 
 
-def test_read_file_returns_file_info_when_requested_range_exceeds_limit(registry, tool_context: ToolContext) -> None:
+def test_read_file_returns_cursor_when_requested_range_exceeds_limit(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "ranged.txt"
     target.write_text("\n".join(f"row-{index}" for index in range(1, 3001)), encoding="utf-8")
 
@@ -596,11 +608,10 @@ def test_read_file_returns_file_info_when_requested_range_exceeds_limit(registry
         arguments={"path": "ranged.txt", "start_line": 1, "end_line": 2501},
     )
     result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
 
-    assert payload["content"] is None
-    assert payload["requested"]["line_count"] == 2501
-    assert payload["suggested_range"] == {"start_line": 1, "end_line": 2000}
+    _assert_truncated_read(result, path="ranged.txt")
+    assert result.content.startswith("row-1\nrow-2\n")
+    assert "row-2501" not in result.content
 
 
 def test_search_files(registry, tool_context: ToolContext) -> None:
@@ -1651,19 +1662,6 @@ def test_write_file_append_returns_changed_files_metadata(registry, tool_context
     assert result.metadata["operation"] == "write_file"
     assert result.metadata["append"] is True
     assert target.read_text(encoding="utf-8") == "ab"
-
-
-def test_compress_memory_writes_note(registry, tool_context: ToolContext) -> None:
-    call = ToolCall(
-        id="call_mem",
-        name=COMPRESS_MEMORY_TOOL_NAME,
-        arguments={"core_information": "current decision and progress"},
-    )
-    result = registry.execute(call, tool_context)
-    payload = json.loads(result.content)
-    assert payload["ok"] is True
-    assert payload["saved_notes"] == 1
-    assert tool_context.shared_state["memory_notes"][0]["core_information"] == "current decision and progress"
 
 
 def test_todo_finish_guard(registry, tool_context: ToolContext) -> None:

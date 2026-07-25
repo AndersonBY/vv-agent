@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from threading import RLock
 
-from vv_agent.workspace.base import FileInfo, _normalize_workspace_path
+from vv_agent.workspace.artifacts import is_reserved_artifact_path
+from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments, _normalize_workspace_path
 
 
 def _glob_match(path: str, pattern: str) -> bool:
@@ -33,11 +35,12 @@ def _glob_match(path: str, pattern: str) -> bool:
 
 
 class MemoryWorkspaceBackend:
-    __slots__ = ("_dirs", "_files")
+    __slots__ = ("_dirs", "_files", "_lock")
 
     def __init__(self) -> None:
         self._files: dict[str, bytes] = {}
         self._dirs: set[str] = {""}
+        self._lock = RLock()
 
     @staticmethod
     def _norm(path: str) -> str:
@@ -46,69 +49,94 @@ class MemoryWorkspaceBackend:
     def list_files(self, base: str, glob: str) -> list[str]:
         base_n = self._norm(base)
         pattern = f"{base_n}/{glob}" if base_n else glob
-        files = [p for p in self._files if _glob_match(p, pattern)]
+        with self._lock:
+            files = [p for p in self._files if _glob_match(p, pattern)]
         files.sort()
         return files
 
     def read_text(self, path: str) -> str:
         key = self._norm(path)
-        if key not in self._files:
-            raise FileNotFoundError(path)
-        return self._files[key].decode("utf-8", errors="replace")
+        with self._lock:
+            if key not in self._files:
+                raise FileNotFoundError(path)
+            return self._files[key].decode("utf-8", errors="replace")
 
     def read_bytes(self, path: str) -> bytes:
         key = self._norm(path)
-        if key not in self._files:
-            raise FileNotFoundError(path)
-        return self._files[key]
+        with self._lock:
+            if key not in self._files:
+                raise FileNotFoundError(path)
+            return self._files[key]
 
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
         key = self._norm(path)
+        if is_reserved_artifact_path(key):
+            raise PermissionError("artifact paths are immutable")
         data = content.encode("utf-8")
-        if append and key in self._files:
-            self._files[key] += data
-        else:
+        with self._lock:
+            if append and key in self._files:
+                self._files[key] += data
+            else:
+                self._files[key] = data
+            self._ensure_parents(key)
+        return len(data)
+
+    def write_text_exclusive(self, path: str, content: str) -> int:
+        key = "/".join(_exclusive_workspace_path_segments(path))
+        data = content.encode("utf-8")
+        with self._lock:
+            if key in self._files or key in self._dirs:
+                raise FileExistsError(path)
+            parts = key.split("/")
+            for index in range(1, len(parts)):
+                parent = "/".join(parts[:index])
+                if parent in self._files:
+                    raise NotADirectoryError(parent)
             self._files[key] = data
-        self._ensure_parents(key)
+            self._ensure_parents(key)
         return len(data)
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._norm(path)
-        if key in self._files:
-            suffix = ""
-            dot = key.rfind(".")
-            if dot != -1 and "/" not in key[dot:]:
-                suffix = key[dot:]
-            return FileInfo(
-                path=key,
-                is_file=True,
-                is_dir=False,
-                size=len(self._files[key]),
-                modified_at=datetime.now(tz=UTC).isoformat(),
-                suffix=suffix,
-            )
-        if key in self._dirs:
-            return FileInfo(
-                path=key or ".",
-                is_file=False,
-                is_dir=True,
-                size=0,
-                modified_at=datetime.now(tz=UTC).isoformat(),
-                suffix="",
-            )
-        return None
+        with self._lock:
+            if key in self._files:
+                suffix = ""
+                dot = key.rfind(".")
+                if dot != -1 and "/" not in key[dot:]:
+                    suffix = key[dot:]
+                return FileInfo(
+                    path=key,
+                    is_file=True,
+                    is_dir=False,
+                    size=len(self._files[key]),
+                    modified_at=datetime.now(tz=UTC).isoformat(),
+                    suffix=suffix,
+                )
+            if key in self._dirs:
+                return FileInfo(
+                    path=key or ".",
+                    is_file=False,
+                    is_dir=True,
+                    size=0,
+                    modified_at=datetime.now(tz=UTC).isoformat(),
+                    suffix="",
+                )
+            return None
 
     def exists(self, path: str) -> bool:
         key = self._norm(path)
-        return key in self._files or key in self._dirs
+        with self._lock:
+            return key in self._files or key in self._dirs
 
     def is_file(self, path: str) -> bool:
-        return self._norm(path) in self._files
+        with self._lock:
+            return self._norm(path) in self._files
 
     def mkdir(self, path: str) -> None:
         key = self._norm(path)
-        self._dirs.add(key)
-        self._ensure_parents(key)
+        with self._lock:
+            self._dirs.add(key)
+            self._ensure_parents(key)
 
     def _ensure_parents(self, key: str) -> None:
         parts = key.split("/")

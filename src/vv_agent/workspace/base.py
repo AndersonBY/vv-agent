@@ -22,6 +22,22 @@ def _normalize_workspace_path(path: str) -> str:
     return "/".join(parts)
 
 
+def _exclusive_workspace_path_segments(path: str) -> tuple[str, ...]:
+    if (
+        not isinstance(path, str)
+        or not path
+        or path.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:", path)
+        or "\\" in path
+        or "\x00" in path
+    ):
+        raise ValueError("exclusive path must be a normalized workspace-relative path")
+    segments = tuple(path.split("/"))
+    if any(segment in {"", ".", ".."} for segment in segments):
+        raise ValueError("exclusive path contains an invalid segment")
+    return segments
+
+
 @dataclass(slots=True)
 class FileInfo:
     path: str
@@ -37,6 +53,7 @@ class WorkspaceBackend(Protocol):
     def read_text(self, path: str) -> str: ...
     def read_bytes(self, path: str) -> bytes: ...
     def write_text(self, path: str, content: str, *, append: bool = False) -> int: ...
+    def write_text_exclusive(self, path: str, content: str) -> int: ...
     def file_info(self, path: str) -> FileInfo | None: ...
     def exists(self, path: str) -> bool: ...
     def is_file(self, path: str) -> bool: ...
@@ -137,6 +154,9 @@ class DiscoveryFilteredWorkspaceBackend:
 
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
         return self._backend.write_text(path, content, append=append)
+
+    def write_text_exclusive(self, path: str, content: str) -> int:
+        return self._backend.write_text_exclusive(path, content)
 
     def file_info(self, path: str) -> FileInfo | None:
         return self._backend.file_info(path)

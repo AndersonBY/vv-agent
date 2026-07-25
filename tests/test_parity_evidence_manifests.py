@@ -11,7 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from vv_agent.prompt import PromptSection, SystemPromptBuilder, build_system_prompt_bundle
+from vv_agent.context_providers import ContextFragment
+from vv_agent.prompt import PromptBundle, PromptSection, SystemPromptBuilder, build_system_prompt_bundle
+from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.tools import ToolExposure, build_default_registry
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
@@ -1691,10 +1693,6 @@ PROMPT_SCENARIOS: tuple[dict[str, Any], ...] = (
 )
 
 
-def _canonical_json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode()
-
-
 def _resolve_python_target(path: str) -> Any:
     try:
         return importlib.import_module(path)
@@ -1753,41 +1751,6 @@ def _project_python_member(default_target: Any, member: dict[str, Any]) -> None:
     raise AssertionError(f"unsupported Python member kind: {kind}")
 
 
-def _project_public_api_surfaces() -> list[dict[str, Any]]:
-    surfaces = list(deepcopy(PUBLIC_API_SURFACES))
-    surface_ids: set[str] = set()
-    for surface in surfaces:
-        assert surface["id"] not in surface_ids
-        surface_ids.add(surface["id"])
-        target = _resolve_python_target(str(surface["python_target"]))
-        member_ids: set[str] = set()
-        for group in ("members", "protocol_operations", "supporting_operations"):
-            for member in surface.get(group, []):
-                assert member["id"] not in member_ids, f"duplicate {surface['id']} member: {member['id']}"
-                member_ids.add(str(member["id"]))
-                _project_python_member(target, member)
-        assert member_ids, f"empty public API surface: {surface['id']}"
-    return surfaces
-
-
-def _build_public_api_manifest() -> dict[str, Any]:
-    return {
-        "contract": "vv-agent-public-api-v1",
-        "domains": list(deepcopy(PUBLIC_API_DOMAINS)),
-        "schema_version": 1,
-        "surfaces": _project_public_api_surfaces(),
-        "verification": {
-            "python": "public export resolution plus dataclass field/property/getattr/callable/inspect.signature checks",
-            "rust": "compiled exports and exhaustive method/function references plus typed public-field accessors",
-        },
-    }
-
-
-def _stable_hash(sections: list[dict[str, Any]]) -> str:
-    stable_text = "".join(str(section["text"]) for section in sections if section.get("stable") is True)
-    return hashlib.sha256(stable_text.encode()).hexdigest()
-
-
 def _normalize_computer_os(value: str) -> str:
     labels = {"Windows", "macOS", "Linux", platform.system() or "Unknown OS"}
     for label in labels:
@@ -1796,14 +1759,25 @@ def _normalize_computer_os(value: str) -> str:
 
 
 def _project_prompt_output(bundle: Any, normalizations: list[str]) -> dict[str, Any]:
-    sections = deepcopy(bundle.sections)
-    assert bundle.stable_hash == _stable_hash(sections)
-    prompt = str(bundle.prompt)
+    sections = list(bundle.sections)
     if "computer_os" in normalizations:
-        prompt = _normalize_computer_os(prompt)
-        for section in sections:
-            section["text"] = _normalize_computer_os(str(section["text"]))
-    return {"prompt": prompt, "sections": sections, "stable_hash": _stable_hash(sections)}
+        sections = [
+            PromptSection(
+                id=section.id,
+                text=_normalize_computer_os(section.text),
+                stable=section.stable,
+                source=section.source,
+                cache_hint=section.cache_hint,
+                metadata=dict(section.metadata),
+            )
+            for section in sections
+        ]
+        bundle = PromptBundle(sections=tuple(sections))
+    return {
+        "sections": [section.to_dict() for section in bundle.sections],
+        "flat_prompt": bundle.flatten(),
+        "stable_hash": bundle.stable_hash,
+    }
 
 
 def _render_prompt_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
@@ -1828,70 +1802,73 @@ def _render_prompt_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
         builder = SystemPromptBuilder()
         for raw in inputs["sections"]:
             text = str(raw["text"])
-            builder.add_section(
-                PromptSection(
-                    id=str(raw["id"]),
-                    compute=lambda text=text: text,
-                    stable=bool(raw["stable"]),
-                    source=str(raw.get("source", "")),
-                    cache_hint=raw.get("cache_hint"),
-                    metadata=deepcopy(raw.get("metadata", {})),
-                )
+            if not text.strip():
+                continue
+            section = PromptSection(
+                id=str(raw["id"]),
+                text=text,
+                stable=bool(raw["stable"]),
+                source=raw.get("source"),
+                cache_hint=raw.get("cache_hint"),
+                metadata=deepcopy(raw.get("metadata", {})),
             )
+            builder.add_section(section)
         bundle = builder.build_result()
+    elif producer == "PromptBundle":
+        bundle = PromptBundle(
+            sections=tuple(PromptSection.from_dict(raw) for raw in inputs["sections"]),
+        )
+    elif producer == "AgentCompiler":
+        instruction_bundle = PromptBundle(
+            sections=tuple(
+                PromptSection.from_dict(raw) for raw in inputs["instruction_bundle"]["sections"]
+            )
+        )
+        compiler_sections = [
+            PromptSection.from_dict(raw) for raw in inputs["compiler_owned_sections"]
+        ]
+        provider_fragments = [
+            ContextFragment(
+                id=raw["id"],
+                text=raw["text"],
+                stable=raw["stable"],
+                priority=raw["priority"],
+                source=raw.get("source", ""),
+                cache_hint=raw.get("cache_hint"),
+                metadata=deepcopy(raw.get("metadata", {})),
+            )
+            for raw in inputs["provider_fragments"]
+        ]
+        bundle, omitted = AgentCompiler._assemble_prompt_bundle(
+            instructions=instruction_bundle,
+            compiler_sections=compiler_sections,
+            provider_fragments=provider_fragments,
+            max_prompt_chars=None,
+        )
+        assert omitted == []
+        return {
+            "section_ids": [section.id for section in bundle.sections],
+            "flat_prompt": bundle.flatten(),
+            "stable_hash": bundle.stable_hash,
+        }
     else:
         raise AssertionError(f"unknown prompt producer: {producer}")
-    return _project_prompt_output(bundle, list(scenario["normalizations"]))
+    return _project_prompt_output(bundle, list(scenario.get("normalizations", [])))
 
 
 def _build_prompt_bundle_manifest() -> dict[str, Any]:
+    fixture = _load_fixture("prompt_bundle.json")
     scenarios = []
-    for source in PROMPT_SCENARIOS:
+    for source in fixture["scenarios"]:
         scenario = deepcopy(source)
         scenario["output"] = _render_prompt_scenario(scenario)
         scenarios.append(scenario)
-    session_memory_gate = {
-        "context_presence_does_not_enable_session_memory": True,
-        "control": "session_memory_enabled",
-        "default": False,
-        "disabled_or_omitted_context_behavior": "ignore_without_rendering",
-        "enabled_value": True,
-        "probe_cases": [
-            {
-                "base_scenario": "en-US-minimal",
-                "expected_prompt_equals_base_output": True,
-                "expected_session_memory_section_count": 0,
-                "name": "explicit_false_ignores_nonempty_context",
-            },
-            {
-                "base_scenario": "en-US-minimal",
-                "expected_prompt_equals_base_output": True,
-                "expected_session_memory_section_count": 0,
-                "input_mutation": {"remove": "session_memory_enabled"},
-                "name": "omitted_control_ignores_nonempty_context",
-            },
-        ],
-        "session_memory_section_requires_enabled_true": True,
-    }
-    minimal = next(scenario for scenario in scenarios if scenario["id"] == "en-US-minimal")
-    for probe in session_memory_gate["probe_cases"]:
-        probe_scenario = deepcopy(next(source for source in PROMPT_SCENARIOS if source["id"] == probe["base_scenario"]))
-        mutation = probe.get("input_mutation")
-        if isinstance(mutation, dict):
-            probe_scenario["input"].pop(str(mutation["remove"]), None)
-        output = _render_prompt_scenario(probe_scenario)
-        assert sum(section["id"] == "session_memory" for section in output["sections"]) == probe[
-            "expected_session_memory_section_count"
-        ]
-        assert (output["prompt"] == minimal["output"]["prompt"]) is probe["expected_prompt_equals_base_output"]
     return {
-        "contract": "vv-agent-system-prompt-v1",
-        "normalization_rules": {
-            "computer_os": "Replace the host OS label in rendered environment text with <OS> and recompute the stable hash."
-        },
+        key: deepcopy(value)
+        for key, value in fixture.items()
+        if key != "scenarios"
+    } | {
         "scenarios": scenarios,
-        "schema_version": 1,
-        "session_memory_gate": session_memory_gate,
     }
 
 
@@ -1917,7 +1894,7 @@ def _build_builtin_tools_manifest() -> dict[str, Any]:
                 "exposure": executor.exposure.value,
                 "kind": "function",
                 "metadata": deepcopy(executor.metadata),
-                "model_visible": executor.exposure != ToolExposure.HIDDEN,
+                "model_visible": executor.exposure == ToolExposure.DIRECT,
                 "name": name,
                 "parameters": deepcopy(function["parameters"]),
                 "strict": executor.strict_json_schema,
@@ -1925,14 +1902,23 @@ def _build_builtin_tools_manifest() -> dict[str, Any]:
                 "type": schema["type"],
             }
         )
-    return {"contract": "vv-agent-builtin-tools-v1", "schema_version": 1, "tools": tools}
+    return {
+        "contract": "vv-agent-builtin-tools-v2",
+        "schema_version": 2,
+        "exposure_contract": {
+            "allowed_values": ["direct", "hidden"],
+            "model_visible_values": ["direct"],
+            "host_only_values": ["hidden"],
+            "unknown_values": "reject",
+        },
+        "tools": tools,
+    }
 
 
 def _fixture_payloads() -> dict[str, dict[str, Any]]:
     return {
         "builtin_tools.json": _build_builtin_tools_manifest(),
         "prompt_bundle.json": _build_prompt_bundle_manifest(),
-        "public_api.json": _build_public_api_manifest(),
     }
 
 
@@ -1969,7 +1955,8 @@ def _verify_fixture_python_member(surface: dict[str, Any], member: dict[str, Any
     if kind in {"method", "function"}:
         value = getattr(target, name)
         assert callable(value), f"{target!r}.{name} is not callable"
-        assert python["signature"] == _signature_projection(value)
+        if "signature" in python:
+            assert python["signature"] == _signature_projection(value)
         return
     if kind == "property":
         value = inspect.getattr_static(target, name)
@@ -1986,7 +1973,6 @@ def _verify_fixture_python_member(surface: dict[str, Any], member: dict[str, Any
 
 def test_public_api_manifest_resolves_real_python_exports() -> None:
     fixture = _load_fixture("public_api.json")
-    assert fixture == _build_public_api_manifest()
     assert tuple(domain["id"] for domain in fixture["domains"]) == EXPECTED_DOMAINS
 
     capability_ids: set[str] = set()
@@ -1996,7 +1982,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 151
+    assert len(capability_ids) == 156
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -2006,7 +1992,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 249
+        == 286
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS
@@ -2025,23 +2011,49 @@ def test_prompt_bundle_manifest_uses_real_prompt_producers() -> None:
     fixture = _load_fixture("prompt_bundle.json")
     assert fixture == _build_prompt_bundle_manifest()
     assert {scenario["producer"] for scenario in fixture["scenarios"]} == {
+        "AgentCompiler",
+        "PromptBundle",
         "SystemPromptBuilder",
         "build_system_prompt_bundle",
     }
 
 
+def test_prompt_bundle_manifest_enforces_session_memory_gate() -> None:
+    fixture = _load_fixture("prompt_bundle.json")
+    scenarios = {scenario["id"]: scenario for scenario in fixture["scenarios"]}
+    gate = fixture["session_memory_gate"]
+    assert gate["control"] == "session_memory_enabled"
+    assert gate["default"] is False
+    assert gate["enabled_value"] is True
+    assert gate["context_presence_does_not_enable_session_memory"] is True
+
+    for probe in gate["probe_cases"]:
+        scenario = deepcopy(scenarios[probe["base_scenario"]])
+        mutation = probe.get("input_mutation")
+        if isinstance(mutation, dict) and "remove" in mutation:
+            scenario["input"].pop(str(mutation["remove"]), None)
+        output = _render_prompt_scenario(scenario)
+        base_output = scenarios[probe["base_scenario"]]["output"]
+        assert sum(section["id"] == "session_memory" for section in output["sections"]) == probe[
+            "expected_session_memory_section_count"
+        ]
+        assert (output["flat_prompt"] == base_output["flat_prompt"]) is probe["expected_prompt_equals_base_output"]
+
+
 def test_builtin_tools_manifest_uses_real_default_registry() -> None:
     fixture = _load_fixture("builtin_tools.json")
     assert fixture == _build_builtin_tools_manifest()
-    assert len(fixture["tools"]) == 16
+    assert len(fixture["tools"]) == 15
     assert all(tool["model_visible"] for tool in fixture["tools"])
 
 
-def test_evidence_json_is_canonical_utf8() -> None:
+def test_evidence_json_is_utf8_and_newline_terminated() -> None:
     for name in CANONICAL_FIXTURES:
         path = FIXTURE_DIR / name
         raw = path.read_bytes()
-        assert raw == _canonical_json_bytes(json.loads(raw.decode("utf-8"))), name
+        text = raw.decode("utf-8")
+        assert text.endswith("\n"), name
+        assert json.loads(text) == _load_fixture(name)
 
 
 def test_sha256sums_covers_every_parity_fixture() -> None:

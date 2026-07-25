@@ -23,6 +23,7 @@ from vv_agent.checkpoint import (
     validate_run_definition,
 )
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.checkpoint_codec import _strict_json_loads
 from vv_agent.runtime.run_definition import build_run_definition
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
@@ -74,7 +75,7 @@ def _minimal_inputs() -> tuple[Agent, RunConfig, ResolvedModelConfig, AgentTask]
     task = AgentTask(
         task_id="checkpoint-agent_fixture",
         model="test-model",
-        system_prompt="You are a careful assistant.",
+        prompt_bundle=build_raw_system_prompt_bundle("You are a careful assistant."),
         user_prompt="Summarize the status.",
         max_cycles=10,
     )

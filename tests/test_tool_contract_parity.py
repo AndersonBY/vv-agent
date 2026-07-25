@@ -7,10 +7,10 @@ from typing import Any, ClassVar, cast
 import pytest
 
 from vv_agent import Agent, RunConfig, Runner, ToolContext, ToolOutputText
+from vv_agent.llm import LlmRequest
 from vv_agent.model import ScriptedModelProvider
-from vv_agent.model_settings import ModelSettings
 from vv_agent.tools import RegistryToolExecutor, ToolExposure, ToolOrchestrator
-from vv_agent.types import AgentStatus, LLMResponse, Message, ToolCall, ToolExecutionResult
+from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolExecutionResult
 from vv_agent.workspace import MemoryWorkspaceBackend
 
 
@@ -44,22 +44,16 @@ class CapturingToolLLM:
     def __init__(self) -> None:
         self.tool_names: list[str] = []
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback=None,
-        model_settings: ModelSettings | None = None,
-        request_metadata=None,
-    ) -> LLMResponse:
-        del model, messages, stream_callback, model_settings, request_metadata
-        self.tool_names = [str(cast(dict[str, object], schema["function"])["name"]) for schema in tools]
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        self.tool_names = [str(cast(dict[str, object], schema["function"])["name"]) for schema in request.tools]
         return LLMResponse(
             content="",
             tool_calls=[ToolCall(id="protocol-call", name="protocol_echo", arguments={"value": "ok"})],
         )
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
 
 
 def test_runner_adapts_public_tool_protocol_instead_of_silently_skipping_it(tmp_path: Path) -> None:

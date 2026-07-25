@@ -1,7 +1,8 @@
 {
   "contract": "checkpoint_resume",
-  "version": 2,
-  "run_definition_schema": "vv-agent.run-definition.v2",
+  "version": 3,
+  "checkpoint_schema": "vv-agent.checkpoint.v4",
+  "run_definition_schema": "vv-agent.run-definition.v3",
   "public_entrypoints": {
     "run": "Runner.run with RunConfig.checkpoint_config",
     "start": "Runner.start with RunConfig.checkpoint_config",
@@ -104,6 +105,100 @@
         "model_dispatches": 1,
         "model_call_records": 2,
         "completed_cycles": 2
+      }
+    },
+    {
+      "name": "frozen_prompt_bundle_resume_does_not_reinvoke_producers",
+      "run": {
+        "agent": {
+          "name": "checkpoint-agent",
+          "instructions": "resolved by callback when the run was created",
+          "model": "scripted"
+        },
+        "input": "process item 42",
+        "run_config": {
+          "max_cycles": 3,
+          "no_tool_policy": "finish",
+          "checkpoint_config": {
+            "key": "case-key/frozen-prompt",
+            "resume_policy": "resume_if_present",
+            "store": {
+              "kind": "in_memory"
+            }
+          }
+        },
+        "frozen_prompt_bundle": {
+          "sections": [
+            {
+              "id": "agent_instructions",
+              "text": "You are a careful assistant.",
+              "stable": true,
+              "source": "agent.instructions"
+            },
+            {
+              "id": "session_memory",
+              "text": "<Session Memory>\n- Preserve checkpoint evidence exactly.\n</Session Memory>",
+              "stable": false,
+              "source": "session.memory"
+            },
+            {
+              "id": "current_time",
+              "text": "<Current Time>\n2026-07-10T08:30:00Z\n</Current Time>",
+              "stable": false,
+              "source": "run.clock",
+              "metadata": {
+                "scope": "run"
+              }
+            },
+            {
+              "id": "callback_context",
+              "text": "<Run Context>\ntenant=tenant-7\nrequest=checkpoint-resume\n</Run Context>",
+              "stable": false,
+              "source": "context.provider",
+              "metadata": {
+                "producer": "callback"
+              }
+            }
+          ],
+          "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+        },
+        "resume_producers": {
+          "instruction_callback": {
+            "behavior": "poison",
+            "poison_error": "instruction_callback_invoked_during_resume",
+            "expected_calls": 0
+          },
+          "context_provider": {
+            "behavior": "poison",
+            "poison_error": "context_provider_invoked_during_resume",
+            "expected_calls": 0
+          },
+          "clock": {
+            "behavior": "poison",
+            "poison_error": "clock_read_during_resume",
+            "expected_calls": 0
+          }
+        },
+        "initial_checkpoint": {
+          "cycle_index": 1,
+          "status": "running",
+          "prompt_bundle_source": "run_definition.prompt_bundle"
+        },
+        "model_steps": [
+          {
+            "content": "done",
+            "tool_calls": []
+          }
+        ]
+      },
+      "expected": {
+        "status": "completed",
+        "completion_reason": "no_tool_finish",
+        "prompt_bundle_relation": "byte_equal",
+        "instruction_callback_calls": 0,
+        "context_provider_calls": 0,
+        "clock_reads": 0,
+        "model_dispatches": 1
       }
     },
     {
@@ -287,19 +382,24 @@
           "kind": "tool",
           "state": "succeeded",
           "cycle_index": 1,
-          "tool_name": "write_record",
-          "tool_call_id": "call_1",
+          "tool_name": "bash",
+          "tool_call_id": "call-bash",
           "result": {
-            "tool_call_id": "call_1",
-            "content": "ok",
+            "tool_call_id": "call-bash",
+            "content": "first output\n... output omitted; full text in artifact ...\nlast output",
             "status_code": "SUCCESS",
             "directive": "continue",
-            "error_code": null,
-            "metadata": {
-              "receipt_id": "receipt-1"
-            },
-            "image_url": null,
-            "image_path": null
+            "truncated": true,
+            "truncation_reason": "output_limit",
+            "original_bytes": 100000,
+            "visible_bytes": 70,
+            "artifact": {
+              "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+              "media_type": "text/plain",
+              "encoding": "utf-8",
+              "size_bytes": 100000,
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }
           }
         },
         "model_steps": [
@@ -307,10 +407,10 @@
             "content": "continue",
             "tool_calls": [
               {
-                "id": "call_1",
-                "name": "write_record",
+                "id": "call-bash",
+                "name": "bash",
                 "arguments": {
-                  "id": "42"
+                  "command": "python generate_large_output.py"
                 }
               }
             ]
@@ -324,7 +424,9 @@
       "expected": {
         "status": "completed",
         "tool_calls": 0,
-        "replayed_tool_results": 1
+        "replayed_tool_results": 1,
+        "replayed_result_relation": "byte_equal",
+        "artifact_rewritten": false
       }
     },
     {
@@ -402,12 +504,9 @@
             "content": "ok",
             "status_code": "SUCCESS",
             "directive": "continue",
-            "error_code": null,
             "metadata": {
               "receipt_id": "receipt-1"
-            },
-            "image_url": null,
-            "image_path": null
+            }
           }
         },
         "model_steps": [
@@ -459,12 +558,9 @@
             "content": "ok",
             "status_code": "SUCCESS",
             "directive": "continue",
-            "error_code": null,
             "metadata": {
               "receipt_id": "receipt-1"
-            },
-            "image_url": null,
-            "image_path": null
+            }
           }
         },
         "model_steps": [

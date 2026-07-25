@@ -16,11 +16,7 @@ from vv_llm.chat_clients import create_chat_client, format_messages, get_token_c
 from vv_llm.settings import Settings
 from vv_llm.types import APIConnectionError, APIStatusError, BackendType
 
-from vv_agent.llm.anthropic_prompt_cache import (
-    PROMPT_CACHE_ENABLED_KEY,
-    SYSTEM_PROMPT_SECTIONS_KEY,
-    apply_claude_prompt_cache,
-)
+from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.model_settings import ModelSettings, ResponseFormat, ToolChoice
 from vv_agent.prompt import CacheBreakTracker, hash_system_prompt_sections, hash_tool_payload
@@ -119,16 +115,27 @@ class VvLlmClient(LLMClient):
     _request_counter: int = field(default=0, init=False, repr=False)
     _prompt_cache_tracker: CacheBreakTracker = field(default_factory=CacheBreakTracker, init=False, repr=False)
 
-    def complete(
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return self._complete(request, stream_callback=None)
+
+    def complete_with_stream(
         self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
+        request: LlmRequest,
         stream_callback: StreamCallback | None = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        return self._complete(request, stream_callback=stream_callback)
+
+    def _complete(
+        self,
+        request: LlmRequest,
+        *,
+        stream_callback: StreamCallback | None = None,
+    ) -> LLMResponse:
+        model = request.model
+        messages = request.messages
+        tools = request.tools
+        model_settings = request.model_settings
+        request_metadata = dict(request.metadata)
         if not self.endpoint_targets:
             raise RuntimeError("No endpoint targets configured")
         if model_settings is not None and model_settings.extra_headers:
@@ -144,8 +151,6 @@ class VvLlmClient(LLMClient):
         backend_type = self._resolve_backend_type(self.backend)
         model_name = self._current_model_name(model)
         settings = self._ensure_settings(model)
-        extracted_metadata = self._extract_request_metadata(messages)
-        request_metadata = {**extracted_metadata, **dict(request_metadata or {})}
         message_payload = self._build_message_payload(
             messages,
             preserve_reasoning_chain=self._should_preserve_reasoning_chain(model),
@@ -184,11 +189,12 @@ class VvLlmClient(LLMClient):
                 tools=request_tool_payload,
                 extra_body=request_options.extra_body,
                 metadata=request_metadata,
+                prompt_bundle=request.prompt_bundle,
             )
             self._track_prompt_cache_state(
                 endpoint_type=target.endpoint_type,
                 model=request_options.model,
-                metadata=request_metadata,
+                prompt_bundle=request.prompt_bundle,
                 tool_payload=request_tool_payload,
             )
             request_options = _RequestOptions(
@@ -269,21 +275,6 @@ class VvLlmClient(LLMClient):
         details = "; ".join(errors) if errors else "no attempts made"
         raise RuntimeError(f"All endpoints failed: {details}") from last_error
 
-    def complete_request(
-        self,
-        request: LlmRequest,
-        *,
-        stream_callback: StreamCallback | None = None,
-    ) -> LLMResponse:
-        return self.complete(
-            model=request.model,
-            messages=request.messages,
-            tools=request.tools,
-            stream_callback=stream_callback,
-            model_settings=request.model_settings,
-            request_metadata=request.metadata,
-        )
-
     def _ensure_settings(self, model: str) -> Settings:
         if self.settings is not None:
             return self.settings
@@ -346,20 +337,12 @@ class VvLlmClient(LLMClient):
             payload.append(cast(ChatCompletionMessageParam, item))
         return payload
 
-    @staticmethod
-    def _extract_request_metadata(messages: list[Message]) -> dict[str, Any]:
-        for message in messages:
-            if message.role != "system":
-                continue
-            return dict(message.metadata)
-        return {}
-
     def _track_prompt_cache_state(
         self,
         *,
         endpoint_type: str,
         model: str,
-        metadata: dict[str, Any],
+        prompt_bundle: Any,
         tool_payload: list[dict[str, Any]],
     ) -> None:
         normalized_endpoint = str(endpoint_type or "").strip().lower()
@@ -368,10 +351,9 @@ class VvLlmClient(LLMClient):
             return
         if not normalized_model.startswith("claude"):
             return
-        if metadata.get(PROMPT_CACHE_ENABLED_KEY, True) is False:
-            return
-
-        system_hash = hash_system_prompt_sections(metadata.get(SYSTEM_PROMPT_SECTIONS_KEY))
+        system_hash = hash_system_prompt_sections(
+            [section.to_dict() for section in prompt_bundle.sections] if prompt_bundle is not None else None
+        )
         tool_hash = hash_tool_payload(tool_payload)
         self._prompt_cache_tracker.check(system_hash=system_hash, tool_hash=tool_hash)
 

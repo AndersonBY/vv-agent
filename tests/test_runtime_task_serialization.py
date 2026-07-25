@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.types import (
     AgentTask,
     CacheUsage,
@@ -19,7 +20,7 @@ def test_agent_task_round_trips_sub_agents_and_metadata() -> None:
     task = AgentTask(
         task_id="parent",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="user",
         sub_agents={"research": SubAgentConfig(model="m2", description="Research facts.", backend="b")},
         metadata={"scope": "research", "trace_id": "trace-1"},

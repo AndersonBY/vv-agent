@@ -128,30 +128,12 @@ class ModelProvider(Protocol):
 class _RequestCallbackLLM:
     callback: Callable[[LlmRequest], LLMResponse]
 
-    def complete_request(self, request: LlmRequest, *, stream_callback=None) -> LLMResponse:
-        del stream_callback
+    def complete(self, request: LlmRequest) -> LLMResponse:
         return self.callback(request)
 
-    def complete(
-        self,
-        *,
-        model,
-        messages,
-        tools,
-        stream_callback=None,
-        model_settings=None,
-        request_metadata=None,
-    ) -> LLMResponse:
-        return self.complete_request(
-            LlmRequest(
-                model=model,
-                messages=list(messages),
-                tools=list(tools),
-                metadata=dict(request_metadata or {}),
-                model_settings=model_settings,
-            ),
-            stream_callback=stream_callback,
-        )
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
 
 
 @dataclass(frozen=True, slots=True)

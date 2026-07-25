@@ -120,6 +120,7 @@ from vv_agent.output_validation import (
     output_repair,
     output_validator,
 )
+from vv_agent.prompt import PromptBundle, PromptSection
 from vv_agent.result import ApprovalSnapshot, RunResult, RunState
 from vv_agent.run_config import ApprovalPolicy, RunConfig, ToolPolicy
 from vv_agent.run_handle import RunHandle, RunHandleController, RunHandleState
@@ -163,6 +164,7 @@ from vv_agent.tools import (
 from vv_agent.tracing import JsonlTraceExporter, Span, TraceProcessor, TraceSink
 from vv_agent.types import (
     AgentStatus,
+    AgentTask,
     CacheUsage,
     CacheUsageStatus,
     CompletionReason,
@@ -174,6 +176,9 @@ from vv_agent.types import (
     SubAgentConfig,
     TaskTokenUsage,
     TokenUsage,
+    ToolArtifactRef,
+    ToolExecutionResult,
+    ToolResultCursor,
     UsageSource,
 )
 
@@ -191,6 +196,7 @@ __all__ = [
     "AgentSessionState",
     "AgentStartedEvent",
     "AgentStatus",
+    "AgentTask",
     "AppServer",
     "AppServerApprovalProvider",
     "AppServerHost",
@@ -278,6 +284,8 @@ __all__ = [
     "OutputValidationContext",
     "OutputValidationResult",
     "OutputValidator",
+    "PromptBundle",
+    "PromptSection",
     "ReasoningDeltaEvent",
     "ReconciliationProvider",
     "ReconciliationRequiredEvent",
@@ -319,11 +327,13 @@ __all__ = [
     "TaskTokenUsage",
     "TokenUsage",
     "Tool",
+    "ToolArtifactRef",
     "ToolCallCompletedEvent",
     "ToolCallPlannedEvent",
     "ToolCallStartedEvent",
     "ToolChoice",
     "ToolContext",
+    "ToolExecutionResult",
     "ToolExposure",
     "ToolIdempotency",
     "ToolMetadata",
@@ -335,6 +345,7 @@ __all__ = [
     "ToolOutputText",
     "ToolPolicy",
     "ToolRegistry",
+    "ToolResultCursor",
     "ToolSideEffect",
     "TraceProcessor",
     "TraceSink",

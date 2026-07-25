@@ -1,6 +1,6 @@
 {
   "contract": "operation_journal",
-  "version": 1,
+  "version": 2,
   "enums": {
     "kinds": [
       "model",
@@ -110,6 +110,24 @@
         "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJhcHByb3ZlZCJ9LCJpZGVtcG90ZW5jeV9rZXkiOiJpZGVtXzVhNDBiNGYxIiwidG9vbF9jYWxsX2lkIjoiY2FsbF8yIiwidG9vbF9uYW1lIjoid3JpdGVfcmVjb3JkIn0sInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQub3BlcmF0aW9uLXJlcXVlc3QudjEifQ==",
         "canonical_json_utf8_bytes": 211,
         "sha256": "6b05beb10de1bae7a2989e39294d4a1f02f4f4b357437bc198f47b6b7be85b49"
+      },
+      {
+        "name": "tool_bash_large_output",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call-bash",
+            "tool_name": "bash",
+            "arguments": {
+              "command": "python generate_large_output.py"
+            },
+            "idempotency_key": null
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7ImNvbW1hbmQiOiJweXRob24gZ2VuZXJhdGVfbGFyZ2Vfb3V0cHV0LnB5In0sImlkZW1wb3RlbmN5X2tleSI6bnVsbCwidG9vbF9jYWxsX2lkIjoiY2FsbC1iYXNoIiwidG9vbF9uYW1lIjoiYmFzaCJ9LCJzY2hlbWFfdmVyc2lvbiI6InZ2LWFnZW50Lm9wZXJhdGlvbi1yZXF1ZXN0LnYxIn0=",
+        "canonical_json_utf8_bytes": 203,
+        "sha256": "fcc962c133bbfcad8ae7f79523da0a3b70cd5de5dbf1b5a4448b18918bf725dc"
       }
     ]
   },
@@ -618,12 +636,46 @@
           "content": "updated",
           "status_code": "SUCCESS",
           "directive": "continue",
-          "error_code": null,
           "metadata": {
             "receipt_id": "receipt-42"
-          },
-          "image_url": null,
-          "image_path": null
+          }
+        },
+        "error": null
+      }
+    },
+    {
+      "name": "tool_succeeded_truncated_bash",
+      "request_golden_case": "tool_bash_large_output",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_1_call_bash",
+        "cycle_index": 1,
+        "attempt": 1,
+        "request_digest": "fcc962c133bbfcad8ae7f79523da0a3b70cd5de5dbf1b5a4448b18918bf725dc",
+        "tool_call_id": "call-bash",
+        "tool_name": "bash",
+        "arguments": {
+          "command": "python generate_large_output.py"
+        },
+        "idempotency_key": null,
+        "idempotency_support": "unsupported",
+        "state": "succeeded",
+        "result": {
+          "tool_call_id": "call-bash",
+          "content": "first output\n... output omitted; full text in artifact ...\nlast output",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "truncated": true,
+          "truncation_reason": "output_limit",
+          "original_bytes": 100000,
+          "visible_bytes": 70,
+          "artifact": {
+            "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+            "media_type": "text/plain",
+            "encoding": "utf-8",
+            "size_bytes": 100000,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
         },
         "error": null
       }
@@ -695,6 +747,18 @@
       "expected": {
         "decision": "replay",
         "tool_calls": 0,
+        "event": "operation_replayed"
+      }
+    },
+    {
+      "name": "durable_truncated_tool_result_is_replayed",
+      "entry": "tool_succeeded_truncated_bash",
+      "policy": "require_reconciliation",
+      "expected": {
+        "decision": "replay",
+        "tool_calls": 0,
+        "artifact_rewrites": 0,
+        "result_bytes_preserved": true,
         "event": "operation_replayed"
       }
     },
@@ -866,12 +930,9 @@
           "content": "updated",
           "status_code": "SUCCESS",
           "directive": "continue",
-          "error_code": null,
           "metadata": {
             "receipt_id": "receipt-42"
-          },
-          "image_url": null,
-          "image_path": null
+          }
         }
       },
       "expected": {

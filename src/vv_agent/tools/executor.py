@@ -20,9 +20,18 @@ if TYPE_CHECKING:
 
 class ToolExposure(StrEnum):
     DIRECT = "direct"
-    DEFERRED = "deferred"
-    DIRECT_MODEL_ONLY = "direct_model_only"
     HIDDEN = "hidden"
+
+
+class ToolExposureError(ValueError):
+    code = "tool_exposure_invalid"
+
+
+def normalize_tool_exposure(value: ToolExposure | str) -> ToolExposure:
+    try:
+        return ToolExposure(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolExposureError("tool exposure must be 'direct' or 'hidden'") from exc
 
 
 class ToolExecutor(Protocol):
@@ -144,6 +153,7 @@ class RegistryToolExecutor:
     tool_metadata: ToolMetadata | None = None
 
     def __post_init__(self) -> None:
+        self.exposure = normalize_tool_exposure(self.exposure)
         self.tool_metadata = normalize_tool_metadata(self.tool_metadata)
         if self.schema is not None:
             self.schema = close_object_schemas(self.schema)

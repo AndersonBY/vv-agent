@@ -12,6 +12,7 @@ from vv_agent import (
 )
 from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.runtime.lifecycle import AFTER_CYCLE_CONTROL_STATE_KEY
 from vv_agent.tools import build_default_registry
@@ -74,7 +75,7 @@ def test_after_cycle_steer_defers_no_tool_completion(tmp_path: Path) -> None:
         AgentTask(
             task_id="after-cycle-no-tool-steer",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="answer",
             max_cycles=3,
             no_tool_policy="finish",
@@ -139,7 +140,7 @@ def test_after_cycle_steer_defers_tool_finish(tmp_path: Path) -> None:
         AgentTask(
             task_id="after-cycle-tool-steer",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="finish",
             max_cycles=3,
         )
@@ -211,7 +212,7 @@ def test_after_cycle_permission_narrowing_hides_schema_and_blocks_dispatch(
     task = AgentTask(
         task_id="after-cycle-deny",
         model="test-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="run",
         max_cycles=2,
         no_tool_policy="continue",
@@ -251,7 +252,7 @@ def test_after_cycle_stop_is_always_non_success(tmp_path: Path) -> None:
         AgentTask(
             task_id="after-cycle-stop",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="answer",
             max_cycles=3,
             no_tool_policy="finish",
@@ -290,7 +291,7 @@ def test_after_cycle_steer_cannot_cross_wait_or_max_cycle(tmp_path: Path) -> Non
         AgentTask(
             task_id="after-cycle-wait-boundary",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="ask",
             max_cycles=3,
         )
@@ -306,7 +307,7 @@ def test_after_cycle_steer_cannot_cross_wait_or_max_cycle(tmp_path: Path) -> Non
         AgentTask(
             task_id="after-cycle-max-boundary",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="answer",
             max_cycles=1,
             no_tool_policy="finish",
@@ -339,7 +340,7 @@ def test_after_cycle_invalid_durable_control_state_fails_before_model(
         AgentTask(
             task_id="after-cycle-invalid-state",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="answer",
             initial_shared_state={
                 AFTER_CYCLE_CONTROL_STATE_KEY: {
@@ -383,7 +384,7 @@ def test_after_cycle_hook_is_not_called_when_budget_stops_after_model(
         AgentTask(
             task_id="after-cycle-budget-boundary",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="answer",
             max_cycles=3,
             no_tool_policy="finish",
@@ -416,7 +417,7 @@ def test_after_cycle_snapshot_is_detached_and_composition_overflow_is_typed(
         AgentTask(
             task_id="after-cycle-copy",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="answer",
             max_cycles=1,
             no_tool_policy="finish",
@@ -440,7 +441,7 @@ def test_after_cycle_snapshot_is_detached_and_composition_overflow_is_typed(
         AgentTask(
             task_id="after-cycle-overflow",
             model="test-model",
-            system_prompt="system",
+            prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="answer",
             max_cycles=2,
             no_tool_policy="continue",

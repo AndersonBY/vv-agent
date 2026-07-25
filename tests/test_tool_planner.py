@@ -13,6 +13,7 @@ from vv_agent.constants import (
     TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, SubAgentConfig
@@ -22,7 +23,7 @@ def _task(**overrides: object) -> AgentTask:
     task = AgentTask(
         task_id="task_planner",
         model="dummy",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="user",
     )
     for key, value in overrides.items():

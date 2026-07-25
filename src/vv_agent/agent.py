@@ -10,6 +10,7 @@ from vv_agent.background_task import BackgroundAgentTask
 from vv_agent.handoffs import Handoff, handoff
 from vv_agent.model_settings import ModelSettings
 from vv_agent.output_validation import OutputRepair, OutputValidator
+from vv_agent.prompt import PromptBundle
 from vv_agent.run_config import _validate_bounded_int
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.outputs import ToolOutputText
@@ -39,7 +40,7 @@ class RunContext[TContext]:
 @dataclass(slots=True)
 class Agent[TContext]:
     name: str
-    instructions: str | Callable[[RunContext[TContext], Agent[TContext]], str]
+    instructions: str | PromptBundle | Callable[[RunContext[TContext], Agent[TContext]], str | PromptBundle]
     model: str | Any | None = None
     model_settings: ModelSettings = field(default_factory=ModelSettings)
     tools: list[Any] = field(default_factory=list)
@@ -67,6 +68,8 @@ class Agent[TContext]:
             raise ValueError("agent name cannot be empty")
         if isinstance(self.instructions, str) and not self.instructions.strip():
             raise ValueError("agent instructions cannot be empty")
+        if not isinstance(self.instructions, (str, PromptBundle)) and not callable(self.instructions):
+            raise TypeError("agent instructions must be a string, PromptBundle, or callable")
         _validate_bounded_int(self.max_cycles, "max_cycles", minimum=1)
         _validate_no_tool_policy(self.no_tool_policy, "Agent.no_tool_policy")
         if not isinstance(self.output_validation_enabled, bool):
@@ -94,10 +97,15 @@ class Agent[TContext]:
             normalized_sub_agents[normalized_id] = deepcopy(config)
         self.sub_agents = normalized_sub_agents
 
-    def resolve_instructions(self, run_context: RunContext[TContext] | None = None) -> str:
-        if isinstance(self.instructions, str):
+    def resolve_instructions(self, run_context: RunContext[TContext] | None = None) -> str | PromptBundle:
+        if isinstance(self.instructions, (str, PromptBundle)):
             return self.instructions
-        return str(self.instructions(run_context or RunContext(), self))
+        resolved = self.instructions(run_context or RunContext(), self)
+        if not isinstance(resolved, (str, PromptBundle)):
+            raise TypeError("agent instruction callback must return a string or PromptBundle")
+        if isinstance(resolved, str) and not resolved.strip():
+            raise ValueError("resolved agent instructions cannot be empty")
+        return resolved
 
     def as_tool(self, *, name: str | None = None, description: str | None = None) -> FunctionTool:
         tool_name = name or self.name

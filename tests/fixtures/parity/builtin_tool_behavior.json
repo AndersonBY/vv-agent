@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "canonical": {
-    "error_content_required_keys": [
+    "structured_error_content_required_keys": [
       "ok",
       "error",
       "error_code"
@@ -108,42 +108,6 @@
         }
       }
     },
-    "compress_memory": {
-      "success": {
-        "arguments": {
-          "core_information": "fixture decision"
-        },
-        "result": {
-          "status_code": "SUCCESS",
-          "directive": "continue",
-          "content": {
-            "ok": true,
-            "saved_notes": 1
-          },
-          "metadata": {
-            "saved_notes": 1
-          }
-        }
-      },
-      "missing_core_information": {
-        "arguments": {
-          "core_information": "   "
-        },
-        "result": {
-          "status_code": "ERROR",
-          "directive": "continue",
-          "error_code": "core_information_required",
-          "content": {
-            "ok": false,
-            "error": "`core_information` is required",
-            "error_code": "core_information_required"
-          },
-          "metadata": {
-            "error_code": "core_information_required"
-          }
-        }
-      }
-    },
     "activate_skill": {
       "success": {
         "available_skills": [
@@ -231,15 +195,7 @@
           "status_code": "ERROR",
           "directive": "continue",
           "error_code": "command_failed",
-          "content": {
-            "ok": false,
-            "error": "command exited with code 7",
-            "error_code": "command_failed",
-            "cwd": ".",
-            "exit_code": 7,
-            "output": "fixture-output\n",
-            "shell": "bash"
-          },
+        "content": "fixture-output\n",
           "metadata": {
             "error_code": "command_failed",
             "cwd": ".",
@@ -413,14 +369,32 @@
     }
   },
   "registry": {
-    "builtin_description": {
-      "tool_name": "compress_memory",
-      "must_be_non_empty": true
-    },
     "hidden_exposure": {
       "tool_name": "fixture_hidden",
       "must_be_model_visible": false
-    }
+    },
+    "exposure_cases": [
+      {
+        "value": "direct",
+        "valid": true,
+        "model_visible": true
+      },
+      {
+        "value": "hidden",
+        "valid": true,
+        "model_visible": false
+      },
+      {
+        "value": "deferred",
+        "valid": false,
+        "error_code": "tool_exposure_invalid"
+      },
+      {
+        "value": "future",
+        "valid": false,
+        "error_code": "tool_exposure_invalid"
+      }
+    ]
   },
   "dynamic_bash_description": {
     "non_string_bash_shell": {
@@ -439,7 +413,13 @@
       "error_code",
       "metadata",
       "image_url",
-      "image_path"
+      "image_path",
+      "truncated",
+      "truncation_reason",
+      "original_bytes",
+      "visible_bytes",
+      "artifact",
+      "cursor"
     ],
     "unknown_fields": "reject",
     "canonical": {
@@ -455,6 +435,8 @@
     "forbidden_absent_fields": [
       "image_url",
       "image_path"
-    ]
+    ],
+    "optional_fields_omitted_when_absent": true,
+    "optional_fields_reject_null": true
   }
 }

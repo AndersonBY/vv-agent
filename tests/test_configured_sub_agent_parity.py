@@ -32,6 +32,7 @@ from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import MemoryManager
 from vv_agent.model import ModelRef, ScriptedModelProvider
 from vv_agent.model_settings import ModelSettings
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.run_config import RunConfig, ToolPolicy
 from vv_agent.runner import Runner
 from vv_agent.runtime import (
@@ -268,7 +269,7 @@ def _parent_task() -> AgentTask:
     return AgentTask(
         task_id="parent-task",
         model="parent-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Parent task",
         max_cycles=6,
         memory_compact_threshold=250_000,
@@ -445,7 +446,7 @@ def test_runtime_revalidates_mutated_sub_agent_config_and_pairs_events(
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=1,
         sub_agents={"researcher": sub_agent},
@@ -608,7 +609,7 @@ def test_request_metadata_cannot_assign_framework_owned_child_identity(tmp_path:
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )
@@ -651,7 +652,7 @@ def test_runtime_lineage_prefers_public_then_execution_then_request_without_task
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )
@@ -735,7 +736,7 @@ def test_runtime_trace_identity_precedence_and_child_run_fallback(
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         metadata=task_metadata,
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
@@ -780,7 +781,7 @@ def test_public_run_context_private_trace_id_precedes_public_trace_id(tmp_path: 
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )
@@ -912,7 +913,7 @@ def test_non_string_identity_metadata_is_ignored_and_falls_through(
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         metadata={"trace_id": invalid_value},
         extra_tool_names=["inspect_identity"],
@@ -994,7 +995,7 @@ def test_runtime_boundary_rejects_non_portable_regex_before_lifecycle(tmp_path: 
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )
@@ -1087,7 +1088,7 @@ def test_configured_sub_agent_uses_parent_workspace_backend_and_emits_sub_run_ev
     task = AgentTask(
         task_id="parent",
         model="shared-model",
-        system_prompt="Parent",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent"),
         user_prompt="Delegate",
         max_cycles=4,
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Read files")},
@@ -1153,7 +1154,7 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
     task = AgentTask(
         task_id="parent-task",
         model="child-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=3,
         extra_tool_names=["contract_delegate"],
@@ -1222,7 +1223,7 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
     failure_task = AgentTask(
         task_id="parent-task",
         model="child-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate invalid child",
         max_cycles=2,
         extra_tool_names=["contract_failure"],
@@ -1369,7 +1370,7 @@ def test_explicit_backend_and_resolved_limits_reach_real_child_request(
     task = AgentTask(
         task_id="explicit-backend-parent",
         model="child-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=2,
         sub_agents={
@@ -1448,7 +1449,7 @@ def test_same_model_parent_client_reuse_inherits_parent_task_token_limits(tmp_pa
     task = AgentTask(
         task_id="parent-client-reuse",
         model="child-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=2,
         metadata=dict(expected_metadata),
@@ -1614,7 +1615,7 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
     task = AgentTask(
         task_id="parent-task",
         model="parent-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=3,
         extra_tool_names=["capture_context"],
@@ -1799,18 +1800,22 @@ class _MaliciousChildStreamLLM:
     def __init__(self) -> None:
         self.parent_calls = 0
 
-    def complete(
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return self._respond(request, None)
+
+    def complete_with_stream(
         self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
+        request: LlmRequest,
         stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
-        del model, messages, tools, model_settings
-        if request_metadata and request_metadata.get("is_sub_task") is True:
+        return self._respond(request, stream_callback)
+
+    def _respond(
+        self,
+        request: LlmRequest,
+        stream_callback: Callable[[dict[str, Any]], None] | None,
+    ) -> LLMResponse:
+        if request.metadata.get("is_sub_task") is True:
             assert stream_callback is not None
             for event in (
                 {
@@ -1872,18 +1877,22 @@ class _ObserverPanicChildStreamLLM:
         self.parent_calls = 0
         self.child_calls = 0
 
-    def complete(
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return self._respond(request, None)
+
+    def complete_with_stream(
         self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
+        request: LlmRequest,
         stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
-        del model, messages, tools, model_settings
-        if request_metadata and request_metadata.get("is_sub_task") is True:
+        return self._respond(request, stream_callback)
+
+    def _respond(
+        self,
+        request: LlmRequest,
+        stream_callback: Callable[[dict[str, Any]], None] | None,
+    ) -> LLMResponse:
+        if request.metadata.get("is_sub_task") is True:
             self.child_calls += 1
             assert stream_callback is not None
             stream_callback({"event": "assistant_delta", "content_delta": f"child delta {self.child_calls}"})
@@ -1917,7 +1926,7 @@ def test_configured_child_stream_observer_failure_isolated_and_child_remains_con
     task = AgentTask(
         task_id="observer-panic-parent",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=2,
         sub_agents={
@@ -1984,7 +1993,7 @@ def test_configured_child_stream_is_allowlisted_and_keeps_canonical_typed_identi
     task = AgentTask(
         task_id="parent-stream-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=2,
         sub_agents={
@@ -2047,18 +2056,8 @@ class _PolicyContinuationLLM:
         self.parent_calls = 0
         self.child_calls = 0
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, messages, tools, stream_callback, model_settings
-        if request_metadata and request_metadata.get("is_sub_task") is True:
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        if request.metadata.get("is_sub_task") is True:
             self.child_calls += 1
             if self.child_calls == 1:
                 return _finish("initial child done", tool_call_id="initial-child-finish")
@@ -2098,6 +2097,14 @@ class _PolicyContinuationLLM:
                 )
             ],
         )
+
+    def complete_with_stream(
+        self,
+        request: LlmRequest,
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
 
 
 class _PolicyApprovalProvider:
@@ -2163,7 +2170,7 @@ def test_configured_child_continuation_uses_current_turn_predicate_and_approval_
         return AgentTask(
             task_id=f"parent-policy-turn-{turn}",
             model="shared-model",
-            system_prompt="Parent prompt",
+            prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
             user_prompt="Manage child",
             max_cycles=2,
             extra_tool_names=["dangerous_action"],
@@ -2330,7 +2337,7 @@ def test_manual_approval_resume_runs_sub_task_status_with_accepting_turn_snapsho
     runtime_task = AgentTask(
         task_id="parent-approval-turn",
         model="approval-model",
-        system_prompt="Manage retained child.",
+        prompt_bundle=build_raw_system_prompt_bundle("Manage retained child."),
         user_prompt="Continue child.",
         max_cycles=1,
         sub_agents={"researcher": SubAgentConfig(model="approval-model", description="Retained child")},
@@ -2427,7 +2434,7 @@ def test_model_resolution_failure_emits_started_before_resolution_and_one_comple
     task = AgentTask(
         task_id="parent-task",
         model="parent-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=1,
         sub_agents={
@@ -2502,7 +2509,7 @@ def test_failed_child_preserves_usage_after_a_completed_cycle(tmp_path: Path) ->
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=2,
         sub_agents={
@@ -2588,7 +2595,7 @@ def test_wait_user_and_max_cycles_each_complete_started_lifecycle(
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=1,
         extra_tool_names=["wait_child"],
@@ -2634,17 +2641,8 @@ class _BlockingConfiguredLLM:
         self._parent_calls = 0
         self._lock = threading.Lock()
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Any = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, tools, stream_callback, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        messages = request.messages
         if messages and messages[0].role == "system" and messages[0].content == "Child prompt":
             self.child_started.put(None)
             if not self.release.wait(timeout=5):
@@ -2657,6 +2655,14 @@ class _BlockingConfiguredLLM:
         if parent_call == 1:
             return _delegate(self.create_arguments)
         return _finish("parent done", tool_call_id="parent-finish")
+
+    def complete_with_stream(
+        self,
+        request: LlmRequest,
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
 
 
 def _blocked_runtime(
@@ -2688,7 +2694,7 @@ def _blocked_runtime(
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=3,
         sub_agents={
@@ -3335,7 +3341,7 @@ def test_child_workspace_filter_hides_discovery_but_allows_known_path_reads(tmp_
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=3,
         sub_agents={
@@ -3455,7 +3461,7 @@ def test_configured_sub_agent_continuation_replays_complete_prior_turn(tmp_path:
     task = AgentTask(
         task_id="parent",
         model="shared-model",
-        system_prompt="Parent",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent"),
         user_prompt="Delegate",
         max_cycles=4,
         extra_tool_names=["remember_state", "inspect_state"],
@@ -3543,17 +3549,8 @@ class _ContinuationCancellationLLM:
         self._parent_calls = 0
         self._lock = threading.Lock()
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Any = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, tools, stream_callback, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        messages = request.messages
         is_child = bool(messages and messages[0].role == "system" and messages[0].content == "Child prompt")
         with self._lock:
             if is_child:
@@ -3574,6 +3571,14 @@ class _ContinuationCancellationLLM:
             return _delegate({"agent_id": "researcher", "task_description": "initial prompt"})
         return _finish("parent done", tool_call_id="parent-finish")
 
+    def complete_with_stream(
+        self,
+        request: LlmRequest,
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
+
 
 def test_parent_cancellation_reaches_configured_sub_agent_continuation(tmp_path: Path) -> None:
     cancellation = _assert_cancellation_contract("continuation")
@@ -3589,7 +3594,7 @@ def test_parent_cancellation_reaches_configured_sub_agent_continuation(tmp_path:
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=3,
         sub_agents={
@@ -3646,17 +3651,8 @@ class _PanicThenRecoverConfiguredLLM:
         self._parent_calls = 0
         self._lock = threading.Lock()
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Any = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, tools, stream_callback, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        messages = request.messages
         is_child = bool(messages and messages[0].role == "system" and messages[0].content == "Child prompt")
         with self._lock:
             if is_child:
@@ -3680,6 +3676,14 @@ class _PanicThenRecoverConfiguredLLM:
             )
         return _finish("parent done", tool_call_id="parent-finish")
 
+    def complete_with_stream(
+        self,
+        request: LlmRequest,
+        stream_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
+
 
 def test_configured_async_child_panic_cleans_up_and_retained_session_can_continue(
     tmp_path: Path,
@@ -3698,7 +3702,7 @@ def test_configured_async_child_panic_cleans_up_and_retained_session_can_continu
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=3,
         sub_agents={

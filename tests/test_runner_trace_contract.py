@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from vv_agent import Agent, ModelSettings, RunConfig, Runner, ToolCallCompletedEvent, ToolOutputText, function_tool
+from vv_agent import Agent, RunConfig, Runner, ToolCallCompletedEvent, ToolOutputText, function_tool
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ScriptedModelProvider
-from vv_agent.types import LLMResponse, Message, ToolCall
+from vv_agent.types import LLMResponse, ToolCall
 
 TRACE_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "runner_trace.jsonl"
 TRACE_FIELDS = (
@@ -37,29 +36,11 @@ TRACE_FIELDS = (
 
 
 class StreamingScriptedLLM(ScriptedLLM):
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        return self.complete_request(
-            LlmRequest(
-                model=model,
-                messages=list(messages),
-                tools=list(tools),
-                metadata=dict(request_metadata or {}),
-                model_settings=model_settings,
-            ),
-            stream_callback=stream_callback,
-        )
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return super().complete(request)
 
-    def complete_request(self, request: LlmRequest, *, stream_callback=None) -> LLMResponse:
-        response = super().complete_request(request, stream_callback=stream_callback)
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        response = self.complete(request)
         if stream_callback is not None:
             stream_callback({"event": "assistant_delta", "content_delta": response.content})
         return response

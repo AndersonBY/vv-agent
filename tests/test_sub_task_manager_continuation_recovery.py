@@ -15,7 +15,8 @@ from vv_agent.config import ResolvedModelConfig
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import SubRunCompletedEvent, SubRunStartedEvent
 from vv_agent.interactive import AgentSessionRun, InteractiveAgentDefinition, create_agent_session
-from vv_agent.llm import ScriptedLLM
+from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime, ExecutionContext, InMemoryCheckpointStore, SubTaskManager, get_sub_agent_session
 from vv_agent.runtime.engine import register_sub_agent_session, unregister_sub_agent_session
 from vv_agent.tools import ToolContext, build_default_registry
@@ -558,18 +559,8 @@ class _TurnRoutingLLM:
         self.parent_calls = 0
         self.child_calls = 0
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: Any = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, messages, tools, stream_callback, model_settings
-        if request_metadata and request_metadata.get("is_sub_task") is True:
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        if request.metadata.get("is_sub_task") is True:
             self.child_calls += 1
             return _finish(f"child result {self.child_calls}", f"child-finish-{self.child_calls}")
 
@@ -603,12 +594,16 @@ class _TurnRoutingLLM:
             )
         return _finish(f"parent result {self.parent_calls}", f"parent-finish-{self.parent_calls}")
 
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
+
 
 def _parent_task(task_id: str) -> AgentTask:
     return AgentTask(
         task_id=task_id,
         model="test-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Manage retained child",
         max_cycles=2,
         sub_agents={
@@ -912,7 +907,7 @@ def _retained_configured_child(
     task = AgentTask(
         task_id="parent-task",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         sub_agents={
             "researcher": SubAgentConfig(
@@ -976,7 +971,7 @@ def test_sync_child_manager_stays_running_and_rejected_continuation_does_not_unr
     task = AgentTask(
         task_id="sync-parent",
         model="shared-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )

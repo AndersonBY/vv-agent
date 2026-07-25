@@ -7,8 +7,8 @@ to the Python implementation and shows the supported public entry point.
 ## Opt In
 
 Durable execution is disabled unless a `CheckpointConfig` is attached to the
-run. Enabled records require `schema_version=vv-agent.checkpoint.v3` and
-`run_definition_schema=vv-agent.run-definition.v2`; no other record shape is
+run. Enabled records require `schema_version=vv-agent.checkpoint.v4` and
+`run_definition_schema=vv-agent.run-definition.v3`; no other record shape is
 read or repaired.
 
 ```python
@@ -45,7 +45,7 @@ recovers it when present. `require_existing` refuses to create a new record;
 ## Frozen Run Definition
 
 Before the first model or tool operation, Runner persists a credential-redacted
-RFC 8785 run definition. It includes the compiled prompt, effective model
+RFC 8785 run definition. It includes the resolved `PromptBundle`, effective model
 settings, model-visible tools in request order, tool policies and idempotency,
 budgets, output schema, metadata that changes behavior, and extension versions.
 Each frozen tool contains one `tool_metadata` field, either the normalized typed
@@ -61,9 +61,11 @@ custom output validators. Credential values are declared with JSON Pointer
 slots and replaced with `<credential-redacted>`; credential rotation therefore
 does not change the digest.
 
-Recovery preserves the original run ID, trace ID, task ID, prompt, initial
-messages, shared state, and session boundary. It does not call dynamic
-instructions, input guardrails, context providers, or session reads again.
+Recovery preserves the original run ID, trace ID, task ID, prompt bundle,
+initial messages, shared state, and session boundary. It does not call dynamic
+instructions, input guardrails, context providers, run-clock producers, or
+session reads again. The flat system text is derived from the ordered frozen
+bundle sections rather than stored as a second independently editable prompt.
 Current schemas and capability versions are still checked before external work.
 Resume also compares the current effective tool declarations and metadata
 denials with the stored definition before claim or external operations. Generic
@@ -138,8 +140,8 @@ For a normal terminal, Runner orders work as follows:
 Terminal records remain replayable after acknowledgement. Session and event
 stores reject reuse of the same identity with different payload bytes.
 
-Distributed workers accept only `vv-agent.distributed-run.v2` and return only
-the closed tagged `vv-agent.distributed-worker-response.v1` object: `pending`, `committed`,
+Distributed workers accept only `vv-agent.distributed-run.v3` and return only
+the closed tagged `vv-agent.distributed-worker-response.v2` object: `pending`, `committed`,
 `terminal_candidate`, or `terminal_replay`. The response is an observation, so
 the scheduler reloads the authoritative checkpoint after every response,
 timeout, or transport error. A candidate still needs controller-side terminal
@@ -148,7 +150,7 @@ result. The old `finished` and terminal Boolean fields are rejected.
 
 ## Scope And Limits
 
-Checkpoint v3 provides durable resume with explicit ambiguity. It does not make
+Checkpoint v4 provides durable resume with explicit ambiguity. It does not make
 an arbitrary external API exactly-once, recover a provider response that was
 never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,

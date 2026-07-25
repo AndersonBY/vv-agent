@@ -459,8 +459,8 @@ class SqliteCheckpointStore:
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v3'),
-    run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v2'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v4'),
+    run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v3'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,
     root_run_id TEXT NOT NULL,

@@ -101,3 +101,15 @@ def test_agent_result_reader_enforces_the_closed_current_wire() -> None:
 
     with pytest.raises(ValueError, match="unknown"):
         AgentResult.from_dict({**deepcopy(raw), "legacy": True})
+
+
+def test_agent_result_preserves_bounded_tool_recovery_fields() -> None:
+    contract = _contract()
+    expected = contract["agent_result"]["cycles"][0]["tool_results"][-1]
+
+    raw_result = AgentResult.from_dict(contract["agent_result"])
+    restored = raw_result.cycles[0].tool_results[-1]
+
+    assert restored.to_dict() == expected
+    assert raw_result.to_dict()["cycles"][0]["tool_results"][-1] == expected
+    assert _result().raw_cycles[0].tool_results[-1].artifact == restored.artifact

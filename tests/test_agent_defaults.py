@@ -10,9 +10,8 @@ from vv_agent import Agent, ApprovalPolicy, RunConfig, Runner, ToolPolicy, funct
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
-from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
-from vv_agent.types import AgentStatus, LLMResponse, Message, ToolCall
+from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -130,20 +129,15 @@ def test_agent_max_cycles_applies_when_run_config_only_supplies_provider() -> No
     calls = 0
 
     class NoToolLLM:
-        def complete(
-            self,
-            *,
-            model: str,
-            messages: list[Message],
-            tools: list[dict[str, object]],
-            stream_callback=None,
-            model_settings: ModelSettings | None = None,
-            request_metadata: dict[str, object] | None = None,
-        ) -> LLMResponse:
-            del model, messages, tools, stream_callback, model_settings, request_metadata
+        def complete(self, request: LlmRequest) -> LLMResponse:
+            del request
             nonlocal calls
             calls += 1
             return LLMResponse(content=f"cycle {calls}")
+
+        def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+            del stream_callback
+            return self.complete(request)
 
     result = Runner.run_sync(
         Agent(name="bounded", instructions="Try twice.", model="m", max_cycles=2),
@@ -191,22 +185,16 @@ def test_agent_tool_policy_is_default_and_run_config_policy_overrides_it() -> No
         def __init__(self) -> None:
             self.tool_names: list[str] = []
 
-        def complete(
-            self,
-            *,
-            model: str,
-            messages: list[Message],
-            tools: list[dict[str, object]],
-            stream_callback=None,
-            model_settings: ModelSettings | None = None,
-            request_metadata: dict[str, object] | None = None,
-        ) -> LLMResponse:
-            del model, messages, stream_callback, model_settings, request_metadata
-            self.tool_names = [str(cast(dict[str, object], tool["function"])["name"]) for tool in tools]
+        def complete(self, request: LlmRequest) -> LLMResponse:
+            self.tool_names = [str(cast(dict[str, object], tool["function"])["name"]) for tool in request.tools]
             return LLMResponse(
                 content="finish",
                 tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
             )
+
+        def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+            del stream_callback
+            return self.complete(request)
 
     agent_llm = CapturingLLM()
     agent = Agent(

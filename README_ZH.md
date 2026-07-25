@@ -6,18 +6,18 @@
 
 ## 安装
 
-当前稳定版本为 `0.8.0`。它和 Rust `vv-agent` crate 都实现语言无关的
-Contract `3.0.0`，两边能力一致，只保留符合各自语言习惯的 API 写法。
+当前版本为 `0.9.0`。它和 Rust `vv-agent` crate 都实现语言无关的
+Contract `4.0.5`，两边能力一致，只保留符合各自语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.8.0"
+python -m pip install "vv-agent==0.9.0"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
-`vv-agent[s3]`。Contract 3 和仓库 `HEAD` 采用 forward-only 设计：当前版本只读取
+`vv-agent[s3]`。Contract 4 和仓库 `HEAD` 采用 forward-only 设计：当前版本只读取
 当前严格定义的公共 API 与传输数据结构。需要旧协议的应用应固定旧包版本。
 
-### 0.8.0 重点能力
+### 0.9.0 重点能力
 
 - 每次真正进入模型调用边界的尝试都会写入
   `result.token_usage.model_calls`，包括 Agent 主循环、Session Memory、完整上下文
@@ -27,9 +27,15 @@ python -m pip install "vv-agent==0.8.0"
   校验。无效调用返回结构化的 `invalid_tool_arguments`，不会执行工具 handler。
 - 可选的宿主输出校验默认关闭；开启后最多执行一次不携带任何工具的修复回调，之后
   才提交终态结果。
-- 持久化执行统一使用 `vv-agent.checkpoint.v3`、
-  `vv-agent.run-definition.v2`、`vv-agent.distributed-run.v2` 和
-  `vv-agent.distributed-worker-response.v1`，严格限定恢复与分布式 controller 边界。
+- 已解析的 `PromptBundle` 会在一次 run 开始时固定 prompt section 和时间；checkpoint
+  恢复、分布式 worker 不会重新执行 instructions 或 context producer。
+- canonical 15 个内建工具使用精简 schema。`compress_memory` 不再暴露给模型，框架内部
+  自动上下文压缩仍然保留。
+- 大型 bash 输出返回最多 12,000 个字符的预览和安全 workspace artifact；大型文件读取返回
+  有界文本和经校验的 cursor，不需要重复执行原操作。
+- 持久化执行统一使用 `vv-agent.checkpoint.v4`、
+  `vv-agent.run-definition.v3`、`vv-agent.distributed-run.v3` 和
+  `vv-agent.distributed-worker-response.v2`，严格限定恢复与分布式 controller 边界。
 
 详细规则见[输出校验](docs/output-validation.md)和
 [Checkpoint 与恢复](docs/checkpoint-resume.md)。
@@ -48,9 +54,10 @@ Agent / RunConfig / ModelSettings
 ```
 
 公开 SDK 入口从 `vv_agent` 顶层导出：`Agent`、`Runner`、`RunConfig`、
-`RunHandle`、`ModelSettings`、`function_tool`、`Session`、强类型 `RunEvent`、
-`ApprovalProvider`、`ContextProvider`、`RunEventStore`，以及面向桌面 runtime 集成的
-interactive session API。位于包模块中的扩展点包括 `vv_agent.memory.MemoryProvider`
+`RunHandle`、`ModelSettings`、`function_tool`、`Session`、`PromptBundle`、
+`PromptSection`、`ToolExecutionResult`、`ToolArtifactRef`、`ToolResultCursor`、
+强类型 `RunEvent`、`ApprovalProvider`、`ContextProvider`、`RunEventStore`，以及面向桌面
+runtime 集成的 interactive session API。位于包模块中的扩展点包括 `vv_agent.memory.MemoryProvider`
 和 `vv_agent.tools.ToolExecutor`。底层 runtime 实现细节包括 `AgentTask`、
 `AgentResult`、`Message`、`CycleRecord` 和 `ToolCall`。
 
@@ -385,7 +392,10 @@ result = Runner.run_sync(
 - `Runner.run_sync(...)` 与 `Runner.stream_sync(...)` 都会继承编译后的 shell 元数据。
 - `bash` 工具 schema 的 description 会注入运行时 shell 提示（解析后的 shell 类型与调用前缀），模型在调用前即可知道应使用哪种命令风格。
 - 该运行时 shell 提示会在单个 task/session-run 内固化，确保跨 cycles 的 tool schema 文本稳定，保护 LLM prompt cache 命中率。
-- SDK/CLI 自动生成的任务现在还会把 `system_prompt_sections` 元数据挂到 system message 上，Anthropic prompt cache 可以据此把稳定前缀长期缓存，同时把当前时间、Session Memory 这类易变段落视为 volatile。
+- SDK/CLI 自动生成的任务会把一次解析完成的 `PromptBundle` 显式传给 `AgentTask`、每次
+  `LlmRequest`、run definition、checkpoint 和分布式执行；通用 metadata 不再承担 prompt
+  section 传输。Anthropic 可以按 canonical section 设置缓存断点，其他 provider 接收确定性
+  展平后的 prompt。
 
 ```python
 from vv_agent import Agent, RunConfig, Runner
@@ -482,18 +492,12 @@ result = runtime.run(task, ctx=ctx)
 
 ### Runtime 日志载荷
 
-`tool_result` 事件现在会把完整工具文本放在 `content`，把结构化工具载荷放在 `metadata`，且不会隐式截断 `content`。
-同时保留 `content_preview`、`assistant_preview` 供前端轻量展示。
-
-如果你希望限制预览长度（例如节省传输），可以显式配置：
-
-```python
-from vv_agent import RunConfig
-
-config = RunConfig(
-    log_preview_chars=220,  # 可选：显式开启预览截断
-)
-```
+`tool_result` 诊断事件只保留模型可见 `content`、普通 metadata 和有界的
+`content_preview`，不会重复携带 artifact 或 cursor。结构化恢复字段属于
+`ToolExecutionResult`，并会保留在 cycle result、checkpoint 和分布式 wire 中。被截断的
+bash 结果指向不可变 workspace artifact，`read_file` 结果指向带源文件校验的 cursor。
+宿主必须通过正常的 workspace 权限读取 artifact；cursor 会拒绝内容变化、路径不匹配和
+无效偏移。
 
 ## 工作区存储后端
 
@@ -699,7 +703,7 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
 
 ## 内建工具
 
-`find_files`、`file_info`、`read_file`、`write_file`、`edit_file`、`search_files`、`compress_memory`、`todo_write`、`task_finish`、`ask_user`、`bash`、`read_image`、`create_sub_task`、`sub_task_status`。
+`find_files`、`file_info`、`read_file`、`write_file`、`edit_file`、`search_files`、`todo_write`、`task_finish`、`ask_user`、`bash`、`check_background_command`、`read_image`、`create_sub_task`、`sub_task_status`、`activate_skill`。
 
 通过 `ToolRegistry.register()` 注册自定义工具。
 

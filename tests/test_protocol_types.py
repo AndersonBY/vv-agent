@@ -1,11 +1,37 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolCall, ToolExecutionResult, ToolResultStatus
+
+BOUNDED_RESULT_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "bounded_tool_result.json"
+
+
+def _set_dotted(payload: dict[str, Any], dotted: str, value: object) -> None:
+    target = payload
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        nested = target[part]
+        assert isinstance(nested, dict)
+        target = nested
+    target[parts[-1]] = value
+
+
+def _delete_dotted(payload: dict[str, Any], dotted: str) -> None:
+    target = payload
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        nested = target[part]
+        assert isinstance(nested, dict)
+        target = nested
+    del target[parts[-1]]
 
 
 def test_tool_result_keeps_tool_message_shape() -> None:
@@ -42,6 +68,63 @@ def test_tool_result_rejects_superseded_status_wire() -> None:
                 "directive": "continue",
             }
         )
+
+
+def test_bounded_tool_result_canonical_codec_and_model_projection() -> None:
+    fixture = json.loads(BOUNDED_RESULT_FIXTURE.read_text(encoding="utf-8"))
+
+    for name, payload in fixture["canonical_results"].items():
+        result = ToolExecutionResult.from_dict(payload)
+        assert result.to_dict() == payload, name
+
+    for case in fixture["tool_message_projection"]["cases"]:
+        result = ToolExecutionResult.from_dict(fixture["canonical_results"][case["result_ref"]])
+        assert result.to_tool_message().content == case["expected_message"], case["name"]
+
+
+def test_bounded_tool_result_rejects_invalid_sparse_fixture_cases() -> None:
+    fixture = json.loads(BOUNDED_RESULT_FIXTURE.read_text(encoding="utf-8"))
+    runtime_only = {
+        "artifact_symlink_segment",
+        "artifact_collision",
+        "artifact_persist_failure",
+        "cursor_path_mismatch",
+        "cursor_source_changed",
+        "cursor_offset_past_end",
+    }
+
+    for case in fixture["invalid_cases"]:
+        if case["name"] in runtime_only:
+            continue
+        payload = deepcopy(fixture["canonical_results"][case["base"]])
+        mutation = case["mutation"]
+        if "remove" in mutation:
+            _delete_dotted(payload, mutation["remove"])
+        for dotted, value in mutation.get("add", {}).items():
+            _set_dotted(payload, dotted, deepcopy(value))
+        for dotted, value in mutation.get("replace", {}).items():
+            _set_dotted(payload, dotted, deepcopy(value))
+
+        with pytest.raises(ValueError, match=case["expected_error_code"]):
+            ToolExecutionResult.from_dict(payload)
+
+
+def test_bounded_tool_result_optional_fields_reject_explicit_null() -> None:
+    fixture = json.loads(BOUNDED_RESULT_FIXTURE.read_text(encoding="utf-8"))
+    ordinary = fixture["canonical_results"]["ordinary"]
+
+    for field_name in fixture["result_contract"]["optional_fields"]:
+        with pytest.raises(ValueError, match="tool_result_invalid"):
+            ToolExecutionResult.from_dict({**ordinary, field_name: None})
+
+
+def test_bounded_tool_result_cursor_path_must_already_be_normalized() -> None:
+    fixture = json.loads(BOUNDED_RESULT_FIXTURE.read_text(encoding="utf-8"))
+    payload = deepcopy(fixture["canonical_results"]["truncated_read"])
+    payload["cursor"]["path"] = "logs/./output.txt"
+
+    with pytest.raises(ValueError, match="tool_result_invalid"):
+        ToolExecutionResult.from_dict(payload)
 
 
 def test_protocol_enums_are_json_serializable() -> None:
@@ -146,7 +229,7 @@ def test_agent_task_sub_agent_config_support() -> None:
     task = AgentTask(
         task_id="task_sub",
         model="m",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="u",
         sub_agents={
             "research": SubAgentConfig(model="kimi-k2.5", description="collect data"),

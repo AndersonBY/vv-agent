@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Callable
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any
@@ -13,10 +12,11 @@ from support import FixedModelProvider
 from vv_agent import Agent, GuardrailResult, RunConfig, Runner, function_tool, input_guardrail
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
-from vv_agent.llm import ScriptedLLM
+from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
-from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolCall
+from vv_agent.prompt import build_raw_system_prompt_bundle
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse, SubAgentConfig, ToolCall
 
 RUN_HANDLE_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "run_handle.json"
 
@@ -274,17 +274,14 @@ class _BurstStreamingLLM:
         self.gate = gate
         self.event_count = event_count
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: Any = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, messages, tools, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return self._respond(request, None)
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        return self._respond(request, stream_callback)
+
+    def _respond(self, request: LlmRequest, stream_callback) -> LLMResponse:
+        del request
         assert self.gate.wait(timeout=2)
         assert stream_callback is not None
         for index in range(self.event_count):
@@ -326,17 +323,8 @@ class _BlockingCancellationLLM:
         self.started = Event()
         self.release = Event()
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: Any = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, messages, tools, stream_callback, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        del request
         self.started.set()
         assert self.release.wait(timeout=3)
         return LLMResponse(
@@ -349,6 +337,10 @@ class _BlockingCancellationLLM:
                 )
             ],
         )
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
 
 
 def test_run_handle_cancel_accepted_state_and_terminal_reason_match_fixture(tmp_path: Path) -> None:
@@ -392,18 +384,8 @@ class _AsyncChildStreamingLLM:
         self.parent_calls = 0
         self.lock = threading.Lock()
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback: Callable[[dict[str, Any]], None] | None = None,
-        model_settings: Any = None,
-        request_metadata: dict[str, Any] | None = None,
-    ) -> LLMResponse:
-        del model, tools, stream_callback, model_settings, request_metadata
-        if messages and messages[0].role == "system" and messages[0].content == "Child prompt":
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        if request.messages and request.messages[0].role == "system" and request.messages[0].content == "Child prompt":
             self.child_started.set()
             assert self.release_child.wait(timeout=3)
             return LLMResponse(
@@ -433,6 +415,10 @@ class _AsyncChildStreamingLLM:
             tool_calls=[ToolCall(id="parent-finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})],
         )
 
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
+
 
 class _AsyncChildModelProvider:
     def __init__(self, llm: _AsyncChildStreamingLLM) -> None:
@@ -459,7 +445,7 @@ def test_run_handle_events_wait_for_async_child_after_parent_result_and_allow_ta
     runtime_task = AgentTask(
         task_id="parent-task",
         model="test-model",
-        system_prompt="Parent prompt",
+        prompt_bundle=build_raw_system_prompt_bundle("Parent prompt"),
         user_prompt="Delegate",
         max_cycles=3,
         sub_agents={

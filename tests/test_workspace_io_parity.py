@@ -29,40 +29,159 @@ def _execute(registry, context: ToolContext, name: str, arguments: dict):
 
 def test_read_file_counts_unicode_characters_and_preserves_result_contract(tmp_path: Path) -> None:
     registry, context = _tool_runtime(tmp_path)
-    content = "中" * 20_000
+    content = "中" * 10_000
     (tmp_path / "cjk.txt").write_text(content, encoding="utf-8")
 
     result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "cjk.txt"})
-    payload = json.loads(result.content)
 
     assert result.status_code is ToolResultStatus.SUCCESS
     assert result.directive == ToolDirective.CONTINUE
     assert result.error_code is None
     assert result.metadata == {}
-    assert payload == {
-        "path": "cjk.txt",
-        "start_line": 1,
-        "end_line": 1,
-        "show_line_numbers": False,
-        "content": content,
-    }
+    assert result.content == content
+    assert result.truncated is None
+    assert result.cursor is None
 
 
 def test_read_file_too_large_counts_unicode_characters(tmp_path: Path) -> None:
     registry, context = _tool_runtime(tmp_path)
-    (tmp_path / "large-cjk.txt").write_text("中" * 50_001, encoding="utf-8")
+    content = "中" * 12_001
+    (tmp_path / "large-cjk.txt").write_text(content, encoding="utf-8")
 
     result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large-cjk.txt"})
-    payload = json.loads(result.content)
 
     assert result.status_code is ToolResultStatus.SUCCESS
     assert result.directive == ToolDirective.CONTINUE
     assert result.error_code is None
     assert result.metadata == {}
-    assert payload["content"] is None
-    assert payload["file_info"] == {"total_lines": 1, "total_chars": 50_001}
-    assert payload["requested"] == {"line_count": 1, "char_count": 50_001}
-    assert payload["limits"] == {"max_lines": 2_000, "max_chars": 50_000}
+    assert result.truncated is True
+    assert result.content == "中" * 12_000
+    assert result.original_bytes == len(content.encode())
+    assert result.visible_bytes == len(result.content.encode())
+    assert result.cursor is not None
+    assert result.cursor.path == "large-cjk.txt"
+    assert result.cursor.offset_chars == 12_000
+
+    continued = _execute(
+        registry,
+        context,
+        READ_FILE_TOOL_NAME,
+        {"path": "large-cjk.txt", "cursor": result.cursor.to_dict()},
+    )
+    assert continued.content == "中"
+    assert continued.truncated is None
+    assert continued.cursor is None
+
+
+def test_read_file_line_limit_returns_recoverable_cursor(tmp_path: Path) -> None:
+    registry, context = _tool_runtime(tmp_path)
+    (tmp_path / "large-lines.txt").write_text("x\n" * 2_001, encoding="utf-8")
+
+    result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large-lines.txt"})
+
+    assert result.status_code is ToolResultStatus.SUCCESS
+    assert result.truncated is True
+    assert result.content == "x\n" * 2_000
+    assert result.cursor is not None
+    assert result.cursor.offset_chars == 4_000
+
+    continued = _execute(
+        registry,
+        context,
+        READ_FILE_TOOL_NAME,
+        {"path": "large-lines.txt", "cursor": result.cursor.to_dict()},
+    )
+    assert continued.content == "x\n"
+    assert continued.cursor is None
+
+
+def test_read_file_line_number_previews_preserve_rendered_output_across_cursors(tmp_path: Path) -> None:
+    registry, context = _tool_runtime(tmp_path)
+    source = "x\n" * 2_001
+    expected = "".join(f"{line_number}: x\n" for line_number in range(1, 2_002))
+    (tmp_path / "numbered-lines.txt").write_text(source, encoding="utf-8")
+
+    arguments = {"path": "numbered-lines.txt", "show_line_numbers": True}
+    chunks: list[str] = []
+    for _ in range(10):
+        result = _execute(registry, context, READ_FILE_TOOL_NAME, arguments)
+        assert result.status_code is ToolResultStatus.SUCCESS
+        assert len(result.content) <= 12_000
+        chunks.append(result.content)
+        if result.cursor is None:
+            break
+        assert result.truncated is True
+        assert result.visible_bytes == len(result.content.encode("utf-8"))
+        assert result.original_bytes is not None
+        assert result.original_bytes >= result.visible_bytes
+        arguments = {
+            "path": "numbered-lines.txt",
+            "show_line_numbers": True,
+            "cursor": result.cursor.to_dict(),
+        }
+    else:
+        raise AssertionError("read_file cursor did not reach EOF")
+
+    assert "".join(chunks) == expected
+
+
+def test_read_file_cursor_rejects_range_path_mismatch_stale_source_and_invalid_offset(tmp_path: Path) -> None:
+    registry, context = _tool_runtime(tmp_path)
+    target = tmp_path / "chars.txt"
+    target.write_text("a" * 12_001, encoding="utf-8")
+    initial = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "chars.txt"})
+    assert initial.cursor is not None
+    cursor = initial.cursor.to_dict()
+
+    incompatible = _execute(
+        registry,
+        context,
+        READ_FILE_TOOL_NAME,
+        {"path": "chars.txt", "cursor": cursor, "start_line": 1},
+    )
+    assert incompatible.error_code == "invalid_arguments"
+
+    mismatch = _execute(
+        registry,
+        context,
+        READ_FILE_TOOL_NAME,
+        {"path": "missing.txt", "cursor": cursor},
+    )
+    assert mismatch.error_code == "cursor_path_mismatch"
+
+    target.write_bytes(b"\xff")
+    stale = _execute(
+        registry,
+        context,
+        READ_FILE_TOOL_NAME,
+        {"path": "chars.txt", "cursor": cursor},
+    )
+    assert stale.error_code == "stale_cursor"
+
+    target.write_text("a" * 12_001 + "b", encoding="utf-8")
+    current = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "chars.txt"})
+    assert current.cursor is not None
+    invalid_cursor = current.cursor.to_dict()
+    invalid_cursor["offset_chars"] = 9_007_199_254_740_991
+    invalid_offset = _execute(
+        registry,
+        context,
+        READ_FILE_TOOL_NAME,
+        {"path": "chars.txt", "cursor": invalid_cursor},
+    )
+    assert invalid_offset.error_code == "cursor_offset_invalid"
+
+
+def test_read_file_recovers_reserved_artifact_through_normal_tool_path(tmp_path: Path) -> None:
+    registry, context = _tool_runtime(tmp_path)
+    artifact_path = ".vv-agent/artifacts/task-7/call-7.txt"
+    context.workspace_backend.write_text_exclusive(artifact_path, "complete artifact output")
+
+    result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": artifact_path})
+
+    assert result.status_code is ToolResultStatus.SUCCESS
+    assert result.content == "complete artifact output"
+    assert result.truncated is None
 
 
 def test_read_file_validation_and_not_found_errors_are_structured(tmp_path: Path) -> None:
@@ -174,8 +293,7 @@ def test_read_and_edit_preserve_utf8_bom_and_crlf(tmp_path: Path) -> None:
     target.write_bytes(b"\xef\xbb\xbffirst\r\n" + "第二行\r\n".encode())
 
     read_result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "bom-crlf.txt"})
-    read_payload = json.loads(read_result.content)
-    assert read_payload["content"] == "first\n第二行"
+    assert read_result.content == "first\r\n第二行\r\n"
 
     edit_result = _execute(
         registry,

@@ -14,8 +14,10 @@ from vv_llm.types.llm_parameters import Usage
 
 from vv_agent import constants as constants_module
 from vv_agent.llm.anthropic_prompt_cache import apply_claude_prompt_cache
+from vv_agent.llm.base import LlmRequest
 from vv_agent.llm.vv_llm_client import EndpointTarget, VvLlmClient
 from vv_agent.model_settings import ModelSettings, RetrySettings, ToolChoice
+from vv_agent.prompt import PromptBundle, PromptSection
 from vv_agent.runtime.token_usage import normalize_token_usage
 from vv_agent.types import Message
 
@@ -62,6 +64,30 @@ def _passthrough_format_messages(*, messages: list[dict[str, Any]], **kwargs: An
     return list(messages)
 
 
+def _complete(
+    client: VvLlmClient,
+    *,
+    model: str,
+    messages: list[Message],
+    tools: list[dict[str, object]],
+    model_settings: ModelSettings | None = None,
+    metadata: dict[str, Any] | None = None,
+    prompt_bundle: PromptBundle | None = None,
+    stream_callback: Callable[[dict[str, Any]], None] | None = None,
+):
+    request = LlmRequest(
+        model=model,
+        messages=messages,
+        tools=tools,
+        model_settings=model_settings,
+        metadata=dict(metadata or {}),
+        prompt_bundle=prompt_bundle,
+    )
+    if stream_callback is not None:
+        return client.complete_with_stream(request, stream_callback)
+    return client.complete(request)
+
+
 def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
     def failing_call(kwargs: dict[str, Any]) -> Any:
         del kwargs
@@ -89,7 +115,7 @@ def test_llm_failover_to_next_endpoint(monkeypatch) -> None:
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="gpt-4o-mini", messages=[Message(role="user", content="hello")], tools=[])
+    response = _complete(llm, model="gpt-4o-mini", messages=[Message(role="user", content="hello")], tools=[])
 
     assert response.content == "ok from backup"
     assert response.raw["used_endpoint_id"] == "second"
@@ -137,7 +163,8 @@ def test_llm_bridge_preserves_provider_reported_zero_cache_usage(monkeypatch) ->
         selected_model="kimi-k2.6",
         randomize_endpoints=False,
     )
-    response = llm.complete(
+    response = _complete(
+        llm,
         model="kimi-k2.6",
         messages=[Message(role="user", content="hello")],
         tools=[],
@@ -178,7 +205,7 @@ def test_llm_retries_transient_status_on_the_same_endpoint(monkeypatch) -> None:
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="demo", messages=[Message(role="user", content="hello")], tools=[])
+    response = _complete(llm, model="demo", messages=[Message(role="user", content="hello")], tools=[])
 
     assert response.content == "ok"
     assert attempts == 2
@@ -209,7 +236,7 @@ def test_llm_auth_status_fails_over_without_same_endpoint_retry(monkeypatch) -> 
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="demo", messages=[Message(role="user", content="hello")], tools=[])
+    response = _complete(llm, model="demo", messages=[Message(role="user", content="hello")], tools=[])
 
     assert response.content == "backup"
     assert [call["endpoint_id"] for call in _FakeChatClient.seen_calls] == ["first", "second"]
@@ -244,7 +271,7 @@ def test_llm_aborts_non_retryable_errors_without_failover(monkeypatch, failure: 
     )
 
     with pytest.raises((APIStatusError, RuntimeError)):
-        llm.complete(model="demo", messages=[Message(role="user", content="hello")], tools=[])
+        _complete(llm, model="demo", messages=[Message(role="user", content="hello")], tools=[])
 
     assert [call["endpoint_id"] for call in _FakeChatClient.seen_calls] == ["first"]
 
@@ -297,7 +324,7 @@ def test_llm_stream_aggregates_tool_calls(monkeypatch) -> None:
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
+    response = _complete(llm, model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
 
     assert response.content == "hello world"
     assert response.raw["stream_collected"] is True
@@ -356,7 +383,8 @@ def test_llm_stream_emits_tool_call_progress_events(monkeypatch) -> None:
     )
     stream_events: list[dict[str, Any]] = []
 
-    response = llm.complete(
+    response = _complete(
+        llm,
         model="kimi-k2.5",
         messages=[Message(role="user", content="hi")],
         tools=[],
@@ -423,7 +451,7 @@ def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
+    response = _complete(llm, model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
     assert response.content == "final"
     assert response.raw["reasoning_content"] == "step-1|step-2"
 
@@ -477,7 +505,8 @@ def test_llm_stream_preserves_gemini3_tool_call_extra_content(monkeypatch) -> No
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(
+    response = _complete(
+        llm,
         model="gemini-3-pro-preview",
         messages=[Message(role="user", content="hi")],
         tools=[],
@@ -501,7 +530,8 @@ def test_llm_rejects_per_request_extra_headers() -> None:
     llm = VvLlmClient(endpoint_targets=[EndpointTarget(endpoint_id="demo", api_key="k", api_base="https://example.test/v1")])
 
     with pytest.raises(ValueError, match="extra_headers is not supported"):
-        llm.complete(
+        _complete(
+            llm,
             model="demo-model",
             messages=[Message(role="user", content="hello")],
             tools=[],
@@ -513,7 +543,8 @@ def test_llm_rejects_per_request_extra_args() -> None:
     llm = VvLlmClient(endpoint_targets=[EndpointTarget(endpoint_id="demo", api_key="k", api_base="https://example.test/v1")])
 
     with pytest.raises(ValueError, match="extra_args is not supported"):
-        llm.complete(
+        _complete(
+            llm,
             model="demo-model",
             messages=[Message(role="user", content="hello")],
             tools=[],
@@ -544,7 +575,8 @@ def test_tool_choice_semantics_reach_the_real_provider_request(monkeypatch) -> N
         for name in ("lookup", "write")
     ]
 
-    llm.complete(
+    _complete(
+        llm,
         model="demo-model",
         messages=[Message(role="user", content="hello")],
         tools=tools,
@@ -554,7 +586,8 @@ def test_tool_choice_semantics_reach_the_real_provider_request(monkeypatch) -> N
     assert named_call["tool_choice"] == "required"
     assert [tool["function"]["name"] for tool in named_call["tools"]] == ["lookup"]
 
-    llm.complete(
+    _complete(
+        llm,
         model="demo-model",
         messages=[Message(role="user", content="hello")],
         tools=tools,
@@ -565,7 +598,8 @@ def test_tool_choice_semantics_reach_the_real_provider_request(monkeypatch) -> N
     assert "tools" not in none_call
 
     with pytest.raises(ValueError, match="unknown tool: missing"):
-        llm.complete(
+        _complete(
+            llm,
             model="demo-model",
             messages=[Message(role="user", content="hello")],
             tools=tools,
@@ -630,10 +664,11 @@ def test_provider_timeout_default_and_model_override_reach_the_request(monkeypat
         max_retries_per_endpoint=1,
     )
 
-    llm.complete(model="demo-model", messages=[Message(role="user", content="default")], tools=[])
+    _complete(llm, model="demo-model", messages=[Message(role="user", content="default")], tools=[])
     assert _FakeChatClient.seen_calls[-1]["timeout"] == 12.5
 
-    llm.complete(
+    _complete(
+        llm,
         model="demo-model",
         messages=[Message(role="user", content="override")],
         tools=[],
@@ -670,7 +705,7 @@ def test_llm_stream_request_payload_aligns_qwen_thinking(monkeypatch) -> None:
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="qwen3-32b-thinking", messages=[Message(role="user", content="hi")], tools=[])
+    response = _complete(llm, model="qwen3-32b-thinking", messages=[Message(role="user", content="hi")], tools=[])
     assert response.content == "done"
 
 
@@ -738,7 +773,7 @@ def test_llm_stream_aggregates_tool_calls_without_index(monkeypatch) -> None:
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
+    response = _complete(llm, model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[])
     assert response.tool_calls[0].arguments["todos"][0]["title"] == "x"
 
 
@@ -938,7 +973,8 @@ def test_deepseek_request_preserves_reasoning_for_all_assistant_turns(monkeypatc
         max_retries_per_endpoint=1,
         backoff_seconds=0.0,
     )
-    llm.complete(
+    _complete(
+        llm,
         model="deepseek-v5-pro",
         messages=[
             Message(role="system", content="sys"),
@@ -987,7 +1023,8 @@ def test_moonshot_provider_defaults_new_models_to_reasoning_chain(monkeypatch) -
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(
+    response = _complete(
+        llm,
         model="kimi-k3",
         messages=[
             Message(role="system", content="sys"),
@@ -1038,7 +1075,8 @@ def test_kimi_k3_real_request_uses_fixed_profile_and_completion_limit(monkeypatc
         max_retries_per_endpoint=1,
         backoff_seconds=0.0,
     )
-    response = llm.complete(
+    response = _complete(
+        llm,
         model="kimi-k3",
         messages=[Message(role="user", content="hi")],
         tools=[],
@@ -1090,7 +1128,8 @@ def test_moonshot_request_preserves_reasoning_for_all_assistant_turns(monkeypatc
         backoff_seconds=0.0,
     )
 
-    response = llm.complete(
+    response = _complete(
+        llm,
         model="kimi-k2.5",
         messages=[
             Message(role="system", content="sys"),
@@ -1123,7 +1162,7 @@ def test_llm_estimates_usage_when_backend_missing_usage(monkeypatch) -> None:
         backoff_seconds=0.0,
     )
 
-    result = llm.complete(model="gpt-4o-mini", messages=[Message(role="user", content="hello")], tools=[])
+    result = _complete(llm, model="gpt-4o-mini", messages=[Message(role="user", content="hello")], tools=[])
     assert result.raw["usage"]["prompt_tokens"] == 10
     assert result.raw["usage"]["completion_tokens"] == 10
     assert result.raw["usage"]["total_tokens"] == 20
@@ -1178,7 +1217,7 @@ def test_llm_stream_collects_raw_content_blocks(monkeypatch) -> None:
         backoff_seconds=0.0,
     )
 
-    result = llm.complete(model="kimi-k2.5", messages=[Message(role="user", content="hello")], tools=[])
+    result = _complete(llm, model="kimi-k2.5", messages=[Message(role="user", content="hello")], tools=[])
     raw_content = result.raw["raw_content"]
     assert result.content == "done"
     assert isinstance(raw_content, list)
@@ -1214,7 +1253,7 @@ def test_llm_debug_dump_writes_request_messages(monkeypatch, tmp_path: Path) -> 
         debug_dump_dir=str(tmp_path / "dumps"),
     )
 
-    result = llm.complete(model="gpt/4o-mini", messages=[Message(role="user", content="hello")], tools=[])
+    result = _complete(llm, model="gpt/4o-mini", messages=[Message(role="user", content="hello")], tools=[])
     assert result.content == "ok"
 
     dump_files = sorted((tmp_path / "dumps").glob("request_*.json"))
@@ -1260,18 +1299,14 @@ def test_claude_direct_request_adds_explicit_breakpoints(monkeypatch) -> None:
     )
 
     long_section = "stable context " * 400
+    prompt_bundle = PromptBundle(
+        sections=(
+            PromptSection(id="core_identity", text=long_section, stable=True),
+            PromptSection(id="tool_runtime_contract", text="tool contract", stable=True),
+        )
+    )
     messages = [
-        Message(
-            role="system",
-            content="system",
-            metadata={
-                "anthropic_prompt_cache_enabled": True,
-                "system_prompt_sections": [
-                    {"id": "core_identity", "text": long_section, "stable": True},
-                    {"id": "tool_runtime_contract", "text": "tool contract", "stable": True},
-                ],
-            },
-        ),
+        Message(role="system", content=prompt_bundle.flatten()),
         Message(role="user", content="hello"),
     ]
     tools: list[dict[str, object]] = [
@@ -1284,10 +1319,12 @@ def test_claude_direct_request_adds_explicit_breakpoints(monkeypatch) -> None:
             },
         }
     ]
-    result = llm.complete(
+    result = _complete(
+        llm,
         model="claude-sonnet-4-5-20250929",
         messages=messages,
         tools=tools,
+        prompt_bundle=prompt_bundle,
     )
 
     assert result.content == "ok"
@@ -1297,11 +1334,13 @@ def test_claude_direct_request_adds_explicit_breakpoints(monkeypatch) -> None:
     assert call["tools"][-1]["cache_control"] == {"type": "ephemeral"}
     assert call["messages"][1]["content"][0]["cache_control"] == {"type": "ephemeral"}
 
-    llm.complete(
+    _complete(
+        llm,
         model="claude-sonnet-4-5-20250929",
         messages=messages,
         tools=tools,
-        request_metadata={"anthropic_prompt_cache_enabled": False},
+        metadata={"anthropic_prompt_cache_enabled": False},
+        prompt_bundle=prompt_bundle,
     )
     disabled_call = _FakeChatClient.seen_calls[-1]
     assert all("cache_control" not in block for message in disabled_call["messages"] for block in message["content"])
@@ -1309,11 +1348,12 @@ def test_claude_direct_request_adds_explicit_breakpoints(monkeypatch) -> None:
 
 
 def test_apply_claude_prompt_cache_vertex_marks_history_boundary_and_skips_thinking() -> None:
+    prompt_bundle = PromptBundle(sections=(PromptSection(id="core_identity", text="stable section " * 400, stable=True),))
     planned_messages, planned_tools, planned_extra_body = apply_claude_prompt_cache(
         endpoint_type="anthropic_vertex",
         model="claude-sonnet-4-5-20250929",
         messages=[
-            {"role": "system", "content": "sys"},
+            {"role": "system", "content": prompt_bundle.flatten()},
             {
                 "role": "assistant",
                 "content": [
@@ -1325,12 +1365,8 @@ def test_apply_claude_prompt_cache_vertex_marks_history_boundary_and_skips_think
         ],
         tools=[],
         extra_body=None,
-        metadata={
-            "anthropic_prompt_cache_enabled": True,
-            "system_prompt_sections": [
-                {"id": "core_identity", "text": "stable section " * 400, "stable": True},
-            ],
-        },
+        metadata={"anthropic_prompt_cache_enabled": True},
+        prompt_bundle=prompt_bundle,
     )
 
     assert planned_extra_body is None
@@ -1358,6 +1394,7 @@ def test_apply_claude_prompt_cache_uses_sonnet_4_6_threshold() -> None:
         tools=[],
         extra_body=None,
         metadata={"anthropic_prompt_cache_enabled": True},
+        prompt_bundle=None,
     )
 
     assert planned_extra_body is None

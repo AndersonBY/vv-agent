@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from vv_agent import Agent, AgentStatus, ModelRef, RunConfig, Runner, VvLlmModelProvider
+from vv_agent.llm import LlmRequest
 from vv_agent.memory import SessionMemory
 from vv_agent.model import ResolvedModelConfig
 from vv_agent.model_settings import ModelSettings
@@ -21,31 +22,25 @@ class _RecordingClient:
         self._inner = inner
         self._observations = observations
 
-    def complete(
+    def _complete(
         self,
+        request: LlmRequest,
         *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
         stream_callback: Any = None,
-        model_settings: ModelSettings | None = None,
-        request_metadata: dict[str, Any] | None = None,
+        streaming: bool,
     ) -> LLMResponse:
         request_summary = {
-            "model": model,
-            "message_roles": [message.role for message in messages],
-            "message_count": len(messages),
-            "tool_count": len(tools),
-            "request_max_tokens": model_settings.max_tokens if model_settings is not None else None,
+            "model": request.model,
+            "message_roles": [message.role for message in request.messages],
+            "message_count": len(request.messages),
+            "tool_count": len(request.tools),
+            "request_max_tokens": request.model_settings.max_tokens if request.model_settings is not None else None,
         }
         try:
-            response = self._inner.complete(
-                model=model,
-                messages=messages,
-                tools=tools,
-                stream_callback=stream_callback,
-                model_settings=model_settings,
-                request_metadata=request_metadata,
+            response = (
+                self._inner.complete_with_stream(request, stream_callback)
+                if streaming
+                else self._inner.complete(request)
             )
         except BaseException as exc:
             self._observations.append({**request_summary, "error_type": type(exc).__name__})
@@ -61,6 +56,12 @@ class _RecordingClient:
             }
         )
         return response
+
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        return self._complete(request, streaming=False)
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback: Any = None) -> LLMResponse:
+        return self._complete(request, stream_callback=stream_callback, streaming=True)
 
 
 class _RecordingProvider:

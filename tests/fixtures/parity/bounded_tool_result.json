@@ -1,0 +1,464 @@
+{
+  "schema_version": "vv-agent.tool-execution-result.v2",
+  "result_contract": {
+    "required_fields": [
+      "tool_call_id",
+      "content",
+      "status_code",
+      "directive"
+    ],
+    "optional_fields": [
+      "error_code",
+      "metadata",
+      "image_url",
+      "image_path",
+      "truncated",
+      "truncation_reason",
+      "original_bytes",
+      "visible_bytes",
+      "artifact",
+      "cursor"
+    ],
+    "optional_fields_omitted_when_absent": true,
+    "optional_fields_reject_null": true,
+    "unknown_fields": "reject",
+    "content": "bounded_model_visible_text",
+    "metadata_forbidden_large_keys": [
+      "content",
+      "instructions",
+      "output",
+      "stderr",
+      "stdout"
+    ],
+    "conditional_rules": {
+      "ordinary": {
+        "when": "truncated_is_absent",
+        "forbidden_fields": [
+          "truncation_reason",
+          "original_bytes",
+          "visible_bytes",
+          "artifact",
+          "cursor"
+        ]
+      },
+      "truncated": {
+        "required_fields": [
+          "truncated",
+          "truncation_reason",
+          "original_bytes",
+          "visible_bytes"
+        ],
+        "truncated_value": true,
+        "truncated_false_is_forbidden": true,
+        "sizes": "non_negative_integer_bytes",
+        "visible_bytes_equals_utf8_length_of_content": true,
+        "visible_bytes_not_greater_than_original_bytes": true
+      },
+      "output_limit": {
+        "required_fields": [
+          "artifact"
+        ],
+        "forbidden_fields": [
+          "cursor"
+        ]
+      },
+      "read_limit": {
+        "required_fields": [
+          "cursor"
+        ],
+        "forbidden_fields": [
+          "artifact"
+        ]
+      }
+    },
+    "truncation_reason_values": [
+      "output_limit",
+      "read_limit"
+    ]
+  },
+  "artifact_contract": {
+    "required_fields": [
+      "path",
+      "media_type",
+      "encoding",
+      "size_bytes",
+      "sha256"
+    ],
+    "unknown_fields": "reject",
+    "path": {
+      "representation": "normalized_POSIX_workspace_relative_path",
+      "required_prefix": ".vv-agent/artifacts/",
+      "pattern": "^\\.vv-agent/artifacts/(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}/)*[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "maximum_utf8_bytes": 512,
+      "forbidden": [
+        "absolute_path",
+        "drive_or_UNC_path",
+        "backslash",
+        "NUL",
+        "empty_segment",
+        "dot_segment",
+        "dot_dot_segment"
+      ]
+    },
+    "path_selected_by": "runtime",
+    "media_type": "text/plain",
+    "encoding": "utf-8",
+    "size_bytes": "non_negative_integer_equal_to_complete_artifact_bytes",
+    "sha256": "lowercase_sha256_of_complete_artifact_bytes",
+    "write_boundary": "effective_workspace_backend_after_originating_tool_policy_and_approval",
+    "local_adapter_resolution": "open_below_workspace_without_following_symlinks_in_any_segment",
+    "creation": "atomic_exclusive_create_then_fsync_before_reference",
+    "collision": "generate_a_new_runtime_path_and_never_overwrite",
+    "immutability": "bytes_do_not_change_after_reference_is_emitted",
+    "write_failure": {
+      "status_code": "ERROR",
+      "error_code": "artifact_persist_failed",
+      "capture_deleted": false,
+      "success_result_emitted": false
+    },
+    "retention": "at_least_until_run_terminal_state_and_its_checkpoint_retention_end",
+    "read_boundary": "existing_read_file_tool_with_normal_policy_path_and_baseline_checks",
+    "direct_host_path_or_bypass_reader": false
+  },
+  "cursor_contract": {
+    "representation": "transparent_continuation_state",
+    "required_fields": [
+      "kind",
+      "path",
+      "offset_chars",
+      "sha256"
+    ],
+    "unknown_fields": "reject",
+    "kind_values": [
+      "read_file"
+    ],
+    "path": "normalized_caller_visible_effective_path",
+    "offset_chars": "non_negative_unicode_scalar_offset_from_source_start",
+    "sha256": "lowercase_sha256_of_complete_source_bytes",
+    "path_binding": "normalized_requested_path_must_equal_cursor_path",
+    "path_mismatch_error_code": "cursor_path_mismatch",
+    "changed_source_error_code": "stale_cursor",
+    "invalid_offset_error_code": "cursor_offset_invalid",
+    "snapshot_rule": "verify_complete_source_bytes_before_slicing_one_UTF8_decoded_snapshot",
+    "end_of_file": "omit_cursor"
+  },
+  "tool_message_projection": {
+    "ordinary": "content_only",
+    "truncated": "content_then_one_LF_then_RFC8785_compact_JSON_object_under_vv_agent_recovery",
+    "recovery_fields": [
+      "truncated",
+      "truncation_reason",
+      "original_bytes",
+      "visible_bytes",
+      "artifact",
+      "cursor"
+    ],
+    "metadata_not_model_visible": true,
+    "cases": [
+      {
+        "name": "ordinary",
+        "result_ref": "ordinary",
+        "expected_message": "ok"
+      },
+      {
+        "name": "truncated_bash",
+        "result_ref": "truncated_bash",
+        "expected_message": "first output\n... output omitted; full text in artifact ...\nlast output\n{\"vv_agent_recovery\":{\"artifact\":{\"encoding\":\"utf-8\",\"media_type\":\"text/plain\",\"path\":\".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt\",\"sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"size_bytes\":100000},\"original_bytes\":100000,\"truncated\":true,\"truncation_reason\":\"output_limit\",\"visible_bytes\":70}}"
+      },
+      {
+        "name": "truncated_read",
+        "result_ref": "truncated_read",
+        "expected_message": "bounded source slice\n{\"vv_agent_recovery\":{\"cursor\":{\"kind\":\"read_file\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"sha256\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"},\"original_bytes\":50000,\"truncated\":true,\"truncation_reason\":\"read_limit\",\"visible_bytes\":20}}"
+      }
+    ]
+  },
+  "bash_contract": {
+    "captured_stream": "combined_terminal_text_in_observed_capture_order",
+    "decode": "UTF8_with_replacement_for_invalid_input_bytes",
+    "preview_limit_chars": 12000,
+    "character_unit": "Unicode_scalar_value",
+    "preview_strategy": "deterministic_head_marker_tail",
+    "head_chars": 6000,
+    "omission_marker": "\n... output omitted; full text in artifact ...\n",
+    "tail_chars": 5953,
+    "preview_includes_marker": true,
+    "at_or_below_limit": "ordinary_result_without_artifact",
+    "above_limit": "persist_complete_text_artifact_before_emitting_truncated_result",
+    "foreground_and_background_same_semantics": true,
+    "repeated_terminal_poll": "return_same_immutable_artifact_reference",
+    "temporary_capture_removed_only_after_artifact_write_succeeds": true,
+    "boundary_cases": [
+      {
+        "source_chars": 12000,
+        "expected_truncated": false,
+        "expected_visible_chars": 12000
+      },
+      {
+        "source_chars": 12001,
+        "expected_truncated": true,
+        "expected_visible_chars": 12000,
+        "expected_omitted_source_chars": 48
+      }
+    ]
+  },
+  "read_file_contract": {
+    "visible_limit_chars": 12000,
+    "visible_limit_lines": 2000,
+    "character_unit": "Unicode_scalar_value",
+    "oversized_request": "return_first_bounded_slice_and_cursor",
+    "content_null": false,
+    "single_oversized_line_recoverable": true,
+    "cursor_argument_exclusive_with": [
+      "start_line",
+      "end_line"
+    ],
+    "path_must_match_cursor": true,
+    "source_digest_verified_before_slice": true,
+    "next_slice_does_not_rerun_external_effect": true,
+    "end_of_file_omits_cursor": true
+  },
+  "canonical_results": {
+    "ordinary": {
+      "tool_call_id": "call-small",
+      "content": "ok",
+      "status_code": "SUCCESS",
+      "directive": "continue"
+    },
+    "truncated_bash": {
+      "tool_call_id": "call-bash",
+      "content": "first output\n... output omitted; full text in artifact ...\nlast output",
+      "status_code": "SUCCESS",
+      "directive": "continue",
+      "truncated": true,
+      "truncation_reason": "output_limit",
+      "original_bytes": 100000,
+      "visible_bytes": 70,
+      "artifact": {
+        "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+        "media_type": "text/plain",
+        "encoding": "utf-8",
+        "size_bytes": 100000,
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    },
+    "truncated_read": {
+      "tool_call_id": "call-read",
+      "content": "bounded source slice",
+      "status_code": "SUCCESS",
+      "directive": "continue",
+      "truncated": true,
+      "truncation_reason": "read_limit",
+      "original_bytes": 50000,
+      "visible_bytes": 20,
+      "cursor": {
+        "kind": "read_file",
+        "path": "logs/output.txt",
+        "offset_chars": 20,
+        "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+      }
+    }
+  },
+  "invalid_cases": [
+    {
+      "name": "ordinary_result_has_truncated_false",
+      "base": "ordinary",
+      "mutation": {
+        "add": {
+          "truncated": false
+        }
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "ordinary_result_has_recovery_pointer",
+      "base": "ordinary",
+      "mutation": {
+        "add": {
+          "cursor": {
+            "kind": "read_file",
+            "path": "logs/output.txt",
+            "offset_chars": 2,
+            "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+          }
+        }
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "truncated_without_reason",
+      "base": "truncated_read",
+      "mutation": {
+        "remove": "truncation_reason"
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "truncated_without_sizes",
+      "base": "truncated_read",
+      "mutation": {
+        "remove": "visible_bytes"
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "truncated_without_recovery_pointer",
+      "base": "truncated_read",
+      "mutation": {
+        "remove": "cursor"
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "output_limit_uses_cursor",
+      "base": "truncated_bash",
+      "mutation": {
+        "remove": "artifact",
+        "add": {
+          "cursor": {
+            "kind": "read_file",
+            "path": "logs/output.txt",
+            "offset_chars": 70,
+            "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+          }
+        }
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "read_limit_uses_artifact",
+      "base": "truncated_read",
+      "mutation": {
+        "remove": "cursor",
+        "add": {
+          "artifact": {
+            "path": ".vv-agent/artifacts/task-7/read.txt",
+            "media_type": "text/plain",
+            "encoding": "utf-8",
+            "size_bytes": 50000,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        }
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "visible_bytes_mismatch",
+      "base": "truncated_read",
+      "mutation": {
+        "replace": {
+          "visible_bytes": 19
+        }
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "visible_bytes_exceeds_original",
+      "base": "truncated_read",
+      "mutation": {
+        "replace": {
+          "original_bytes": 10
+        }
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "artifact_path_outside_reserved_root",
+      "base": "truncated_bash",
+      "mutation": {
+        "replace": {
+          "artifact.path": "capture.txt"
+        }
+      },
+      "expected_error_code": "artifact_path_invalid"
+    },
+    {
+      "name": "artifact_path_dot_dot_segment",
+      "base": "truncated_bash",
+      "mutation": {
+        "replace": {
+          "artifact.path": ".vv-agent/artifacts/../capture.txt"
+        }
+      },
+      "expected_error_code": "artifact_path_invalid"
+    },
+    {
+      "name": "artifact_path_backslash",
+      "base": "truncated_bash",
+      "mutation": {
+        "replace": {
+          "artifact.path": ".vv-agent\\artifacts\\capture.txt"
+        }
+      },
+      "expected_error_code": "artifact_path_invalid"
+    },
+    {
+      "name": "artifact_symlink_segment",
+      "runtime_setup": "task-7 segment is a symlink",
+      "expected_error_code": "artifact_path_invalid"
+    },
+    {
+      "name": "artifact_collision",
+      "runtime_setup": "selected path already exists",
+      "expected_behavior": "generate_new_path_without_overwrite"
+    },
+    {
+      "name": "artifact_persist_failure",
+      "runtime_setup": "workspace backend write fails",
+      "expected_error_code": "artifact_persist_failed",
+      "expected_capture_deleted": false
+    },
+    {
+      "name": "cursor_missing_path",
+      "base": "truncated_read",
+      "mutation": {
+        "remove": "cursor.path"
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
+      "name": "cursor_path_mismatch",
+      "base": "truncated_read",
+      "read_path": "logs/other.txt",
+      "expected_error_code": "cursor_path_mismatch"
+    },
+    {
+      "name": "cursor_source_changed",
+      "base": "truncated_read",
+      "source_mutation": "append one byte",
+      "expected_error_code": "stale_cursor"
+    },
+    {
+      "name": "cursor_offset_past_end",
+      "base": "truncated_read",
+      "mutation": {
+        "replace": {
+          "cursor.offset_chars": 9007199254740991
+        }
+      },
+      "expected_error_code": "cursor_offset_invalid"
+    },
+    {
+      "name": "unknown_result_field",
+      "base": "ordinary",
+      "mutation": {
+        "add": {
+          "preview": "duplicate"
+        }
+      },
+      "expected_error_code": "tool_result_invalid"
+    }
+  ],
+  "durability": {
+    "canonical_result_ref": "truncated_bash",
+    "preserve_sparse_fields_through": [
+      "tool_message",
+      "cycle_record",
+      "agent_result",
+      "operation_journal",
+      "checkpoint",
+      "distributed_worker_response"
+    ],
+    "receipt_replay_rewrites_artifact": false,
+    "receipt_replay_reruns_tool": false
+  }
+}

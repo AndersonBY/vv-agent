@@ -117,7 +117,7 @@ def _validate_task_and_capabilities(
     task = envelope.task
     controls = definition["runtime_controls"]
     expected_task_fields = {
-        "compiled_prompt": task.system_prompt,
+        "prompt_bundle": task.prompt_bundle.to_dict(),
         "root_input": task.user_prompt,
         "model_id": task.model,
         "max_cycles": task.max_cycles,
@@ -130,7 +130,7 @@ def _validate_task_and_capabilities(
         "stop_at_tool_names": list(task.metadata.get("_vv_agent_stop_at_tool_names") or []),
     }
     durable_task_fields = {
-        "compiled_prompt": definition["compiled_prompt"],
+        "prompt_bundle": definition["prompt_bundle"],
         "root_input": definition["root_input"],
         "model_id": definition["model"]["model_id"],
         "max_cycles": controls["max_cycles"],

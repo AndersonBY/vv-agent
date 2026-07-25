@@ -10,16 +10,16 @@ from vv_agent.constants import (
     ASK_USER_TOOL_NAME,
     BASH_TOOL_NAME,
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
-    COMPRESS_MEMORY_TOOL_NAME,
     FILE_INFO_TOOL_NAME,
     FIND_FILES_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
     TASK_FINISH_TOOL_NAME,
 )
-from vv_agent.prompt import build_system_prompt
+from vv_agent.prompt import build_raw_system_prompt_bundle, build_system_prompt
 from vv_agent.runtime.background_sessions import background_session_manager
 from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools import RegistryToolExecutor, ToolContext, ToolExposure, ToolRegistry, build_default_registry
+from vv_agent.tools.executor import ToolExposureError
 from vv_agent.types import AgentTask, ToolCall, ToolExecutionResult
 from vv_agent.workspace import LocalWorkspaceBackend
 
@@ -41,11 +41,15 @@ def _assert_result(result: ToolExecutionResult, expected: dict[str, Any]) -> Non
     for key in ("status_code", "directive"):
         assert wire[key] == expected[key]
     assert wire.get("error_code") == expected.get("error_code")
-    assert json.loads(result.content) == expected["content"]
+    expected_content = expected["content"]
+    if isinstance(expected_content, (dict, list)):
+        assert json.loads(result.content) == expected_content
+    else:
+        assert result.content == expected_content
     assert result.metadata == expected["metadata"]
 
-    if expected["status_code"] == "ERROR":
-        required = set(_FIXTURE["canonical"]["error_content_required_keys"])
+    if expected["status_code"] == "ERROR" and isinstance(expected_content, dict):
+        required = set(_FIXTURE["canonical"]["structured_error_content_required_keys"])
         assert required <= set(json.loads(result.content))
 
     forbidden = set(_FIXTURE["canonical"]["metadata_policy"]["forbidden_large_keys"])
@@ -97,10 +101,9 @@ def test_fixture_drives_prompt_registry_dynamic_hint_and_projection(tmp_path: Pa
         assert fragment not in prompt
 
     registry = build_default_registry()
-    description_case = _FIXTURE["registry"]["builtin_description"]
-    executor = registry.get_executor(description_case["tool_name"])
-    assert bool(executor.description.strip()) is description_case["must_be_non_empty"]
-    assert executor.description == registry.get_schema(description_case["tool_name"])["function"]["description"]
+    for name in registry.list_tool_names():
+        executor = registry.get_executor(name)
+        assert executor.description == registry.get_schema(name)["function"]["description"]
 
     hidden_case = _FIXTURE["registry"]["hidden_exposure"]
 
@@ -118,11 +121,33 @@ def test_fixture_drives_prompt_registry_dynamic_hint_and_projection(tmp_path: Pa
     visible_names = {schema["function"]["name"] for schema in registry.list_openai_schemas()}
     assert (hidden_case["tool_name"] in visible_names) is hidden_case["must_be_model_visible"]
 
+    for exposure_case in _FIXTURE["registry"]["exposure_cases"]:
+        if exposure_case["valid"]:
+            executor = RegistryToolExecutor(
+                name=f"fixture-{exposure_case['value']}",
+                description="Fixture exposure tool",
+                handler=hidden_handler,
+                exposure=exposure_case["value"],
+            )
+            assert (executor.exposure.value == "direct") is exposure_case["model_visible"]
+            continue
+        try:
+            RegistryToolExecutor(
+                name=f"fixture-{exposure_case['value']}",
+                description="Fixture invalid exposure tool",
+                handler=hidden_handler,
+                exposure=exposure_case["value"],
+            )
+        except ToolExposureError as exc:
+            assert exc.code == exposure_case["error_code"]
+        else:
+            raise AssertionError(f"unsupported exposure was accepted: {exposure_case['value']}")
+
     hint_case = _FIXTURE["dynamic_bash_description"]["non_string_bash_shell"]
     task = AgentTask(
         task_id="fixture-task",
         model="fixture-model",
-        system_prompt="system",
+        prompt_bundle=build_raw_system_prompt_bundle("system"),
         user_prompt="user",
         agent_type="computer",
         metadata={"bash_shell": hint_case["bash_shell"]},
@@ -141,18 +166,6 @@ def test_fixture_drives_prompt_registry_dynamic_hint_and_projection(tmp_path: Pa
 def test_fixture_drives_builtin_handler_envelopes_and_metadata(tmp_path: Path) -> None:
     registry = build_default_registry()
     tools = _FIXTURE["tools"]
-
-    context = _context(tmp_path)
-    case = tools["compress_memory"]["success"]
-    _assert_result(
-        _execute(registry, context, COMPRESS_MEMORY_TOOL_NAME, case["arguments"]),
-        case["result"],
-    )
-    case = tools["compress_memory"]["missing_core_information"]
-    _assert_result(
-        _execute(registry, context, COMPRESS_MEMORY_TOOL_NAME, case["arguments"]),
-        case["result"],
-    )
 
     skill_case = tools["activate_skill"]["success"]
     context = _context(tmp_path)

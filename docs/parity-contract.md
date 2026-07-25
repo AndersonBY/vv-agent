@@ -7,9 +7,10 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `3.0.0` at revision
-`a0c7c22e4416446f66712cf4484583fcfe2c4969`. The central support matrix records
-this adoption as `verified`. Treat
+`contract.lock.json` selects contract `4.0.5` at revision
+`c903234f1374de85ddda44608c4a7e259f13e6c3`. Its immutable release artifact has
+SHA-256 `92aaa062cdbd62513b2ee1d28e71c33d66f616e9884f09d8d18fc9753b113ff4`.
+The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
 revisions, verification timestamp, and cross-repository run URL.
@@ -43,8 +44,8 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-3.0.0.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v3.0.0/vv-agent-contract-3.0.0.zip
+  --artifact /path/to/vv-agent-contract-4.0.5.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v4.0.5/vv-agent-contract-4.0.5.zip
 ```
 
 ## Python Producer Map
@@ -52,8 +53,9 @@ python3 scripts/contract_snapshot.py sync \
 | Contract surface | Python producer and evidence |
 | --- | --- |
 | Public API | `src/vv_agent/__init__.py`, `tests/test_parity_evidence_manifests.py` |
-| Prompt bundle | `src/vv_agent/prompt/`, `tests/test_prompt_builder.py` |
-| Built-in tools | `src/vv_agent/constants/workspace.py`, `src/vv_agent/tools/registry.py`, `tests/test_tool_schema_contract.py`, `tests/test_builtin_tool_behavior_contract.py` |
+| Resolved PromptBundle and one-run producer scope | `src/vv_agent/prompt/`, `src/vv_agent/runtime/compiler.py`, `src/vv_agent/runtime/run_definition.py`, `src/vv_agent/llm/`; `tests/test_prompt_builder.py`, `tests/test_context_providers.py`, `tests/test_protocol_types.py`, `tests/test_checkpoint.py`, `tests/test_distributed_checkpoint.py` |
+| Canonical 15-tool surface and compact schemas | `src/vv_agent/constants/workspace.py`, `src/vv_agent/tools/registry.py`, `src/vv_agent/tools/executor.py`; `tests/test_tool_schema_contract.py`, `tests/test_builtin_tool_behavior_contract.py` |
+| Sparse bounded tool results, artifact recovery, and read cursor | `src/vv_agent/types.py`, `src/vv_agent/workspace/artifacts.py`, `src/vv_agent/tools/handlers/bash.py`, `src/vv_agent/tools/handlers/background.py`, `src/vv_agent/tools/handlers/workspace_io.py`; `tests/test_protocol_types.py`, `tests/test_checkpoint.py`, `tests/test_distributed_checkpoint.py`, `tests/test_bash_tools.py`, `tests/test_workspace_io_parity.py` |
 | Tool metadata and policy | `src/vv_agent/tools/metadata.py`, `src/vv_agent/run_config.py`, `src/vv_agent/runtime/tool_planner.py`, `tests/test_tool_metadata_contract.py`, `tests/test_tool_policy.py` |
 | Tool execution lifecycle | `src/vv_agent/tools/orchestrator.py`, `src/vv_agent/runtime/tool_call_runner.py`, `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py` |
 | Agent, Runner, result, and live control | `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `src/vv_agent/run_handle.py`, `src/vv_agent/result.py` |
@@ -105,11 +107,38 @@ Output reservation order is explicit `ModelSettings.max_tokens`, explicit task
 capacity planning only, not a model output limit. Configured children inherit
 the same explicit `ModelProvider` and resolve their own model.
 
-### Tools
+### Prompt Bundle And Tools
+
+`PromptBundle` is the only resolved system-prompt representation after a run
+starts. `AgentTask`, `LlmRequest`, run definitions, checkpoints, and
+distributed envelopes carry it explicitly. Instruction providers, context
+providers, and the run clock execute once while compiling a new run; every
+cycle reuses the immutable bundle. Resume restores it without calling those
+producers again. Providers without section-aware caching receive one
+deterministic flattening; Anthropic may use canonical section boundaries for
+cache breakpoints. Generic metadata is never a prompt-section transport.
+
+The current model-visible manifest is `vv-agent-builtin-tools-v2` with 15
+direct tools. `ToolExposure` has only `direct` and `hidden`; there is no
+deferred exposure. The model-visible `compress_memory` tool and its
+`memory_notes` state do not exist. Framework-owned automatic compaction remains
+internal.
 
 `ToolExecutionResult.status_code` is the only result status. The current values
 are `SUCCESS`, `ERROR`, `WAIT_RESPONSE`, `RUNNING`, and `PENDING_COMPRESS`.
-Unknown fields are rejected.
+`PENDING_COMPRESS` is reserved for framework-internal compaction flow and is
+not produced by a built-in model-callable tool. Unknown fields are rejected.
+
+Ordinary results carry their required fields plus only optional fields that are
+actually present. A bounded result adds a reason, byte counts, and one recovery
+pointer: bash uses an immutable workspace artifact and `read_file` uses a
+source-verified cursor. Bash preserves bounded stdout/stderr even when the
+process exits non-zero, and terminal background polling reuses the same
+artifact instead of writing a second copy. Sparse recovery fields survive
+cycle/result, checkpoint, and distributed serialization. Artifact reads must
+return through the normal workspace policy; cursors reject changed content,
+mismatched paths, and invalid offsets. Large output is never hidden in generic
+metadata or automatically replayed into model context.
 
 `ToolMetadata` is the only typed capability declaration and contains
 `side_effect`, `idempotency`, `terminal`, `capability_tags`, and
@@ -123,9 +152,10 @@ own ambiguity and replay decisions.
 
 ### Persistence
 
-Checkpoint records require `vv-agent.checkpoint.v3`; run definitions require
-`vv-agent.run-definition.v2`; distributed envelopes require
-`vv-agent.distributed-run.v2`. Readers reject every other shape before claim or
+Checkpoint records require `vv-agent.checkpoint.v4`; run definitions require
+`vv-agent.run-definition.v3`; distributed envelopes require
+`vv-agent.distributed-run.v3`. The frozen definition stores `prompt_bundle`,
+not a second independently editable flattened system prompt. Readers reject every other shape before claim or
 external work. There is no namespace probe, alternate decoder, field synthesis,
 or in-place repair.
 
@@ -138,7 +168,7 @@ A definitive pre-dispatch failure is the only terminal model journal state with
 no dispatch evidence.
 
 Distributed worker responses use only the closed
-`vv-agent.distributed-worker-response.v1` wire. Python owns the typed value and
+`vv-agent.distributed-worker-response.v2` wire. Python owns the typed value and
 strict reader in `runtime/backends/distributed.py`, Celery workers produce it in
 `celery_tasks.py`, and the scheduler consumes it in `celery.py`. `pending`,
 `committed`, `terminal_candidate`, and `terminal_replay` are the only variants;

@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.types import AgentTask, SubAgentConfig
 
 INVALID_SUB_AGENT_VALUES: list[tuple[str, Any, type[Exception]]] = [
@@ -70,7 +71,7 @@ def _agent_task_values() -> dict[str, Any]:
     return {
         "task_id": "task-1",
         "model": "model-1",
-        "system_prompt": "system",
+        "prompt_bundle": build_raw_system_prompt_bundle("system").to_dict(),
         "user_prompt": "user",
     }
 
@@ -132,7 +133,7 @@ def test_agent_task_from_dict_uses_public_dict_defaults_for_sparse_payload() -> 
     }
 
 
-@pytest.mark.parametrize("field_name", ["task_id", "model", "system_prompt", "user_prompt"])
+@pytest.mark.parametrize("field_name", ["task_id", "model", "prompt_bundle", "user_prompt"])
 def test_agent_task_from_dict_requires_all_core_fields(field_name: str) -> None:
     payload = _agent_task_values()
     del payload[field_name]
@@ -141,12 +142,15 @@ def test_agent_task_from_dict_requires_all_core_fields(field_name: str) -> None:
         AgentTask.from_dict(payload)
 
 
-@pytest.mark.parametrize("field_name", ["task_id", "model", "system_prompt", "user_prompt"])
-def test_agent_task_from_dict_requires_core_string_fields(field_name: str) -> None:
+@pytest.mark.parametrize(
+    ("field_name", "error_pattern"),
+    [("task_id", "task_id"), ("model", "model"), ("prompt_bundle", "PromptBundle"), ("user_prompt", "user_prompt")],
+)
+def test_agent_task_from_dict_requires_core_field_types(field_name: str, error_pattern: str) -> None:
     payload = _agent_task_values()
     payload[field_name] = 123
 
-    with pytest.raises(TypeError, match=field_name):
+    with pytest.raises(TypeError, match=error_pattern):
         AgentTask.from_dict(payload)
 
 

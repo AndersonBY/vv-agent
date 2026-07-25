@@ -91,25 +91,22 @@ def test_compiler_assembles_agent_instructions_with_context_providers() -> None:
         trace_id="trace-1",
     )
 
-    assert task.system_prompt == "Current order status.\n\nCheck facts."
-    assert task.metadata["system_prompt_sources"] == {
-        "agent_instructions": "agent.instructions",
-        "runtime_context": "test",
-    }
-    assert task.metadata["system_prompt_sections"] == [
-        {
-            "id": "runtime_context",
-            "text": "Current order status.",
-            "stable": False,
-            "source": "test",
-        },
+    assert task.prompt_bundle.flatten() == "Check facts.\n\nCurrent order status."
+    assert [section.to_dict() for section in task.prompt_bundle.sections] == [
         {
             "id": "agent_instructions",
             "text": "Check facts.",
             "stable": True,
             "source": "agent.instructions",
         },
+        {
+            "id": "runtime_context",
+            "text": "Current order status.",
+            "stable": False,
+            "source": "test",
+        },
     ]
+    assert "system_prompt_sections" not in task.metadata
 
 
 def test_compiler_reports_agent_instructions_as_builtin_context_section() -> None:
@@ -121,8 +118,8 @@ def test_compiler_reports_agent_instructions_as_builtin_context_section() -> Non
         trace_id="trace-1",
     )
 
-    assert task.system_prompt == "Check facts."
-    assert task.metadata["system_prompt_sections"] == [
+    assert task.prompt_bundle.flatten() == "Check facts."
+    assert [section.to_dict() for section in task.prompt_bundle.sections] == [
         {
             "id": "agent_instructions",
             "text": "Check facts.",

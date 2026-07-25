@@ -79,7 +79,7 @@ def _build_live_task(*, model_id: str, workspace: Path, task_id: str, user_promp
     return AgentTask(
         task_id=task_id,
         model=model_id,
-        system_prompt=prompt_bundle.prompt,
+        prompt_bundle=prompt_bundle,
         user_prompt=user_prompt,
         max_cycles=10,
         metadata={"language": "en-US"},

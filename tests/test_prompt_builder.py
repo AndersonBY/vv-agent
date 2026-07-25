@@ -3,16 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from vv_agent.constants import (
-    ASK_USER_TOOL_NAME,
-    CREATE_SUB_TASK_TOOL_NAME,
-    EDIT_FILE_TOOL_NAME,
-    READ_FILE_TOOL_NAME,
-    SUB_TASK_STATUS_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
-    WORKSPACE_TOOLS,
-    WRITE_FILE_TOOL_NAME,
-)
 from vv_agent.prompt import PromptSection, SystemPromptBuilder, build_system_prompt, build_system_prompt_bundle
 
 
@@ -39,7 +29,7 @@ def test_build_system_prompt_can_include_session_memory_context() -> None:
 
     assert "<Session Memory>" in prompt
     assert prompt.index("</Agent Definition>") < prompt.index("<Session Memory>")
-    assert prompt.index("<Session Memory>") < prompt.index("<Tools>")
+    assert prompt.index("<Tools>") < prompt.index("<Session Memory>")
 
 
 def test_build_system_prompt_ignores_session_memory_context_when_disabled() -> None:
@@ -56,16 +46,14 @@ def test_prompt_includes_tool_governance_rules() -> None:
     prompt = build_system_prompt("Agent", language="en-US")
     old_tool_name = "file" + "_str_replace"
 
-    assert ASK_USER_TOOL_NAME in prompt
-    assert TASK_FINISH_TOOL_NAME in prompt
-    assert READ_FILE_TOOL_NAME in prompt
-    assert WRITE_FILE_TOOL_NAME in prompt
-    assert EDIT_FILE_TOOL_NAME in prompt
+    assert "Ask the user only for a required decision" in prompt
+    assert "Prefer specialized workspace tools" in prompt
+    assert "at most one item in progress" in prompt
+    assert "Use task_finish for an explicit final result" in prompt
     assert old_tool_name not in prompt
-    assert "Tool priority" in prompt
-    workspace_line = next(line for line in prompt.splitlines() if line.startswith("You can operate workspace files with tools:"))
-    assert workspace_line == f"You can operate workspace files with tools: {', '.join(WORKSPACE_TOOLS)}."
-    assert "Find candidate files with `find_files`" in prompt
+    assert "read_file" not in prompt
+    assert "write_file" not in prompt
+    assert "edit_file" not in prompt
 
 
 def test_prompt_can_include_computer_environment() -> None:
@@ -82,8 +70,6 @@ def test_prompt_can_include_sub_agent_guidance() -> None:
         available_sub_agents={"research-sub": "负责资料检索", "writer-sub": "负责初稿撰写"},
     )
 
-    assert CREATE_SUB_TASK_TOOL_NAME in prompt
-    assert SUB_TASK_STATUS_TOOL_NAME in prompt
     assert "agent_id=`research-sub`" in prompt
     assert "agent_id=`writer-sub`" in prompt
 
@@ -146,43 +132,33 @@ def test_build_system_prompt_bundle_includes_cacheable_sections() -> None:
         session_memory_context="<Session Memory>\n- note\n</Session Memory>",
     )
 
-    assert bundle.prompt.startswith("<Agent Definition>")
-    assert [section["id"] for section in bundle.sections] == [
+    assert bundle.flatten().startswith("<Agent Definition>")
+    assert [section.id for section in bundle.sections] == [
         "agent_definition",
-        "session_memory",
         "tools",
+        "session_memory",
         "current_time",
     ]
-    assert bundle.sections[0]["stable"] is True
-    assert bundle.sections[1]["stable"] is False
-    assert bundle.sections[-1]["stable"] is False
+    assert bundle.sections[0].stable is True
+    assert bundle.sections[1].stable is True
+    assert bundle.sections[2].stable is False
+    assert bundle.sections[-1].stable is False
     assert bundle.stable_hash
 
 
-def test_system_prompt_builder_caches_stable_sections_only() -> None:
-    counters = {"stable": 0, "volatile": 0}
-
-    def build_stable() -> str:
-        counters["stable"] += 1
-        return "stable"
-
-    def build_volatile() -> str:
-        counters["volatile"] += 1
-        return f"volatile-{counters['volatile']}"
-
+def test_system_prompt_builder_reuses_resolved_sections() -> None:
     builder = SystemPromptBuilder()
-    builder.add_section(PromptSection(id="stable", compute=build_stable, stable=True))
-    builder.add_section(PromptSection(id="volatile", compute=build_volatile, stable=False))
+    builder.add_section(PromptSection(id="stable", text="stable", stable=True))
+    builder.add_section(PromptSection(id="volatile", text="volatile", stable=False))
 
-    assert builder.build() == "stable\n\nvolatile-1"
-    assert builder.build() == "stable\n\nvolatile-2"
-    assert counters == {"stable": 1, "volatile": 2}
+    assert builder.build() == "stable\n\nvolatile"
+    assert builder.build() == "stable\n\nvolatile"
 
 
 def test_system_prompt_builder_stable_hash_matches_build_result_hash() -> None:
     builder = SystemPromptBuilder()
-    builder.add_section(PromptSection(id="stable", compute=lambda: "  stable section  ", stable=True))
-    builder.add_section(PromptSection(id="volatile", compute=lambda: " volatile ", stable=False))
+    builder.add_section(PromptSection(id="stable", text="  stable section  ", stable=True))
+    builder.add_section(PromptSection(id="volatile", text=" volatile ", stable=False))
 
     assert builder.stable_hash() == builder.build_result().stable_hash
 

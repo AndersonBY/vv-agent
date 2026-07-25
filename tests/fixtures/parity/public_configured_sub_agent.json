@@ -91,25 +91,22 @@
     ],
     "fragment": {
       "id": "configured_sub_agents",
-      "text": "If sub-agents are configured, delegate work with `create_sub_task`. Use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, `wait_for_completion=false` for background execution, and `sub_task_status` to query progress or send follow-up messages. If background work must finish before you can continue, call `sub_task_status` with `wait_for_completion=true` and a longer `check_interval_seconds` instead of repeatedly polling.\nAvailable sub-agents (use the agent_id exactly as shown):\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
+      "text": "Configured sub-agents:\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
       "stable": true,
-      "priority": 10,
       "source": "agent.sub_agents"
     },
-    "prompt": "Coordinate the work carefully.\n\nIf sub-agents are configured, delegate work with `create_sub_task`. Use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, `wait_for_completion=false` for background execution, and `sub_task_status` to query progress or send follow-up messages. If background work must finish before you can continue, call `sub_task_status` with `wait_for_completion=true` and a longer `check_interval_seconds` instead of repeatedly polling.\nAvailable sub-agents (use the agent_id exactly as shown):\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
+    "prompt": "Coordinate the work carefully.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
     "sections": [
       {
         "id": "agent_instructions",
         "text": "Coordinate the work carefully.",
         "stable": true,
-        "priority": 0,
         "source": "agent.instructions"
       },
       {
         "id": "configured_sub_agents",
-        "text": "If sub-agents are configured, delegate work with `create_sub_task`. Use `agent_id` to select the target sub-agent, `task_description` for one task, `tasks` for multiple independent tasks of the same sub-agent, `wait_for_completion=false` for background execution, and `sub_task_status` to query progress or send follow-up messages. If background work must finish before you can continue, call `sub_task_status` with `wait_for_completion=true` and a longer `check_interval_seconds` instead of repeatedly polling.\nAvailable sub-agents (use the agent_id exactly as shown):\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
+        "text": "Configured sub-agents:\n- agent_id=`researcher`: Research source-backed facts.\n- agent_id=`writer`: Draft the final response.",
         "stable": true,
-        "priority": 10,
         "source": "agent.sub_agents"
       }
     ],
@@ -117,8 +114,8 @@
       "agent_instructions": "agent.instructions",
       "configured_sub_agents": "agent.sub_agents"
     },
-    "stable_hash": "e471d833a57d6711eda527e15ebf0f8f88657462cfc1da314d7ad37b53277cc9",
-    "total_chars": 703
+    "stable_hash": "ee7aed024cd8c5da695981624bb88aa43a635a96beee8a58609cca4bde206625",
+    "total_chars": 156
   },
   "public_runner": {
     "constructs_agent_task": false,

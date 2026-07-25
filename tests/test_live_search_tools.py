@@ -74,7 +74,7 @@ def _build_live_task(*, model_id: str, workspace: Path) -> AgentTask:
     return AgentTask(
         task_id="live_search_tools_find_then_search",
         model=model_id,
-        system_prompt=prompt_bundle.prompt,
+        prompt_bundle=prompt_bundle,
         user_prompt=(
             "Validate the renamed search tools against the workspace. "
             "Step 1: call find_files with path '.', glob '**/*.txt', sort 'path_asc', and max_results 10. "

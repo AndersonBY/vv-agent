@@ -15,7 +15,8 @@ from vv_agent.constants import (
     TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
-from vv_agent.types import AgentStatus, LLMResponse, Message, ToolCall, ToolResultStatus
+from vv_agent.llm import LlmRequest
+from vv_agent.types import AgentStatus, LLMResponse, ToolCall, ToolResultStatus
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -33,19 +34,9 @@ class CapturingLLM:
     def __init__(self) -> None:
         self.tool_names: list[str] = []
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback=None,
-        model_settings=None,
-        request_metadata=None,
-    ) -> LLMResponse:
-        del model, messages, stream_callback, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
         names: list[str] = []
-        for tool in tools:
+        for tool in request.tools:
             function = cast(dict[str, object], tool["function"])
             assert isinstance(function, dict)
             names.append(str(function["name"]))
@@ -54,6 +45,10 @@ class CapturingLLM:
             content="done",
             tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
         )
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)
 
 
 def test_tool_policy_allowed_tools_filters_default_and_custom_tool_schemas(tmp_path: Path) -> None:
@@ -332,18 +327,13 @@ class CapturingLLMWithToolCall:
         self.tool_name = tool_name
         self.arguments = arguments
 
-    def complete(
-        self,
-        *,
-        model: str,
-        messages: list[Message],
-        tools: list[dict[str, object]],
-        stream_callback=None,
-        model_settings=None,
-        request_metadata=None,
-    ) -> LLMResponse:
-        del model, messages, tools, stream_callback, model_settings, request_metadata
+    def complete(self, request: LlmRequest) -> LLMResponse:
+        del request
         return LLMResponse(
             content="call tool",
             tool_calls=[ToolCall(id="policy-call", name=self.tool_name, arguments=self.arguments)],
         )
+
+    def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
+        del stream_callback
+        return self.complete(request)

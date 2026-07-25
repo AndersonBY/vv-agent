@@ -15,6 +15,7 @@ from vv_agent.memory import (
     SessionMemoryConfig,
 )
 from vv_agent.memory.microcompact import CLEARED_MARKER
+from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.cycle_runner import MAX_PTL_RETRIES, CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, LLMResponse, Message
@@ -46,7 +47,7 @@ def _build_task() -> AgentTask:
     return AgentTask(
         task_id="task_cycle_runner",
         model="gpt-5.4",
-        system_prompt="sys",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="start",
         max_cycles=3,
     )
@@ -159,8 +160,7 @@ def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> Non
 
     ptl_step = cast(Callable[[LlmRequest], LLMResponse], raise_ptl)
     ptl_steps: list[LLMResponse | Callable[[LlmRequest], LLMResponse]] = [
-        cast(LLMResponse | Callable[[LlmRequest], LLMResponse], ptl_step)
-        for _ in range(MAX_PTL_RETRIES + 1)
+        cast(LLMResponse | Callable[[LlmRequest], LLMResponse], ptl_step) for _ in range(MAX_PTL_RETRIES + 1)
     ]
 
     runner = CycleRunner(

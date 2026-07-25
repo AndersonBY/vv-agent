@@ -18,7 +18,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EXTENSION_NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.[a-z0-9._-]+$")
 _CAPABILITY_SLOT_RE = re.compile(r"^[a-z][a-z0-9_.:-]*$")
 _JSON_POINTER_ESCAPE_RE = re.compile(r"~(?:0|1)")
-RUN_DEFINITION_SCHEMA = "vv-agent.run-definition.v2"
+RUN_DEFINITION_SCHEMA = "vv-agent.run-definition.v3"
 OPERATION_REQUEST_SCHEMA = "vv-agent.operation-request.v1"
 CREDENTIAL_REDACTION_VALUE = "<credential-redacted>"
 
@@ -27,7 +27,7 @@ _RUN_DEFINITION_REQUIRED_FIELDS = frozenset(
         "schema_version",
         "agent",
         "root_input",
-        "compiled_prompt",
+        "prompt_bundle",
         "initial_messages",
         "initial_shared_state",
         "run_metadata",
@@ -615,7 +615,7 @@ def _validate_run_definition_shape(definition: dict[str, Any]) -> None:
     _non_empty_definition_string(agent["name"], "run_definition.agent.name")
     _optional_non_empty_definition_string(agent["type"], "run_definition.agent.type")
     _definition_string(definition["root_input"], "run_definition.root_input")
-    _definition_string(definition["compiled_prompt"], "run_definition.compiled_prompt")
+    _validate_prompt_bundle_shape(definition["prompt_bundle"])
 
     messages = _definition_array(definition["initial_messages"], "run_definition.initial_messages")
     for index, message in enumerate(messages):
@@ -746,6 +746,47 @@ def _validate_run_definition_shape(definition: dict[str, Any]) -> None:
         if _CAPABILITY_SLOT_RE.fullmatch(slot) is None:
             raise ValueError(f"run_definition.capability_refs contains invalid slot {slot!r}")
         _validate_capability_ref(reference, f"run_definition.capability_refs[{slot!r}]")
+
+
+def _validate_prompt_bundle_shape(value: Any) -> None:
+    bundle = _closed_definition_object(
+        value,
+        frozenset({"sections", "stable_hash"}),
+        "run_definition.prompt_bundle",
+    )
+    sections = _definition_array(bundle["sections"], "run_definition.prompt_bundle.sections")
+    if not sections:
+        raise ValueError("run_definition.prompt_bundle.sections cannot be empty")
+    seen_ids: set[str] = set()
+    stable_sections: list[dict[str, Any]] = []
+    for index, raw_section in enumerate(sections):
+        label = f"run_definition.prompt_bundle.sections[{index}]"
+        section = _closed_definition_object(
+            raw_section,
+            frozenset({"id", "text", "stable", "source", "cache_hint", "metadata"}),
+            label,
+            required=frozenset({"id", "text", "stable"}),
+        )
+        section_id = _non_empty_definition_string(section["id"], f"{label}.id")
+        if section_id in seen_ids:
+            raise ValueError("run_definition.prompt_bundle section ids must be unique")
+        seen_ids.add(section_id)
+        text = _non_empty_definition_string(section["text"], f"{label}.text")
+        if text != text.strip("\t\n\v\f\r "):
+            raise ValueError(f"{label}.text must use canonical ASCII whitespace trimming")
+        _definition_boolean(section["stable"], f"{label}.stable")
+        if "source" in section:
+            _non_empty_definition_string(section["source"], f"{label}.source")
+        if "cache_hint" in section:
+            _non_empty_definition_string(section["cache_hint"], f"{label}.cache_hint")
+        if "metadata" in section:
+            _open_definition_object(section["metadata"], f"{label}.metadata")
+        if section["stable"] is True:
+            stable_sections.append(dict(section))
+    stable_hash = _non_empty_definition_string(bundle["stable_hash"], "run_definition.prompt_bundle.stable_hash")
+    validate_sha256(stable_hash, "run_definition.prompt_bundle.stable_hash")
+    if canonical_json_sha256(stable_sections, "stable prompt sections") != stable_hash:
+        raise ValueError("run_definition.prompt_bundle.stable_hash does not match stable sections")
 
 
 def _validate_run_definition_message(value: Any, *, index: int) -> None:

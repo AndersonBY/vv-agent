@@ -15,6 +15,12 @@ from vv_agent.runtime.shell import prepare_shell_execution
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import builtin_error, select_metadata, to_json
 from vv_agent.types import ToolExecutionResult, ToolResultStatus
+from vv_agent.workspace.artifacts import (
+    BOUNDED_TEXT_CHARS,
+    ArtifactPathInvalidError,
+    bounded_text_preview,
+    persist_text_artifact,
+)
 
 _DANGEROUS_SNIPPETS = (
     "rm -rf /",
@@ -24,7 +30,7 @@ _DANGEROUS_SNIPPETS = (
     "dd if=/dev/zero of=/dev/",
 )
 
-_OUTPUT_LIMIT = 50_000
+_OUTPUT_LIMIT = BOUNDED_TEXT_CHARS
 _WINDOWS_PYTHON_ENV_DEFAULTS = {
     "PYTHONUTF8": "1",
     "PYTHONIOENCODING": "utf-8",
@@ -186,6 +192,9 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
                 shell=shell,
                 windows_shell_priority=windows_shell_priority,
                 env=process_env,
+                artifact_backend=context.workspace_backend,
+                artifact_task_id=context.task_id,
+                artifact_tool_call_id=context.tool_call_id,
             )
         except ValueError as exc:
             return builtin_error(
@@ -246,6 +255,9 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             process=started_process.process,
             output_path=started_process.output_path,
             shell=shell,
+            artifact_backend=context.workspace_backend,
+            artifact_task_id=context.task_id,
+            artifact_tool_call_id=context.tool_call_id,
         )
         payload = {
             "status": "running",
@@ -275,8 +287,35 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
             ),
         )
 
-    combined_output = read_captured_output(started_process.output_path, limit_chars=_OUTPUT_LIMIT)
-    remove_captured_output(started_process.output_path)
+    try:
+        combined_output = started_process.output_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return builtin_error(
+            f"failed to read command output: {exc}",
+            "command_failed",
+        )
+    if not combined_output and completed_exit_code != 0:
+        combined_output = f"command exited with code {completed_exit_code}"
+    preview = bounded_text_preview(combined_output)
+    artifact = None
+    if preview.truncated:
+        try:
+            artifact = persist_text_artifact(
+                context.workspace_backend,
+                context.task_id,
+                context.tool_call_id,
+                combined_output,
+            )
+        except ArtifactPathInvalidError as exc:
+            return builtin_error(
+                f"failed to persist complete command output: {exc}",
+                "artifact_path_invalid",
+            )
+        except Exception as exc:
+            return builtin_error(
+                f"failed to persist complete command output: {exc}",
+                "artifact_persist_failed",
+            )
     workspace_root = context.workspace.resolve()
     resolved_exec_dir = Path(exec_dir).resolve()
     if resolved_exec_dir == workspace_root:
@@ -287,27 +326,24 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
         except ValueError:
             cwd = str(resolved_exec_dir)
 
-    payload = {
-        "cwd": cwd,
-        "exit_code": completed_exit_code,
-        "output": combined_output,
-    }
+    payload = {"cwd": cwd, "exit_code": completed_exit_code}
     if shell:
         payload["shell"] = shell
-
-    metadata = select_metadata(payload, "cwd", "exit_code", "shell")
-
     if completed_exit_code != 0:
-        return builtin_error(
-            f"command exited with code {completed_exit_code}",
-            "command_failed",
-            details=payload,
-            metadata=metadata,
-        )
+        payload["error_code"] = "command_failed"
 
-    return ToolExecutionResult(
+    metadata = select_metadata(payload, "error_code", "cwd", "exit_code", "shell")
+    result = ToolExecutionResult(
         tool_call_id="",
-        status_code=ToolResultStatus.SUCCESS,
-        content=to_json(payload),
+        status_code=(ToolResultStatus.SUCCESS if completed_exit_code == 0 else ToolResultStatus.ERROR),
+        error_code="command_failed" if completed_exit_code != 0 else None,
+        content=preview.content,
         metadata=metadata,
+        truncated=True if preview.truncated else None,
+        truncation_reason="output_limit" if preview.truncated else None,
+        original_bytes=preview.original_bytes if preview.truncated else None,
+        visible_bytes=preview.visible_bytes if preview.truncated else None,
+        artifact=artifact,
     )
+    remove_captured_output(started_process.output_path)
+    return result
