@@ -7,7 +7,7 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 ## Install
 
 The current release is `0.9.0`. It implements language-neutral Contract
-`4.0.5` behavior with the Rust `vv-agent` crate while keeping a Python-idiomatic
+`4.1.0` behavior with the Rust `vv-agent` crate while keeping a Python-idiomatic
 API.
 
 ```bash
@@ -34,11 +34,16 @@ older package release when an application must retain an older protocol.
 - A resolved `PromptBundle` freezes the prompt sections and run time once for a
   run. Checkpoint resume and distributed workers reuse that bundle instead of
   rerunning instruction or context producers.
+- When Session Memory is enabled, a new run loads persisted entries once before
+  freezing its `PromptBundle`. Entries extracted during that run are persisted
+  for the next new run; they never rewrite the active run's system prompt.
 - The canonical 15-tool surface uses compact schemas. `compress_memory` is no
   longer model-callable; framework-owned automatic compaction remains internal.
 - Large bash output returns a bounded 12,000-character preview plus a secure
-  workspace artifact. Large file reads return bounded text plus a verified
-  cursor, so recovery does not repeat the original operation.
+  workspace artifact. A local workspace stores the artifact outside the shell
+  working directory and streams the complete capture into private storage.
+  Large file reads return bounded text plus a verified cursor, so recovery does
+  not repeat the original operation.
 - Durable execution uses `vv-agent.checkpoint.v4`,
   `vv-agent.run-definition.v3`, `vv-agent.distributed-run.v3`, and
   `vv-agent.distributed-worker-response.v2` for strict recovery and
@@ -719,7 +724,12 @@ resolved auto-compaction threshold is exceeded.
   - Stored in `workspace/.memory/session/<session-or-task-scope>/session_memory.json` by default
   - Scoped to the current session when `metadata.session_id` is present; otherwise scoped to the current `task_id`
   - New sessions/tasks start without inherited Session Memory from previous sessions/tasks
-  - Injected into the first system message on every cycle as `<Session Memory>`
+  - Loaded once when a new run is compiled and frozen into its first system
+    message as `<Session Memory>`; every cycle reuses the same `PromptBundle`
+  - Entries extracted during the active run are persisted but become visible
+    only when the next new run is compiled
+  - Checkpoint resume reuses the frozen memory section without rereading the
+    store or rewriting the active prompt
   - Extraction reuses the configured memory summary backend/model
   - Full compaction resets transcript tracking but preserves persisted memory entries
   - Sub-tasks disable Session Memory by default to avoid parent/child memory-file contamination

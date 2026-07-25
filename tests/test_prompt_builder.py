@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
+
+import pytest
 
 from vv_agent.prompt import PromptSection, SystemPromptBuilder, build_system_prompt, build_system_prompt_bundle
 
@@ -161,6 +165,28 @@ def test_system_prompt_builder_stable_hash_matches_build_result_hash() -> None:
     builder.add_section(PromptSection(id="volatile", text=" volatile ", stable=False))
 
     assert builder.stable_hash() == builder.build_result().stable_hash
+
+
+def test_prompt_section_metadata_is_a_deeply_immutable_snapshot() -> None:
+    original = {"nested": {"items": ["before"]}}
+    section = PromptSection(id="stable", text="stable", metadata=original)
+    stable_hash = SystemPromptBuilder(_sections=[section]).stable_hash()
+
+    original["nested"]["items"].append("after")
+    assert section.to_dict()["metadata"] == {"nested": {"items": ["before"]}}
+    with pytest.raises(TypeError):
+        cast(dict[str, Any], section.metadata)["new"] = "value"
+    with pytest.raises(TypeError):
+        cast(dict[str, Any], section.metadata)["nested"]["items"] += ("after",)
+
+    materialized = section.to_dict()
+    materialized["metadata"]["nested"]["items"].append("changed")
+    assert section.to_dict()["metadata"] == {"nested": {"items": ["before"]}}
+    assert SystemPromptBuilder(_sections=[section]).stable_hash() == stable_hash
+
+    bundle = SystemPromptBuilder(_sections=[section]).build_result()
+    assert deepcopy(section) is section
+    assert deepcopy(bundle) is bundle
 
 
 def test_task_start_time_is_fixed_when_builder_is_created(monkeypatch) -> None:

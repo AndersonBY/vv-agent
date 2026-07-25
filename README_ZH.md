@@ -7,7 +7,7 @@
 ## 安装
 
 当前版本为 `0.9.0`。它和 Rust `vv-agent` crate 都实现语言无关的
-Contract `4.0.5`，两边能力一致，只保留符合各自语言习惯的 API 写法。
+Contract `4.1.0`，两边能力一致，只保留符合各自语言习惯的 API 写法。
 
 ```bash
 python -m pip install "vv-agent==0.9.0"
@@ -29,10 +29,14 @@ python -m pip install "vv-agent==0.9.0"
   才提交终态结果。
 - 已解析的 `PromptBundle` 会在一次 run 开始时固定 prompt section 和时间；checkpoint
   恢复、分布式 worker 不会重新执行 instructions 或 context producer。
+- 开启 Session Memory 后，新 run 会先读取一次已持久化记忆，再把它冻结进
+  `PromptBundle`。当前 run 提取出的新记忆只负责持久化，从下一个新 run 开始可见，
+  不会中途改写当前 system prompt。
 - canonical 15 个内建工具使用精简 schema。`compress_memory` 不再暴露给模型，框架内部
   自动上下文压缩仍然保留。
-- 大型 bash 输出返回最多 12,000 个字符的预览和安全 workspace artifact；大型文件读取返回
-  有界文本和经校验的 cursor，不需要重复执行原操作。
+- 大型 bash 输出返回最多 12,000 个字符的预览和安全 workspace artifact；本地 workspace
+  会把 artifact 存在 shell 工作目录之外的私有位置，并以流式方式写入完整输出。大型文件
+  读取返回有界文本和经校验的 cursor，不需要重复执行原操作。
 - 持久化执行统一使用 `vv-agent.checkpoint.v4`、
   `vv-agent.run-definition.v3`、`vv-agent.distributed-run.v3` 和
   `vv-agent.distributed-worker-response.v2`，严格限定恢复与分布式 controller 边界。
@@ -660,7 +664,10 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
   - 默认存放在 `workspace/.memory/session/<session-or-task-scope>/session_memory.json`
   - 若 `metadata.session_id` 存在，则按当前 session 隔离；否则按当前 `task_id` 隔离
   - 新 session / 新 task 不会继承上一轮 session / task 的 Session Memory
-  - 每个 cycle 都会以 `<Session Memory>` 的形式注入到第一条 system message
+  - 新 run 编译时只读取一次，并以 `<Session Memory>` 形式冻结进第一条 system message；
+    后续每个 cycle 都复用同一个 `PromptBundle`
+  - 当前 run 提取出的新条目会持久化，但直到下一个新 run 编译时才对模型可见
+  - Checkpoint resume 直接复用已冻结的记忆 section，不重新读取 store，也不改写当前 prompt
   - 提取阶段复用现有的 memory summary backend/model 选择逻辑
   - 全量压缩后只重置 transcript 跟踪索引，不清空已持久化记忆
   - 子任务默认关闭 Session Memory，避免父子任务共享同一记忆文件

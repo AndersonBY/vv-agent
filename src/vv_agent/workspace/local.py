@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import re
 import stat
+import tempfile
+from collections.abc import Iterable
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
 from vv_agent.workspace.artifacts import ArtifactPathInvalidError, is_reserved_artifact_path
-from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments
+from vv_agent.workspace.base import FileInfo, _exclusive_workspace_path_segments, _normalize_workspace_path
+
+_PRIVATE_ARTIFACT_ROOT_ENV = "VV_AGENT_PRIVATE_ARTIFACT_ROOT"
+_PRIVATE_ARTIFACT_ROOT_NAME = "vv-agent-artifacts"
 
 
 def _glob_match(path: str, pattern: str) -> bool:
@@ -36,11 +43,12 @@ def _glob_match(path: str, pattern: str) -> bool:
 
 
 class LocalWorkspaceBackend:
-    __slots__ = ("_allow_outside_root", "_root")
+    __slots__ = ("_allow_outside_root", "_artifact_root", "_root")
 
     def __init__(self, root: Path, *, allow_outside_root: bool = False) -> None:
         self._root = root.resolve()
         self._allow_outside_root = bool(allow_outside_root)
+        self._artifact_root = _private_artifact_root(self._root)
 
     @property
     def root(self) -> Path:
@@ -57,6 +65,37 @@ class LocalWorkspaceBackend:
             raise ValueError(f"Path escapes workspace: {path}")
         return target
 
+    def _artifact_segments(self, path: str) -> tuple[str, ...] | None:
+        if not isinstance(path, str) or path.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", path):
+            return None
+        normalized = _normalize_workspace_path(path)
+        if not is_reserved_artifact_path(normalized):
+            return None
+        return _exclusive_workspace_path_segments(normalized)
+
+    def _resolve_artifact(self, path: str) -> tuple[Path, tuple[str, ...]] | None:
+        segments = self._artifact_segments(path)
+        if segments is None:
+            return None
+
+        target = self._artifact_root
+        for segment in segments:
+            target /= segment
+            try:
+                target_stat = target.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(target_stat.st_mode):
+                raise ArtifactPathInvalidError("artifact_path_invalid")
+        return target, segments
+
+    def _resolve_read_target(self, path: str) -> tuple[Path, str | None]:
+        artifact = self._resolve_artifact(path)
+        if artifact is not None:
+            target, _segments = artifact
+            return target, _normalize_workspace_path(path)
+        return self._resolve(path), None
+
     def _to_output_path(self, path: Path) -> str:
         try:
             rel = path.relative_to(self._root).as_posix()
@@ -65,6 +104,8 @@ class LocalWorkspaceBackend:
             return str(path)
 
     def list_files(self, base: str, glob: str) -> list[str]:
+        if self._artifact_segments(base) is not None:
+            return []
         root = self._resolve(base)
         if not root.exists() or not root.is_dir():
             return []
@@ -82,6 +123,8 @@ class LocalWorkspaceBackend:
                     if not _glob_match(rel_from_base, pattern):
                         continue
                     rel = self._to_output_path(candidate)
+                    if is_reserved_artifact_path(rel):
+                        continue
                 except (OSError, ValueError):
                     continue
                 files.append(rel)
@@ -89,10 +132,12 @@ class LocalWorkspaceBackend:
         return files
 
     def read_text(self, path: str) -> str:
-        return self._resolve(path).read_text(encoding="utf-8", errors="replace")
+        target, _logical_path = self._resolve_read_target(path)
+        return target.read_text(encoding="utf-8", errors="replace")
 
     def read_bytes(self, path: str) -> bytes:
-        return self._resolve(path).read_bytes()
+        target, _logical_path = self._resolve_read_target(path)
+        return target.read_bytes()
 
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
         if is_reserved_artifact_path(path):
@@ -107,20 +152,24 @@ class LocalWorkspaceBackend:
             return fh.write(data)
 
     def write_text_exclusive(self, path: str, content: str) -> int:
+        return self.write_text_chunks_exclusive(path, (content,))
+
+    def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
         segments = _exclusive_workspace_path_segments(path)
-        self._root.mkdir(parents=True, exist_ok=True)
-        data = content.encode("utf-8")
+        artifact = self._resolve_artifact(path)
+        root = self._artifact_root if artifact is not None else self._root
+        root.mkdir(parents=True, exist_ok=True)
         if os.name != "nt" and hasattr(os, "O_NOFOLLOW"):
-            return _write_exclusive_at(self._root, segments, data)
-        return _write_exclusive_portable(self._root, segments, data)
+            return _write_exclusive_chunks_at(root, segments, chunks)
+        return _write_exclusive_chunks_portable(root, segments, chunks)
 
     def file_info(self, path: str) -> FileInfo | None:
-        target = self._resolve(path)
+        target, logical_path = self._resolve_read_target(path)
         if not target.exists():
             return None
         stat = target.stat()
         return FileInfo(
-            path=self._to_output_path(target),
+            path=logical_path or self._to_output_path(target),
             is_file=target.is_file(),
             is_dir=target.is_dir(),
             size=stat.st_size,
@@ -130,17 +179,21 @@ class LocalWorkspaceBackend:
 
     def exists(self, path: str) -> bool:
         try:
-            return self._resolve(path).exists()
+            target, _logical_path = self._resolve_read_target(path)
+            return target.exists()
         except (OSError, RuntimeError, ValueError):
             return False
 
     def is_file(self, path: str) -> bool:
         try:
-            return self._resolve(path).is_file()
+            target, _logical_path = self._resolve_read_target(path)
+            return target.is_file()
         except (OSError, RuntimeError, ValueError):
             return False
 
     def mkdir(self, path: str) -> None:
+        if is_reserved_artifact_path(path):
+            raise PermissionError("artifact paths are immutable")
         self._resolve(path).mkdir(parents=True, exist_ok=True)
 
     def _is_reserved_target(self, target: Path) -> bool:
@@ -149,6 +202,23 @@ class LocalWorkspaceBackend:
         except ValueError:
             return False
         return is_reserved_artifact_path(relative)
+
+
+def _private_artifact_root(workspace_root: Path) -> Path:
+    configured_root = os.environ.get(_PRIVATE_ARTIFACT_ROOT_ENV)
+    base = Path(configured_root).expanduser() if configured_root else Path(tempfile.gettempdir()) / _PRIVATE_ARTIFACT_ROOT_NAME
+    base.mkdir(parents=True, exist_ok=True)
+    if base.is_symlink() or not base.is_dir():
+        raise ArtifactPathInvalidError("artifact_path_invalid")
+    with suppress(OSError):
+        base.chmod(0o700)
+
+    digest = hashlib.sha256(os.fsencode(str(workspace_root))).hexdigest()
+    artifact_root = base / digest
+    artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if artifact_root.is_symlink() or not artifact_root.is_dir():
+        raise ArtifactPathInvalidError("artifact_path_invalid")
+    return artifact_root.resolve()
 
 
 def _write_all(file_descriptor: int, data: bytes) -> None:
@@ -160,7 +230,7 @@ def _write_all(file_descriptor: int, data: bytes) -> None:
         remaining = remaining[written:]
 
 
-def _write_exclusive_at(root: Path, segments: tuple[str, ...], data: bytes) -> int:
+def _write_exclusive_chunks_at(root: Path, segments: tuple[str, ...], chunks: Iterable[str]) -> int:
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     directory_fd = os.open(root, directory_flags)
     try:
@@ -194,17 +264,17 @@ def _write_exclusive_at(root: Path, segments: tuple[str, ...], data: bytes) -> i
         )
         file_fd = os.open(segments[-1], file_flags, 0o600, dir_fd=directory_fd)
         try:
-            _write_all(file_fd, data)
+            total = _write_chunks(file_fd, chunks)
             os.fsync(file_fd)
         finally:
             os.close(file_fd)
         os.fsync(directory_fd)
-        return len(data)
+        return total
     finally:
         os.close(directory_fd)
 
 
-def _write_exclusive_portable(root: Path, segments: tuple[str, ...], data: bytes) -> int:
+def _write_exclusive_chunks_portable(root: Path, segments: tuple[str, ...], chunks: Iterable[str]) -> int:
     parent = root
     for segment in segments[:-1]:
         parent /= segment
@@ -222,8 +292,19 @@ def _write_exclusive_portable(root: Path, segments: tuple[str, ...], data: bytes
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     file_fd = os.open(target, flags, 0o600)
     try:
-        _write_all(file_fd, data)
+        total = _write_chunks(file_fd, chunks)
         os.fsync(file_fd)
     finally:
         os.close(file_fd)
-    return len(data)
+    return total
+
+
+def _write_chunks(file_descriptor: int, chunks: Iterable[str]) -> int:
+    total = 0
+    for chunk in chunks:
+        if not isinstance(chunk, str):
+            raise TypeError("artifact text chunks must be strings")
+        data = chunk.encode("utf-8")
+        _write_all(file_descriptor, data)
+        total += len(data)
+    return total

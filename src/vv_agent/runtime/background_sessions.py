@@ -16,7 +16,13 @@ from vv_agent.runtime.processes import (
 )
 from vv_agent.runtime.shell import prepare_shell_execution
 from vv_agent.types import ToolArtifactRef
-from vv_agent.workspace.artifacts import ArtifactPathInvalidError, bounded_text_preview, persist_text_artifact
+from vv_agent.workspace.artifacts import (
+    ArtifactPathInvalidError,
+    BoundedTextPreview,
+    bounded_captured_text_preview,
+    bounded_text_preview,
+    persist_captured_text_artifact,
+)
 
 if TYPE_CHECKING:
     from vv_agent.workspace.base import WorkspaceBackend
@@ -37,7 +43,7 @@ class _SessionState:
     process: subprocess.Popen[str]
     output_path: Path
     status: str = "running"
-    output: str = ""
+    preview: BoundedTextPreview | None = None
     exit_code: int | None = None
     listeners: list[BackgroundSessionListener] | None = None
     artifact: ToolArtifactRef | None = None
@@ -297,16 +303,20 @@ class BackgroundSessionManager:
             if session.status in {"completed", "failed", "timeout"}:
                 return self._snapshot(session), []
 
-            session.output = self._read_complete_output(session.output_path)
             process_returncode = getattr(session.process, "returncode", None)
             session.exit_code = process_returncode if process_returncode is not None else 0
             session.status = "completed" if session.exit_code == 0 else "failed"
+            self._capture_terminal_preview(session, fallback="")
+            self._ensure_artifact(
+                session,
+                fallback_backend=None,
+                fallback_task_id="",
+                fallback_tool_call_id="",
+            )
             payload = self._snapshot(session)
             listeners = list(session.listeners or [])
             session.listeners = []
 
-        if not bounded_text_preview(session.output).truncated:
-            remove_captured_output(session.output_path)
         return payload, listeners
 
     def _finalize_timeout(self, session_id: str) -> tuple[dict[str, Any], list[Any]]:
@@ -340,47 +350,56 @@ class BackgroundSessionManager:
             session.status = "timeout"
             process_returncode = getattr(session.process, "returncode", None)
             session.exit_code = process_returncode if process_returncode is not None else -9
-            session.output = self._read_complete_output(session.output_path)
-            if not session.output:
-                session.output = "Command timed out in background session"
+            self._capture_terminal_preview(session, fallback="Command timed out in background session")
+            self._ensure_artifact(
+                session,
+                fallback_backend=None,
+                fallback_task_id="",
+                fallback_tool_call_id="",
+            )
             payload = self._snapshot(session)
             listeners = list(session.listeners or [])
             session.listeners = []
 
-        if not bounded_text_preview(session.output).truncated:
-            remove_captured_output(session.output_path)
         return payload, listeners
 
     @staticmethod
-    def _read_complete_output(path: Path) -> str:
+    def _capture_terminal_preview(session: _SessionState, *, fallback: str) -> None:
         try:
-            return path.read_text(encoding="utf-8", errors="replace")
+            preview = bounded_captured_text_preview(session.output_path)
         except OSError:
-            return ""
+            preview = bounded_text_preview("")
+        if not preview.content and fallback:
+            preview = bounded_text_preview(fallback)
+        session.preview = preview
+        if not preview.truncated:
+            remove_captured_output(session.output_path)
 
     @staticmethod
     def _ensure_artifact(
         session: _SessionState,
         *,
-        fallback_backend: WorkspaceBackend,
+        fallback_backend: WorkspaceBackend | None,
         fallback_task_id: str,
         fallback_tool_call_id: str,
     ) -> None:
-        preview = bounded_text_preview(session.output)
+        preview = session.preview or bounded_text_preview("")
         if session.status not in {"completed", "failed", "timeout"} or not preview.truncated:
             return
         if session.artifact is not None:
             return
 
         backend = session.artifact_backend or fallback_backend
+        if backend is None:
+            return
         task_id = session.artifact_task_id.strip() or fallback_task_id
         tool_call_id = session.artifact_tool_call_id.strip() or fallback_tool_call_id
         try:
-            session.artifact = persist_text_artifact(
+            session.artifact = persist_captured_text_artifact(
                 backend,
                 task_id,
                 tool_call_id,
-                session.output,
+                session.output_path,
             )
         except Exception as exc:
             session.artifact_error = str(exc)
@@ -405,7 +424,7 @@ class BackgroundSessionManager:
 
     @staticmethod
     def _snapshot(session: _SessionState) -> dict[str, Any]:
-        preview = bounded_text_preview(session.output)
+        preview = session.preview or bounded_text_preview("")
         payload: dict[str, Any] = {
             "status": session.status,
             "session_id": session.session_id,

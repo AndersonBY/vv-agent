@@ -249,12 +249,16 @@ def test_runtime_routes_session_extraction_through_its_own_backend_model_pair(
         default_model=contract["model"],
     )
 
-    def assert_injected(request: LlmRequest) -> LLMResponse:
+    def assert_current_run_is_frozen(request: LlmRequest) -> LLMResponse:
+        assert "route extraction separately" not in request.messages[0].content
+        return LLMResponse(content="first run")
+
+    def assert_new_run_loads_memory(request: LlmRequest) -> LLMResponse:
         assert "route extraction separately" in request.messages[0].content
         return LLMResponse(content="done")
 
     runtime = AgentRuntime(
-        llm_client=ScriptedLLM(steps=[assert_injected]),
+        llm_client=ScriptedLLM(steps=[assert_current_run_is_frozen, assert_new_run_loads_memory]),
         model_provider=model_provider,
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
@@ -280,8 +284,10 @@ def test_runtime_routes_session_extraction_through_its_own_backend_model_pair(
     )
 
     result = runtime.run(task)
+    follow_up = runtime.run(task)
 
     assert result.status == AgentStatus.COMPLETED
+    assert follow_up.status == AgentStatus.COMPLETED
     assert model_provider.resolved_models == [contract["model"]]
     assert len(model_provider.resolved_models) == contract["resolution_count"]
     assert [request.model for request in extraction_requests] == [contract["request_model"]]
@@ -798,7 +804,7 @@ def test_memory_provider_attempt_errors_are_fail_open() -> None:
     assert after_error["error"] == contract["after_error"]["error"]
 
 
-def test_session_memory_refreshes_in_place_and_resets_token_baseline() -> None:
+def test_session_memory_compaction_does_not_refresh_the_current_prompt() -> None:
     contract = _CONTRACT["session_memory"]
     session_memory = SessionMemory(SessionMemoryConfig())
     session_memory.state.entries = [SessionMemoryEntry("decision", contract["stale_fact"], source_cycle=1)]
@@ -818,22 +824,15 @@ def test_session_memory_refreshes_in_place_and_resets_token_baseline() -> None:
         Message(role="assistant", content="a" * 120),
         Message(role="user", content="c" * 120),
     ]
-    stale = manager.apply_session_memory_context(messages)
     session_memory.state.entries = [SessionMemoryEntry("decision", contract["fresh_fact"], source_cycle=2)]
 
-    refreshed = manager.apply_session_memory_context(stale)
-
-    assert contract["stale_fact"] not in refreshed[0].content
-    assert contract["fresh_fact"] in refreshed[0].content
-    assert refreshed[0].content.count("<Session Memory>") == contract["block_count"]
-
-    compacted, changed = manager.compact(refreshed, cycle_index=3, force=True)
-    expected_baseline = manager._calculate_message_length(manager.apply_session_memory_context(compacted))
+    compacted, changed = manager.compact(messages, cycle_index=3, force=True)
+    expected_baseline = manager._calculate_message_length(compacted)
 
     assert changed is True
     assert session_memory.state.initialized is contract["initialized_after_compaction"]
     assert session_memory.state.tokens_at_last_extraction == expected_baseline
-    assert expected_baseline > manager._calculate_message_length(compacted)
+    assert contract["fresh_fact"] not in compacted[0].content
 
 
 def _artifact_path(message: Message) -> str:

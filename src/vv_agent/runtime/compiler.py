@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, cast
 
 from vv_agent.agent import Agent, RunContext
@@ -13,7 +14,9 @@ from vv_agent.context_providers import (
     ContextRequest,
     collect_context_fragments,
 )
+from vv_agent.memory.session_memory import load_session_memory_context
 from vv_agent.prompt import PromptBundle, PromptSection
+from vv_agent.prompt.builder import _trim_text, inject_session_memory_section
 from vv_agent.prompt.templates import render_sub_agents
 from vv_agent.run_config import RunConfig, ToolPolicy, _validate_bounded_int
 from vv_agent.tools.executor import ToolExposure
@@ -65,6 +68,7 @@ class AgentCompiler:
         run_id: str = "",
     ) -> AgentTask:
         model = run_config.model or agent.model or resolved.selected_model
+        task_id = f"{agent.name}_{uuid.uuid4().hex[:8]}"
         metadata = dict(agent.metadata)
         metadata.update(run_config.metadata)
         metadata["session_memory_enabled"] = run_config.session_memory_enabled
@@ -124,6 +128,12 @@ class AgentCompiler:
             provider_fragments=provider_fragments,
             max_prompt_chars=run_config.max_context_chars,
         )
+        prompt_bundle = self._inject_loaded_session_memory(
+            prompt_bundle=prompt_bundle,
+            metadata=metadata,
+            task_id=task_id,
+            workspace=run_config.workspace,
+        )
         if omitted_section_ids:
             metadata["omitted_prompt_section_ids"] = omitted_section_ids
 
@@ -134,7 +144,7 @@ class AgentCompiler:
         )
         assert max_cycles is not None
         return AgentTask(
-            task_id=f"{agent.name}_{uuid.uuid4().hex[:8]}",
+            task_id=task_id,
             model=str(resolved.model_id or model),
             prompt_bundle=prompt_bundle,
             user_prompt=input,
@@ -151,6 +161,25 @@ class AgentCompiler:
             initial_shared_state=dict(run_config.shared_state or {}),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _inject_loaded_session_memory(
+        *,
+        prompt_bundle: PromptBundle,
+        metadata: dict[str, Any],
+        task_id: str,
+        workspace: str | Path | None,
+    ) -> PromptBundle:
+        if metadata.get("session_memory_enabled") is not True or workspace is None:
+            return prompt_bundle
+        session_id = metadata.get("session_id")
+        storage_scope = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else task_id
+        context = load_session_memory_context(
+            workspace=Path(workspace).resolve(),
+            storage_scope=storage_scope,
+            storage_dir=str(metadata.get("session_memory_storage_dir", ".memory/session")),
+        )
+        return inject_session_memory_section(prompt_bundle, context)
 
     @staticmethod
     def _assemble_prompt_bundle(
@@ -238,6 +267,7 @@ class AgentCompiler:
                 code="checkpoint_definition_invalid",
             ) from exc
         self._validate_frozen_static_prompt(agent, prompt_bundle)
+        self._validate_frozen_checkpoint_messages(getattr(checkpoint, "messages", None), prompt_bundle)
 
         metadata: dict[str, Any] = {}
         run_metadata = definition.get("run_metadata")
@@ -296,7 +326,7 @@ class AgentCompiler:
     ) -> None:
         section_map = {section.id: section.text for section in prompt_bundle.sections}
         if isinstance(agent.instructions, str):
-            expected = agent.instructions.strip()
+            expected = _trim_text(agent.instructions)
             observed = section_map.get("agent_instructions")
             if observed != expected:
                 raise CheckpointError(
@@ -315,9 +345,31 @@ class AgentCompiler:
             expected_sub_agents = render_sub_agents(
                 "en-US",
                 {name: config.description for name, config in agent.sub_agents.items()},
-            ).strip()
-            if section_map.get("configured_sub_agents", "").strip() != expected_sub_agents:
+            )
+            if _trim_text(section_map.get("configured_sub_agents", "")) != _trim_text(expected_sub_agents):
                 raise CheckpointError(
                     "configured sub-agents do not match the frozen checkpoint prompt",
                     code="checkpoint_definition_mismatch",
                 )
+
+    @staticmethod
+    def _validate_frozen_checkpoint_messages(
+        messages: Any,
+        prompt_bundle: PromptBundle,
+    ) -> None:
+        if not isinstance(messages, list) or not messages:
+            raise CheckpointError(
+                "checkpoint is missing its frozen system message",
+                code="checkpoint_definition_mismatch",
+            )
+        first = messages[0]
+        if not isinstance(first, Message) or first.role != "system" or first.content != prompt_bundle.flatten():
+            raise CheckpointError(
+                "checkpoint system message does not match the frozen prompt bundle",
+                code="checkpoint_definition_mismatch",
+            )
+        if any(isinstance(message, Message) and message.role == "system" for message in messages[1:]):
+            raise CheckpointError(
+                "checkpoint contains a non-canonical system message",
+                code="checkpoint_definition_mismatch",
+            )

@@ -5,7 +5,10 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from vv_agent import Agent, RunConfig, ToolPolicy, function_tool, handoff
+from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.prompt import build_raw_system_prompt_bundle
@@ -222,3 +225,77 @@ def test_frozen_checkpoint_restores_run_metadata_when_system_metadata_is_empty()
     assert precedence_task.metadata["host_request_id"] == "request-42"
     assert precedence_task.metadata["model_context_window"] == 48_000
     assert stale_system_message.metadata["host_request_id"] == "stale-request"
+
+
+def test_agent_compiler_freezes_loaded_session_memory_into_a_new_run_bundle(tmp_path: Path) -> None:
+    storage = tmp_path / ".memory" / "session" / "shared-session" / "session_memory.json"
+    storage.parent.mkdir(parents=True)
+    storage.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"category": "decision", "content": "reuse the reviewed evidence", "source_cycle": 4, "importance": 9}
+                ],
+                "last_extracted_message_index": 3,
+                "tokens_at_last_extraction": 100,
+                "initialized": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    task = AgentCompiler().compile(
+        agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
+        input="continue",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            session_memory_enabled=True,
+            metadata={"session_id": "shared-session"},
+        ),
+        resolved=_resolved(),
+        trace_id="trace-session-memory",
+    )
+
+    assert [section.id for section in task.prompt_bundle.sections] == ["agent_instructions", "session_memory"]
+    assert "reuse the reviewed evidence" in task.prompt_bundle.flatten()
+
+
+def test_frozen_checkpoint_preserves_non_ascii_whitespace_in_static_instructions() -> None:
+    instructions = "\u00a0Answer.\u00a0"
+    definition = _frozen_definition(run_metadata={})
+    definition["prompt_bundle"] = build_raw_system_prompt_bundle(instructions).to_dict()
+    checkpoint = SimpleNamespace(
+        run_definition=definition,
+        messages=[Message(role="system", content=instructions)],
+        task_id="ascii-trim-checkpoint",
+    )
+
+    task = AgentCompiler().compile_frozen_checkpoint(
+        agent=Agent(name="assistant", instructions=instructions, model="model-id"),
+        run_config=RunConfig(),
+        resolved=_resolved(),
+        checkpoint=checkpoint,
+        trace_id="trace-ascii-trim",
+    )
+
+    assert task.prompt_bundle.flatten() == instructions
+
+
+def test_frozen_checkpoint_rejects_conflicting_system_history() -> None:
+    definition = _frozen_definition(run_metadata={})
+    checkpoint = SimpleNamespace(
+        run_definition=definition,
+        messages=[Message(role="system", content="untrusted system")],
+        task_id="conflicting-system-checkpoint",
+    )
+
+    with pytest.raises(CheckpointError, match="does not match") as error:
+        AgentCompiler().compile_frozen_checkpoint(
+            agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
+            run_config=RunConfig(),
+            resolved=_resolved(),
+            checkpoint=checkpoint,
+            trace_id="trace-conflicting-system",
+        )
+
+    assert error.value.code == "checkpoint_definition_mismatch"

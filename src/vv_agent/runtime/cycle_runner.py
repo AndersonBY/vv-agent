@@ -66,7 +66,6 @@ class CycleRunner:
             messages=messages,
             shared_state=shared,
         )
-        pre_compact_messages = memory_manager.apply_session_memory_context(pre_compact_messages)
         lifecycle_before_messages = pre_compact_messages
         preemptively_microcompacted = False
         preemptive_mode: CompactionMode = "none"
@@ -133,7 +132,6 @@ class CycleRunner:
         llm_response = None
 
         while True:
-            compacted_messages = memory_manager.apply_session_memory_context(compacted_messages)
             memory_usage_percentage = memory_manager.estimate_memory_usage_percentage(compacted_messages)
             tool_schemas = plan_tool_schemas(
                 registry=self.tool_registry,

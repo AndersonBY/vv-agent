@@ -18,8 +18,9 @@ from vv_agent.types import ToolExecutionResult, ToolResultStatus
 from vv_agent.workspace.artifacts import (
     BOUNDED_TEXT_CHARS,
     ArtifactPathInvalidError,
+    bounded_captured_text_preview,
     bounded_text_preview,
-    persist_text_artifact,
+    persist_captured_text_artifact,
 )
 
 _DANGEROUS_SNIPPETS = (
@@ -288,23 +289,22 @@ def run_bash_command(context: ToolContext, arguments: dict[str, Any]) -> ToolExe
         )
 
     try:
-        combined_output = started_process.output_path.read_text(encoding="utf-8", errors="replace")
+        preview = bounded_captured_text_preview(started_process.output_path)
     except OSError as exc:
         return builtin_error(
             f"failed to read command output: {exc}",
             "command_failed",
         )
-    if not combined_output and completed_exit_code != 0:
-        combined_output = f"command exited with code {completed_exit_code}"
-    preview = bounded_text_preview(combined_output)
+    if not preview.content and completed_exit_code != 0:
+        preview = bounded_text_preview(f"command exited with code {completed_exit_code}")
     artifact = None
     if preview.truncated:
         try:
-            artifact = persist_text_artifact(
+            artifact = persist_captured_text_artifact(
                 context.workspace_backend,
                 context.task_id,
                 context.tool_call_id,
-                combined_output,
+                started_process.output_path,
             )
         except ArtifactPathInvalidError as exc:
             return builtin_error(

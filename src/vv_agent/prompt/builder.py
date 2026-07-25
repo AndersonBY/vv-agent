@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from vv_agent.checkpoint import canonical_json_sha256
@@ -24,6 +26,22 @@ def _trim_text(value: str) -> str:
     return value.strip(_ASCII_WHITESPACE)
 
 
+def _freeze_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_json_value(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _thaw_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json_value(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class PromptSection:
     """One resolved, ordered system-prompt section."""
@@ -33,7 +51,7 @@ class PromptSection:
     stable: bool = True
     source: str | None = None
     cache_hint: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id:
@@ -49,11 +67,12 @@ class PromptSection:
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"prompt section {name} must be omitted or a non-empty string")
-        if not isinstance(self.metadata, dict) or not all(isinstance(key, str) for key in self.metadata):
+        if not isinstance(self.metadata, Mapping) or not all(isinstance(key, str) for key in self.metadata):
             raise TypeError("prompt section metadata must be an object with string keys")
-        canonical_json_sha256(self.metadata, "prompt section metadata")
+        metadata = _thaw_json_value(self.metadata)
+        canonical_json_sha256(metadata, "prompt section metadata")
         object.__setattr__(self, "text", text)
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(self, "metadata", _freeze_json_value(metadata))
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"id": self.id, "text": self.text, "stable": self.stable}
@@ -62,8 +81,12 @@ class PromptSection:
         if self.cache_hint is not None:
             payload["cache_hint"] = self.cache_hint
         if self.metadata:
-            payload["metadata"] = dict(self.metadata)
+            payload["metadata"] = _thaw_json_value(self.metadata)
         return payload
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> PromptSection:
+        memo[id(self)] = self
+        return self
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> PromptSection:
@@ -115,6 +138,10 @@ class PromptBundle:
     def flatten(self) -> str:
         return "\n\n".join(section.text for section in self.sections)
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> PromptBundle:
+        memo[id(self)] = self
+        return self
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "sections": [section.to_dict() for section in self.sections],
@@ -137,6 +164,25 @@ class PromptBundle:
             sections=tuple(PromptSection.from_dict(section) for section in raw_sections),
             stable_hash=stable_hash,
         )
+
+
+def inject_session_memory_section(bundle: PromptBundle, session_memory_context: str) -> PromptBundle:
+    """Freeze loaded Session Memory into a new run's resolved prompt bundle."""
+
+    context = _trim_text(session_memory_context)
+    if not context or any(section.id == "session_memory" for section in bundle.sections):
+        return bundle
+
+    section = PromptSection(
+        id="session_memory",
+        text=context,
+        stable=False,
+        source="session.memory",
+    )
+    sections = list(bundle.sections)
+    insertion_index = next((index for index, item in enumerate(sections) if item.id == "current_time"), len(sections))
+    sections.insert(insertion_index, section)
+    return PromptBundle(sections=tuple(sections))
 
 
 @dataclass(slots=True)

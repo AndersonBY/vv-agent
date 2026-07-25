@@ -72,6 +72,43 @@ def test_runtime_finishes_via_task_finish(tmp_path: Path) -> None:
     assert len(result.cycles) == 2
 
 
+def test_runtime_uses_the_frozen_bundle_as_the_only_initial_system_message(tmp_path: Path) -> None:
+    def assert_messages(request: LlmRequest) -> LLMResponse:
+        assert [(message.role, message.content) for message in request.messages] == [
+            ("system", "canonical system"),
+            ("user", "persisted user message"),
+            ("assistant", "persisted assistant message"),
+            ("user", "new request"),
+        ]
+        return LLMResponse(content="done")
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(steps=[assert_messages]),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    task = AgentTask(
+        task_id="canonical-system",
+        model="dummy-model",
+        prompt_bundle=build_raw_system_prompt_bundle("canonical system"),
+        user_prompt="new request",
+        max_cycles=1,
+        no_tool_policy="finish",
+    )
+
+    result = runtime.run(
+        task,
+        initial_messages=[
+            Message(role="system", content="untrusted system one"),
+            Message(role="user", content="persisted user message"),
+            Message(role="system", content="untrusted system two"),
+            Message(role="assistant", content="persisted assistant message"),
+        ],
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+
+
 def test_runtime_waits_for_user_when_ask_user_called(tmp_path: Path) -> None:
     llm = ScriptedLLM(
         steps=[
