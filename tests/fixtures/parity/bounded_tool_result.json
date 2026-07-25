@@ -86,7 +86,7 @@
     ],
     "unknown_fields": "reject",
     "path": {
-      "representation": "normalized_POSIX_workspace_relative_path",
+      "representation": "normalized_POSIX_logical_workspace_relative_path",
       "required_prefix": ".vv-agent/artifacts/",
       "pattern": "^\\.vv-agent/artifacts/(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}/)*[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
       "maximum_utf8_bytes": 512,
@@ -106,7 +106,10 @@
     "size_bytes": "non_negative_integer_equal_to_complete_artifact_bytes",
     "sha256": "lowercase_sha256_of_complete_artifact_bytes",
     "write_boundary": "effective_workspace_backend_after_originating_tool_policy_and_approval",
-    "local_adapter_resolution": "open_below_workspace_without_following_symlinks_in_any_segment",
+    "streaming_write": "workspace_backend_write_text_chunks_exclusive_consumes_normalized_UTF8_text_chunks_without_materializing_complete_terminal_output",
+    "logical_namespace": "reserved_logical_workspace_path_not_a_host_shell_path",
+    "local_adapter_resolution": "resolve_logical_artifact_path_below_private_artifact_root_without_following_symlinks_in_any_segment",
+    "shell_visibility": "private_artifact_storage_is_not_reachable_from_the_agent_shell_working_directory",
     "creation": "atomic_exclusive_create_then_fsync_before_reference",
     "collision": "generate_a_new_runtime_path_and_never_overwrite",
     "immutability": "bytes_do_not_change_after_reference_is_emitted",
@@ -118,6 +121,7 @@
     },
     "retention": "at_least_until_run_terminal_state_and_its_checkpoint_retention_end",
     "read_boundary": "existing_read_file_tool_with_normal_policy_path_and_baseline_checks",
+    "read_projection": "logical_artifact_path_resolves_only_through_the_effective_workspace_backend",
     "direct_host_path_or_bypass_reader": false
   },
   "cursor_contract": {
@@ -184,6 +188,7 @@
     "preview_includes_marker": true,
     "at_or_below_limit": "ordinary_result_without_artifact",
     "above_limit": "persist_complete_text_artifact_before_emitting_truncated_result",
+    "above_limit_persistence": "scan_for_bounded_preview_then_stream_normalized_capture_chunks_to_exclusive_artifact_without_full_output_materialization",
     "foreground_and_background_same_semantics": true,
     "repeated_terminal_poll": "return_same_immutable_artifact_reference",
     "temporary_capture_removed_only_after_artifact_write_succeeds": true,

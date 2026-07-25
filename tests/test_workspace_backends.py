@@ -61,7 +61,8 @@ class _FakeS3Client:
 
     def put_object(self, **kwargs: Any) -> None:
         key = str(kwargs["Key"])
-        body = bytes(kwargs["Body"])
+        raw_body = kwargs["Body"]
+        body = raw_body.read() if hasattr(raw_body, "read") else bytes(raw_body)
         assert kwargs["ContentLength"] == len(body)
         self.put_requests.append(dict(kwargs))
         if kwargs.get("IfNoneMatch") == "*" and key in self.objects:
@@ -122,6 +123,23 @@ def test_workspace_backends_create_artifacts_exclusively_and_keep_them_immutable
         assert backend.read_text(path) == "complete 中"
 
 
+def test_workspace_backends_write_artifact_chunks_without_changing_the_result(tmp_path: Path) -> None:
+    backends = [
+        LocalWorkspaceBackend(tmp_path / "local-chunks"),
+        MemoryWorkspaceBackend(),
+        _make_s3_backend(),
+    ]
+    path = ".vv-agent/artifacts/task-7/chunks.txt"
+
+    for backend in backends:
+        assert backend.write_text_chunks_exclusive(path, (chunk for chunk in ("complete ", "中"))) == len(
+            "complete 中".encode()
+        )
+        assert backend.read_text(path) == "complete 中"
+        assert path not in backend.list_files(".", "**/*")
+        assert backend.list_files(".vv-agent/artifacts", "**/*") == []
+
+
 def test_s3_exclusive_create_uses_conditional_put() -> None:
     backend = _make_s3_backend()
 
@@ -149,6 +167,20 @@ def test_artifact_persistence_retries_collision_without_overwrite(monkeypatch) -
     assert backend.read_text(artifact.path) == "complete"
 
 
+def test_captured_artifact_persistence_does_not_use_path_read_text(tmp_path: Path, monkeypatch) -> None:
+    backend = LocalWorkspaceBackend(tmp_path / "workspace")
+    capture = tmp_path / "capture.log"
+    capture.write_text("x" * 12_001, encoding="utf-8")
+
+    def fail_read_text(*_args, **_kwargs):
+        raise AssertionError("captured output must be consumed in chunks")
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+    artifact = artifact_runtime.persist_captured_text_artifact(backend, "task-7", "call-7", capture)
+
+    assert artifact.size_bytes == 12_001
+
+
 def test_memory_exclusive_write_treats_existing_directory_as_collision() -> None:
     backend = MemoryWorkspaceBackend()
     path = ".vv-agent/artifacts/task-7/call-7.txt"
@@ -158,7 +190,7 @@ def test_memory_exclusive_write_treats_existing_directory_as_collision() -> None
         backend.write_text_exclusive(path, "must not replace a directory")
 
 
-def test_local_exclusive_artifact_write_rejects_symlink_segment(tmp_path: Path) -> None:
+def test_local_artifact_storage_ignores_a_workspace_symlink_with_the_same_logical_path(tmp_path: Path) -> None:
     backend = LocalWorkspaceBackend(tmp_path / "workspace")
     external = tmp_path / "external"
     external.mkdir()
@@ -169,13 +201,27 @@ def test_local_exclusive_artifact_write_rejects_symlink_segment(tmp_path: Path) 
     except OSError:
         pytest.skip("directory symlinks are unavailable")
 
-    with pytest.raises(artifact_runtime.ArtifactPathInvalidError, match="artifact_path_invalid"):
-        backend.write_text_exclusive(
-            ".vv-agent/artifacts/task/call.txt",
-            "must stay inside workspace",
-        )
+    path = ".vv-agent/artifacts/task/call.txt"
+    backend.write_text_exclusive(path, "private artifact")
 
+    assert backend.read_text(path) == "private artifact"
     assert not (external / "task" / "call.txt").exists()
+
+
+def test_local_artifact_reads_ignore_shell_created_workspace_fakes(tmp_path: Path) -> None:
+    backend = LocalWorkspaceBackend(tmp_path / "workspace")
+    path = ".vv-agent/artifacts/task/call.txt"
+    backend.write_text_exclusive(path, "private artifact")
+
+    fake = backend.root / path
+    fake.parent.mkdir(parents=True)
+    fake.write_text("shell fake", encoding="utf-8")
+
+    assert backend.read_text(path) == "private artifact"
+    info = backend.file_info(path)
+    assert info is not None
+    assert info.path == path
+    assert path not in backend.list_files(".", "**/*")
 
 
 def test_local_regular_write_cannot_alias_into_artifact_root(tmp_path: Path) -> None:

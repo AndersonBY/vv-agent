@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from threading import RLock
 
@@ -48,9 +49,11 @@ class MemoryWorkspaceBackend:
 
     def list_files(self, base: str, glob: str) -> list[str]:
         base_n = self._norm(base)
+        if is_reserved_artifact_path(base_n):
+            return []
         pattern = f"{base_n}/{glob}" if base_n else glob
         with self._lock:
-            files = [p for p in self._files if _glob_match(p, pattern)]
+            files = [p for p in self._files if not is_reserved_artifact_path(p) and _glob_match(p, pattern)]
         files.sort()
         return files
 
@@ -82,8 +85,11 @@ class MemoryWorkspaceBackend:
         return len(data)
 
     def write_text_exclusive(self, path: str, content: str) -> int:
+        return self.write_text_chunks_exclusive(path, (content,))
+
+    def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
         key = "/".join(_exclusive_workspace_path_segments(path))
-        data = content.encode("utf-8")
+        data = b"".join(chunk.encode("utf-8") for chunk in chunks)
         with self._lock:
             if key in self._files or key in self._dirs:
                 raise FileExistsError(path)

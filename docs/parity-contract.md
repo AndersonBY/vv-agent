@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `4.0.5` at revision
-`c903234f1374de85ddda44608c4a7e259f13e6c3`. Its immutable release artifact has
-SHA-256 `92aaa062cdbd62513b2ee1d28e71c33d66f616e9884f09d8d18fc9753b113ff4`.
+`contract.lock.json` selects contract `4.1.0` at revision
+`0611a95012ce40ca4e70acc0b695e6cf4ddd7eee`. Its immutable release artifact has
+SHA-256 `376ffe70d497fa8b36667fe929e5241aede94e72091a12261f76286287124d23`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,8 +44,8 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-4.0.5.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v4.0.5/vv-agent-contract-4.0.5.zip
+  --artifact /path/to/vv-agent-contract-4.1.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v4.1.0/vv-agent-contract-4.1.0.zip
 ```
 
 ## Python Producer Map
@@ -140,6 +140,12 @@ return through the normal workspace policy; cursors reject changed content,
 mismatched paths, and invalid offsets. Large output is never hidden in generic
 metadata or automatically replayed into model context.
 
+For a local workspace, `.vv-agent/artifacts/` is a logical recovery namespace,
+not a shell-visible directory. The adapter maps it to private storage outside
+the shell working directory. Truncated terminal output is streamed into one
+exclusive immutable artifact, so the runtime does not materialize the complete
+capture in application memory and shell commands cannot mutate recovery bytes.
+
 `ToolMetadata` is the only typed capability declaration and contains
 `side_effect`, `idempotency`, `terminal`, `capability_tags`, and
 `cost_dimensions`. Generic host metadata is separate and cannot populate this
@@ -193,6 +199,12 @@ Session Memory defaults to disabled. Only the exact public
 workspace writes, or Session Memory model calls. Existing files, supplied
 context, seed data, parent configuration, and historical aliases do not enable
 it implicitly.
+
+When enabled, a newly compiled run reads persisted entries once and freezes
+them into its `PromptBundle`. Extraction during that run may persist new entries
+but never rewrites the active bundle; those entries become model-visible only
+in a later newly compiled run. Checkpoint resume restores the frozen section
+without rereading the store.
 
 ### App Server
 

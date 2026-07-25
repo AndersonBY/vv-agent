@@ -13,7 +13,9 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import importlib.util
+from collections.abc import Iterable
 from datetime import UTC, datetime
+from tempfile import SpooledTemporaryFile
 from typing import Any
 
 from vv_agent.workspace.artifacts import is_reserved_artifact_path
@@ -121,6 +123,8 @@ class S3WorkspaceBackend:
 
     def list_files(self, base: str, glob: str) -> list[str]:
         base_norm = _normalize_workspace_path(base)
+        if is_reserved_artifact_path(base_norm):
+            return []
         if not base_norm:
             search_prefix = self._prefix
         elif self._prefix:
@@ -137,7 +141,7 @@ class S3WorkspaceBackend:
         result: list[str] = []
         for key in all_keys:
             rel = self._rel(key)
-            if not rel or rel.endswith("/"):
+            if not rel or rel.endswith("/") or is_reserved_artifact_path(rel):
                 continue
             if fnmatch.fnmatch(rel, pattern) or self._glob_match(rel, pattern):
                 result.append(rel)
@@ -171,26 +175,35 @@ class S3WorkspaceBackend:
         return len(data)
 
     def write_text_exclusive(self, path: str, content: str) -> int:
+        return self.write_text_chunks_exclusive(path, (content,))
+
+    def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
         normalized = "/".join(_exclusive_workspace_path_segments(path))
-        data = content.encode("utf-8")
-        try:
-            self._client.put_object(
-                Bucket=self._bucket,
-                Key=self._key(normalized),
-                Body=data,
-                ContentLength=len(data),
-                IfNoneMatch="*",
-            )
-        except self._client.exceptions.ClientError as exc:
-            response = getattr(exc, "response", {})
-            error = response.get("Error", {}) if isinstance(response, dict) else {}
-            metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
-            code = str(error.get("Code", "")) if isinstance(error, dict) else ""
-            status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
-            if code in {"PreconditionFailed", "ConditionalRequestConflict", "412", "409"} or status in {409, 412}:
-                raise FileExistsError(path) from exc
-            raise
-        return len(data)
+        with SpooledTemporaryFile(max_size=1_048_576, mode="w+b") as staging:
+            size = 0
+            for chunk in chunks:
+                data = chunk.encode("utf-8")
+                staging.write(data)
+                size += len(data)
+            staging.seek(0)
+            try:
+                self._client.put_object(
+                    Bucket=self._bucket,
+                    Key=self._key(normalized),
+                    Body=staging,
+                    ContentLength=size,
+                    IfNoneMatch="*",
+                )
+            except self._client.exceptions.ClientError as exc:
+                response = getattr(exc, "response", {})
+                error = response.get("Error", {}) if isinstance(response, dict) else {}
+                metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+                code = str(error.get("Code", "")) if isinstance(error, dict) else ""
+                status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+                if code in {"PreconditionFailed", "ConditionalRequestConflict", "412", "409"} or status in {409, 412}:
+                    raise FileExistsError(path) from exc
+                raise
+        return size
 
     def file_info(self, path: str) -> FileInfo | None:
         key = self._key(path)

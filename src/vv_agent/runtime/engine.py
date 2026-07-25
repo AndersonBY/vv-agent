@@ -21,7 +21,7 @@ from vv_agent.budget import (
     HostCostMeter,
     RunBudgetLimits,
 )
-from vv_agent.checkpoint import utf16_sort_key
+from vv_agent.checkpoint import CheckpointError, utf16_sort_key
 from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import (
@@ -37,10 +37,12 @@ from vv_agent.events import (
 )
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
+from vv_agent.memory.session_memory import load_session_memory_context
 from vv_agent.memory.token_utils import resolve_model_token_limits
 from vv_agent.model import ModelProvider, ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_bundle, build_system_prompt_bundle
+from vv_agent.prompt.builder import inject_session_memory_section
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
@@ -452,6 +454,8 @@ class AgentRuntime:
         checkpoint_controller: CheckpointResumeController | None = None,
     ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
+        if checkpoint_controller is None:
+            self._freeze_loaded_session_memory_bundle(task=task, workspace_path=workspace_path)
         had_configured_disallowed_tools = "_vv_agent_disallowed_tools" in task.metadata
         configured_disallowed_tools = deepcopy(task.metadata.get("_vv_agent_disallowed_tools"))
         effective_shared_state = shared_state if shared_state is not None else task.initial_shared_state
@@ -463,15 +467,16 @@ class AgentRuntime:
             if "active_skills" not in shared and task.metadata.get("active_skills") is not None:
                 shared["active_skills"] = list(task.metadata.get("active_skills") or [])
 
-        messages = (
-            [self._copy_message(message) for message in prepared_initial_messages]
-            if prepared_initial_messages is not None
-            else self._build_initial_messages(
+        if prepared_initial_messages is not None:
+            messages = [self._copy_message(message) for message in prepared_initial_messages]
+            if checkpoint_controller is not None:
+                self._validate_frozen_checkpoint_messages(task=task, messages=messages)
+        else:
+            messages = self._build_initial_messages(
                 task=task,
                 initial_messages=(initial_messages if initial_messages is not None else (list(task.initial_messages) or None)),
                 user_message=user_message,
             )
-        )
         freeze_dynamic_tool_schema_hints(task)
         runtime_ctx = ctx if ctx is not None else ExecutionContext()
         if checkpoint_controller is not None:
@@ -1503,19 +1508,8 @@ class AgentRuntime:
         user_message: str | None,
     ) -> list[Message]:
         if initial_messages:
-            prepared = [self._copy_message(message) for message in initial_messages]
-            if not prepared or prepared[0].role != "system":
-                prepared.insert(0, Message(role="system", content=task.prompt_bundle.flatten(), metadata=dict(task.metadata)))
-            elif task.metadata:
-                merged_metadata = dict(task.metadata)
-                merged_metadata.update(prepared[0].metadata)
-                if task.metadata.get("is_sub_task") is True:
-                    for key in _RESERVED_SUB_AGENT_METADATA_KEYS:
-                        if key in task.metadata:
-                            merged_metadata[key] = task.metadata[key]
-                        else:
-                            merged_metadata.pop(key, None)
-                prepared[0].metadata = merged_metadata
+            prepared = [self._copy_message(message) for message in initial_messages if message.role != "system"]
+            prepared.insert(0, Message(role="system", content=task.prompt_bundle.flatten(), metadata=dict(task.metadata)))
             message_to_append = task.user_prompt if user_message is None else user_message
             if message_to_append:
                 prepared.append(Message(role="user", content=message_to_append))
@@ -1526,6 +1520,30 @@ class AgentRuntime:
             Message(role="system", content=task.prompt_bundle.flatten(), metadata=dict(task.metadata)),
             Message(role="user", content=first_user_message),
         ]
+
+    def _freeze_loaded_session_memory_bundle(self, *, task: AgentTask, workspace_path: Path) -> None:
+        if not task.use_workspace or not self._read_session_memory_enabled(task.metadata):
+            return
+        session_id = self._read_optional_str(task.metadata, "session_id")
+        context = load_session_memory_context(
+            workspace=workspace_path,
+            storage_scope=session_id or task.task_id,
+            storage_dir=str(task.metadata.get("session_memory_storage_dir", ".memory/session")),
+        )
+        task.prompt_bundle = inject_session_memory_section(task.prompt_bundle, context)
+
+    @staticmethod
+    def _validate_frozen_checkpoint_messages(*, task: AgentTask, messages: list[Message]) -> None:
+        if not messages or messages[0].role != "system" or messages[0].content != task.prompt_bundle.flatten():
+            raise CheckpointError(
+                "checkpoint system message does not match the frozen prompt bundle",
+                code="checkpoint_definition_mismatch",
+            )
+        if any(message.role == "system" for message in messages[1:]):
+            raise CheckpointError(
+                "checkpoint contains a non-canonical system message",
+                code="checkpoint_definition_mismatch",
+            )
 
     def _build_memory_manager(
         self,
@@ -2240,13 +2258,35 @@ class AgentRuntime:
                     )
 
                 try:
-                    run_metadata = dict(sub_task.metadata)
+                    task_template = sub_task
+                    if not is_initial_sub_run:
+                        task_template = self._build_sub_agent_task(
+                            parent_task=parent_task,
+                            sub_task_id=sub_task_id,
+                            sub_session_id=sub_session_id,
+                            sub_agent_name=request.agent_name,
+                            sub_agent=sub_agent,
+                            resolved_model_id=model_id,
+                            resolved_native_multimodal=resolved_config.native_multimodal,
+                            resolved_context_length=resolved_config.context_length,
+                            resolved_max_output_tokens=resolved_config.max_output_tokens,
+                            child_run_id=current_child_run_id,
+                            trace_id=current_trace_id,
+                            parent_run_id=current_parent_run_id,
+                            parent_tool_call_id=current_parent_tool_call_id,
+                            request=request,
+                            parent_shared_state=parent_shared_state,
+                            workspace_path=workspace_path,
+                            effective_model_settings=effective_model_settings,
+                            parent_tool_policy_metadata=current_policy_metadata,
+                        )
+                    run_metadata = dict(task_template.metadata)
                     if _sub_task_turn_snapshot is not None:
                         for key in _TOOL_POLICY_METADATA_KEYS:
                             run_metadata.pop(key, None)
                     run_metadata.update(current_policy_metadata)
                     run_task = replace(
-                        sub_task,
+                        task_template,
                         task_id=sub_task_id,
                         user_prompt=prompt,
                         metadata=self._canonical_sub_run_metadata(
@@ -2270,7 +2310,7 @@ class AgentRuntime:
                         child_session_id=sub_session_id,
                         child_agent_name=request.agent_name,
                         child_backend=resolved_config.backend,
-                        child_model=sub_task.model,
+                        child_model=run_task.model,
                         child_workspace=workspace_path,
                         child_metadata=run_task.metadata,
                         trace_id=current_trace_id,

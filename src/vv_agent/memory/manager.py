@@ -251,8 +251,8 @@ class MemoryManager:
         summary_removed = len(cleaned) != len(messages)
         sanitized_messages, sanitized = self._sanitize_empty_assistant_messages(cleaned)
         messages_changed = summary_removed or sanitized
-        working_messages = self.apply_session_memory_context(sanitized_messages)
-        if messages_changed or working_messages != sanitized_messages:
+        working_messages = sanitized_messages
+        if messages_changed:
             strongest_mode = "structural"
 
         message_length = self._calculate_effective_length(
@@ -260,21 +260,11 @@ class MemoryManager:
             total_tokens=total_tokens,
             recent_tool_call_ids=recent_tool_call_ids,
         )
-        extracted = self._maybe_extract_session_memory(
+        self._maybe_extract_session_memory(
             working_messages,
             cycle_index=cycle_index,
             current_tokens=message_length,
         )
-        if extracted:
-            before_refresh = working_messages
-            working_messages = self.apply_session_memory_context(sanitized_messages)
-            if working_messages != before_refresh:
-                strongest_mode = _strongest_compaction_mode(strongest_mode, "structural")
-            message_length = self._calculate_effective_length(
-                working_messages,
-                total_tokens=None,
-                recent_tool_call_ids=recent_tool_call_ids,
-            )
         microcompacted_messages = working_messages
         if not force and self.microcompact_trigger_threshold > 0 and message_length > self.microcompact_trigger_threshold:
             microcompacted_messages, cleared = self.microcompact_messages(
@@ -326,9 +316,8 @@ class MemoryManager:
             strongest_mode = _strongest_compaction_mode(strongest_mode, "summary")
             messages_changed = True
         if summarized and self.session_memory is not None:
-            post_compaction_messages = self.apply_session_memory_context(summarized_messages)
             self.session_memory.on_compaction(
-                current_tokens=self._calculate_message_length(post_compaction_messages),
+                current_tokens=self._calculate_message_length(summarized_messages),
             )
         return self._compaction_result(
             original_messages,

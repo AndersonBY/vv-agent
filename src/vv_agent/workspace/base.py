@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -54,6 +55,7 @@ class WorkspaceBackend(Protocol):
     def read_bytes(self, path: str) -> bytes: ...
     def write_text(self, path: str, content: str, *, append: bool = False) -> int: ...
     def write_text_exclusive(self, path: str, content: str) -> int: ...
+    def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int: ...
     def file_info(self, path: str) -> FileInfo | None: ...
     def exists(self, path: str) -> bool: ...
     def is_file(self, path: str) -> bool: ...
@@ -157,6 +159,9 @@ class DiscoveryFilteredWorkspaceBackend:
 
     def write_text_exclusive(self, path: str, content: str) -> int:
         return self._backend.write_text_exclusive(path, content)
+
+    def write_text_chunks_exclusive(self, path: str, chunks: Iterable[str]) -> int:
+        return self._backend.write_text_chunks_exclusive(path, chunks)
 
     def file_info(self, path: str) -> FileInfo | None:
         return self._backend.file_info(path)

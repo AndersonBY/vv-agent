@@ -321,7 +321,7 @@ def test_memory_recomputes_compacted_length_without_stale_total_tokens() -> None
     assert all("<Compressed Agent Memory>" not in message.content for message in compacted)
 
 
-def test_memory_compaction_preserves_session_memory_and_excludes_it_from_summary_prompt() -> None:
+def test_memory_compaction_persists_session_memory_without_rewriting_current_prompt() -> None:
     observed_prompts: list[str] = []
 
     def tracking_summary(prompt: str, backend: str | None, model: str | None) -> str:
@@ -352,7 +352,7 @@ def test_memory_compaction_preserves_session_memory_and_excludes_it_from_summary
         Message(role="user", content="c" * 40),
     ]
 
-    compacted, changed = manager.compact(messages, cycle_index=2, total_tokens=150)
+    compacted, changed = manager.compact(messages, cycle_index=2, total_tokens=150, force=True)
 
     assert changed is True
     assert len(compacted) == 2
@@ -361,12 +361,11 @@ def test_memory_compaction_preserves_session_memory_and_excludes_it_from_summary
     assert observed_prompts
     assert "<Session Memory>" not in observed_prompts[0]
 
-    request_messages = manager.apply_session_memory_context(compacted)
-    assert "<Session Memory>" in request_messages[0].content
-    assert "preserve prior decisions" in request_messages[0].content
+    assert all("<Session Memory>" not in message.content for message in compacted)
+    assert "preserve prior decisions" not in compacted[0].content
 
 
-def test_session_memory_projection_does_not_report_context_compression() -> None:
+def test_session_memory_extraction_does_not_mutate_current_prompt() -> None:
     session_memory = SessionMemory(SessionMemoryConfig(token_model="gpt-5.4"))
     session_memory.state.entries = [
         SessionMemoryEntry(
@@ -388,9 +387,9 @@ def test_session_memory_projection_does_not_report_context_compression() -> None
     updated, changed = manager.compact(messages)
 
     assert changed is False
-    assert updated != messages
-    assert "<Session Memory>" in updated[0].content
-    assert "keep the Python API small" in updated[0].content
+    assert updated == messages
+    assert "<Session Memory>" not in updated[0].content
+    assert "keep the Python API small" not in updated[0].content
 
 
 def test_memory_compaction_strips_analysis_and_restores_key_files(tmp_path: Path) -> None:

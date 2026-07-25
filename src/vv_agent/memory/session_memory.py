@@ -229,7 +229,6 @@ class SessionMemory:
             return
         if isinstance(data, dict):
             self.state = SessionMemoryState.from_dict(data)
-
     def _storage_path(self) -> Path | None:
         if self.workspace is None:
             return None
@@ -383,3 +382,22 @@ class SessionMemory:
             )
             self.state.entries.pop(drop_index)
             current_tokens = count_tokens(self.render_as_system_context(), model=self.config.token_model)
+
+
+def load_session_memory_context(
+    *,
+    workspace: Path | None,
+    storage_scope: str,
+    storage_dir: str,
+) -> str:
+    """Read persisted Session Memory once while resolving a new run's bundle."""
+
+    if workspace is None:
+        return ""
+    memory = SessionMemory(
+        SessionMemoryConfig(storage_dir=storage_dir),
+        workspace=workspace,
+        storage_scope=storage_scope,
+    )
+    memory.load()
+    return memory.render_as_system_context()

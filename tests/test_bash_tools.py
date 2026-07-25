@@ -660,7 +660,7 @@ def test_foreground_bash_uses_exact_preview_boundary_and_persists_complete_artif
     assert truncated.artifact is not None
     assert truncated.artifact.path.startswith(".vv-agent/artifacts/task-7/bash_truncated-")
     assert truncated.artifact.sha256 == hashlib.sha256(complete.encode()).hexdigest()
-    assert (tmp_path / truncated.artifact.path).read_text(encoding="utf-8") == complete
+    assert context.workspace_backend.read_text(truncated.artifact.path) == complete
 
 
 def test_foreground_bash_artifact_failure_keeps_complete_capture(tmp_path: Path, monkeypatch) -> None:
@@ -677,8 +677,8 @@ def test_foreground_bash_artifact_failure_keeps_complete_capture(tmp_path: Path,
             return 0
 
     class _FailingArtifactBackend(LocalWorkspaceBackend):
-        def write_text_exclusive(self, path: str, content: str) -> int:
-            del path, content
+        def write_text_chunks_exclusive(self, path: str, chunks) -> int:
+            del path, chunks
             raise RuntimeError("artifact store unavailable")
 
     monkeypatch.setattr(
@@ -698,7 +698,7 @@ def test_foreground_bash_artifact_failure_keeps_complete_capture(tmp_path: Path,
     assert output_file.read_text(encoding="utf-8") == "x" * 12_001
 
 
-def test_foreground_bash_rejects_artifact_symlink_segment(tmp_path: Path, monkeypatch) -> None:
+def test_foreground_bash_ignores_workspace_artifact_symlink(tmp_path: Path, monkeypatch) -> None:
     registry = build_default_registry()
     context = _context(tmp_path)
     output_file = tmp_path / "artifact-symlink.log"
@@ -729,9 +729,9 @@ def test_foreground_bash_rejects_artifact_symlink_segment(tmp_path: Path, monkey
         context,
     )
 
-    assert result.status_code is ToolResultStatus.ERROR
-    assert result.error_code == "artifact_path_invalid"
-    assert output_file.read_text(encoding="utf-8") == "x" * 12_001
+    assert result.status_code is ToolResultStatus.SUCCESS
+    assert result.artifact is not None
+    assert context.workspace_backend.read_text(result.artifact.path) == "x" * 12_001
     assert list(external.iterdir()) == []
 
 
@@ -782,7 +782,7 @@ def test_background_bash_reuses_terminal_artifact_across_polls(tmp_path: Path) -
 
     assert second.artifact == first_artifact
     assert second.content == probe.content
-    assert (tmp_path / first_artifact.path).read_text(encoding="utf-8") == "0" * 12_001
+    assert context.workspace_backend.read_text(first_artifact.path) == "0" * 12_001
 
 
 def test_background_bash_artifact_failure_keeps_complete_capture(tmp_path: Path) -> None:
@@ -790,8 +790,8 @@ def test_background_bash_artifact_failure_keeps_complete_capture(tmp_path: Path)
     context = _context(tmp_path)
 
     class _FailingArtifactBackend(LocalWorkspaceBackend):
-        def write_text_exclusive(self, path: str, content: str) -> int:
-            del path, content
+        def write_text_chunks_exclusive(self, path: str, chunks) -> int:
+            del path, chunks
             raise RuntimeError("artifact store unavailable")
 
     context.workspace_backend = _FailingArtifactBackend(tmp_path)

@@ -275,7 +275,7 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
     assert all("<Compressed Agent Memory>" not in message.content for message in sent_messages[0])
 
 
-def test_cycle_runner_reapplies_session_memory_after_full_compaction() -> None:
+def test_cycle_runner_keeps_the_frozen_prompt_after_session_memory_extraction() -> None:
     sent_messages: list[list[Message]] = []
 
     def capture(request: LlmRequest) -> LLMResponse:
@@ -306,9 +306,9 @@ def test_cycle_runner_reapplies_session_memory_after_full_compaction() -> None:
         task=_build_task(),
         messages=[
             Message(role="system", content="sys"),
-            Message(role="user", content="u" * 40),
-            Message(role="assistant", content="a" * 40),
-            Message(role="user", content="c" * 40),
+            Message(role="user", content="user evidence " * 40),
+            Message(role="assistant", content="assistant analysis " * 40),
+            Message(role="user", content="current request " * 40),
         ],
         cycle_index=2,
         memory_manager=memory_manager,
@@ -318,5 +318,7 @@ def test_cycle_runner_reapplies_session_memory_after_full_compaction() -> None:
 
     assert cycle_record.memory_compacted is True
     assert sent_messages
-    assert "<Session Memory>" in sent_messages[0][0].content
-    assert "session memory survives" in sent_messages[0][0].content
+    assert sent_messages[0][0].content == "sys"
+    assert "<Session Memory>" not in sent_messages[0][0].content
+    assert memory_manager.session_memory is not None
+    assert [entry.content for entry in memory_manager.session_memory.state.entries] == ["session memory survives"]

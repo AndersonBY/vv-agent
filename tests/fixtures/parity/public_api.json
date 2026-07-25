@@ -4993,6 +4993,38 @@
           }
         },
         {
+          "id": "write_text_chunks_exclusive",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "write_text_chunks_exclusive",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "path",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "chunks",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "write_text_chunks_exclusive"
+          }
+        },
+        {
           "id": "file_info",
           "kind": "operation",
           "python": {

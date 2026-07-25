@@ -1424,6 +1424,11 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
             _operation("read_text", "read_text", "read_text"),
             _operation("read_bytes", "read_bytes", "read_bytes"),
             _operation("write_text", "write_text", "write_text"),
+            _operation(
+                "write_text_chunks_exclusive",
+                "write_text_chunks_exclusive",
+                "write_text_chunks_exclusive",
+            ),
             _operation("file_info", "file_info", "file_info"),
             _operation("exists", "exists", "exists"),
             _operation("is_file", "is_file", "is_file"),
@@ -1992,7 +1997,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 286
+        == 287
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS
