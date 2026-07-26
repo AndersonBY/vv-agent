@@ -40,11 +40,7 @@ def test_cache_break_tracker_detects_system_and_tool_changes() -> None:
 
 def test_cache_size_estimation_uses_compact_json_and_unicode_characters() -> None:
     tool = {"name": "读取", "input_schema": {"type": "object", "a": 1}}
-    assert _estimate_tool_chars(tool) == len(
-        json.dumps(tool, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    )
+    assert _estimate_tool_chars(tool) == len(json.dumps(tool, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
     block = {"type": "tool_result", "content": {"文本": "你好"}}
-    assert _estimate_block_chars(block) == len(
-        json.dumps(block["content"], ensure_ascii=False, separators=(",", ":"))
-    )
+    assert _estimate_block_chars(block) == len(json.dumps(block["content"], ensure_ascii=False, separators=(",", ":")))

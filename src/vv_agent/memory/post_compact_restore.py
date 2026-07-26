@@ -38,9 +38,7 @@ def restore_key_files(
 
     workspace_root = workspace.resolve()
     indexed_files: list[tuple[int, dict[str, Any]]] = [
-        (index, cast(dict[str, Any], item))
-        for index, item in enumerate(raw_files)
-        if isinstance(item, dict)
+        (index, cast(dict[str, Any], item)) for index, item in enumerate(raw_files) if isinstance(item, dict)
     ]
     indexed_files.sort(
         key=lambda item: (
@@ -72,7 +70,7 @@ def restore_key_files(
             max(config.max_tokens_per_file, 1),
             model=config.token_model,
         )
-        candidate = f"<file path=\"{path_value}\" action=\"{action}\">\n{content}\n</file>"
+        candidate = f'<file path="{path_value}" action="{action}">\n{content}\n</file>'
         candidate_tokens = count_tokens(candidate, model=config.token_model)
         if total_tokens + candidate_tokens > config.total_budget_tokens:
             break

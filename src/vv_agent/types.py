@@ -537,9 +537,7 @@ class TaskTokenUsage:
         return usage
 
 
-_ARTIFACT_PATH_RE = re.compile(
-    r"^\.vv-agent/artifacts/(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}/)*[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
-)
+_ARTIFACT_PATH_RE = re.compile(r"^\.vv-agent/artifacts/(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}/)*[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TOOL_RESULT_FORBIDDEN_METADATA_KEYS = frozenset({"content", "instructions", "output", "stderr", "stdout"})
 
 
@@ -604,12 +602,7 @@ class ToolResultCursor:
             path_bytes = self.path.encode("utf-8") if isinstance(self.path, str) else b""
         except UnicodeEncodeError as exc:
             raise ValueError("tool_result_invalid: cursor path must be a normalized caller-visible path") from exc
-        if (
-            not path_bytes
-            or "\x00" in self.path
-            or "\\" in self.path
-            or posixpath.normpath(self.path) != self.path
-        ):
+        if not path_bytes or "\x00" in self.path or "\\" in self.path or posixpath.normpath(self.path) != self.path:
             raise ValueError("tool_result_invalid: cursor path must be a normalized caller-visible path")
         if (
             isinstance(self.offset_chars, bool)

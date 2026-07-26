@@ -255,13 +255,7 @@ def _write_exclusive_chunks_at(root: Path, segments: tuple[str, ...], chunks: It
             os.close(directory_fd)
             directory_fd = next_fd
 
-        file_flags = (
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-            | os.O_NOFOLLOW
-            | getattr(os, "O_CLOEXEC", 0)
-        )
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
         file_fd = os.open(segments[-1], file_flags, 0o600, dir_fd=directory_fd)
         try:
             total = _write_chunks(file_fd, chunks)

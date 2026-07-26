@@ -12,6 +12,14 @@ python3 scripts/contract_snapshot.py check
 Canonical fixtures live in `../vv-agent-contract/`; never edit
 `tests/fixtures/parity/` directly.
 
+After adopting a contract revision that changes `builtin_tools.json`, regenerate
+the readable Python schema source and verify that generation is reproducible:
+
+```bash
+uv run python scripts/generate_builtin_tool_schemas.py
+uv run pytest tests/test_builtin_tool_schema_generation.py tests/test_tool_schema_contract.py
+```
+
 ## Environment
 
 ```bash
@@ -38,10 +46,11 @@ uv run pytest tests/test_tools.py
 uv run pytest tests/test_app_server_jsonrpc.py tests/test_app_server_initialize.py tests/test_app_server_thread_turn.py
 ```
 
-Run linting before finishing:
+Run formatting and linting before finishing:
 
 ```bash
-uv run ruff check
+uv run ruff format --check .
+uv run ruff check .
 ```
 
 Run the full non-live test suite before reporting broad completion:

@@ -85,12 +85,8 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "run_started": frozenset({"input"}),
     "agent_started": frozenset(),
     "cycle_started": frozenset(),
-    "model_call_started": frozenset(
-        {"call_id", "operation_id", "attempt", "operation", "backend", "model"}
-    ),
-    "model_call_completed": frozenset(
-        {"call_id", "operation_id", "attempt", "operation", "backend", "model", "usage"}
-    ),
+    "model_call_started": frozenset({"call_id", "operation_id", "attempt", "operation", "backend", "model"}),
+    "model_call_completed": frozenset({"call_id", "operation_id", "attempt", "operation", "backend", "model", "usage"}),
     "model_call_failed": frozenset(
         {
             "call_id",
@@ -196,9 +192,7 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
 }
 _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "run_started": frozenset({"input"}),
-    "model_call_started": frozenset(
-        {"call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model"}
-    ),
+    "model_call_started": frozenset({"call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model"}),
     "model_call_completed": frozenset(
         {"call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model", "usage"}
     ),

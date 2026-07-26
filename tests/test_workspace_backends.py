@@ -132,9 +132,7 @@ def test_workspace_backends_write_artifact_chunks_without_changing_the_result(tm
     path = ".vv-agent/artifacts/task-7/chunks.txt"
 
     for backend in backends:
-        assert backend.write_text_chunks_exclusive(path, (chunk for chunk in ("complete ", "中"))) == len(
-            "complete 中".encode()
-        )
+        assert backend.write_text_chunks_exclusive(path, (chunk for chunk in ("complete ", "中"))) == len("complete 中".encode())
         assert backend.read_text(path) == "complete 中"
         assert path not in backend.list_files(".", "**/*")
         assert backend.list_files(".vv-agent/artifacts", "**/*") == []

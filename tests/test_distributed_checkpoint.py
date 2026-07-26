@@ -365,11 +365,7 @@ def test_distributed_worker_response_matches_all_canonical_and_invalid_cases() -
 
 def test_distributed_worker_response_producer_preserves_bounded_tool_result_fields() -> None:
     fixture = json.loads(WORKER_RESPONSE_FIXTURE_PATH.read_text(encoding="utf-8"))
-    payload = next(
-        case["response"]
-        for case in fixture["valid_cases"]
-        if case["name"] == "terminal_candidate"
-    )
+    payload = next(case["response"] for case in fixture["valid_cases"] if case["name"] == "terminal_candidate")
     decoded = DistributedWorkerResponse.from_dict(payload)
     assert decoded.result is not None
     assert decoded.checkpoint_revision is not None

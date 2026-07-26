@@ -56,8 +56,7 @@ class NativeCycleOutcome:
                 CompletionReason(self.completion_reason),
             )
         if self.completion_tool_name is not None and (
-            not isinstance(self.completion_tool_name, str)
-            or not self.completion_tool_name.strip()
+            not isinstance(self.completion_tool_name, str) or not self.completion_tool_name.strip()
         ):
             raise ValueError("completion_tool_name must be a non-empty string or None")
         if not isinstance(self.steer_allowed, bool):

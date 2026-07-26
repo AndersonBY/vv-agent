@@ -229,6 +229,7 @@ class SessionMemory:
             return
         if isinstance(data, dict):
             self.state = SessionMemoryState.from_dict(data)
+
     def _storage_path(self) -> Path | None:
         if self.workspace is None:
             return None

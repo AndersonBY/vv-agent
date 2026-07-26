@@ -27,5 +27,6 @@ __all__ = [
 def __getattr__(name: str) -> type:
     if name == "S3WorkspaceBackend":
         from vv_agent.workspace.s3 import S3WorkspaceBackend
+
         return S3WorkspaceBackend
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

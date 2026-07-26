@@ -541,9 +541,7 @@ class MessageProcessor:
             self._router.send_error(
                 connection_id,
                 request.id,
-                AppServerError.invalid_params(
-                    "turn/resume requires exactly threadId, turnId, and checkpointKey"
-                ),
+                AppServerError.invalid_params("turn/resume requires exactly threadId, turnId, and checkpointKey"),
             )
             return
         thread_id = self._required_string_param(connection_id, request, params, "threadId")

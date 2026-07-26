@@ -77,6 +77,9 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
+      - name: Verify formatting
+        run: uv run ruff format --check .
+
       - name: Run linting
         run: uv run ruff check .
 

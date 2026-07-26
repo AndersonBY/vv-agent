@@ -745,9 +745,7 @@ class BudgetEvaluator:
             expected_currency=expected_currency,
             observed_currency=observed_currency,
         )
-        self._unavailable = dict(
-            sorted(self._unavailable.items(), key=lambda item: _DIMENSION_ORDER[item[0]])
-        )
+        self._unavailable = dict(sorted(self._unavailable.items(), key=lambda item: _DIMENSION_ORDER[item[0]]))
 
     def _strict_unavailable(self, boundary: BudgetEnforcementBoundary) -> BudgetExhaustion | None:
         if self.limits.unavailable_metric_policy is not UnavailableMetricPolicy.STOP:

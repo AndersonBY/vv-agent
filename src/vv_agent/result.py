@@ -90,10 +90,7 @@ class _ApprovalConsumption:
     ) -> bool:
         with self._lock:
             if interruption_id in self._consumed:
-                return bool(
-                    checkpoint_key is not None
-                    and self._consumed[interruption_id] == checkpoint_key
-                )
+                return bool(checkpoint_key is not None and self._consumed[interruption_id] == checkpoint_key)
             self._consumed[interruption_id] = checkpoint_key
             return True
 
@@ -180,9 +177,7 @@ class RunResult:
             "budget_usage": self.budget_usage.to_dict() if self.budget_usage is not None else None,
             "budget_exhaustion": self.budget_exhaustion.to_dict() if self.budget_exhaustion is not None else None,
             "checkpoint_key": self.checkpoint_key,
-            "resume_observation": (
-                self.resume_observation.to_dict() if self.resume_observation is not None else None
-            ),
+            "resume_observation": (self.resume_observation.to_dict() if self.resume_observation is not None else None),
             "events": [event.to_dict() for event in self.events],
             "token_usage": self.token_usage.to_dict(),
             "trace_id": self.trace_id,
@@ -198,11 +193,7 @@ class RunResult:
     def _resolved_model_dict(self) -> dict[str, Any] | None:
         if self.resolved_model is None:
             return None
-        endpoint = (
-            self.resolved_model.endpoint_options[0].endpoint.endpoint_id
-            if self.resolved_model.endpoint_options
-            else None
-        )
+        endpoint = self.resolved_model.endpoint_options[0].endpoint.endpoint_id if self.resolved_model.endpoint_options else None
         return {
             "backend": self.resolved_model.backend,
             "requested_model": self.resolved_model.requested_model,

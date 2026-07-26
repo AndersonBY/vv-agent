@@ -121,9 +121,7 @@ def resolve_model_token_limits(model: str) -> tuple[int | None, int | None]:
                 None,
             )
         if isinstance(setting, dict):
-            return _coerce_positive_int(setting.get("context_length")), _coerce_positive_int(
-                setting.get("max_output_tokens")
-            )
+            return _coerce_positive_int(setting.get("context_length")), _coerce_positive_int(setting.get("max_output_tokens"))
 
     return None, None
 
@@ -134,9 +132,7 @@ def _estimate_tokens(text: str) -> int:
         return 0
 
     cjk_chars = sum(
-        1
-        for char in text
-        if "\u4e00" <= char <= "\u9fff" or "\u3000" <= char <= "\u303f" or "\uff00" <= char <= "\uffef"
+        1 for char in text if "\u4e00" <= char <= "\u9fff" or "\u3000" <= char <= "\u303f" or "\uff00" <= char <= "\uffef"
     )
     ascii_chars = len(text) - cjk_chars
     return max(1, int(cjk_chars * 1.5 + ascii_chars * 0.25))

@@ -197,10 +197,7 @@ class OperationJournalEntry:
                         code="model_identity_invalid",
                     )
         else:
-            if any(
-                value is not None
-                for value in (self.model_operation, self.backend, self.model, self.call_id)
-            ):
+            if any(value is not None for value in (self.model_operation, self.backend, self.model, self.call_id)):
                 raise CheckpointError(
                     "tool journal entry cannot contain model identity fields",
                     code="operation_kind_fields_invalid",
@@ -854,10 +851,7 @@ def _validate_model_journal_entry_accounting(checkpoint: Checkpoint, journal: Op
         if entry.event.get("type") in {"model_call_started", "model_call_completed", "model_call_failed"}
         and (
             entry.event.get("call_id") == journal.call_id
-            or (
-                entry.event.get("operation_id") == journal.operation_id
-                and entry.event.get("attempt") == journal.attempt
-            )
+            or (entry.event.get("operation_id") == journal.operation_id and entry.event.get("attempt") == journal.attempt)
         )
     ]
     started_events = [event for event in event_candidates if event["type"] == "model_call_started"]
@@ -894,9 +888,7 @@ def _validate_model_journal_entry_accounting(checkpoint: Checkpoint, journal: Op
         OperationState.FAILED: {ModelCallStatus.FAILED, ModelCallStatus.AMBIGUOUS},
         OperationState.AMBIGUOUS: {ModelCallStatus.AMBIGUOUS},
     }.get(journal.state)
-    expected_event_type = (
-        "model_call_completed" if record.status is ModelCallStatus.COMPLETED else "model_call_failed"
-    )
+    expected_event_type = "model_call_completed" if record.status is ModelCallStatus.COMPLETED else "model_call_failed"
     if expected_statuses is None or record.status not in expected_statuses or terminal_event["type"] != expected_event_type:
         raise CheckpointError(
             "model journal terminal state does not match its accounting evidence",
@@ -959,8 +951,7 @@ def _model_record_identity(record: ModelCallRecord) -> tuple[Any, ...]:
 
 def _model_event_identity(event: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(
-        event.get(field)
-        for field in ("call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model")
+        event.get(field) for field in ("call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model")
     )
 
 

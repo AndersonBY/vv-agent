@@ -174,12 +174,14 @@ def _entries_from_dict(
     metadata_raw = item.get("metadata")
     metadata = {str(k): str(v) for k, v in metadata_raw.items()} if isinstance(metadata_raw, dict) else None
 
-    return [SkillEntry(
-        name=name,
-        description=description,
-        location=location,
-        instructions=instructions,
-        compatibility=compatibility,
-        allowed_tools=allowed_tools,
-        metadata=metadata,
-    )]
+    return [
+        SkillEntry(
+            name=name,
+            description=description,
+            location=location,
+            instructions=instructions,
+            compatibility=compatibility,
+            allowed_tools=allowed_tools,
+            metadata=metadata,
+        )
+    ]

@@ -4,5 +4,4 @@ from typing import Protocol
 
 
 class SkillIntegration(Protocol):
-    def enabled(self) -> bool:
-        ...
+    def enabled(self) -> bool: ...

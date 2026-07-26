@@ -64,10 +64,12 @@ def test_normalize_dict_with_location_fallback(tmp_path: Path) -> None:
 
 def test_normalize_deduplicates_by_name(tmp_path: Path) -> None:
     _write_skill(tmp_path / "dup", "dup", "First")
-    entries = normalize_skill_list([
-        str(tmp_path / "dup"),
-        {"name": "dup", "description": "Second"},
-    ])
+    entries = normalize_skill_list(
+        [
+            str(tmp_path / "dup"),
+            {"name": "dup", "description": "Second"},
+        ]
+    )
     assert len(entries) == 1
     assert entries[0].description == "First"
 
@@ -87,14 +89,18 @@ def test_normalize_returns_empty_for_none() -> None:
 
 
 def test_normalize_dict_with_instructions() -> None:
-    entries = normalize_skill_list([{
-        "name": "manual",
-        "description": "Manual skill",
-        "instructions": "Do the thing",
-        "compatibility": "python>=3.10",
-        "allowed-tools": "bash read_file",
-        "metadata": {"author": "test"},
-    }])
+    entries = normalize_skill_list(
+        [
+            {
+                "name": "manual",
+                "description": "Manual skill",
+                "instructions": "Do the thing",
+                "compatibility": "python>=3.10",
+                "allowed-tools": "bash read_file",
+                "metadata": {"author": "test"},
+            }
+        ]
+    )
     assert len(entries) == 1
     e = entries[0]
     assert e.name == "manual"

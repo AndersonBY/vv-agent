@@ -17,8 +17,10 @@ _PNG_1X1 = bytes.fromhex(
 
 def _context(tmp_path: Path) -> ToolContext:
     return ToolContext(
-        workspace=tmp_path, shared_state={"todo_list": []},
-        cycle_index=1, workspace_backend=LocalWorkspaceBackend(tmp_path),
+        workspace=tmp_path,
+        shared_state={"todo_list": []},
+        cycle_index=1,
+        workspace_backend=LocalWorkspaceBackend(tmp_path),
     )
 
 

@@ -39,16 +39,12 @@ def test_assigned_sub_task_identity_nesting_restores_only_unconsumed_outer_value
 
 
 def test_assigned_sub_task_identity_cleans_up_after_exception_and_restores_outer_scope() -> None:
-    with pytest.raises(RuntimeError, match="scope failed"), assigned_sub_task_identity(
-        "failed-task", "failed-session"
-    ):
+    with pytest.raises(RuntimeError, match="scope failed"), assigned_sub_task_identity("failed-task", "failed-session"):
         raise RuntimeError("scope failed")
     assert _take_pair() is None
 
     with assigned_sub_task_identity("outer-task", "outer-session"):
-        with pytest.raises(RuntimeError, match="inner failed"), assigned_sub_task_identity(
-            "inner-task", "inner-session"
-        ):
+        with pytest.raises(RuntimeError, match="inner failed"), assigned_sub_task_identity("inner-task", "inner-session"):
             raise RuntimeError("inner failed")
         assert _take_pair() == ("outer-task", "outer-session")
     assert _take_pair() is None
@@ -65,10 +61,7 @@ def test_assigned_sub_task_identity_is_isolated_across_async_tasks_and_threads()
     async def run_async_workers() -> list[tuple[tuple[str, str] | None, tuple[str, str] | None]]:
         return list(await asyncio.gather(*(async_worker(index) for index in range(3))))
 
-    assert asyncio.run(run_async_workers()) == [
-        ((f"async-task-{index}", f"async-session-{index}"), None)
-        for index in range(3)
-    ]
+    assert asyncio.run(run_async_workers()) == [((f"async-task-{index}", f"async-session-{index}"), None) for index in range(3)]
 
     barrier = threading.Barrier(2)
 
@@ -82,8 +75,5 @@ def test_assigned_sub_task_identity_is_isolated_across_async_tasks_and_threads()
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(thread_worker, range(2)))
 
-    assert results == [
-        ((f"thread-task-{index}", f"thread-session-{index}"), None, True)
-        for index in range(2)
-    ]
+    assert results == [((f"thread-task-{index}", f"thread-session-{index}"), None, True) for index in range(2)]
     assert _take_pair() is None

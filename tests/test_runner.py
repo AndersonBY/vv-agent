@@ -110,11 +110,7 @@ def test_runner_path_workspace_isolated_from_process_cwd(tmp_path: Path, monkeyp
     monkeypatch.chdir(process_cwd)
     llm = ScriptedLLM(
         steps=[
-            LLMResponse(
-                content=json.dumps(
-                    [{"category": "key_fact", "content": "workspace isolation marker", "importance": 8}]
-                )
-            ),
+            LLMResponse(content=json.dumps([{"category": "key_fact", "content": "workspace isolation marker", "importance": 8}])),
             LLMResponse(content="done"),
         ]
     )

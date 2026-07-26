@@ -235,15 +235,9 @@ def test_model_lifecycle_app_server_projection_matches_shared_fixture() -> None:
         error_code="provider_rejected",
     )
 
-    assert _mapped_notifications(started, thread_id="thread-model", turn_id="turn-model") == contract[
-        "startedNotifications"
-    ]
-    assert _mapped_notifications(completed, thread_id="thread-model", turn_id="turn-model") == contract[
-        "completedNotifications"
-    ]
-    assert _mapped_notifications(failed, thread_id="thread-model", turn_id="turn-model") == contract[
-        "failedNotifications"
-    ]
+    assert _mapped_notifications(started, thread_id="thread-model", turn_id="turn-model") == contract["startedNotifications"]
+    assert _mapped_notifications(completed, thread_id="thread-model", turn_id="turn-model") == contract["completedNotifications"]
+    assert _mapped_notifications(failed, thread_id="thread-model", turn_id="turn-model") == contract["failedNotifications"]
     notifications = [
         *contract["startedNotifications"],
         *contract["completedNotifications"],

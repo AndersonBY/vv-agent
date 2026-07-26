@@ -43,9 +43,7 @@ class ThreadBackend:
         messages = initial_messages
         cycles: list[CycleRecord] = []
         start_cycle = 1
-        checkpoint_controller = (
-            ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
-        )
+        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
         if isinstance(checkpoint_controller, CheckpointResumeController):
             assert ctx is not None
             snapshot_provider = ctx.metadata.get("_vv_agent_checkpoint_budget_snapshot")
@@ -73,12 +71,15 @@ class ThreadBackend:
                     )
 
             result = cycle_executor(
-                cycle_index, messages, cycles, shared_state, ctx,
+                cycle_index,
+                messages,
+                cycles,
+                shared_state,
+                ctx,
             )
             if (
                 result is None
-                and
-                isinstance(checkpoint_controller, CheckpointResumeController)
+                and isinstance(checkpoint_controller, CheckpointResumeController)
                 and cycles
                 and cycles[-1].index == cycle_index
             ):

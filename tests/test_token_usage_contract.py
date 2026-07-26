@@ -51,10 +51,10 @@ def test_aggregation_matches_canonical_cache_observation_cases() -> None:
                     model="test-model",
                     status=ModelCallStatus.COMPLETED,
                     usage=TokenUsage(
-                    total_tokens=1,
-                    usage_source=UsageSource.PROVIDER_REPORTED,
-                    cache_usage=CacheUsage.from_dict(observation),
-                ),
+                        total_tokens=1,
+                        usage_source=UsageSource.PROVIDER_REPORTED,
+                        cache_usage=CacheUsage.from_dict(observation),
+                    ),
                     error_code=None,
                 )
             )

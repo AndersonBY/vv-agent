@@ -92,8 +92,7 @@ def validate_snapshot(fixtures: Path) -> dict[str, Any]:
     actual = {path.relative_to(fixtures).as_posix() for path in snapshot_files(fixtures)}
     if actual != set(entries):
         raise SnapshotError(
-            f"fixture coverage mismatch: missing={sorted(actual - set(entries))}, "
-            f"stale={sorted(set(entries) - actual)}"
+            f"fixture coverage mismatch: missing={sorted(actual - set(entries))}, stale={sorted(set(entries) - actual)}"
         )
     for relative, expected in entries.items():
         actual_digest = sha256_file(fixtures / relative)
@@ -154,9 +153,7 @@ def contract_source(source: Path, revision: str | None = None) -> dict[str, Any]
 
 
 def compare_trees(expected: Path, actual: Path) -> None:
-    expected_files = {
-        path.relative_to(expected).as_posix(): path for path in expected.rglob("*") if path.is_file()
-    }
+    expected_files = {path.relative_to(expected).as_posix(): path for path in expected.rglob("*") if path.is_file()}
     actual_files = {path.relative_to(actual).as_posix(): path for path in actual.rglob("*") if path.is_file()}
     if set(expected_files) != set(actual_files):
         raise SnapshotError(
@@ -356,8 +353,7 @@ def verify_adoption(
         )
         if result.returncode != 0:
             raise SnapshotError(
-                f"release revision {revision} does not contain centrally verified {implementation} revision "
-                f"{verified_revision}"
+                f"release revision {revision} does not contain centrally verified {implementation} revision {verified_revision}"
             )
 
     return {

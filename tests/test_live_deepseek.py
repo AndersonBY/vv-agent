@@ -37,11 +37,7 @@ class _RecordingClient:
             "request_max_tokens": request.model_settings.max_tokens if request.model_settings is not None else None,
         }
         try:
-            response = (
-                self._inner.complete_with_stream(request, stream_callback)
-                if streaming
-                else self._inner.complete(request)
-            )
+            response = self._inner.complete_with_stream(request, stream_callback) if streaming else self._inner.complete(request)
         except BaseException as exc:
             self._observations.append({**request_summary, "error_type": type(exc).__name__})
             raise
@@ -158,9 +154,7 @@ def test_deepseek_session_memory_probe_accounts_for_every_model_call(tmp_path: P
 
     monkeypatch.setattr(SessionMemory, "extract", observed_extract)
     provider = _RecordingProvider(
-        VvLlmModelProvider.from_settings_file(settings_file)
-        .with_default_backend(backend)
-        .with_timeout_seconds(300)
+        VvLlmModelProvider.from_settings_file(settings_file).with_default_backend(backend).with_timeout_seconds(300)
     )
     agent = Agent(
         name="deepseek-session-memory-probe",

@@ -351,6 +351,7 @@ class CycleRunner:
             model_settings=model_settings,
             prompt_bundle=prompt_bundle,
         )
+
         def invoke() -> LLMResponse:
             if stream_callback is None:
                 return self.llm_client.complete(request)

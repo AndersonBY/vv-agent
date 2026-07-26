@@ -292,9 +292,7 @@ def _checkpoint_with_model_journal(
         checkpoint.claim_token = None
         checkpoint.claimed_cycle = None
         checkpoint.lease_expires_at_ms = None
-    if journal.state is not OperationState.PLANNED and not (
-        journal.state is OperationState.FAILED and status is None
-    ):
+    if journal.state is not OperationState.PLANNED and not (journal.state is OperationState.FAILED and status is None):
         _attach_model_accounting(
             checkpoint,
             journal,

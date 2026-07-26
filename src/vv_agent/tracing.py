@@ -41,16 +41,13 @@ class Span:
 
 
 class TraceProcessor(Protocol):
-    def on_span_start(self, span: Span) -> None:
-        ...
+    def on_span_start(self, span: Span) -> None: ...
 
-    def on_span_end(self, span: Span) -> None:
-        ...
+    def on_span_end(self, span: Span) -> None: ...
 
 
 class TraceSink(TraceProcessor, Protocol):
-    def flush(self) -> None:
-        ...
+    def flush(self) -> None: ...
 
 
 class JsonlTraceExporter:

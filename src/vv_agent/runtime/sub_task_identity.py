@@ -27,9 +27,7 @@ _ASSIGNED_SUB_TASK_IDENTITY: ContextVar[AssignedSubTaskIdentity | None] = Contex
 
 @contextmanager
 def assigned_sub_task_identity(task_id: str, session_id: str) -> Iterator[None]:
-    token = _ASSIGNED_SUB_TASK_IDENTITY.set(
-        AssignedSubTaskIdentity(task_id=task_id, session_id=session_id)
-    )
+    token = _ASSIGNED_SUB_TASK_IDENTITY.set(AssignedSubTaskIdentity(task_id=task_id, session_id=session_id))
     try:
         yield
     finally:

@@ -120,10 +120,10 @@ def test_omitted_memory_compact_threshold_defaults_match_contract() -> None:
     )
     restored = AgentTask.from_dict(
         {
-                "task_id": "restored-default-capacity",
-                "model": "capacity-model",
-                "prompt_bundle": build_raw_system_prompt_bundle("system").to_dict(),
-                "user_prompt": "run",
+            "task_id": "restored-default-capacity",
+            "model": "capacity-model",
+            "prompt_bundle": build_raw_system_prompt_bundle("system").to_dict(),
+            "user_prompt": "run",
         }
     )
 

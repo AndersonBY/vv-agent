@@ -100,9 +100,7 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
             id="c3",
             name=BASH_TOOL_NAME,
             arguments={
-                "command": (
-                    f'"{sys.executable}" -c "import time; time.sleep(0.2); print(\'done\')"'
-                ),
+                "command": (f'"{sys.executable}" -c "import time; time.sleep(0.2); print(\'done\')"'),
                 "run_in_background": True,
                 "timeout": 5,
             },
@@ -638,10 +636,7 @@ def test_foreground_bash_uses_exact_preview_boundary_and_persists_complete_artif
             id="bash_truncated",
             name=BASH_TOOL_NAME,
             arguments={
-                "command": (
-                    f'"{sys.executable}" -c "import sys;sys.stdout.write('
-                    "'A'*6000+'M'*48+'Z'*5953)\""
-                ),
+                "command": (f"\"{sys.executable}\" -c \"import sys;sys.stdout.write('A'*6000+'M'*48+'Z'*5953)\""),
             },
         ),
         context,
@@ -649,11 +644,7 @@ def test_foreground_bash_uses_exact_preview_boundary_and_persists_complete_artif
 
     assert truncated.status_code is ToolResultStatus.SUCCESS
     assert truncated.truncated is True
-    assert truncated.content == (
-        "A" * 6_000
-        + "\n... output omitted; full text in artifact ...\n"
-        + "Z" * 5_953
-    )
+    assert truncated.content == ("A" * 6_000 + "\n... output omitted; full text in artifact ...\n" + "Z" * 5_953)
     assert len(truncated.content) == 12_000
     assert truncated.original_bytes == 12_001
     assert truncated.visible_bytes == 12_000

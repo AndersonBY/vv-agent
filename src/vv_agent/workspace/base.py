@@ -104,12 +104,7 @@ def compile_portable_workspace_regex(pattern: str) -> re.Pattern[str]:
             continue
         if pattern.startswith("{,", index):
             raise InvalidPortableRegexError(INVALID_EXCLUDE_FILES_PATTERN_MESSAGE)
-        if (
-            current == "("
-            and index + 1 < len(pattern)
-            and pattern[index + 1] == "?"
-            and not pattern.startswith("(?:", index)
-        ):
+        if current == "(" and index + 1 < len(pattern) and pattern[index + 1] == "?" and not pattern.startswith("(?:", index):
             raise InvalidPortableRegexError(INVALID_EXCLUDE_FILES_PATTERN_MESSAGE)
         if current in {"*", "+", "?", "}"} and index + 1 < len(pattern) and pattern[index + 1] == "+":
             raise InvalidPortableRegexError(INVALID_EXCLUDE_FILES_PATTERN_MESSAGE)
@@ -142,11 +137,7 @@ class DiscoveryFilteredWorkspaceBackend:
         return self._exclude_pattern
 
     def list_files(self, base: str, glob: str) -> list[str]:
-        return [
-            path
-            for path in self._backend.list_files(base, glob)
-            if not self._regex.search(_normalize_workspace_path(path))
-        ]
+        return [path for path in self._backend.list_files(base, glob) if not self._regex.search(_normalize_workspace_path(path))]
 
     def read_text(self, path: str) -> str:
         return self._backend.read_text(path)

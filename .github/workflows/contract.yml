@@ -31,9 +31,16 @@ jobs:
       - name: Verify vendored contract snapshot
         run: python3 scripts/contract_snapshot.py check
 
+      - name: Verify formatting
+        run: uv run ruff format --check .
+
+      - name: Run linting
+        run: uv run ruff check .
+
       - name: Rebuild canonical producer evidence
         run: |
           uv run pytest \
+            tests/test_builtin_tool_schema_generation.py \
             tests/test_parity_evidence_manifests.py \
             tests/test_tool_schema_contract.py \
             tests/test_tool_metadata_contract.py \

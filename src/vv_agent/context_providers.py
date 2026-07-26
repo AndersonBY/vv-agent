@@ -32,8 +32,7 @@ class ContextRequest:
 
 
 class ContextProvider(Protocol):
-    def fragments(self, request: ContextRequest) -> list[ContextFragment]:
-        ...
+    def fragments(self, request: ContextRequest) -> list[ContextFragment]: ...
 
 
 @dataclass(frozen=True, slots=True)

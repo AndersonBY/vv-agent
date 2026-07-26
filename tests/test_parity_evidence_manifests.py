@@ -1825,13 +1825,9 @@ def _render_prompt_scenario(scenario: dict[str, Any]) -> dict[str, Any]:
         )
     elif producer == "AgentCompiler":
         instruction_bundle = PromptBundle(
-            sections=tuple(
-                PromptSection.from_dict(raw) for raw in inputs["instruction_bundle"]["sections"]
-            )
+            sections=tuple(PromptSection.from_dict(raw) for raw in inputs["instruction_bundle"]["sections"])
         )
-        compiler_sections = [
-            PromptSection.from_dict(raw) for raw in inputs["compiler_owned_sections"]
-        ]
+        compiler_sections = [PromptSection.from_dict(raw) for raw in inputs["compiler_owned_sections"]]
         provider_fragments = [
             ContextFragment(
                 id=raw["id"],
@@ -1868,11 +1864,7 @@ def _build_prompt_bundle_manifest() -> dict[str, Any]:
         scenario = deepcopy(source)
         scenario["output"] = _render_prompt_scenario(scenario)
         scenarios.append(scenario)
-    return {
-        key: deepcopy(value)
-        for key, value in fixture.items()
-        if key != "scenarios"
-    } | {
+    return {key: deepcopy(value) for key, value in fixture.items() if key != "scenarios"} | {
         "scenarios": scenarios,
     }
 
@@ -2039,9 +2031,10 @@ def test_prompt_bundle_manifest_enforces_session_memory_gate() -> None:
             scenario["input"].pop(str(mutation["remove"]), None)
         output = _render_prompt_scenario(scenario)
         base_output = scenarios[probe["base_scenario"]]["output"]
-        assert sum(section["id"] == "session_memory" for section in output["sections"]) == probe[
-            "expected_session_memory_section_count"
-        ]
+        assert (
+            sum(section["id"] == "session_memory" for section in output["sections"])
+            == probe["expected_session_memory_section_count"]
+        )
         assert (output["flat_prompt"] == base_output["flat_prompt"]) is probe["expected_prompt_equals_base_output"]
 
 

@@ -82,6 +82,7 @@ def test_scripted_llm_callback_receives_the_complete_request() -> None:
     assert requests[0].metadata == {"trace_id": "trace-1"}
     assert requests[0].model_settings == ModelSettings(temperature=0.2)
 
+
 def test_scripted_provider_default_model_is_runner_fallback(tmp_path: Path) -> None:
     provider = ScriptedModelProvider.new(
         "scripted",

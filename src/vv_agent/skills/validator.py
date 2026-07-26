@@ -42,9 +42,7 @@ def normalize_validation_mode(validation_mode: str | None) -> ValidationMode:
         return "compat"
     if normalized == "minimal":
         return "minimal"
-    raise ValueError(
-        f"Unsupported validation mode '{validation_mode}'. Expected one of {list(VALIDATION_MODES)}."
-    )
+    raise ValueError(f"Unsupported validation mode '{validation_mode}'. Expected one of {list(VALIDATION_MODES)}.")
 
 
 def _append_issue(diagnostics: ValidationDiagnostics, message: str, *, severity: IssueSeverity) -> None:
@@ -146,8 +144,7 @@ def validate_metadata_with_diagnostics(
     if extra_fields:
         _append_issue(
             diagnostics,
-            f"Unexpected fields in frontmatter: {', '.join(sorted(extra_fields))}. "
-            f"Only {sorted(ALLOWED_FIELDS)} are allowed.",
+            f"Unexpected fields in frontmatter: {', '.join(sorted(extra_fields))}. Only {sorted(ALLOWED_FIELDS)} are allowed.",
             severity="error" if mode == "strict" else "warning",
         )
 

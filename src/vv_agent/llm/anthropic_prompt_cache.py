@@ -257,9 +257,7 @@ def _estimate_block_chars(block: dict[str, Any]) -> int:
     if block_type == "tool_result":
         return len(json.dumps(block.get("content"), ensure_ascii=False, separators=(",", ":")))
     if block_type == "tool_use":
-        return len(str(block.get("name") or "")) + len(
-            json.dumps(block.get("input"), ensure_ascii=False, separators=(",", ":"))
-        )
+        return len(str(block.get("name") or "")) + len(json.dumps(block.get("input"), ensure_ascii=False, separators=(",", ":")))
     if block_type in _THINKING_BLOCK_TYPES:
         return 0
     return len(json.dumps(block, ensure_ascii=False, separators=(",", ":")))

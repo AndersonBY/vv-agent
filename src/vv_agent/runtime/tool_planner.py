@@ -70,10 +70,7 @@ def _build_bash_runtime_hint(task: AgentTask) -> str:
         return _invalid_shell_hint(exc)
 
     prefix = " ".join(resolved.prefix)
-    return (
-        "Runtime shell hint: "
-        f"commands run via `{resolved.kind}` using prefix `{prefix}`."
-    )
+    return f"Runtime shell hint: commands run via `{resolved.kind}` using prefix `{prefix}`."
 
 
 def _get_or_build_bash_runtime_hint(task: AgentTask) -> str:

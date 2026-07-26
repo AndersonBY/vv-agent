@@ -68,6 +68,7 @@ versioned source of truth for architecture, workflows, and model configuration.
 ```bash
 uv sync --dev
 python3 scripts/contract_snapshot.py check
+uv run ruff format --check .
 uv run ruff check
 uv run pytest
 ```

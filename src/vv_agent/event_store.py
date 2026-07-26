@@ -91,9 +91,7 @@ class JsonlRunEventStore:
                 except (KeyError, TypeError, ValueError) as error:
                     raise EventStoreError.corrupt_line(line_number) from error
 
-                if event.run_id == query.run_id or (
-                    query.include_children and event.parent_run_id == query.run_id
-                ):
+                if event.run_id == query.run_id or (query.include_children and event.parent_run_id == query.run_id):
                     yield event
 
 

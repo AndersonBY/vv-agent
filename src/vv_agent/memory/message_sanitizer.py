@@ -80,15 +80,9 @@ def _filter_tool_turns(
             if call_id is not None:
                 result_counts[call_id] = result_counts.get(call_id, 0) + 1
 
-        ordered_calls = [
-            (call_id, tool_call)
-            for tool_call in tool_calls
-            if (call_id := _get_id(tool_call)) is not None
-        ]
+        ordered_calls = [(call_id, tool_call) for tool_call in tool_calls if (call_id := _get_id(tool_call)) is not None]
         ordered_results = [
-            (call_id, tool_result)
-            for tool_result in tool_results
-            if (call_id := _get_tool_call_id(tool_result)) is not None
+            (call_id, tool_result) for tool_result in tool_results if (call_id := _get_tool_call_id(tool_result)) is not None
         ]
         paired_calls: list[dict[str, Any]] = []
         paired_results: list[Message] = []

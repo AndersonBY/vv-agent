@@ -88,10 +88,7 @@ Body
 def test_render_skills_xml_truncates_on_budget() -> None:
     from vv_agent.skills.normalize import SkillEntry
 
-    entries = [
-        SkillEntry(name=f"skill-{i}", description=f"Description for skill {i}")
-        for i in range(50)
-    ]
+    entries = [SkillEntry(name=f"skill-{i}", description=f"Description for skill {i}") for i in range(50)]
     xml = render_skills_xml(entries, budget=500)
     assert "<available_skills>" in xml
     assert "more skills available" in xml

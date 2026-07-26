@@ -214,9 +214,7 @@ class _RunBudgetController:
         token_usage: TokenUsage,
     ) -> ModelCallBudgetObservation:
         cancelled = bool(
-            self.ctx is not None
-            and self.ctx.cancellation_token is not None
-            and self.ctx.cancellation_token.cancelled
+            self.ctx is not None and self.ctx.cancellation_token is not None and self.ctx.cancellation_token.cancelled
         )
         exhaustion, event = self._observe_result(
             BudgetEnforcementBoundary.MODEL_CALL_COMPLETE,
@@ -780,11 +778,7 @@ class AgentRuntime:
                 max_cycles=task.max_cycles,
                 message_count=len(messages),
             )
-            previous_prompt_tokens = (
-                ctx.model_call_ledger.previous_agent_input_tokens(cycle_index)
-                if ctx is not None
-                else None
-            )
+            previous_prompt_tokens = ctx.model_call_ledger.previous_agent_input_tokens(cycle_index) if ctx is not None else None
             recent_tool_call_ids: set[str] | None = None
             if cycles:
                 last_cycle = cycles[-1]

@@ -189,10 +189,7 @@ def checkpoint_from_dict(
         status=status,
         messages=[Message.from_dict(_object(item, "checkpoint message")) for item in messages_raw],
         cycles=[CycleRecord.from_dict(_object(item, "checkpoint cycle")) for item in cycles_raw],
-        model_calls=[
-            ModelCallRecord.from_dict(_object(item, "checkpoint model call"))
-            for item in model_calls_raw
-        ],
+        model_calls=[ModelCallRecord.from_dict(_object(item, "checkpoint model call")) for item in model_calls_raw],
         shared_state=shared_state,
         budget_usage=BudgetUsageSnapshot.from_dict(budget_raw) if budget_raw is not None else None,
         event_cursor=EventCursor.from_dict(cursor_raw) if cursor_raw is not None else None,

@@ -32,12 +32,10 @@ class LlmRequestError(LlmError):
 
 
 class LLMClient(Protocol):
-    def complete(self, request: LlmRequest) -> LLMResponse:
-        ...
+    def complete(self, request: LlmRequest) -> LLMResponse: ...
 
     def complete_with_stream(
         self,
         request: LlmRequest,
         stream_callback: Callable[[dict[str, Any]], None] | None = None,
-    ) -> LLMResponse:
-        ...
+    ) -> LLMResponse: ...

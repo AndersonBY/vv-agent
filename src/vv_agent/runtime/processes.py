@@ -32,10 +32,7 @@ def _build_captured_process_platform_kwargs() -> dict[str, Any]:
         return {"start_new_session": True}
 
     kwargs: dict[str, Any] = {}
-    creationflags = (
-        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    )
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
     if creationflags:
         kwargs["creationflags"] = creationflags
 

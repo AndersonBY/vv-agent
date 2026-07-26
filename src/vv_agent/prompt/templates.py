@@ -47,10 +47,7 @@ _COMPUTER_OS_LABEL = _os_label()
 
 
 COMPUTER_AGENT_ENV_PROMPT = {
-    "en-US": (
-        f"You are running in a {_COMPUTER_OS_LABEL} workspace environment "
-        "and can use tools to inspect and modify files."
-    ),
+    "en-US": (f"You are running in a {_COMPUTER_OS_LABEL} workspace environment and can use tools to inspect and modify files."),
     "zh-CN": f"你运行在 {_COMPUTER_OS_LABEL} 工作区环境中, 可以用工具读取, 搜索, 修改文件.",
 }
 
