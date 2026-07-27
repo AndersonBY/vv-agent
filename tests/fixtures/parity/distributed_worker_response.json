@@ -1,5 +1,5 @@
 {
-  "schema_version": "vv-agent.distributed-worker-response.v2",
+  "schema_version": "vv-agent.distributed-worker-response.v3",
   "wire_rules": {
     "discriminator": "type",
     "types": [
@@ -64,7 +64,13 @@
     ],
     "optional_fields_omitted_when_absent": true,
     "optional_fields_reject_null": true,
-    "unknown_fields": "reject"
+    "unknown_fields": "reject",
+    "message_wire": {
+      "type": "Message",
+      "artifact_ref_preserved": true,
+      "artifact_ref_omitted_when_absent": true,
+      "model_projection_strips_artifact_ref": true
+    }
   },
   "status_matrix_cases": [
     {
@@ -118,14 +124,14 @@
     {
       "name": "pending",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v2",
+        "schema_version": "vv-agent.distributed-worker-response.v3",
         "type": "pending"
       }
     },
     {
       "name": "committed",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v2",
+        "schema_version": "vv-agent.distributed-worker-response.v3",
         "type": "committed",
         "checkpoint_revision": 2,
         "committed_cycle": 1
@@ -134,7 +140,7 @@
     {
       "name": "terminal_candidate",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v2",
+        "schema_version": "vv-agent.distributed-worker-response.v3",
         "type": "terminal_candidate",
         "checkpoint_revision": 2,
         "result": {
@@ -142,7 +148,21 @@
           "completion_reason": "no_tool_finish",
           "completion_tool_name": null,
           "partial_output": null,
-          "messages": [],
+          "messages": [
+            {
+              "role": "tool",
+              "content": "<Tool Result Compact>\ntool_name: bash\nartifact_path: .vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst output\n...<snip>...\nlast output\n</Tool Result Compact>",
+              "name": "bash",
+              "tool_call_id": "call-bash",
+              "artifact_ref": {
+                "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+                "media_type": "text/plain",
+                "encoding": "utf-8",
+                "size_bytes": 100000,
+                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+              }
+            }
+          ],
           "cycles": [
             {
               "index": 1,
@@ -197,7 +217,7 @@
     {
       "name": "terminal_replay",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v2",
+        "schema_version": "vv-agent.distributed-worker-response.v3",
         "type": "terminal_replay",
         "checkpoint_revision": 2,
         "result": {
@@ -205,7 +225,21 @@
           "completion_reason": "no_tool_finish",
           "completion_tool_name": null,
           "partial_output": null,
-          "messages": [],
+          "messages": [
+            {
+              "role": "tool",
+              "content": "<Tool Result Compact>\ntool_name: bash\nartifact_path: .vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst output\n...<snip>...\nlast output\n</Tool Result Compact>",
+              "name": "bash",
+              "tool_call_id": "call-bash",
+              "artifact_ref": {
+                "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+                "media_type": "text/plain",
+                "encoding": "utf-8",
+                "size_bytes": 100000,
+                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+              }
+            }
+          ],
           "cycles": [
             {
               "index": 1,
@@ -333,7 +367,7 @@
     {
       "name": "unknown_schema_version",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "pending"
       },
       "error": "unsupported distributed worker response schema_version"
@@ -341,7 +375,7 @@
     {
       "name": "missing_type",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v2"
+        "schema_version": "vv-agent.distributed-worker-response.v3"
       },
       "error": "unsupported distributed worker response type"
     },
@@ -384,7 +418,7 @@
     {
       "name": "unknown_type",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v2",
+        "schema_version": "vv-agent.distributed-worker-response.v3",
         "type": "finished"
       },
       "error": "unsupported distributed worker response type"

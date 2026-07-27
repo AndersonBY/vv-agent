@@ -95,6 +95,12 @@
     "session_memory_enabled": false,
     "memory_compact_threshold": 250000,
     "memory_threshold_percentage": 80,
+    "microcompaction_policy": {
+      "trigger_ratio": 0.8,
+      "target_ratio": 0.5,
+      "keep_recent_cycles": 4,
+      "min_result_chars": 700
+    },
     "no_tool_policy": "continue",
     "allow_interruption": false,
     "use_workspace": true,
@@ -114,6 +120,18 @@
     },
     "initial_messages": [],
     "initial_shared_state": {}
+  },
+  "task_projection_validation": {
+    "wire_type": "AgentTask",
+    "invalid_cases": [
+      {
+        "name": "agent_task_missing_microcompaction_policy",
+        "mutation": {
+          "remove": "microcompaction_policy"
+        },
+        "error_code": "agent_task_invalid"
+      }
+    ]
   },
   "metadata_projection": {
     "is_sub_task": true,

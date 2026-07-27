@@ -1,5 +1,5 @@
 {
-  "schema_version": "vv-agent.tool-metadata.v1",
+  "schema_version": "vv-agent.tool-metadata.v2",
   "limits": {
     "maximum_capability_tags": 32,
     "maximum_cost_dimensions": 32,
@@ -12,6 +12,7 @@
       "side_effect",
       "idempotency",
       "terminal",
+      "result_retention",
       "capability_tags",
       "cost_dimensions"
     ],
@@ -19,6 +20,7 @@
       "side_effect",
       "idempotency",
       "terminal",
+      "result_retention",
       "capability_tags",
       "cost_dimensions"
     ],
@@ -26,6 +28,7 @@
       "side_effect": "unknown",
       "idempotency": "unknown",
       "terminal": false,
+      "result_retention": "archive",
       "capability_tags": [],
       "cost_dimensions": []
     },
@@ -45,6 +48,13 @@
       "unsupported"
     ],
     "terminal_semantics": "declares that the tool may return finish or wait_user; it never makes the framework stop automatically",
+    "result_retention_values": [
+      "archive",
+      "preserve"
+    ],
+    "result_retention_semantics": "archive makes old results eligible for artifact-backed proactive microcompaction; preserve excludes them only from proactive microcompaction",
+    "result_retention_is_not_inferred": true,
+    "missing_metadata_result_retention": "archive",
     "capability_tags_semantics": "opaque exact-match labels; the SDK does not interpret task or domain meaning",
     "cost_dimensions_semantics": "opaque names of resources a tool may consume; declarations are not measurements, prices, or budget observations",
     "generic_metadata_is_not_a_declaration": true,
@@ -72,6 +82,7 @@
         "side_effect": "read",
         "idempotency": "supported",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [
           " source.inspect ",
           "filesystem.read",
@@ -86,6 +97,7 @@
         "side_effect": "read",
         "idempotency": "supported",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [
           "filesystem.read",
           "source.inspect"
@@ -103,6 +115,7 @@
         "side_effect": "unknown",
         "idempotency": "unknown",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [],
         "cost_dimensions": []
       }
@@ -119,6 +132,7 @@
         "side_effect": "unknown",
         "idempotency": "unknown",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [
           "😀",
           ""
@@ -137,6 +151,7 @@
         "side_effect": "unknown",
         "idempotency": "unknown",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [],
         "cost_dimensions": [
           " host.cpu_ms "
@@ -161,6 +176,12 @@
       "name": "terminal_is_not_boolean",
       "input": {
         "terminal": "yes"
+      }
+    },
+    {
+      "name": "unknown_result_retention",
+      "input": {
+        "result_retention": "drop"
       }
     },
     {
@@ -231,12 +252,14 @@
   "public_construction": {
     "python": {
       "type": "vv_agent.ToolMetadata",
+      "result_retention_type": "vv_agent.ToolResultRetention",
       "function_tool_constructor_parameter": "tool_metadata",
       "function_tool_decorator_parameter": "tool_metadata",
       "absent_value": null
     },
     "rust": {
       "type": "vv_agent::ToolMetadata",
+      "result_retention_type": "vv_agent::ToolResultRetention",
       "default_constructor": "ToolMetadata::default",
       "function_tool_builder": "FunctionTool::tool_metadata",
       "tool_trait_accessor": "Tool::tool_metadata",
@@ -249,6 +272,7 @@
       "registry_or_spec_adapter",
       "executor",
       "policy",
+      "memory_compaction",
       "telemetry",
       "checkpoint"
     ],
@@ -321,6 +345,7 @@
         "side_effect": "read",
         "idempotency": "supported",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [],
         "cost_dimensions": []
       },
@@ -338,6 +363,7 @@
         "side_effect": "none",
         "idempotency": "unknown",
         "terminal": true,
+        "result_retention": "archive",
         "capability_tags": [],
         "cost_dimensions": []
       },
@@ -353,6 +379,7 @@
         "side_effect": "external",
         "idempotency": "unsupported",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [
           "calendar.write"
         ],
@@ -372,6 +399,7 @@
         "side_effect": "network",
         "idempotency": "unknown",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [],
         "cost_dimensions": [
           "workflow.credit"
@@ -391,6 +419,7 @@
         "side_effect": "none",
         "idempotency": "supported",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [],
         "cost_dimensions": []
       },
@@ -478,6 +507,7 @@
         "side_effect": "read",
         "idempotency": "supported",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [
           "source.inspect"
         ],
@@ -497,6 +527,7 @@
             "side_effect": "read",
             "idempotency": "supported",
             "terminal": false,
+            "result_retention": "archive",
             "capability_tags": [
               "source.inspect"
             ],
@@ -516,6 +547,7 @@
             "side_effect": "read",
             "idempotency": "supported",
             "terminal": false,
+            "result_retention": "archive",
             "capability_tags": [
               "source.inspect"
             ],
@@ -537,6 +569,7 @@
             "side_effect": "read",
             "idempotency": "supported",
             "terminal": false,
+            "result_retention": "archive",
             "capability_tags": [
               "source.inspect"
             ],
@@ -553,6 +586,7 @@
         "side_effect": "write",
         "idempotency": "unsupported",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [
           "workspace.mutate"
         ],
@@ -589,6 +623,7 @@
         "side_effect": "unknown",
         "idempotency": "unknown",
         "terminal": false,
+        "result_retention": "archive",
         "capability_tags": [],
         "cost_dimensions": []
       }

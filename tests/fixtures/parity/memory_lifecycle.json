@@ -51,6 +51,11 @@
     "reserved_output_tokens_fallback": 16000,
     "autocompact_buffer_tokens_default": 13000,
     "microcompact_trigger_ratio_default": 0.75,
+    "microcompact_target_ratio_default": 0.6,
+    "microcompact_ratio_constraints": {
+      "target_ratio": "0 < target_ratio < trigger_ratio",
+      "trigger_ratio": "trigger_ratio <= 1"
+    },
     "resolved_model_max_output_is_capability_not_request_default": true,
     "reserved_output_precedence": [
       "effective_model_settings.max_tokens",
@@ -67,6 +72,7 @@
       "derived_prompt_capacity": "max(model_context_window - reserved_output_tokens - autocompact_buffer_tokens, 0)",
       "effective_threshold": "configured_threshold > 0 ? min(configured_threshold, derived_prompt_capacity) : derived_prompt_capacity",
       "microcompact_threshold": "floor(effective_threshold * microcompact_trigger_ratio)",
+      "microcompact_target": "floor(effective_threshold * microcompact_target_ratio)",
       "known_zero_capacity_stays_zero": true
     },
     "cases": [
@@ -84,7 +90,8 @@
           "reserved_output_tokens": 16000,
           "reserved_output_source": "framework_fallback",
           "effective_threshold": 250000,
-          "microcompact_threshold": 187500
+          "microcompact_threshold": 187500,
+          "microcompact_target": 150000
         }
       },
       {
@@ -101,7 +108,8 @@
           "reserved_output_tokens": 16000,
           "reserved_output_source": "framework_fallback",
           "effective_threshold": 250000,
-          "microcompact_threshold": 187500
+          "microcompact_threshold": 187500,
+          "microcompact_target": 150000
         }
       },
       {
@@ -118,7 +126,8 @@
           "reserved_output_tokens": 4096,
           "reserved_output_source": "model_settings",
           "effective_threshold": 238904,
-          "microcompact_threshold": 179178
+          "microcompact_threshold": 179178,
+          "microcompact_target": 143342
         }
       },
       {
@@ -135,7 +144,8 @@
           "reserved_output_tokens": 32768,
           "reserved_output_source": "task_metadata",
           "effective_threshold": 210232,
-          "microcompact_threshold": 157674
+          "microcompact_threshold": 157674,
+          "microcompact_target": 126139
         }
       },
       {
@@ -152,7 +162,8 @@
           "reserved_output_tokens": 24000,
           "reserved_output_source": "model_settings",
           "effective_threshold": 27000,
-          "microcompact_threshold": 20250
+          "microcompact_threshold": 20250,
+          "microcompact_target": 16200
         }
       },
       {
@@ -169,7 +180,8 @@
           "reserved_output_tokens": 24000,
           "reserved_output_source": "task_metadata",
           "effective_threshold": 27000,
-          "microcompact_threshold": 20250
+          "microcompact_threshold": 20250,
+          "microcompact_target": 16200
         }
       },
       {
@@ -186,7 +198,8 @@
           "reserved_output_tokens": 8192,
           "reserved_output_source": "framework_fallback_capped_by_model_capability",
           "effective_threshold": 10808,
-          "microcompact_threshold": 8106
+          "microcompact_threshold": 8106,
+          "microcompact_target": 6484
         }
       },
       {
@@ -203,7 +216,8 @@
           "reserved_output_tokens": 10000,
           "reserved_output_source": "model_settings",
           "effective_threshold": 0,
-          "microcompact_threshold": 0
+          "microcompact_threshold": 0,
+          "microcompact_target": 0
         }
       }
     ]
@@ -215,17 +229,22 @@
         "full_threshold",
         "prompt_too_long"
       ],
-      "new_producer_fields": [
+      "producer_fields": [
         "trigger",
         "configured_threshold",
         "effective_threshold",
         "microcompact_threshold",
+        "microcompact_target",
+        "candidate_count",
+        "estimated_reclaimable_tokens",
         "model_context_window",
         "model_max_output_tokens",
         "reserved_output_tokens",
         "reserved_output_source",
         "autocompact_buffer_tokens"
-      ]
+      ],
+      "candidate_count_semantics": "number_of_oldest_first_candidates_selected_by_the_single_plan",
+      "estimated_reclaimable_tokens_semantics": "estimated_prompt_token_reduction_if_every_selected_archive_succeeds"
     },
     "completed": {
       "mode_values": [
@@ -235,12 +254,34 @@
         "summary",
         "emergency"
       ],
-      "new_producer_fields": [
+      "producer_fields": [
         "mode",
-        "changed"
+        "changed",
+        "archived_count",
+        "reclaimed_tokens",
+        "artifact_failure_count"
       ],
+      "archived_count_semantics": "selected_results_successfully_persisted_and_replaced",
+      "reclaimed_tokens_semantics": "actual_prompt_token_reduction_after_successful_replacements",
+      "artifact_failure_count_semantics": "selected_results_left_inline_because_archive_persistence_failed",
       "changed_is_content_aware": true,
       "mode_is_strongest_applied_stage": true
+    },
+    "microcompact_planning": {
+      "single_plan_and_apply_pass_per_cycle": true,
+      "candidate_required_for_micro_threshold_trigger": true,
+      "micro_threshold_without_candidate_event_count": 0,
+      "full_or_prompt_too_long_trigger_may_start_without_micro_candidate": true,
+      "candidate_order": "oldest_first",
+      "stop_condition": "actual_post_replacement_usage_at_or_below_microcompact_target_or_candidates_exhausted",
+      "planned_estimates_do_not_satisfy_target": true,
+      "reclaimed_tokens_per_candidate": "actual_original_message_tokens_minus_actual_replacement_message_tokens",
+      "recalculate_actual_usage_after_each_successful_replacement": true,
+      "archive_before_replace": true,
+      "archive_failure_preserves_original": true,
+      "existing_artifact_requires_utf8_size_and_sha256_validation": true,
+      "existing_artifact_validation_failure_preserves_original": true,
+      "archive_failure_does_not_stop_later_candidates": true
     },
     "simultaneous_warning_and_microcompact": {
       "order": [
@@ -257,7 +298,8 @@
     ],
     "missing_or_unknown_fields_are_rejected": true,
     "unknown_enum_values_are_rejected": true,
-    "task_semantics_are_not_inspected": true
+    "task_semantics_are_not_inspected": true,
+    "tool_result_format_is_not_inspected": true
   },
   "provider_attempts": {
     "prompt_too_long_failures_before_success": 2,
@@ -389,10 +431,23 @@
     ]
   },
   "artifacts": {
-    "fallback_pattern": "^tool_result_[0-9a-f]{32}\\.txt$",
-    "fallback_count": 2,
-    "paths_are_distinct": true,
-    "write_failure_path": "N/A",
-    "escape_path": "N/A"
+    "logical_root": ".vv-agent/artifacts/",
+    "written_through_effective_workspace_backend": true,
+    "immutable": true,
+    "microcompact_requires_success": true,
+    "model_visible_marker_fields": [
+      "tool_name",
+      "artifact_path",
+      "retrieval_hint",
+      "excerpt"
+    ],
+    "model_visible_marker_forbidden_fields": [
+      "original_bytes",
+      "visible_bytes",
+      "size_bytes",
+      "sha256",
+      "total_chars",
+      "truncated_chars"
+    ]
   }
 }

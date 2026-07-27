@@ -1,5 +1,37 @@
 {
-  "version": 1,
+  "version": 2,
+  "message_contract": {
+    "required_fields": [
+      "role",
+      "content"
+    ],
+    "optional_fields": [
+      "name",
+      "tool_call_id",
+      "tool_calls",
+      "reasoning_content",
+      "image_url",
+      "metadata",
+      "artifact_ref"
+    ],
+    "artifact_ref_type": "ToolArtifactRef",
+    "artifact_ref_omitted_when_absent": true,
+    "artifact_ref_fields": [
+      "path",
+      "media_type",
+      "encoding",
+      "size_bytes",
+      "sha256"
+    ],
+    "artifact_ref_closed": true,
+    "unknown_message_fields": "reject"
+  },
+  "model_projection": {
+    "strip_host_only_fields": [
+      "artifact_ref"
+    ],
+    "content_is_unchanged": true
+  },
   "canonical_cases": [
     {
       "name": "plain_message_uses_current_wire",
@@ -59,6 +91,41 @@
         "metadata": {
           "sequence": 2
         }
+      }
+    },
+    {
+      "name": "microcompacted_tool_message_round_trips",
+      "input": {
+        "role": "tool",
+        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
+        "name": "web_search",
+        "tool_call_id": "call_search",
+        "artifact_ref": {
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 26,
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+        }
+      },
+      "canonical": {
+        "role": "tool",
+        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
+        "name": "web_search",
+        "tool_call_id": "call_search",
+        "artifact_ref": {
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 26,
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+        }
+      },
+      "model_projection": {
+        "role": "tool",
+        "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
+        "name": "web_search",
+        "tool_call_id": "call_search"
       }
     }
   ],
@@ -275,6 +342,62 @@
       "input": {
         "type": "user",
         "content": "missing role"
+      }
+    },
+    {
+      "name": "artifact_ref_bad_path_is_rejected",
+      "input": {
+        "role": "tool",
+        "content": "compact marker",
+        "artifact_ref": {
+          "path": ".vv-agent/artifacts/../escape.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 26,
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+        }
+      }
+    },
+    {
+      "name": "artifact_ref_bad_hash_is_rejected",
+      "input": {
+        "role": "tool",
+        "content": "compact marker",
+        "artifact_ref": {
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 26,
+          "sha256": "ABC"
+        }
+      }
+    },
+    {
+      "name": "artifact_ref_missing_field_is_rejected",
+      "input": {
+        "role": "tool",
+        "content": "compact marker",
+        "artifact_ref": {
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 26
+        }
+      }
+    },
+    {
+      "name": "artifact_ref_unknown_field_is_rejected",
+      "input": {
+        "role": "tool",
+        "content": "compact marker",
+        "artifact_ref": {
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 26,
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
+          "original_bytes": 26
+        }
       }
     }
   ]

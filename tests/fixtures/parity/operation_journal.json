@@ -34,7 +34,10 @@
   "request_digest": {
     "schema_version": "vv-agent.operation-request.v1",
     "canonicalization": "RFC 8785 JSON Canonicalization Scheme over UTF-8 followed by lowercase SHA-256",
-    "model_projection": "complete effective provider request after credential redaction, including model, messages, settings, tools, output schema, and provider idempotency key",
+    "model_projection": "complete effective provider request after credential redaction, including model, messages with host-only artifact_ref removed, settings, tools, output schema, and provider idempotency key",
+    "message_projection_strips": [
+      "artifact_ref"
+    ],
     "tool_projection": "tool call id, exact tool name, arguments, and framework idempotency key",
     "excluded_fields": [
       "operation_id",
