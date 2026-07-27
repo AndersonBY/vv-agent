@@ -64,6 +64,7 @@ from vv_agent.types import (
     ModelCallRecord,
     ModelCallStatus,
     TokenUsage,
+    ToolArtifactRef,
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
@@ -335,6 +336,29 @@ def test_checkpoint_round_trip_uses_jcs() -> None:
     wire = checkpoint_to_json(checkpoint)
     assert wire.encode("utf-8") == canonical_json_bytes(encoded)
     assert checkpoint_from_json(wire) == checkpoint
+
+
+def test_checkpoint_round_trip_preserves_message_artifact_ref() -> None:
+    checkpoint = _minimal_checkpoint(key="message-artifact-ref")
+    artifact_ref = ToolArtifactRef(
+        path=".vv-agent/artifacts/run-7/call-search.txt",
+        media_type="text/plain",
+        encoding="utf-8",
+        size_bytes=42,
+        sha256="0" * 64,
+    )
+    checkpoint.messages.append(
+        Message(
+            role="tool",
+            content="<Tool Result Compact>\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt",
+            tool_call_id="call-search",
+            artifact_ref=artifact_ref,
+        )
+    )
+
+    restored = checkpoint_from_json(checkpoint_to_json(checkpoint))
+
+    assert restored.messages[-1].artifact_ref == artifact_ref
 
 
 def test_checkpoint_and_operation_receipt_preserve_bounded_tool_result_fields() -> None:

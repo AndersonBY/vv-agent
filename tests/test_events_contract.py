@@ -91,7 +91,7 @@ def test_run_event_has_stable_identity_and_timing() -> None:
 
     payload = event.to_dict()
 
-    assert payload["version"] == "v1"
+    assert payload["version"] == "v2"
     assert payload["type"] == "run_started"
     assert payload["event_id"].startswith("evt_")
     assert payload["run_id"] == "run_1"
@@ -102,11 +102,26 @@ def test_run_event_has_stable_identity_and_timing() -> None:
     assert payload["input"] == "hello"
 
 
+def test_event_from_dict_rejects_stale_v1_discriminator() -> None:
+    with pytest.raises(ValueError, match="version"):
+        event_from_dict(
+            {
+                "version": "v1",
+                "type": "run_started",
+                "event_id": "evt_stale",
+                "run_id": "run_stale",
+                "trace_id": "trace_stale",
+                "created_at": 1.0,
+                "input": "hello",
+            }
+        )
+
+
 def test_event_from_dict_rejects_superseded_created_at_milliseconds() -> None:
     with pytest.raises(ValueError, match="unknown fields: created_at_ms"):
         event_from_dict(
             {
-                "version": "v1",
+                "version": "v2",
                 "type": "run_started",
                 "event_id": "evt_old_time",
                 "run_id": "run_old_time",
@@ -197,7 +212,7 @@ def test_typed_tool_lifecycle_fields_are_normalized_and_round_trip() -> None:
 
 def test_tool_completion_rejects_missing_current_fields() -> None:
     incomplete_payload = {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_completed",
         "event_id": "evt_incomplete_tool",
         "run_id": "run_incomplete_tool",
@@ -214,7 +229,7 @@ def test_tool_completion_rejects_missing_current_fields() -> None:
 
 def test_memory_compaction_rejects_missing_current_fields() -> None:
     incomplete_started = {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_started",
         "event_id": "evt_incomplete_memory_started",
         "run_id": "run_incomplete_memory",
@@ -224,7 +239,7 @@ def test_memory_compaction_rejects_missing_current_fields() -> None:
         "estimated_tokens": 120,
     }
     incomplete_completed = {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_completed",
         "event_id": "evt_incomplete_memory_completed",
         "run_id": "run_incomplete_memory",
@@ -243,7 +258,7 @@ def test_memory_compaction_rejects_missing_current_fields() -> None:
 
 def test_memory_compact_started_accepts_explicit_null_model_output_capability() -> None:
     payload = {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_started",
         "event_id": "evt_nullable_memory_capability",
         "run_id": "run_nullable_memory_capability",
@@ -254,6 +269,9 @@ def test_memory_compact_started_accepts_explicit_null_model_output_capability() 
         "configured_threshold": 250_000,
         "effective_threshold": 250_000,
         "microcompact_threshold": 187_500,
+        "microcompact_target": 150_000,
+        "candidate_count": 0,
+        "estimated_reclaimable_tokens": 0,
         "model_context_window": 1_000_000,
         "model_max_output_tokens": None,
         "reserved_output_tokens": 16_000,
@@ -317,7 +335,7 @@ def test_tool_event_can_point_to_parent_event_and_run() -> None:
 
     payload = event.to_dict()
 
-    assert payload["version"] == "v1"
+    assert payload["version"] == "v2"
     assert payload["type"] == "tool_call_started"
     assert payload["event_id"].startswith("evt_")
     assert payload["run_id"] == "run_child"
@@ -403,7 +421,7 @@ def test_concrete_event_constructors_can_preserve_replayed_identity_and_timing()
 
     for event in events:
         payload = event.to_dict()
-        assert payload["version"] == "v1"
+        assert payload["version"] == "v2"
         assert payload["event_id"] == "evt_replayed"
         assert payload["created_at"] == 123.45
         assert payload["session_id"] == "session_replay"

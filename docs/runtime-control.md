@@ -165,7 +165,7 @@ events. Unknown tools, policy denials, and approval short-circuits emit planned
 plus completed with `execution_started=False`, no started event, and null
 duration. Cancellation or process loss after started may leave no completed
 event; these observations do not provide exactly-once execution or replace the
-checkpoint v3 operation journal.
+checkpoint v5 operation journal.
 
 When a configured session accepts the current turn through `add_items()`, the
 Runner emits `session_persisted`. Run, trace, agent, and session identities are
@@ -173,7 +173,7 @@ captured by Runner and cannot be replaced by provider payloads or user metadata.
 Tool completion statuses use lowercase wire values such as `success`, `error`,
 and `wait_response`.
 
-The event wire version is `v1`, used as a strict discriminator rather than a
+The event wire version is `v2`, used as a strict discriminator rather than a
 decoder selector. Current events require their complete field set; readers
 reject missing, stale, unknown, and malformed fields. The public runtime exposes
 only typed `RunEvent` objects. Task-neutral internal observations use

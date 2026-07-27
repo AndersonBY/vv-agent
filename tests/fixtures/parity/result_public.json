@@ -1,6 +1,6 @@
 {
   "contract": "result_public",
-  "version": 2,
+  "version": 3,
   "agent_result_wire": {
     "required_fields": [
       "status",
@@ -25,6 +25,12 @@
     "optional_fields_omitted_when_absent": true,
     "optional_fields_reject_null": true,
     "unknown_fields": "reject",
+    "message_wire": {
+      "type": "Message",
+      "artifact_ref_preserved": true,
+      "artifact_ref_omitted_when_absent": true,
+      "model_projection_strips_artifact_ref": true
+    },
     "statuses": [
       "pending",
       "running",
@@ -40,7 +46,21 @@
     "completion_reason": "wait_user",
     "completion_tool_name": "dangerous",
     "partial_output": null,
-    "messages": [],
+    "messages": [
+      {
+        "role": "tool",
+        "content": "<Tool Result Compact>\ntool_name: bash\nartifact_path: .vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst output\n...<snip>...\nlast output\n</Tool Result Compact>",
+        "name": "bash",
+        "tool_call_id": "call-bash",
+        "artifact_ref": {
+          "path": ".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 100000,
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      }
+    ],
     "cycles": [
       {
         "index": 2,

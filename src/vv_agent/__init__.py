@@ -108,6 +108,7 @@ from vv_agent.interactive import (
     create_agent_session,
 )
 from vv_agent.llm import VvLlmClient
+from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model import ModelError, ModelProvider, ModelRef, ScriptedModelProvider, VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings, ResponseFormat, RetrySettings, ToolChoice
 from vv_agent.output_validation import (
@@ -157,6 +158,7 @@ from vv_agent.tools import (
     ToolOutputJson,
     ToolOutputText,
     ToolRegistry,
+    ToolResultRetention,
     ToolSideEffect,
     build_default_registry,
     function_tool,
@@ -260,6 +262,7 @@ __all__ = [
     "MemorySessionStore",
     "Message",
     "MessageProcessor",
+    "MicrocompactionPolicy",
     "ModelCallCompletedEvent",
     "ModelCallFailedEvent",
     "ModelCallOperation",
@@ -346,6 +349,7 @@ __all__ = [
     "ToolPolicy",
     "ToolRegistry",
     "ToolResultCursor",
+    "ToolResultRetention",
     "ToolSideEffect",
     "TraceProcessor",
     "TraceSink",

@@ -113,6 +113,7 @@ def build_run_definition(
             "session_memory_enabled": run_config.session_memory_enabled,
             "memory_compact_threshold": task.memory_compact_threshold,
             "memory_threshold_percentage": task.memory_threshold_percentage,
+            "microcompaction_policy": task.microcompaction_policy.to_dict(),
             "allow_interruption": task.allow_interruption,
             "native_multimodal": task.native_multimodal,
             "tool_use_behavior": agent.tool_use_behavior,
@@ -257,8 +258,9 @@ def _validate_behavior_capability_refs(
     required_slots.extend(f"after_cycle_hook:{index}" for index, _ in enumerate(run_config.after_cycle_hooks))
     required_slots.extend(f"context_provider:{index}" for index, _ in enumerate(run_config.context_providers))
     required_slots.extend(f"memory_provider:{index}" for index, _ in enumerate(run_config.memory_providers))
+    behavior_metadata = _behavior_metadata(agent=agent, run_config=run_config)
     for present, slot in (
-        (bool(_behavior_metadata(agent=agent, run_config=run_config)), "behavior_affecting_run_metadata"),
+        (bool(behavior_metadata), "behavior_affecting_run_metadata"),
         (run_config.before_cycle_messages is not None, "before_cycle_messages"),
         (run_config.interruption_messages is not None, "interruption_messages"),
         (run_config.approval_provider is not None, "approval_provider"),
@@ -281,7 +283,7 @@ def _validate_behavior_capability_refs(
     missing = [slot for slot in required_slots if slot not in refs]
     if missing:
         raise CheckpointError(
-            f"checkpoint v2 requires stable capability refs for: {', '.join(missing)}",
+            f"checkpointed runs require stable capability refs for: {', '.join(missing)}",
             code="checkpoint_definition_unstable",
         )
 
@@ -295,7 +297,7 @@ def _take_ref(
     value = refs.pop(slot, None)
     if required and value is None:
         raise CheckpointError(
-            f"checkpoint v2 requires stable capability ref {slot!r}",
+            f"checkpointed runs require stable capability ref {slot!r}",
             code="checkpoint_definition_unstable",
         )
     return value
@@ -337,7 +339,7 @@ def _output_schema(output_type: Any) -> dict[str, Any] | None:
             schema["required"] = required
         return schema
     raise CheckpointError(
-        "output_type requires a stable JSON schema for checkpoint v2",
+        "output_type requires a stable JSON schema for checkpointed runs",
         code="checkpoint_definition_unstable",
     )
 

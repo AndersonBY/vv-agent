@@ -99,7 +99,7 @@ class CheckpointReconciliationRequired(RuntimeError):
 
 
 class CheckpointResumeController:
-    """Coordinates one opt-in checkpoint v3 root run against a durable store."""
+    """Coordinates one opt-in checkpointed root run against a durable store."""
 
     def __init__(
         self,

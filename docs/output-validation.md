@@ -87,7 +87,7 @@ of the contract's empty tool collection. `model` and `model_settings` are
 host-selected descriptors passed to the callback; the Runner does not resolve
 them, inject tools, or turn repair into another agent cycle.
 
-Checkpoint v3 requires stable `output_validator` and `output_repair`
+Checkpoint v5 requires stable `output_validator` and `output_repair`
 capability refs when those callbacks are enabled.
 
 ## Verification

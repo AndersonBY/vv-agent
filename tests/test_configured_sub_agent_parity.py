@@ -30,6 +30,7 @@ from vv_agent.events import (
 )
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import MemoryManager
+from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model import ModelRef, ScriptedModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_bundle
@@ -221,7 +222,7 @@ def _normalize_sub_event(event: SubRunStartedEvent | SubRunCompletedEvent) -> di
 
 
 def test_configured_sub_agent_shared_fixtures_use_one_current_version() -> None:
-    assert _contract()["version"] == "v1"
+    assert _contract()["version"] == "v2"
     assert all(event["version"] == _contract()["version"] for event in _event_contract())
 
 
@@ -295,6 +296,12 @@ def test_configured_sub_agent_task_projection_matches_shared_contract(tmp_path: 
         default_workspace=tmp_path,
     )
     parent = _parent_task()
+    parent.microcompaction_policy = MicrocompactionPolicy(
+        trigger_ratio=0.8,
+        target_ratio=0.5,
+        keep_recent_cycles=4,
+        min_result_chars=700,
+    )
     child = SubAgentConfig(
         model="child-model",
         description="Research facts",
@@ -340,6 +347,7 @@ def test_configured_sub_agent_task_projection_matches_shared_contract(tmp_path: 
         "session_memory_enabled": task.metadata["session_memory_enabled"],
         "memory_compact_threshold": task.memory_compact_threshold,
         "memory_threshold_percentage": task.memory_threshold_percentage,
+        "microcompaction_policy": task.microcompaction_policy.to_dict(),
         "no_tool_policy": task.no_tool_policy,
         "allow_interruption": task.allow_interruption,
         "use_workspace": task.use_workspace,
@@ -356,6 +364,7 @@ def test_configured_sub_agent_task_projection_matches_shared_contract(tmp_path: 
     }
 
     assert projection == _contract()["task_projection"]
+    assert task.microcompaction_policy == parent.microcompaction_policy
     assert metadata_projection == _contract()["metadata_projection"]
     canonical_metadata = _contract()["metadata_projection"]
     for key in _contract()["reserved_metadata_keys"]:

@@ -1,11 +1,17 @@
 {
-  "schema_version": "vv-agent.distributed-run.v3",
+  "schema_version": "vv-agent.distributed-run.v5",
   "run_definition_schema_rules": {
-    "writer_value": "vv-agent.run-definition.v3",
+    "writer_value": "vv-agent.run-definition.v5",
     "complete_definition_source": "embedded_run_definition_in_checkpoint",
     "envelope_digest_must_match_checkpoint_digest": true,
     "missing_or_unknown_error": "checkpoint_definition_schema_unsupported",
     "failure_boundary": "before_capability_resolution_or_claim"
+  },
+  "message_wire": {
+    "type": "Message",
+    "artifact_ref_preserved_in_agent_task": true,
+    "artifact_ref_omitted_when_absent": true,
+    "model_projection_strips_artifact_ref": true
   },
   "resume_attempt_rules": {
     "checkpoint_store_is_authoritative": true,
@@ -28,7 +34,7 @@
     "missing_or_unknown_error": "checkpoint_claim_mode_invalid"
   },
   "canonical_envelope": {
-    "schema_version": "vv-agent.distributed-run.v3",
+    "schema_version": "vv-agent.distributed-run.v5",
     "job_id": "run-123:cycle:2",
     "run_id": "run-123",
     "task": {
@@ -49,6 +55,12 @@
       "max_cycles": 8,
       "memory_compact_threshold": 250000,
       "memory_threshold_percentage": 90,
+      "microcompaction_policy": {
+        "trigger_ratio": 0.75,
+        "target_ratio": 0.6,
+        "keep_recent_cycles": 3,
+        "min_result_chars": 500
+      },
       "no_tool_policy": "continue",
       "allow_interruption": true,
       "use_workspace": true,
@@ -58,7 +70,35 @@
       "extra_tool_names": [],
       "exclude_tools": [],
       "model_settings": null,
-      "initial_messages": [],
+      "initial_messages": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call-search",
+              "type": "function",
+              "function": {
+                "name": "search",
+                "arguments": "{\"query\":\"wire parity\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "<Tool Result Compact>\ntool_name: search\nartifact_path: .vv-agent/artifacts/run-123/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nsearch result\n</Tool Result Compact>",
+          "name": "search",
+          "tool_call_id": "call-search",
+          "artifact_ref": {
+            "path": ".vv-agent/artifacts/run-123/call-search.txt",
+            "media_type": "text/plain",
+            "encoding": "utf-8",
+            "size_bytes": 26,
+            "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+          }
+        }
+      ],
       "initial_shared_state": {},
       "metadata": {
         "_vv_agent_run_id": "run-123",
@@ -209,7 +249,7 @@
     "lease_duration_ms": 120000,
     "root_run_id": "run-123",
     "trace_id": "trace-run-123",
-    "run_definition_schema": "vv-agent.run-definition.v3",
+    "run_definition_schema": "vv-agent.run-definition.v5",
     "run_definition_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "claim_mode": "recovery",
     "resume_attempt": 2,
@@ -229,11 +269,20 @@
   },
   "invalid_cases": [
     {
+      "name": "task_missing_microcompaction_policy",
+      "path": [
+        "task",
+        "microcompaction_policy"
+      ],
+      "operation": "remove",
+      "error": "invalid AgentTask microcompaction_policy"
+    },
+    {
       "name": "unsupported_schema_version",
       "path": [
         "schema_version"
       ],
-      "value": "vv-agent.distributed-run.v4",
+      "value": "vv-agent.distributed-run.v6",
       "error": "unsupported distributed schema_version"
     },
     {
@@ -349,6 +398,7 @@
           "side_effect": "read",
           "idempotency": "supported",
           "terminal": false,
+          "result_retention": "archive",
           "capability_tags": [
             "record.read"
           ],
@@ -361,6 +411,7 @@
           "side_effect": "write",
           "idempotency": "supported",
           "terminal": false,
+          "result_retention": "archive",
           "capability_tags": [
             "record.read"
           ],

@@ -1022,7 +1022,7 @@ class Runner:
             request = cls._extract_handoff(result)
             if request is not None and effective_config.checkpoint_config is not None:
                 raise CheckpointError(
-                    "checkpoint v2 does not yet support handoff state",
+                    "checkpointed runs do not support handoff state",
                     code="checkpoint_handoff_unsupported",
                 )
             if pending is not None:
@@ -1217,12 +1217,12 @@ class Runner:
         if run_config.checkpoint_config is not None:
             if agent.handoffs:
                 raise CheckpointError(
-                    "checkpoint v2 does not yet support handoff state",
+                    "checkpointed runs do not support handoff state",
                     code="checkpoint_handoff_unsupported",
                 )
             if run_config.session is not None and not callable(getattr(run_config.session, "add_items_once", None)):
                 raise CheckpointError(
-                    "checkpoint v2 requires an append-once session",
+                    "checkpointed runs require an append-once session",
                     code="checkpoint_session_idempotency_unsupported",
                 )
         event_session_id = cls._resolve_event_session_id(run_config)

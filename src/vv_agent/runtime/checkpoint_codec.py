@@ -100,7 +100,7 @@ def checkpoint_to_dict(
         "terminal_result": (checkpoint.terminal_result.to_dict() if checkpoint.terminal_result is not None else None),
         "terminal_acknowledged": checkpoint.terminal_acknowledged,
     }
-    return _json_object(payload, "checkpoint v3")
+    return _json_object(payload, "checkpoint v5")
 
 
 def checkpoint_from_dict(
@@ -110,7 +110,7 @@ def checkpoint_from_dict(
     registered_extensions: Iterable[Any] | None = None,
 ) -> Checkpoint:
     if not isinstance(payload, dict):
-        raise ValueError("checkpoint v3 payload must be an object")
+        raise ValueError("checkpoint v5 payload must be an object")
     unknown_fields = set(payload) - _KNOWN_FIELDS
     if unknown_fields:
         names = ", ".join(sorted(unknown_fields))
@@ -225,7 +225,7 @@ def checkpoint_to_json(
             checkpoint,
             max_extension_state_bytes=max_extension_state_bytes,
         ),
-        "checkpoint v3",
+        "checkpoint v5",
     ).decode("utf-8")
 
 
@@ -236,11 +236,11 @@ def checkpoint_from_json(
     registered_extensions: Iterable[Any] | None = None,
 ) -> Checkpoint:
     if not isinstance(payload, str | bytes):
-        raise TypeError("checkpoint v3 JSON must be str or bytes")
+        raise TypeError("checkpoint v5 JSON must be str or bytes")
     try:
         decoded = _strict_json_loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("checkpoint v3 JSON is invalid") from exc
+        raise ValueError("checkpoint v5 JSON is invalid") from exc
     return checkpoint_from_dict(
         decoded,
         max_extension_state_bytes=max_extension_state_bytes,

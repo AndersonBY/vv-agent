@@ -6,10 +6,12 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+from vv_agent.constants import READ_FILE_TOOL_NAME
 from vv_agent.events import MemoryCompactTrigger, RunEvent, _project_provider_stream_payload
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import CompactionExhaustedError, MemoryManager
 from vv_agent.memory.manager import CompactionMode
+from vv_agent.memory.microcompact import MicrocompactPlan, is_microcompacted_tool_content
 from vv_agent.memory.provider import MemoryCompactCompleted, MemoryCompactStarted, MemoryProvider, MemoryProviderResult
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.model_settings import ModelSettings
@@ -67,25 +69,34 @@ class CycleRunner:
             shared_state=shared,
         )
         lifecycle_before_messages = pre_compact_messages
-        preemptively_microcompacted = False
-        preemptive_mode: CompactionMode = "none"
-        compact_total_tokens = previous_prompt_tokens
         estimated_compact_tokens = self._estimate_compact_tokens(
             pre_compact_messages,
             memory_manager=memory_manager,
             total_tokens=previous_prompt_tokens,
         )
-        should_preemptive_microcompact = memory_manager.should_preemptive_microcompact(
+        effective_compact_tokens = memory_manager._calculate_effective_length(
             pre_compact_messages,
             total_tokens=previous_prompt_tokens,
             recent_tool_call_ids=recent_tool_call_ids,
+        )
+        recovery_tool_available = self._model_can_recover_archives(
+            task=task,
+            memory_manager=memory_manager,
+        )
+        memory_manager.recovery_tool_available = recovery_tool_available
+        microcompact_plan = memory_manager.plan_microcompaction(
+            pre_compact_messages,
+            cycle_index=cycle_index,
+            current_tokens=effective_compact_tokens,
+            recovery_tool_available=recovery_tool_available,
         )
         compact_lifecycle_started = False
         should_full_compact = self._should_full_compact(
             estimated_compact_tokens,
             memory_manager=memory_manager,
         )
-        if should_preemptive_microcompact or should_full_compact:
+        has_microcompact_candidates = bool(microcompact_plan and microcompact_plan.candidates)
+        if has_microcompact_candidates or should_full_compact:
             self._emit_memory_compact_started(
                 ctx=ctx,
                 cycle_index=cycle_index,
@@ -93,28 +104,22 @@ class CycleRunner:
                 estimated_tokens=estimated_compact_tokens,
                 trigger="full_threshold" if should_full_compact else "micro_threshold",
                 memory_manager=memory_manager,
+                microcompact_plan=microcompact_plan,
             )
             compact_lifecycle_started = True
-        if should_preemptive_microcompact:
-            pre_compact_messages, cleared = memory_manager.microcompact_messages(
-                pre_compact_messages,
-                cycle_index=cycle_index,
-            )
-            if cleared > 0:
-                preemptively_microcompacted = True
-                preemptive_mode = "micro"
-                compact_total_tokens = None
         compaction_result = memory_manager.compact_with_result(
             pre_compact_messages,
             cycle_index=cycle_index,
-            total_tokens=compact_total_tokens,
+            total_tokens=previous_prompt_tokens,
             recent_tool_call_ids=recent_tool_call_ids,
+            microcompact_plan=microcompact_plan,
+            microcompact_planned=True,
         )
         compacted_messages = compaction_result.messages
-        memory_compacted = compaction_result.changed or preemptively_microcompacted
+        memory_compacted = compaction_result.changed
         if compact_lifecycle_started:
             changed = lifecycle_before_messages != compacted_messages
-            mode = self._strongest_compaction_mode(preemptive_mode, compaction_result.mode)
+            mode = compaction_result.mode
             if not changed:
                 mode = "none"
             self._emit_memory_compact_completed(
@@ -125,6 +130,9 @@ class CycleRunner:
                 memory_manager=memory_manager,
                 mode=mode,
                 changed=changed,
+                archived_count=compaction_result.archived_count,
+                reclaimed_tokens=compaction_result.reclaimed_tokens,
+                artifact_failure_count=compaction_result.artifact_failure_count,
             )
         ptl_retries = 0
         request_messages = compacted_messages
@@ -145,6 +153,14 @@ class CycleRunner:
                 tool_schemas=tool_schemas,
                 shared_state=shared,
             )
+            final_recovery_tool_available = self._tool_schemas_include_recovery(request_tool_schemas)
+            memory_manager.recovery_tool_available = final_recovery_tool_available
+            if not final_recovery_tool_available and any(
+                message.role == "tool" and is_microcompacted_tool_content(message.content) for message in request_messages
+            ):
+                raise RuntimeError(
+                    "microcompaction_recovery_unavailable: compacted tool results require a model-visible read_file tool"
+                )
 
             if ctx is not None:
                 ctx.check_cancelled()
@@ -414,6 +430,28 @@ class CycleRunner:
         rank = {"none": 0, "micro": 1, "structural": 2, "summary": 3, "emergency": 4}
         return max(modes, key=rank.__getitem__, default="none")
 
+    def _model_can_recover_archives(
+        self,
+        *,
+        task: AgentTask,
+        memory_manager: MemoryManager,
+    ) -> bool:
+        schemas = plan_tool_schemas(
+            registry=self.tool_registry,
+            task=task,
+            memory_usage_percentage=memory_manager.estimate_memory_usage_percentage([]),
+        )
+        return self._tool_schemas_include_recovery(schemas)
+
+    @staticmethod
+    def _tool_schemas_include_recovery(schemas: list[dict[str, Any]]) -> bool:
+        return any(
+            isinstance(schema, dict)
+            and isinstance((function := schema.get("function")), dict)
+            and function.get("name") == READ_FILE_TOOL_NAME
+            for schema in schemas
+        )
+
     def _emit_memory_compact_started(
         self,
         *,
@@ -423,6 +461,7 @@ class CycleRunner:
         estimated_tokens: int | None,
         trigger: MemoryCompactTrigger,
         memory_manager: MemoryManager,
+        microcompact_plan: MicrocompactPlan | None = None,
     ) -> None:
         providers = self._memory_providers_from_context(ctx)
         emit_event = self._event_emitter_from_context(ctx)
@@ -437,6 +476,9 @@ class CycleRunner:
             configured_threshold=memory_manager.compact_threshold,
             effective_threshold=memory_manager.autocompact_threshold,
             microcompact_threshold=memory_manager.microcompact_trigger_threshold,
+            microcompact_target=memory_manager.microcompact_target_threshold,
+            candidate_count=microcompact_plan.candidate_count if microcompact_plan is not None else 0,
+            estimated_reclaimable_tokens=(microcompact_plan.estimated_reclaimable_tokens if microcompact_plan is not None else 0),
             model_context_window=memory_manager.model_context_window,
             model_max_output_tokens=memory_manager.model_max_output_tokens,
             reserved_output_tokens=memory_manager.reserved_output_tokens,
@@ -452,6 +494,9 @@ class CycleRunner:
             configured_threshold=memory_manager.compact_threshold,
             effective_threshold=memory_manager.autocompact_threshold,
             microcompact_threshold=memory_manager.microcompact_trigger_threshold,
+            microcompact_target=memory_manager.microcompact_target_threshold,
+            candidate_count=microcompact_plan.candidate_count if microcompact_plan is not None else 0,
+            estimated_reclaimable_tokens=(microcompact_plan.estimated_reclaimable_tokens if microcompact_plan is not None else 0),
             model_context_window=memory_manager.model_context_window,
             model_max_output_tokens=memory_manager.model_max_output_tokens,
             reserved_output_tokens=memory_manager.reserved_output_tokens,
@@ -472,6 +517,11 @@ class CycleRunner:
                 configured_threshold=memory_manager.compact_threshold,
                 effective_threshold=memory_manager.autocompact_threshold,
                 microcompact_threshold=memory_manager.microcompact_trigger_threshold,
+                microcompact_target=memory_manager.microcompact_target_threshold,
+                candidate_count=microcompact_plan.candidate_count if microcompact_plan is not None else 0,
+                estimated_reclaimable_tokens=(
+                    microcompact_plan.estimated_reclaimable_tokens if microcompact_plan is not None else 0
+                ),
                 model_context_window=memory_manager.model_context_window,
                 model_max_output_tokens=memory_manager.model_max_output_tokens,
                 reserved_output_tokens=memory_manager.reserved_output_tokens,
@@ -494,6 +544,9 @@ class CycleRunner:
         memory_manager: MemoryManager,
         mode: CompactionMode,
         changed: bool,
+        archived_count: int = 0,
+        reclaimed_tokens: int = 0,
+        artifact_failure_count: int = 0,
     ) -> None:
         providers = self._memory_providers_from_context(ctx)
         emit_event = self._event_emitter_from_context(ctx)
@@ -511,6 +564,9 @@ class CycleRunner:
             ),
             mode=mode,
             changed=changed,
+            archived_count=archived_count,
+            reclaimed_tokens=reclaimed_tokens,
+            artifact_failure_count=artifact_failure_count,
         )
         metadata = self._call_after_memory_providers(providers, event)
         if metadata:
@@ -522,6 +578,9 @@ class CycleRunner:
                 summary_tokens=event.summary_tokens,
                 mode=mode,
                 changed=changed,
+                archived_count=archived_count,
+                reclaimed_tokens=reclaimed_tokens,
+                artifact_failure_count=artifact_failure_count,
                 event_id=event.event_id,
                 created_at=event.created_at,
                 metadata=metadata,

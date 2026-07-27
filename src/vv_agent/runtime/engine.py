@@ -75,7 +75,11 @@ from vv_agent.runtime.sub_task_manager import SubTaskManager, _SubTaskTurnSnapsh
 from vv_agent.runtime.tool_call_runner import ToolCallRunner, _ConfiguredSubTaskCancelledError
 from vv_agent.runtime.tool_planner import freeze_dynamic_tool_schema_hints, plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
-from vv_agent.tools.metadata import normalize_denied_side_effects, normalize_metadata_labels
+from vv_agent.tools.metadata import (
+    ToolResultRetention,
+    normalize_denied_side_effects,
+    normalize_metadata_labels,
+)
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -581,12 +585,17 @@ class AgentRuntime:
         if checkpoint_controller is not None:
             checkpoint_controller.bind_model_accounting(runtime_ctx.model_call_coordinator)
 
+        allow_outside_workspace_paths = self._allow_outside_workspace_paths(task)
+        effective_workspace_backend = self._workspace_backend or LocalWorkspaceBackend(
+            workspace_path,
+            allow_outside_root=allow_outside_workspace_paths,
+        )
         memory_manager = self._build_memory_manager(
             task=task,
             workspace_path=workspace_path,
+            workspace_backend=effective_workspace_backend,
             ctx=runtime_ctx,
         )
-        allow_outside_workspace_paths = self._allow_outside_workspace_paths(task)
         effective_sub_task_manager = sub_task_manager
         if effective_sub_task_manager is None:
             effective_sub_task_manager = SubTaskManager(
@@ -597,11 +606,7 @@ class AgentRuntime:
         cycle_executor = self._build_cycle_executor(
             task=task,
             workspace_path=workspace_path,
-            workspace_backend=self._workspace_backend
-            or LocalWorkspaceBackend(
-                workspace_path,
-                allow_outside_root=allow_outside_workspace_paths,
-            ),
+            workspace_backend=effective_workspace_backend,
             memory_manager=memory_manager,
             before_cycle_messages=before_cycle_messages,
             interruption_messages=interruption_messages,
@@ -1492,6 +1497,7 @@ class AgentRuntime:
             reasoning_content=message.reasoning_content,
             image_url=message.image_url,
             metadata=dict(message.metadata),
+            artifact_ref=message.artifact_ref,
         )
 
     def _build_initial_messages(
@@ -1544,6 +1550,7 @@ class AgentRuntime:
         *,
         task: AgentTask,
         workspace_path: Path,
+        workspace_backend: WorkspaceBackend | None = None,
         ctx: ExecutionContext | None = None,
     ) -> MemoryManager:
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
@@ -1581,24 +1588,6 @@ class AgentRuntime:
         def read_int(key: str, default: int, *, minimum: int = 0) -> int:
             value = read_optional_int(key, minimum=minimum)
             return max(default, minimum) if value is None else value
-
-        def read_float(key: str, default: float, *, minimum: float = 0.0, maximum: float | None = None) -> float:
-            raw = metadata.get(key, default)
-            try:
-                value = float(raw)
-            except (TypeError, ValueError):
-                value = default
-            value = max(value, minimum)
-            if maximum is not None:
-                value = min(value, maximum)
-            return value
-
-        def read_str_set(key: str) -> set[str] | None:
-            raw = metadata.get(key)
-            if not isinstance(raw, list):
-                return None
-            values = {str(item).strip() for item in raw if str(item).strip()}
-            return values or None
 
         warning_threshold = max(1, min(task.memory_threshold_percentage, 100))
         summary_backend = self._read_optional_str(metadata, "memory_summary_backend")
@@ -1672,6 +1661,12 @@ class AgentRuntime:
                 storage_scope=session_memory_scope,
             )
             session_memory.load()
+        tool_result_retentions: dict[str, ToolResultRetention] = {}
+        for tool_name in self.tool_registry.list_tool_names():
+            declared_metadata = self.tool_registry.tool_metadata(tool_name)
+            tool_result_retentions[tool_name] = (
+                declared_metadata.result_retention if declared_metadata is not None else ToolResultRetention.ARCHIVE
+            )
         return MemoryManager(
             compact_threshold=max(task.memory_compact_threshold, 0),
             keep_recent_messages=read_int("memory_keep_recent_messages", 10, minimum=1),
@@ -1690,11 +1685,12 @@ class AgentRuntime:
             tool_result_excerpt_tail=read_int("tool_result_excerpt_tail", 200),
             tool_calls_keep_last=read_int("tool_calls_keep_last", 3),
             assistant_no_tool_keep_last=read_int("assistant_no_tool_keep_last", 1),
-            microcompact_trigger_ratio=read_float("microcompact_trigger_ratio", 0.75, minimum=0.0, maximum=1.0),
-            microcompact_keep_recent_cycles=read_int("microcompact_keep_recent_cycles", 3, minimum=0),
-            microcompact_min_result_length=read_int("microcompact_min_result_length", 500, minimum=1),
-            microcompact_compactable_tools=read_str_set("microcompact_compactable_tools"),
-            tool_result_artifact_dir=str(metadata.get("tool_result_artifact_dir", ".memory/tool_results")),
+            microcompaction_policy=task.microcompaction_policy,
+            tool_result_retentions=tool_result_retentions,
+            workspace_backend=workspace_backend
+            or self._workspace_backend
+            or (LocalWorkspaceBackend(workspace_path) if task.use_workspace else None),
+            artifact_scope=task.task_id,
             workspace=workspace_path if task.use_workspace else None,
             summary_event_limit=read_int("summary_event_limit", 40, minimum=1),
             summary_backend=summary_backend,
@@ -2844,6 +2840,7 @@ class AgentRuntime:
             max_cycles=max(sub_agent.max_cycles, 1),
             memory_compact_threshold=parent_task.memory_compact_threshold,
             memory_threshold_percentage=parent_task.memory_threshold_percentage,
+            microcompaction_policy=parent_task.microcompaction_policy,
             no_tool_policy="continue",
             allow_interruption=False,
             use_workspace=parent_task.use_workspace,

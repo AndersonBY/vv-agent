@@ -1,80 +1,208 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 
-from vv_agent.constants import (
-    BASH_TOOL_NAME,
-    EDIT_FILE_TOOL_NAME,
-    FILE_INFO_TOOL_NAME,
-    FIND_FILES_TOOL_NAME,
-    READ_FILE_TOOL_NAME,
-    SEARCH_FILES_TOOL_NAME,
-    WRITE_FILE_TOOL_NAME,
-)
-from vv_agent.types import Message
+from vv_agent.microcompaction import MicrocompactionPolicy
+from vv_agent.tools.metadata import ToolResultRetention
+from vv_agent.types import Message, ToolArtifactRef
 
-COMPACTABLE_TOOLS: set[str] = {
-    READ_FILE_TOOL_NAME,
-    WRITE_FILE_TOOL_NAME,
-    EDIT_FILE_TOOL_NAME,
-    FIND_FILES_TOOL_NAME,
-    SEARCH_FILES_TOOL_NAME,
-    BASH_TOOL_NAME,
-    FILE_INFO_TOOL_NAME,
-}
-
-CLEARED_MARKER = "[Old tool result content cleared by microcompact]"
+COMPACT_MARKER_OPENING = "<Tool Result Compact>"
+COMPACT_MARKER_CLOSING = "</Tool Result Compact>"
+EXCERPT_METADATA_KEY = "_vv_agent_microcompact_excerpt"
 
 
-@dataclass(slots=True)
-class MicrocompactConfig:
-    trigger_ratio: float = 0.75
-    keep_recent_cycles: int = 3
-    min_result_length: int = 500
-    compactable_tools: set[str] | None = None
+@dataclass(frozen=True, slots=True)
+class MicrocompactCandidate:
+    message_index: int
+    tool_name: str
+    tool_call_id: str
+    existing_artifact: ToolArtifactRef | None
+    estimated_reclaimable_tokens: int
 
 
-def microcompact(
+@dataclass(frozen=True, slots=True)
+class MicrocompactPlan:
+    candidates: tuple[MicrocompactCandidate, ...] = ()
+    current_tokens: int = 0
+    target_tokens: int = 0
+
+    @property
+    def candidate_count(self) -> int:
+        return len(self.candidates)
+
+    @property
+    def estimated_reclaimable_tokens(self) -> int:
+        return sum(candidate.estimated_reclaimable_tokens for candidate in self.candidates)
+
+
+def plan_microcompact(
     messages: list[Message],
+    *,
     current_cycle: int,
-    config: MicrocompactConfig | None = None,
-) -> tuple[list[Message], int]:
-    if not messages:
-        return messages, 0
+    current_tokens: int,
+    target_tokens: int,
+    policy: MicrocompactionPolicy,
+    result_retentions: Mapping[str, ToolResultRetention],
+    artifact_path_estimate_for: Callable[[str], str],
+    estimate_message_tokens: Callable[[Message], int],
+) -> MicrocompactPlan:
+    if not messages or current_tokens <= target_tokens:
+        return MicrocompactPlan(current_tokens=max(current_tokens, 0), target_tokens=max(target_tokens, 0))
 
-    effective_config = config or MicrocompactConfig()
-    compactable_tools = effective_config.compactable_tools or COMPACTABLE_TOOLS
     tool_call_names = _build_tool_call_name_map(messages)
     inferred_cycles = _infer_message_cycles(messages)
     max_inferred_cycle = inferred_cycles[-1] if inferred_cycles else 0
-    # `current_cycle` is the upcoming cycle index, while inferred cycles track
-    # completed assistant turns currently present in the retained window.
-    # Clamp against `max_inferred + 1` to preserve the existing keep_recent
-    # semantics without over-clearing after earlier compaction has truncated history.
-    effective_current_cycle = min(max(int(current_cycle), 0), max_inferred_cycle + 1)
-    protected_cycle = max(effective_current_cycle - max(effective_config.keep_recent_cycles, 0), 0)
+    effective_current_cycle = max(max(int(current_cycle), 0), max_inferred_cycle + 1)
+    protected_cycle = max(effective_current_cycle - policy.keep_recent_cycles, 0)
+    candidates: list[MicrocompactCandidate] = []
 
-    updated_messages: list[Message] = []
-    cleared_count = 0
-    for message, inferred_cycle in zip(messages, inferred_cycles, strict=False):
-        if not _should_clear_message(
+    for index, (message, inferred_cycle) in enumerate(zip(messages, inferred_cycles, strict=False)):
+        tool_name = _candidate_tool_name(
             message,
             inferred_cycle=inferred_cycle,
             protected_cycle=protected_cycle,
-            min_result_length=effective_config.min_result_length,
-            compactable_tools=compactable_tools,
+            min_result_chars=policy.min_result_chars,
             tool_call_names=tool_call_names,
-        ):
-            updated_messages.append(message)
+            result_retentions=result_retentions,
+        )
+        if tool_name is None:
             continue
+        tool_call_id = str(message.tool_call_id or "").strip()
+        existing_artifact = _existing_artifact(message)
+        artifact_path = existing_artifact.path if existing_artifact is not None else artifact_path_estimate_for(tool_call_id)
+        excerpt_value = message.metadata.get(EXCERPT_METADATA_KEY)
+        excerpt_source = excerpt_value if isinstance(excerpt_value, str) else message.content
+        marker = build_compacted_tool_content(
+            excerpt_source,
+            artifact_path=artifact_path,
+            tool_name=tool_name,
+        )
+        marker_message = replace(message, content=marker)
+        reclaimable = max(estimate_message_tokens(message) - estimate_message_tokens(marker_message), 0)
+        if reclaimable == 0:
+            continue
+        candidates.append(
+            MicrocompactCandidate(
+                message_index=index,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                existing_artifact=existing_artifact,
+                estimated_reclaimable_tokens=reclaimable,
+            )
+        )
 
-        updated_messages.append(_replace_content(message))
-        cleared_count += 1
-    return updated_messages, cleared_count
+    return MicrocompactPlan(
+        candidates=tuple(candidates),
+        current_tokens=max(current_tokens, 0),
+        target_tokens=max(target_tokens, 0),
+    )
+
+
+def build_compacted_tool_content(
+    content: str,
+    *,
+    artifact_path: str,
+    tool_name: str,
+    excerpt_head_chars: int = 200,
+    excerpt_tail_chars: int = 200,
+) -> str:
+    content = content_without_recovery_envelope(content)
+    head_length = max(excerpt_head_chars, 0)
+    tail_length = max(excerpt_tail_chars, 0)
+    head = content[:head_length] if head_length else ""
+    tail = content[-tail_length:] if tail_length and len(content) > head_length else ""
+    excerpt_parts = [head] if head else []
+    if tail:
+        if head:
+            excerpt_parts.append("...<snip>...")
+        excerpt_parts.append(tail)
+    excerpt = "\n".join(excerpt_parts).strip()
+    return (
+        f"{COMPACT_MARKER_OPENING}\n"
+        f"tool_name: {tool_name}\n"
+        f"artifact_path: {artifact_path}\n"
+        "retrieval_hint: use read_file on artifact_path if needed\n"
+        "excerpt:\n"
+        f"{excerpt}\n"
+        f"{COMPACT_MARKER_CLOSING}"
+    )
+
+
+def replace_with_compacted_marker(
+    message: Message,
+    candidate: MicrocompactCandidate,
+    *,
+    artifact: ToolArtifactRef,
+    marker: str,
+) -> Message:
+    return _replace_content(
+        message,
+        marker,
+        artifact=artifact,
+        tool_name=candidate.tool_name,
+    )
 
 
 def is_microcompacted_tool_content(content: str) -> bool:
-    return str(content or "").startswith(CLEARED_MARKER)
+    return str(content or "").startswith(COMPACT_MARKER_OPENING)
+
+
+def has_recovery_envelope(content: str) -> bool:
+    _, separator, last_line = str(content or "").rpartition("\n")
+    if not separator:
+        return False
+    try:
+        payload = json.loads(last_line)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and "vv_agent_recovery" in payload
+
+
+def content_without_recovery_envelope(content: str) -> str:
+    prefix, separator, _last_line = str(content or "").rpartition("\n")
+    return prefix if separator and has_recovery_envelope(content) else content
+
+
+def _candidate_tool_name(
+    message: Message,
+    *,
+    inferred_cycle: int,
+    protected_cycle: int,
+    min_result_chars: int,
+    tool_call_names: dict[str, str],
+    result_retentions: Mapping[str, ToolResultRetention],
+) -> str | None:
+    if message.role != "tool" or inferred_cycle >= protected_cycle:
+        return None
+    if len(message.content) <= min_result_chars or is_microcompacted_tool_content(message.content):
+        return None
+    if _existing_artifact(message) is None and has_recovery_envelope(message.content):
+        return None
+    tool_name = tool_call_names.get(str(message.tool_call_id or "").strip())
+    if tool_name is None:
+        return None
+    if result_retentions.get(tool_name, ToolResultRetention.ARCHIVE) == ToolResultRetention.PRESERVE:
+        return None
+    return tool_name
+
+
+def _replace_content(
+    message: Message,
+    content: str,
+    *,
+    artifact: ToolArtifactRef,
+    tool_name: str,
+) -> Message:
+    del tool_name
+    metadata = dict(message.metadata)
+    metadata.pop(EXCERPT_METADATA_KEY, None)
+    return replace(message, content=content, metadata=metadata, artifact_ref=artifact)
+
+
+def _existing_artifact(message: Message) -> ToolArtifactRef | None:
+    return message.artifact_ref if isinstance(message.artifact_ref, ToolArtifactRef) else None
 
 
 def _build_tool_call_name_map(messages: list[Message]) -> dict[str, str]:
@@ -96,18 +224,6 @@ def _build_tool_call_name_map(messages: list[Message]) -> dict[str, str]:
 
 
 def _infer_message_cycles(messages: list[Message]) -> list[int]:
-    """Infer per-message cycle indices from assistant turns in the current message window.
-
-    The runtime appends one assistant message per completed cycle, so the inferred
-    cycle increments on each assistant message and the following tool/user messages
-    inherit that cycle number until the next assistant appears.
-
-    This is an approximation over the currently retained message slice, not a
-    canonical persisted cycle id. Callers should clamp any external `current_cycle`
-    against the inferred window size (effectively `max_inferred + 1`, because the
-    runtime passes the upcoming cycle index) to avoid over-clearing after prior
-    compaction has truncated older turns.
-    """
     current_cycle = 0
     inferred_cycles: list[int] = []
     for message in messages:
@@ -117,29 +233,16 @@ def _infer_message_cycles(messages: list[Message]) -> list[int]:
     return inferred_cycles
 
 
-def _should_clear_message(
-    message: Message,
-    *,
-    inferred_cycle: int,
-    protected_cycle: int,
-    min_result_length: int,
-    compactable_tools: set[str],
-    tool_call_names: dict[str, str],
-) -> bool:
-    if message.role != "tool":
-        return False
-    if inferred_cycle >= protected_cycle:
-        return False
-    if len(message.content) <= max(min_result_length, 1):
-        return False
-    if is_microcompacted_tool_content(message.content):
-        return False
-    tool_name = tool_call_names.get(str(message.tool_call_id or "").strip(), "")
-    return bool(tool_name and tool_name in compactable_tools)
-
-
-def _replace_content(message: Message) -> Message:
-    metadata = dict(message.metadata)
-    metadata["microcompacted"] = True
-    metadata["microcompact_original_chars"] = len(message.content)
-    return replace(message, content=CLEARED_MARKER, metadata=metadata)
+__all__ = [
+    "COMPACT_MARKER_CLOSING",
+    "COMPACT_MARKER_OPENING",
+    "EXCERPT_METADATA_KEY",
+    "MicrocompactCandidate",
+    "MicrocompactPlan",
+    "build_compacted_tool_content",
+    "content_without_recovery_envelope",
+    "has_recovery_envelope",
+    "is_microcompacted_tool_content",
+    "plan_microcompact",
+    "replace_with_compacted_marker",
+]

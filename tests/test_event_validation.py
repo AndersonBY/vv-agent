@@ -17,7 +17,7 @@ def _contract() -> dict[str, Any]:
 
 def _run_completed_payload() -> dict[str, Any]:
     return {
-        "version": "v1",
+        "version": "v2",
         "type": "run_completed",
         "event_id": "evt_completion_contract",
         "run_id": "run_completion_contract",
@@ -112,7 +112,7 @@ def test_run_event_rejects_unknown_fields_but_preserves_typed_metadata_extension
 @pytest.mark.parametrize("duration_ms", [True, -1, 1.5, 9_007_199_254_740_992])
 def test_tool_completion_duration_rejects_non_json_safe_values(duration_ms: Any) -> None:
     payload = {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_duration",
         "run_id": "run_invalid_duration",
@@ -151,7 +151,7 @@ def test_memory_compact_started_rejects_known_fields_with_wrong_types(
     value: Any,
 ) -> None:
     payload = {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory_started",
         "run_id": "run_invalid_memory",
@@ -180,7 +180,7 @@ def test_memory_compact_completed_rejects_known_fields_with_wrong_types(
     value: Any,
 ) -> None:
     payload = {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory_completed",
         "run_id": "run_invalid_memory",

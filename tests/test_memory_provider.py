@@ -36,6 +36,9 @@ def test_memory_compact_events_are_serializable() -> None:
         configured_threshold=250_000,
         effective_threshold=250_000,
         microcompact_threshold=187_500,
+        microcompact_target=150_000,
+        candidate_count=2,
+        estimated_reclaimable_tokens=80_000,
         model_context_window=1_000_000,
         model_max_output_tokens=384_000,
         reserved_output_tokens=16_000,
@@ -52,6 +55,9 @@ def test_memory_compact_events_are_serializable() -> None:
         summary_tokens=500,
         mode="summary",
         changed=True,
+        archived_count=2,
+        reclaimed_tokens=80_000,
+        artifact_failure_count=0,
     )
 
     assert started.to_dict()["estimated_tokens"] == 9000

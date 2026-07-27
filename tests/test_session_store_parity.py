@@ -9,7 +9,7 @@ import pytest
 
 from vv_agent import MemorySession, Message, SQLiteSessionStore
 from vv_agent.sessions.base import _deserialize_message, _serialize_message
-from vv_agent.types import Role
+from vv_agent.types import Role, ToolArtifactRef
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
 CODEC_FIXTURE = FIXTURE_DIR / "session_codec.json"
@@ -148,6 +148,28 @@ def test_session_codec_accepts_only_openai_function_tool_calls() -> None:
     }
 
 
+def test_session_codec_preserves_host_artifact_ref_but_model_projection_omits_it() -> None:
+    artifact_ref = ToolArtifactRef(
+        path=".vv-agent/artifacts/run-7/call-search.txt",
+        media_type="text/plain",
+        encoding="utf-8",
+        size_bytes=42,
+        sha256="0" * 64,
+    )
+    message = Message(
+        role="tool",
+        content="<Tool Result Compact>\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt",
+        tool_call_id="call-search",
+        artifact_ref=artifact_ref,
+    )
+
+    restored = _deserialize_message(_serialize_message(message))
+
+    assert restored.artifact_ref == artifact_ref
+    assert restored.to_dict()["artifact_ref"] == artifact_ref.to_dict()
+    assert "artifact_ref" not in restored.to_openai_message()
+
+
 def test_memory_session_uses_validated_snapshots_and_atomic_batches() -> None:
     session = MemorySession("memory-parity")
     original = Message(
@@ -174,19 +196,22 @@ def test_sqlite_opens_canonical_schema_written_by_either_runtime(tmp_path: Path)
 
     store = SQLiteSessionStore(db_path)
     shared = store.session("shared")
-    assert [item.content for item in shared.get_items()] == ["canonical user", ""]
-    assert shared.get_items()[1].tool_calls == [
+    items = shared.get_items()
+    assert [item.content for item in items[:2]] == ["canonical user", ""]
+    assert items[1].tool_calls == [
         {
             "id": "call_canonical",
             "type": "function",
             "function": {"name": "lookup", "arguments": '{"a":1,"z":2}'},
         }
     ]
+    assert items[2].artifact_ref is not None
+    assert items[2].artifact_ref.path == ".vv-agent/artifacts/session-1/call-canonical.txt"
     shared.add_items([Message(role="tool", content="canonical result", tool_call_id="call_canonical")])
     store.close()
 
     version, columns, rows = _schema_state(db_path)
-    assert version == 1
+    assert version == 2
     assert columns == ["session_id", "item_index", "payload"]
     assert rows[-1][0] == 10
     assert json.loads(rows[-1][2]) == {
@@ -223,7 +248,7 @@ def test_sqlite_creates_only_the_current_schema_on_an_empty_database(tmp_path: P
 
     connection = sqlite3.connect(db_path)
     try:
-        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 1
+        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 2
         assert [
             (str(row[0]), str(row[1]), str(row[2]))
             for row in connection.execute(
@@ -286,7 +311,7 @@ def test_sqlite_rejects_canonical_column_names_with_wrong_constraints(tmp_path: 
     try:
         connection.executescript(
             """
-            PRAGMA user_version = 1;
+            PRAGMA user_version = 2;
             CREATE TABLE session_items (
                 session_id TEXT,
                 item_index INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -318,7 +343,7 @@ def test_sqlite_rejects_superseded_session_columns_without_migrating(tmp_path: P
     try:
         connection.executescript(
             """
-            PRAGMA user_version = 1;
+            PRAGMA user_version = 2;
             CREATE TABLE session_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -381,7 +406,7 @@ def test_sqlite_rejects_newer_schema_without_mutating_it(tmp_path: Path) -> None
     _seed_database(db_path, CANONICAL_SQL_FIXTURE)
     connection = sqlite3.connect(db_path)
     try:
-        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA user_version = 3")
     finally:
         connection.close()
 
@@ -389,6 +414,6 @@ def test_sqlite_rejects_newer_schema_without_mutating_it(tmp_path: Path) -> None
         SQLiteSessionStore(db_path)
 
     version, columns, rows = _schema_state(db_path)
-    assert version == 2
+    assert version == 3
     assert columns == ["session_id", "item_index", "payload"]
-    assert len(rows) == 3
+    assert len(rows) == 4

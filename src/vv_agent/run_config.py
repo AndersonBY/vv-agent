@@ -11,6 +11,7 @@ from vv_agent.checkpoint import CheckpointConfig, CheckpointExtension, Reconcili
 from vv_agent.context_providers import ContextProvider
 from vv_agent.event_store import RunEventStore
 from vv_agent.events import RunEvent
+from vv_agent.microcompaction import MicrocompactionPolicy, normalize_microcompaction_policy
 from vv_agent.model_settings import ModelSettings
 from vv_agent.runtime.backends.base import ExecutionBackend
 from vv_agent.runtime.cancellation import CancellationToken
@@ -162,6 +163,7 @@ class RunConfig:
     workspace_backend: Any | None = None
     session: Any | None = None
     session_memory_enabled: bool = False
+    microcompaction_policy: MicrocompactionPolicy = field(default_factory=MicrocompactionPolicy)
     max_cycles: int | None = None
     max_handoffs: int | None = None
     tool_policy: ToolPolicy | None = None
@@ -202,6 +204,7 @@ class RunConfig:
         _validate_no_tool_policy(self.no_tool_policy, "RunConfig.no_tool_policy")
         if not isinstance(self.session_memory_enabled, bool):
             raise TypeError("RunConfig.session_memory_enabled must be a boolean")
+        self.microcompaction_policy = normalize_microcompaction_policy(self.microcompaction_policy)
         if self.workspace is not None and not isinstance(self.workspace, (str, Path)):
             raise TypeError("RunConfig.workspace must be a string or Path; use workspace_backend for custom storage")
         if self.model_provider is not None:

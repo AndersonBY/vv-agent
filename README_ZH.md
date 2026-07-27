@@ -6,18 +6,18 @@
 
 ## 安装
 
-当前版本为 `0.9.0`。它和 Rust `vv-agent` crate 都实现语言无关的
-Contract `4.1.0`，两边能力一致，只保留符合各自语言习惯的 API 写法。
+当前包版本为 `0.10.0`。仓库 `HEAD` 和 Rust `vv-agent` crate 都锁定语言无关的
+Contract `6.0.1`，两边能力一致，只保留符合各自语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.9.0"
+python -m pip install "vv-agent==0.10.0"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
-`vv-agent[s3]`。Contract 4 和仓库 `HEAD` 采用 forward-only 设计：当前版本只读取
-当前严格定义的公共 API 与传输数据结构。需要旧协议的应用应固定旧包版本。
+`vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
+公共 API 与传输数据结构。
 
-### 0.9.0 重点能力
+### 0.10.0 重点能力
 
 - 每次真正进入模型调用边界的尝试都会写入
   `result.token_usage.model_calls`，包括 Agent 主循环、Session Memory、完整上下文
@@ -37,9 +37,15 @@ python -m pip install "vv-agent==0.9.0"
 - 大型 bash 输出返回最多 12,000 个字符的预览和安全 workspace artifact；本地 workspace
   会把 artifact 存在 shell 工作目录之外的私有位置，并以流式方式写入完整输出。大型文件
   读取返回有界文本和经校验的 cursor，不需要重复执行原操作。
-- 持久化执行统一使用 `vv-agent.checkpoint.v4`、
-  `vv-agent.run-definition.v3`、`vv-agent.distributed-run.v3` 和
-  `vv-agent.distributed-worker-response.v2`，严格限定恢复与分布式 controller 边界。
+- `MicrocompactionPolicy` 可以配置触发比例、目标比例、受保护的最近 cycle 数和最小结果
+  长度。内建工具与自定义工具的旧结果默认都可归档；只有完整内容已经写入不可变 artifact，
+  且模型仍能调用 `read_file` 时，runtime 才会把旧结果替换为精简标记。模型只看到短预览和
+  恢复路径，大小与哈希等完整性信息只保留在宿主侧。
+- 持久化执行统一使用 `vv-agent.checkpoint.v5`、
+  `vv-agent.run-definition.v5`、`vv-agent.distributed-run.v5` 和
+  `vv-agent.distributed-worker-response.v3`，严格限定恢复与分布式 controller
+  边界。`RunEvent` 使用 wire version `v2`，SQLite session store 使用
+  `PRAGMA user_version=2`。
 
 详细规则见[输出校验](docs/output-validation.md)和
 [Checkpoint 与恢复](docs/checkpoint-resume.md)。
@@ -178,7 +184,7 @@ runtime 事件入口只有强类型 `RunEvent`；任务无关的内部观测统�
 审批短路和未知工具只发出 planned 与 completed，不发 started。completed 事件包含
 `directive`、可空的
 `error_code`、`execution_started` 和可空的单调时钟 `duration_ms`。取消或进程退出可能
-留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v3 operation journal
+留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v5 operation journal
 为准。
 
 需要直接控制 cycle loop 的后端集成仍可使用底层 `AgentRuntime` API。
@@ -639,8 +645,9 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
   - `derived_prompt_capacity = max(model_context_window - reserved_output_tokens - autocompact_buffer_tokens, 0)`
   - `autocompact_threshold = min(memory_compact_threshold, derived_prompt_capacity)`；
     配置阈值为零时使用 derived capacity，已知 derived capacity 为零时保持零。
-  - 默认 autocompact buffer 为 `13000`，默认 microcompact trigger 是有效完整
-    压缩阈值的 75%。
+  - 默认 autocompact buffer 为 `13000`。`MicrocompactionPolicy` 默认
+    trigger/target 为 `0.75`/`0.60`，保留最近 3 个 cycle，只考虑超过 500
+    字符的结果。
 - 有效长度策略（与 backend 对齐）：
   - 如果有上一轮 token 用量：
     - `effective_length = previous_prompt_tokens + token_count(recent_tool_messages)`
@@ -648,18 +655,45 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
     - `vv_llm.chat_clients.utils.get_message_token_counts(...)`
     - 如果 tokenizer 不可用，再用本地 CJK 感知估算
 - 压缩流程：
-  1. 预防性 microcompact：当使用量超过 `microcompact_trigger_ratio` 时，先清理旧的大 tool result
+  1. archive-backed microcompaction：使用量超过类型化 policy 的 trigger 后，
+     按最旧优先规划旧 tool result；只有完整归档成功才替换，并在达到 target
+     后停止
   2. Session Memory 提取：在全量摘要前抽取并持久化关键事实，避免后续压缩丢失
   3. 结构化清理（陈旧 tool_calls、孤儿 tool 消息、assistant 无工具消息折叠、旧 tool 结果 artifact 化）
   4. 若仍超阈值，再生成增强版压缩记忆总结，显式保留用户原始消息、文件操作、当前工作状态和错误修复信息
   5. 如果 provider 仍返回 prompt-too-long，再执行一次强制压缩，之后逐步加大 emergency tail-dropping 重试
   6. 全量压缩后，会在预算内自动恢复相关工作区文件内容到 `<Post-Compaction File Context>`
 - 压缩事件：
-  - 新的 `memory_compact_started` producer 会携带 typed trigger 和完整的容量解析快照。
+  - 新的 `memory_compact_started` producer 会携带 typed trigger、完整容量解析
+    快照、micro target、候选数量和预计可回收 token。
   - 新的 `memory_compact_completed` producer 会携带实际执行的最强 mode
     （`none`、`micro`、`structural`、`summary` 或 `emergency`）以及基于消息内容比较的
-    `changed`。
+    `changed`、归档数量、实际回收 token 和 artifact 失败数量。
   - 当前事件必须包含完整的强类型容量与结果字段；缺失或未知字段会被拒绝。
+- Artifact 恢复：
+  - 所有工具默认使用 `ToolResultRetention.ARCHIVE`；`PRESERVE` 只排除主动
+    microcompaction。
+  - 替换前先通过有效 `WorkspaceBackend` 把完整文本写入不可变的逻辑
+    `.vv-agent/artifacts/` 命名空间。写入失败或短写会保留原始消息。
+  - 当模型看不到 `read_file` 时不执行 microcompaction，包括
+    `use_workspace=False` 和显式排除该工具。
+  - 已有 typed artifact 会直接复用；模型只看到工具名、artifact 路径、恢复提示
+    和有限 excerpt。
+- 使用 `RunConfig(microcompaction_policy=MicrocompactionPolicy(...))` 配置主动
+  压缩。policy 会显式复制到 `AgentTask`，并在 run definition 的
+  `runtime_controls.microcompaction_policy` 中冻结/恢复。
+- 模型可见的替换内容严格使用下面的结构；字节数和 SHA-256 只保留在宿主可见的
+  `ToolArtifactRef` 中：
+
+```text
+<Tool Result Compact>
+tool_name: web_search
+artifact_path: .vv-agent/artifacts/<run>/<call>.txt
+retrieval_hint: use read_file on artifact_path if needed
+excerpt:
+<有限的头尾预览>
+</Tool Result Compact>
+```
 - Session Memory 行为：
   - 默认存放在 `workspace/.memory/session/<session-or-task-scope>/session_memory.json`
   - 若 `metadata.session_id` 存在，则按当前 session 隔离；否则按当前 `task_id` 隔离
@@ -681,10 +715,6 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
 - `model_max_output_tokens`（解析出的模型 capability，不代表隐式请求限制）
 - `reserved_output_tokens`
 - `autocompact_buffer_tokens`
-- `microcompact_trigger_ratio`
-- `microcompact_keep_recent_cycles`
-- `microcompact_min_result_length`
-- `microcompact_compactable_tools`
 - `include_memory_warning`
 - `session_memory_enabled`
 - `session_memory_min_tokens`
@@ -697,7 +727,6 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
 - `tool_result_excerpt_tail`
 - `tool_calls_keep_last`
 - `assistant_no_tool_keep_last`
-- `tool_result_artifact_dir`
 - `summary_event_limit`
 
 ### 记忆总结模型选择优先级

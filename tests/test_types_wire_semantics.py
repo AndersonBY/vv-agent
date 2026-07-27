@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.types import AgentTask, SubAgentConfig
 
@@ -73,6 +74,7 @@ def _agent_task_values() -> dict[str, Any]:
         "model": "model-1",
         "prompt_bundle": build_raw_system_prompt_bundle("system").to_dict(),
         "user_prompt": "user",
+        "microcompaction_policy": MicrocompactionPolicy().to_dict(),
     }
 
 
@@ -110,7 +112,7 @@ def test_sub_agent_config_accepts_full_u32_range_without_clamping_zero() -> None
     assert max_cycles.max_cycles == (1 << 32) - 1
 
 
-def test_agent_task_from_dict_uses_public_dict_defaults_for_sparse_payload() -> None:
+def test_agent_task_from_dict_uses_public_dict_defaults_for_optional_fields() -> None:
     task = AgentTask.from_dict(_agent_task_values())
 
     assert task.to_dict() == {
@@ -131,6 +133,14 @@ def test_agent_task_from_dict_uses_public_dict_defaults_for_sparse_payload() -> 
         "initial_shared_state": {},
         "metadata": {},
     }
+
+
+def test_agent_task_from_dict_requires_current_microcompaction_policy() -> None:
+    payload = _agent_task_values()
+    del payload["microcompaction_policy"]
+
+    with pytest.raises(KeyError, match="microcompaction_policy"):
+        AgentTask.from_dict(payload)
 
 
 @pytest.mark.parametrize("field_name", ["task_id", "model", "prompt_bundle", "user_prompt"])

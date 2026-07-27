@@ -18,7 +18,8 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EXTENSION_NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.[a-z0-9._-]+$")
 _CAPABILITY_SLOT_RE = re.compile(r"^[a-z][a-z0-9_.:-]*$")
 _JSON_POINTER_ESCAPE_RE = re.compile(r"~(?:0|1)")
-RUN_DEFINITION_SCHEMA = "vv-agent.run-definition.v3"
+_ARTIFACT_PATH_RE = re.compile(r"^\.vv-agent/artifacts/(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}/)*[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+RUN_DEFINITION_SCHEMA = "vv-agent.run-definition.v5"
 OPERATION_REQUEST_SCHEMA = "vv-agent.operation-request.v1"
 CREDENTIAL_REDACTION_VALUE = "<credential-redacted>"
 
@@ -56,6 +57,7 @@ _RUN_DEFINITION_RUNTIME_CONTROL_FIELDS = frozenset(
         "session_memory_enabled",
         "memory_compact_threshold",
         "memory_threshold_percentage",
+        "microcompaction_policy",
         "allow_interruption",
         "native_multimodal",
         "tool_use_behavior",
@@ -66,7 +68,16 @@ _RUN_DEFINITION_TOOL_FIELDS = frozenset({"schema", "tool_metadata", "timeout_sec
 _RUN_DEFINITION_TOOL_SCHEMA_FIELDS = frozenset({"type", "function"})
 _RUN_DEFINITION_FUNCTION_SCHEMA_REQUIRED_FIELDS = frozenset({"name", "description", "parameters"})
 _RUN_DEFINITION_FUNCTION_SCHEMA_FIELDS = frozenset({*_RUN_DEFINITION_FUNCTION_SCHEMA_REQUIRED_FIELDS, "strict"})
-_RUN_DEFINITION_TOOL_METADATA_FIELDS = frozenset({"side_effect", "idempotency", "terminal", "capability_tags", "cost_dimensions"})
+_RUN_DEFINITION_TOOL_METADATA_FIELDS = frozenset(
+    {
+        "side_effect",
+        "idempotency",
+        "terminal",
+        "result_retention",
+        "capability_tags",
+        "cost_dimensions",
+    }
+)
 _RUN_DEFINITION_TOOL_POLICY_FIELDS = frozenset(
     {
         "allowed_tools",
@@ -105,6 +116,7 @@ _RUN_DEFINITION_MESSAGE_FIELDS = frozenset(
         "reasoning_content",
         "image_url",
         "metadata",
+        "artifact_ref",
     }
 )
 _RUN_DEFINITION_TOOL_CALL_FIELDS = frozenset({"id", "type", "function", "extra_content"})
@@ -666,6 +678,25 @@ def _validate_run_definition_shape(definition: dict[str, Any]) -> None:
         "run_definition.runtime_controls.memory_threshold_percentage",
         maximum=255,
     )
+    from vv_agent.microcompaction import MicrocompactionPolicy
+
+    try:
+        MicrocompactionPolicy.from_dict(
+            _closed_definition_object(
+                controls["microcompaction_policy"],
+                frozenset(
+                    {
+                        "trigger_ratio",
+                        "target_ratio",
+                        "keep_recent_cycles",
+                        "min_result_chars",
+                    }
+                ),
+                "run_definition.runtime_controls.microcompaction_policy",
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"run_definition.runtime_controls.microcompaction_policy is invalid: {exc}") from exc
     _definition_boolean(controls["allow_interruption"], "run_definition.runtime_controls.allow_interruption")
     _definition_boolean(controls["native_multimodal"], "run_definition.runtime_controls.native_multimodal")
     if controls["tool_use_behavior"] not in {
@@ -805,6 +836,25 @@ def _validate_run_definition_message(value: Any, *, index: int) -> None:
             _definition_string(message[field_name], f"{label}.{field_name}")
     if "metadata" in message:
         _open_definition_object(message["metadata"], f"{label}.metadata")
+    if "artifact_ref" in message:
+        artifact = _closed_definition_object(
+            message["artifact_ref"],
+            {"path", "media_type", "encoding", "size_bytes", "sha256"},
+            f"{label}.artifact_ref",
+            required={"path", "media_type", "encoding", "size_bytes", "sha256"},
+        )
+        path = _definition_string(artifact["path"], f"{label}.artifact_ref.path")
+        if len(path.encode("utf-8")) > 512 or _ARTIFACT_PATH_RE.fullmatch(path) is None:
+            raise ValueError(f"{label}.artifact_ref.path is invalid")
+        if artifact["media_type"] != "text/plain" or artifact["encoding"] != "utf-8":
+            raise ValueError(f"{label}.artifact_ref must use text/plain with utf-8 encoding")
+        _definition_integer(
+            artifact["size_bytes"],
+            f"{label}.artifact_ref.size_bytes",
+            minimum=0,
+            maximum=MAX_WIRE_INTEGER,
+        )
+        validate_sha256(artifact["sha256"], f"{label}.artifact_ref.sha256")
     if "tool_calls" not in message:
         return
     calls = _definition_array(message["tool_calls"], f"{label}.tool_calls")
@@ -878,6 +928,8 @@ def _validate_run_definition_tool(value: Any, *, index: int) -> None:
         if metadata["idempotency"] not in {"supported", "unsupported", "unknown"}:
             raise ValueError(f"{label}.tool_metadata.idempotency is invalid")
         _definition_boolean(metadata["terminal"], f"{label}.tool_metadata.terminal")
+        if metadata["result_retention"] not in {"archive", "preserve"}:
+            raise ValueError(f"{label}.tool_metadata.result_retention is invalid")
         _definition_string_array(
             metadata["capability_tags"],
             f"{label}.tool_metadata.capability_tags",

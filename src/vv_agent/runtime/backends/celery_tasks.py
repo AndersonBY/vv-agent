@@ -124,6 +124,7 @@ def _validate_task_and_capabilities(
         "no_tool_policy": task.no_tool_policy,
         "memory_compact_threshold": task.memory_compact_threshold,
         "memory_threshold_percentage": task.memory_threshold_percentage,
+        "microcompaction_policy": task.microcompaction_policy.to_dict(),
         "allow_interruption": task.allow_interruption,
         "native_multimodal": task.native_multimodal,
         "tool_use_behavior": task.metadata.get("_vv_agent_tool_use_behavior", "run_llm_again"),
@@ -137,6 +138,7 @@ def _validate_task_and_capabilities(
         "no_tool_policy": controls["no_tool_policy"],
         "memory_compact_threshold": controls["memory_compact_threshold"],
         "memory_threshold_percentage": controls["memory_threshold_percentage"],
+        "microcompaction_policy": controls["microcompaction_policy"],
         "allow_interruption": controls["allow_interruption"],
         "native_multimodal": controls["native_multimodal"],
         "tool_use_behavior": controls["tool_use_behavior"],
@@ -749,7 +751,7 @@ def run_single_cycle(
 ) -> dict[str, Any]:
     """Execute a single agent cycle on a Celery worker.
 
-    Returns one closed ``vv-agent.distributed-worker-response.v1`` payload.
+    Returns one closed ``vv-agent.distributed-worker-response.v3`` payload.
     """
     envelope = DistributedRunEnvelope.from_dict(envelope_dict)
 

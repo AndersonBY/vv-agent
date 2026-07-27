@@ -102,4 +102,7 @@ def test_real_runner_trace_matches_current_producer_fixture() -> None:
 
 
 def _trace_projection(payload: dict[str, Any]) -> dict[str, Any]:
-    return {key: payload[key] for key in TRACE_FIELDS if key in payload}
+    projected = {key: payload[key] for key in TRACE_FIELDS if key in payload}
+    if "duration_ms" in projected:
+        projected["duration_ms"] = 0
+    return projected

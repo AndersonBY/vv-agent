@@ -4,9 +4,13 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from vv_agent.memory import MemoryManager, MicrocompactConfig, SessionMemory, SessionMemoryConfig, microcompact
+from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
+from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
 from vv_agent.memory.token_utils import count_messages_tokens, count_tokens
-from vv_agent.types import Message
+from vv_agent.microcompaction import MicrocompactionPolicy
+from vv_agent.tools.metadata import ToolResultRetention
+from vv_agent.types import Message, ToolArtifactRef
+from vv_agent.workspace import MemoryWorkspaceBackend
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "memory_local.json"
 _CONTRACT: dict[str, Any] = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -96,7 +100,36 @@ def test_memory_local_microcompact_boundaries_match_fixture() -> None:
     actual_cases: list[dict[str, Any]] = []
 
     for case in contract["cases"]:
+        if "repeat" not in case:
+            continue
+
+        class CaseWorkspaceBackend(MemoryWorkspaceBackend):
+            def __init__(self, *, fail_writes: bool) -> None:
+                super().__init__()
+                self._fail_writes = fail_writes
+
+            def write_text_exclusive(self, path: str, content: str) -> int:
+                if self._fail_writes:
+                    raise OSError("fixture archive failure")
+                return super().write_text_exclusive(path, content)
+
+        backend = CaseWorkspaceBackend(fail_writes=case.get("artifact_write_succeeds") is False)
+        manager = MemoryManager(
+            compact_threshold=1_000,
+            model_context_window=1_000,
+            reserved_output_tokens=0,
+            autocompact_buffer_tokens=0,
+            microcompaction_policy=MicrocompactionPolicy(
+                keep_recent_cycles=int(contract["keep_recent_cycles_default"]),
+                min_result_chars=int(contract["min_result_chars_default"]),
+            ),
+            tool_result_retentions={str(case["tool_name"]): ToolResultRetention(str(case["result_retention"]))},
+            workspace_backend=backend,
+            recovery_tool_available=True,
+            artifact_scope="memory-local",
+        )
         tool_content = str(contract["content_unit"]) * int(case["repeat"])
+        call_id = "call_old"
         messages = [
             Message(role="system", content="system"),
             Message(
@@ -104,32 +137,50 @@ def test_memory_local_microcompact_boundaries_match_fixture() -> None:
                 content="old tool call",
                 tool_calls=[
                     {
-                        "id": "call_old",
+                        "id": call_id,
                         "type": "function",
-                        "function": {"name": "read_file", "arguments": "{}"},
+                        "function": {"name": case["tool_name"], "arguments": "{}"},
                     }
                 ],
             ),
-            Message(role="tool", content=tool_content, tool_call_id="call_old"),
-            Message(role="assistant", content="recent reply"),
-        ]
-        compacted, cleared = microcompact(
-            messages,
-            current_cycle=3,
-            config=MicrocompactConfig(
-                keep_recent_cycles=int(contract["keep_recent_cycles"]),
-                min_result_length=int(contract["minimum_chars"]),
+            Message(
+                role="tool",
+                content=tool_content,
+                tool_call_id=call_id,
             ),
+            Message(role="assistant", content="recent reply 1"),
+            Message(role="assistant", content="recent reply 2"),
+            Message(role="assistant", content="recent reply 3"),
+        ]
+        if "existing_artifact_ref" in case:
+            artifact = ToolArtifactRef.from_dict(case["existing_artifact_ref"])
+            backend.write_text_exclusive(artifact.path, case["persisted_utf8_text"])
+            messages[2].artifact_ref = artifact
+
+        plan = manager.plan_microcompaction(
+            messages,
+            cycle_index=5,
+            current_tokens=1_000,
         )
+        assert plan is not None
+        applied = manager.apply_microcompaction(messages, plan=plan)
         actual_case: dict[str, Any] = {
+            "name": case["name"],
             "repeat": case["repeat"],
-            "cleared": cleared > 0,
+            "replaced_with_compact_marker": applied.messages[2].content.startswith(COMPACT_MARKER_OPENING),
         }
-        if cleared:
-            actual_case["original_chars"] = compacted[2].metadata["microcompact_original_chars"]
         actual_cases.append(actual_case)
 
-    assert actual_cases == contract["cases"]
+    expected_cases = [
+        {
+            "name": case["name"],
+            "repeat": case["repeat"],
+            "replaced_with_compact_marker": case["replaced_with_compact_marker"],
+        }
+        for case in contract["cases"]
+        if "repeat" in case
+    ]
+    assert actual_cases == expected_cases
 
 
 def test_memory_local_session_prompt_truncation_matches_fixture() -> None:

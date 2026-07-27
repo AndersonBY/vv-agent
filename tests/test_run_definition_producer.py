@@ -288,6 +288,7 @@ def test_run_definition_freezes_typed_tool_metadata_and_policy_denials() -> None
         "side_effect": "read",
         "idempotency": "supported",
         "terminal": False,
+        "result_retention": "archive",
         "capability_tags": ["source.inspect"],
         "cost_dimensions": ["workspace.bytes_read"],
     }

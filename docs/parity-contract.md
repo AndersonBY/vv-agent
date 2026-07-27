@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `4.1.0` at revision
-`0611a95012ce40ca4e70acc0b695e6cf4ddd7eee`. Its immutable release artifact has
-SHA-256 `376ffe70d497fa8b36667fe929e5241aede94e72091a12261f76286287124d23`.
+`contract.lock.json` selects contract `6.0.1` at revision
+`77a2a55732fb1197da0239186dcad00806776063`. Its immutable release artifact has
+SHA-256 `0d07e463297a58f2ceed17bf15acca05ef6b7dec9b84237907e1300ba9335ad2`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,8 +44,8 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-4.1.0.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v4.1.0/vv-agent-contract-4.1.0.zip
+  --artifact /path/to/vv-agent-contract-6.0.1.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v6.0.1/vv-agent-contract-6.0.1.zip
 ```
 
 ## Python Producer Map
@@ -63,7 +63,7 @@ python3 scripts/contract_snapshot.py sync \
 | LLM stream projection | `src/vv_agent/llm/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_llm_interface.py`, `tests/test_runner_events_producer_parity.py` |
 | Configured children | `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/sub_task_manager.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_sub_agent_runtime.py` |
 | Sessions | `src/vv_agent/sessions/`, `src/vv_agent/interactive.py`, `tests/test_session_store_parity.py`, `tests/test_interactive_lifecycle_contract.py` |
-| Memory and compaction | `src/vv_agent/memory/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_memory_lifecycle_contract.py`, `tests/test_memory_provider.py` |
+| Memory and compaction | `src/vv_agent/microcompaction.py`, `src/vv_agent/memory/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_microcompact.py`, `tests/test_microcompaction_policy.py`, `tests/test_microcompaction_events.py`, `tests/test_memory_lifecycle_contract.py`, `tests/test_memory_provider.py` |
 | Model-call ledger, token, and cache usage | `src/vv_agent/types.py`, `src/vv_agent/runtime/model_calls.py`, `src/vv_agent/runtime/token_usage.py`, `src/vv_agent/llm/vv_llm_client.py`, `tests/test_token_usage_contract.py`, `tests/test_runtime_task_serialization.py` |
 | Run budgets | `src/vv_agent/budget.py`, `src/vv_agent/runtime/engine.py`, `tests/test_run_budget.py` |
 | Durable checkpoint and resume | `src/vv_agent/checkpoint.py`, `src/vv_agent/runtime/checkpoint_codec.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/run_definition.py`, `tests/test_checkpoint.py`, `tests/test_checkpoint_runner.py`, `tests/test_checkpoint_fault_matrix.py` |
@@ -92,7 +92,7 @@ diagnostic cannot replace lifecycle, approval, budget, cancellation, tool, or
 terminal state. Child event forwarding preserves the original event identity
 and parent/run/trace/session relationships.
 
-RunEvent `v1` is a strict current discriminator. Readers reject missing, stale,
+RunEvent `v2` is a strict current discriminator. Readers reject missing, stale,
 unknown, and malformed fields; there is no alternate event decoder.
 
 ### Model Capacity
@@ -147,9 +147,11 @@ exclusive immutable artifact, so the runtime does not materialize the complete
 capture in application memory and shell commands cannot mutate recovery bytes.
 
 `ToolMetadata` is the only typed capability declaration and contains
-`side_effect`, `idempotency`, `terminal`, `capability_tags`, and
-`cost_dimensions`. Generic host metadata is separate and cannot populate this
-declaration. Metadata policy is denial-only across parent and delegated layers.
+`side_effect`, `idempotency`, `terminal`, `result_retention`,
+`capability_tags`, and `cost_dimensions`. Missing retention defaults to
+`archive`; `preserve` excludes the result from proactive microcompaction.
+Generic host metadata is separate and cannot populate this declaration.
+Metadata policy is denial-only across parent and delegated layers.
 
 The executor sequence is `tool_call_planned`, optional approval,
 `tool_call_started` immediately before effects may begin, and
@@ -158,9 +160,9 @@ own ambiguity and replay decisions.
 
 ### Persistence
 
-Checkpoint records require `vv-agent.checkpoint.v4`; run definitions require
-`vv-agent.run-definition.v3`; distributed envelopes require
-`vv-agent.distributed-run.v3`. The frozen definition stores `prompt_bundle`,
+Checkpoint records require `vv-agent.checkpoint.v5`; run definitions require
+`vv-agent.run-definition.v5`; distributed envelopes require
+`vv-agent.distributed-run.v5`. The frozen definition stores `prompt_bundle`,
 not a second independently editable flattened system prompt. Readers reject every other shape before claim or
 external work. There is no namespace probe, alternate decoder, field synthesis,
 or in-place repair.
@@ -174,7 +176,7 @@ A definitive pre-dispatch failure is the only terminal model journal state with
 no dispatch evidence.
 
 Distributed worker responses use only the closed
-`vv-agent.distributed-worker-response.v2` wire. Python owns the typed value and
+`vv-agent.distributed-worker-response.v3` wire. Python owns the typed value and
 strict reader in `runtime/backends/distributed.py`, Celery workers produce it in
 `celery_tasks.py`, and the scheduler consumes it in `celery.py`. `pending`,
 `committed`, `terminal_candidate`, and `terminal_replay` are the only variants;
@@ -205,6 +207,34 @@ them into its `PromptBundle`. Extraction during that run may persist new entries
 but never rewrites the active bundle; those entries become model-visible only
 in a later newly compiled run. Checkpoint resume restores the frozen section
 without rereading the store.
+
+`MicrocompactionPolicy` is the public typed control for proactive compaction.
+It defaults to trigger/target ratios `0.75`/`0.60`, 3 protected recent cycles,
+and a 500-character minimum. Eligible archive results are planned oldest-first
+once per cycle and applied until the target is reached. Replacement happens
+only after immutable persistence through the effective `WorkspaceBackend`;
+failed or short writes stay inline, and existing typed artifacts are reused.
+No proactive candidate or no model-visible `read_file` means no micro lifecycle
+event.
+
+Run-definition v5 freezes the policy at
+`runtime_controls.microcompaction_policy`. Session, checkpoint, distributed,
+and host round trips preserve the typed artifact reference while model
+projection exposes only this closed marker:
+
+```text
+<Tool Result Compact>
+tool_name: web_search
+artifact_path: .vv-agent/artifacts/<run>/<call>.txt
+retrieval_hint: use read_file on artifact_path if needed
+excerpt:
+<bounded head/tail preview>
+</Tool Result Compact>
+```
+
+Artifact byte size and SHA-256 remain host-only integrity fields and never
+appear in the model-visible marker. SQLite session persistence uses the strict
+current schema at `PRAGMA user_version=2`.
 
 ### App Server
 

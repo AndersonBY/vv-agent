@@ -25,7 +25,7 @@ from vv_agent.types import CompletionReason, ModelCallOperation, TokenUsage
 if TYPE_CHECKING:
     from vv_agent.tools.metadata import ToolMetadata
 
-RUN_EVENT_VERSION = "v1"
+RUN_EVENT_VERSION = "v2"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
 MemoryCompactTrigger = Literal["micro_threshold", "full_threshold", "prompt_too_long"]
 MemoryCompactMode = Literal["none", "micro", "structural", "summary", "emergency"]
@@ -55,13 +55,22 @@ _MEMORY_COMPACT_STARTED_FIELDS = (
     "configured_threshold",
     "effective_threshold",
     "microcompact_threshold",
+    "microcompact_target",
+    "candidate_count",
+    "estimated_reclaimable_tokens",
     "model_context_window",
     "model_max_output_tokens",
     "reserved_output_tokens",
     "reserved_output_source",
     "autocompact_buffer_tokens",
 )
-_MEMORY_COMPACT_COMPLETED_FIELDS = ("mode", "changed")
+_MEMORY_COMPACT_COMPLETED_FIELDS = (
+    "mode",
+    "changed",
+    "archived_count",
+    "reclaimed_tokens",
+    "artifact_failure_count",
+)
 _JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
 _TOOL_STATUS_VALUES = frozenset({"success", "error", "wait_response", "running", "pending_compress"})
 _TOOL_DIRECTIVE_VALUES = frozenset({"continue", "finish", "wait_user"})
@@ -866,6 +875,9 @@ class MemoryCompactStarted(RunEvent):
     configured_threshold: int | None = None
     effective_threshold: int | None = None
     microcompact_threshold: int | None = None
+    microcompact_target: int | None = None
+    candidate_count: int | None = None
+    estimated_reclaimable_tokens: int | None = None
     model_context_window: int | None = None
     model_max_output_tokens: int | None = None
     reserved_output_tokens: int | None = None
@@ -885,6 +897,9 @@ class MemoryCompactStarted(RunEvent):
         configured_threshold: int,
         effective_threshold: int,
         microcompact_threshold: int,
+        microcompact_target: int,
+        candidate_count: int,
+        estimated_reclaimable_tokens: int,
         model_context_window: int,
         model_max_output_tokens: int | None,
         reserved_output_tokens: int,
@@ -919,6 +934,13 @@ class MemoryCompactStarted(RunEvent):
         object.__setattr__(
             self, "microcompact_threshold", _memory_compact_counter(microcompact_threshold, "microcompact_threshold")
         )
+        object.__setattr__(self, "microcompact_target", _memory_compact_counter(microcompact_target, "microcompact_target"))
+        object.__setattr__(self, "candidate_count", _memory_compact_counter(candidate_count, "candidate_count"))
+        object.__setattr__(
+            self,
+            "estimated_reclaimable_tokens",
+            _memory_compact_counter(estimated_reclaimable_tokens, "estimated_reclaimable_tokens"),
+        )
         object.__setattr__(self, "model_context_window", _memory_compact_counter(model_context_window, "model_context_window"))
         object.__setattr__(
             self, "model_max_output_tokens", _optional_stream_counter(model_max_output_tokens, "model_max_output_tokens")
@@ -948,6 +970,9 @@ class MemoryCompactCompleted(RunEvent):
     summary_tokens: int | None = None
     mode: MemoryCompactMode | None = None
     changed: bool | None = None
+    archived_count: int | None = None
+    reclaimed_tokens: int | None = None
+    artifact_failure_count: int | None = None
 
     def __init__(
         self,
@@ -961,6 +986,9 @@ class MemoryCompactCompleted(RunEvent):
         summary_tokens: int | None = None,
         mode: MemoryCompactMode,
         changed: bool,
+        archived_count: int,
+        reclaimed_tokens: int,
+        artifact_failure_count: int,
         session_id: str | None = None,
         parent_event_id: str | None = None,
         parent_run_id: str | None = None,
@@ -987,6 +1015,13 @@ class MemoryCompactCompleted(RunEvent):
         object.__setattr__(self, "summary_tokens", summary_tokens)
         object.__setattr__(self, "mode", _memory_compact_mode(mode))
         object.__setattr__(self, "changed", _memory_compact_changed(changed))
+        object.__setattr__(self, "archived_count", _memory_compact_counter(archived_count, "archived_count"))
+        object.__setattr__(self, "reclaimed_tokens", _memory_compact_counter(reclaimed_tokens, "reclaimed_tokens"))
+        object.__setattr__(
+            self,
+            "artifact_failure_count",
+            _memory_compact_counter(artifact_failure_count, "artifact_failure_count"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -2703,6 +2738,9 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             "configured_threshold",
             "effective_threshold",
             "microcompact_threshold",
+            "microcompact_target",
+            "candidate_count",
+            "estimated_reclaimable_tokens",
             "model_context_window",
             "model_max_output_tokens",
             "reserved_output_tokens",
@@ -2720,6 +2758,8 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             _optional_stream_counter(payload["summary_tokens"], "summary_tokens")
         _memory_compact_mode(payload["mode"])
         _memory_compact_changed(payload["changed"])
+        for field_name in ("archived_count", "reclaimed_tokens", "artifact_failure_count"):
+            _memory_compact_counter(payload[field_name], field_name)
     if payload["type"] in {"assistant_delta", "reasoning_delta"}:
         _stream_delta(payload.get("delta"))
     typed_stream_events = {
@@ -2874,6 +2914,9 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             configured_threshold=payload["configured_threshold"],
             effective_threshold=payload["effective_threshold"],
             microcompact_threshold=payload["microcompact_threshold"],
+            microcompact_target=payload["microcompact_target"],
+            candidate_count=payload["candidate_count"],
+            estimated_reclaimable_tokens=payload["estimated_reclaimable_tokens"],
             model_context_window=payload["model_context_window"],
             model_max_output_tokens=payload["model_max_output_tokens"],
             reserved_output_tokens=payload["reserved_output_tokens"],
@@ -2889,6 +2932,9 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             summary_tokens=summary_tokens if isinstance(summary_tokens, int) else None,
             mode=payload["mode"],
             changed=payload["changed"],
+            archived_count=payload["archived_count"],
+            reclaimed_tokens=payload["reclaimed_tokens"],
+            artifact_failure_count=payload["artifact_failure_count"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "assistant_delta":

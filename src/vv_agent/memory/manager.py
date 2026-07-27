@@ -1,23 +1,34 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
-import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
-from vv_agent.constants import READ_FILE_TOOL_NAME
-from vv_agent.memory.microcompact import MicrocompactConfig, is_microcompacted_tool_content, microcompact
+from vv_agent.memory.microcompact import (
+    EXCERPT_METADATA_KEY,
+    MicrocompactCandidate,
+    MicrocompactPlan,
+    build_compacted_tool_content,
+    has_recovery_envelope,
+    is_microcompacted_tool_content,
+    plan_microcompact,
+    replace_with_compacted_marker,
+)
 from vv_agent.memory.post_compact_restore import PostCompactRestoreConfig, restore_key_files
 from vv_agent.memory.session_memory import SessionMemory
 from vv_agent.memory.token_utils import compute_compaction_threshold, count_messages_tokens
-from vv_agent.types import Message
+from vv_agent.microcompaction import MicrocompactionPolicy
+from vv_agent.tools.metadata import ToolResultRetention
+from vv_agent.types import Message, ToolArtifactRef
+from vv_agent.workspace.artifacts import persist_text_artifact
+from vv_agent.workspace.base import WorkspaceBackend
 
 _MEMORY_SUMMARY_NAME = "memory_summary"
-_COMPACT_MARKER = "<Tool Result Compact>"
 _ORIGINAL_USER_REQUEST_PATTERN = re.compile(r"<Original User Request>\s*(.*?)\s*</Original User Request>", re.DOTALL)
 _COMPRESSED_AGENT_MEMORY_PATTERN = re.compile(
     r"<Compressed Agent Memory>\s*([\s\S]*?)\s*</Compressed Agent Memory>",
@@ -150,6 +161,17 @@ class MemoryCompactionResult:
     messages: list[Message]
     mode: CompactionMode
     changed: bool
+    archived_count: int = 0
+    reclaimed_tokens: int = 0
+    artifact_failure_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class MicrocompactionApplyResult:
+    messages: list[Message]
+    archived_count: int = 0
+    reclaimed_tokens: int = 0
+    artifact_failure_count: int = 0
 
 
 @dataclass(slots=True)
@@ -171,11 +193,11 @@ class MemoryManager:
     tool_result_excerpt_tail: int = 200
     tool_calls_keep_last: int = 3
     assistant_no_tool_keep_last: int = 1
-    microcompact_trigger_ratio: float = 0.75
-    microcompact_keep_recent_cycles: int = 3
-    microcompact_min_result_length: int = 500
-    microcompact_compactable_tools: set[str] | None = None
-    tool_result_artifact_dir: str = ".memory/tool_results"
+    microcompaction_policy: MicrocompactionPolicy = field(default_factory=MicrocompactionPolicy)
+    tool_result_retentions: dict[str, ToolResultRetention] = field(default_factory=dict)
+    workspace_backend: WorkspaceBackend | None = None
+    recovery_tool_available: bool = False
+    artifact_scope: str = "run"
     workspace: Path | None = None
     summary_event_limit: int = 40
     summary_backend: str | None = None
@@ -183,6 +205,10 @@ class MemoryManager:
     summary_callback: SummaryCallback | None = None
     base_system_prompt: str = ""
     session_memory: SessionMemory | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.microcompaction_policy, MicrocompactionPolicy):
+            self.microcompaction_policy = MicrocompactionPolicy.from_dict(self.microcompaction_policy)
 
     @property
     def effective_context_window(self) -> int:
@@ -212,8 +238,14 @@ class MemoryManager:
         threshold = self.autocompact_threshold
         if threshold <= 0:
             return 0
-        ratio = min(max(self.microcompact_trigger_ratio, 0.0), 1.0)
-        return int(threshold * ratio)
+        return int(threshold * self.microcompaction_policy.trigger_ratio)
+
+    @property
+    def microcompact_target_threshold(self) -> int:
+        threshold = self.autocompact_threshold
+        if threshold <= 0:
+            return 0
+        return int(threshold * self.microcompaction_policy.target_ratio)
 
     def compact(
         self,
@@ -241,6 +273,8 @@ class MemoryManager:
         total_tokens: int | None = None,
         recent_tool_call_ids: set[str] | None = None,
         force: bool = False,
+        microcompact_plan: MicrocompactPlan | None = None,
+        microcompact_planned: bool = False,
     ) -> MemoryCompactionResult:
         original_messages = list(messages)
         strongest_mode: CompactionMode = "none"
@@ -250,9 +284,8 @@ class MemoryManager:
         cleaned = [msg for msg in messages if not (msg.role == "system" and msg.name == _MEMORY_SUMMARY_NAME)]
         summary_removed = len(cleaned) != len(messages)
         sanitized_messages, sanitized = self._sanitize_empty_assistant_messages(cleaned)
-        messages_changed = summary_removed or sanitized
         working_messages = sanitized_messages
-        if messages_changed:
+        if summary_removed or sanitized:
             strongest_mode = "structural"
 
         message_length = self._calculate_effective_length(
@@ -266,18 +299,26 @@ class MemoryManager:
             current_tokens=message_length,
         )
         microcompacted_messages = working_messages
-        if not force and self.microcompact_trigger_threshold > 0 and message_length > self.microcompact_trigger_threshold:
-            microcompacted_messages, cleared = self.microcompact_messages(
-                working_messages,
-                cycle_index=cycle_index,
-            )
-            if cleared > 0:
+        microcompact_result = MicrocompactionApplyResult(messages=working_messages)
+        if not force:
+            effective_plan = microcompact_plan
+            if not microcompact_planned:
+                effective_plan = self.plan_microcompaction(
+                    working_messages,
+                    cycle_index=cycle_index,
+                    current_tokens=message_length,
+                )
+            if effective_plan is not None and effective_plan.candidates:
+                microcompact_result = self.apply_microcompaction(
+                    working_messages,
+                    plan=effective_plan,
+                )
+                microcompacted_messages = microcompact_result.messages
+            if microcompact_result.archived_count > 0:
                 strongest_mode = _strongest_compaction_mode(strongest_mode, "micro")
-                messages_changed = True
-                message_length = self._calculate_effective_length(
-                    microcompacted_messages,
-                    total_tokens=None,
-                    recent_tool_call_ids=None,
+                message_length = max(
+                    message_length - microcompact_result.reclaimed_tokens,
+                    0,
                 )
 
         if not force and message_length <= self.autocompact_threshold:
@@ -291,30 +332,33 @@ class MemoryManager:
                 original_messages,
                 maybe_warned_messages,
                 strongest_mode,
-                messages_changed or warning_inserted,
+                archived_count=microcompact_result.archived_count,
+                reclaimed_tokens=microcompact_result.reclaimed_tokens,
+                artifact_failure_count=microcompact_result.artifact_failure_count,
             )
 
+        before_structural_tokens = self._calculate_message_length(microcompacted_messages)
         compacted_messages, compacted = self._compact_messages(microcompacted_messages, cycle_index=cycle_index)
         if compacted:
             strongest_mode = _strongest_compaction_mode(strongest_mode, "structural")
-            messages_changed = True
-        message_length = self._calculate_effective_length(
-            compacted_messages,
-            total_tokens=None,
-            recent_tool_call_ids=recent_tool_call_ids,
+        after_structural_tokens = self._calculate_message_length(compacted_messages)
+        message_length = max(
+            message_length + after_structural_tokens - before_structural_tokens,
+            0,
         )
         if not force and message_length <= self.autocompact_threshold:
             return self._compaction_result(
                 original_messages,
                 compacted_messages,
                 strongest_mode,
-                messages_changed,
+                archived_count=microcompact_result.archived_count,
+                reclaimed_tokens=microcompact_result.reclaimed_tokens,
+                artifact_failure_count=microcompact_result.artifact_failure_count,
             )
 
         summarized_messages, summarized = self.compress_memory(compacted_messages, cycle_index=cycle_index)
         if summarized:
             strongest_mode = _strongest_compaction_mode(strongest_mode, "summary")
-            messages_changed = True
         if summarized and self.session_memory is not None:
             self.session_memory.on_compaction(
                 current_tokens=self._calculate_message_length(summarized_messages),
@@ -323,7 +367,9 @@ class MemoryManager:
             original_messages,
             summarized_messages,
             strongest_mode,
-            messages_changed,
+            archived_count=microcompact_result.archived_count,
+            reclaimed_tokens=microcompact_result.reclaimed_tokens,
+            artifact_failure_count=microcompact_result.artifact_failure_count,
         )
 
     @staticmethod
@@ -331,14 +377,24 @@ class MemoryManager:
         before_messages: list[Message],
         after_messages: list[Message],
         mode: CompactionMode,
-        changed: bool,
+        *,
+        archived_count: int = 0,
+        reclaimed_tokens: int = 0,
+        artifact_failure_count: int = 0,
     ) -> MemoryCompactionResult:
         content_changed = before_messages != after_messages
         if not content_changed:
             mode = "none"
         elif mode == "none":
             mode = "structural"
-        return MemoryCompactionResult(messages=after_messages, mode=mode, changed=changed)
+        return MemoryCompactionResult(
+            messages=after_messages,
+            mode=mode,
+            changed=content_changed,
+            archived_count=archived_count,
+            reclaimed_tokens=reclaimed_tokens,
+            artifact_failure_count=artifact_failure_count,
+        )
 
     def emergency_compact(
         self,
@@ -521,18 +577,92 @@ class MemoryManager:
         *,
         cycle_index: int | None = None,
     ) -> tuple[list[Message], int]:
-        if cycle_index is None:
+        plan = self.plan_microcompaction(
+            messages,
+            cycle_index=cycle_index,
+            current_tokens=self._calculate_message_length(messages),
+        )
+        if plan is None:
             return messages, 0
-        return microcompact(
+        result = self.apply_microcompaction(messages, plan=plan)
+        return result.messages, result.archived_count
+
+    def plan_microcompaction(
+        self,
+        messages: list[Message],
+        *,
+        cycle_index: int | None,
+        current_tokens: int,
+        recovery_tool_available: bool | None = None,
+    ) -> MicrocompactPlan | None:
+        can_recover = self.recovery_tool_available if recovery_tool_available is None else recovery_tool_available
+        if (
+            not can_recover
+            or cycle_index is None
+            or self.microcompact_trigger_threshold <= 0
+            or current_tokens <= self.microcompact_trigger_threshold
+        ):
+            return None
+        return plan_microcompact(
             messages,
             current_cycle=cycle_index,
-            config=MicrocompactConfig(
-                trigger_ratio=self.microcompact_trigger_ratio,
-                keep_recent_cycles=self.microcompact_keep_recent_cycles,
-                min_result_length=self.microcompact_min_result_length,
-                compactable_tools=self.microcompact_compactable_tools,
-            ),
+            current_tokens=current_tokens,
+            target_tokens=self.microcompact_target_threshold,
+            policy=self.microcompaction_policy,
+            result_retentions=self.tool_result_retentions,
+            artifact_path_estimate_for=self._estimate_tool_artifact_path,
+            estimate_message_tokens=self._estimate_message_tokens,
         )
+
+    def apply_microcompaction(
+        self,
+        messages: list[Message],
+        *,
+        plan: MicrocompactPlan,
+    ) -> MicrocompactionApplyResult:
+        updated_messages = list(messages)
+        remaining_tokens = plan.current_tokens
+        archived_count = 0
+        reclaimed_tokens = 0
+        artifact_failure_count = 0
+        for candidate in plan.candidates:
+            if remaining_tokens <= plan.target_tokens:
+                break
+            message = updated_messages[candidate.message_index]
+            artifact = self._archive_tool_message(message, candidate)
+            if artifact is None:
+                artifact_failure_count += 1
+                continue
+            marker = build_compacted_tool_content(
+                self._compaction_excerpt(message),
+                artifact_path=artifact.path,
+                tool_name=candidate.tool_name,
+            )
+            replacement = replace_with_compacted_marker(
+                message,
+                candidate,
+                artifact=artifact,
+                marker=marker,
+            )
+            actual_reclaimed = max(
+                self._estimate_message_tokens(message) - self._estimate_message_tokens(replacement),
+                0,
+            )
+            if actual_reclaimed == 0:
+                continue
+            updated_messages[candidate.message_index] = replacement
+            archived_count += 1
+            reclaimed_tokens += actual_reclaimed
+            remaining_tokens = max(remaining_tokens - actual_reclaimed, 0)
+        return MicrocompactionApplyResult(
+            messages=updated_messages,
+            archived_count=archived_count,
+            reclaimed_tokens=reclaimed_tokens,
+            artifact_failure_count=artifact_failure_count,
+        )
+
+    def _estimate_message_tokens(self, message: Message) -> int:
+        return count_messages_tokens([message.to_openai_message()], model=self.model)
 
     def _render_system_prompt(self) -> str:
         session_context = self.session_memory.render_as_system_context() if self.session_memory is not None else ""
@@ -771,7 +901,7 @@ class MemoryManager:
         return compacted, updated
 
     def _compact_tool_messages(self, messages: list[Message], *, cycle_index: int | None) -> tuple[list[Message], bool]:
-        if self.tool_result_compact_threshold <= 0:
+        if self.tool_result_compact_threshold <= 0 or not self.recovery_tool_available:
             return messages, False
 
         tool_call_id_to_info = self._build_tool_call_id_to_info_map(messages)
@@ -794,95 +924,91 @@ class MemoryManager:
                 continue
 
             tool_info = tool_call_id_to_info.get(message.tool_call_id or "")
-            tool_name = tool_info.get("name") if tool_info else None
-            artifact_path = self._persist_tool_content(message.content, message.tool_call_id, cycle_index=cycle_index)
-            compacted_content = self._build_compacted_tool_content(
-                message.content,
-                artifact_path=artifact_path,
+            tool_name = (tool_info.get("name") if tool_info else None) or "unknown"
+            candidate = MicrocompactCandidate(
+                message_index=idx,
                 tool_name=tool_name,
+                tool_call_id=str(message.tool_call_id or ""),
+                existing_artifact=self._message_artifact_ref(message),
+                estimated_reclaimable_tokens=max(
+                    self._estimate_message_tokens(message),
+                    0,
+                ),
             )
-            compacted.append(replace(message, content=compacted_content))
+            artifact = self._archive_tool_message(message, candidate)
+            if artifact is None:
+                compacted.append(message)
+                continue
+            compacted_content = build_compacted_tool_content(
+                self._compaction_excerpt(message),
+                artifact_path=artifact.path,
+                tool_name=tool_name,
+                excerpt_head_chars=self.tool_result_excerpt_head,
+                excerpt_tail_chars=self.tool_result_excerpt_tail,
+            )
+            compacted.append(
+                replace_with_compacted_marker(
+                    message,
+                    candidate,
+                    artifact=artifact,
+                    marker=compacted_content,
+                )
+            )
             updated = True
 
         return compacted, updated
 
     @staticmethod
     def _is_compacted_tool_content(content: str) -> bool:
-        return content.startswith(_COMPACT_MARKER) or is_microcompacted_tool_content(content)
+        return is_microcompacted_tool_content(content)
 
-    def _build_tool_artifact_path(self, tool_call_id: str | None, *, cycle_index: int | None) -> Path:
-        safe_tool_call_id = re.sub(r"[^a-zA-Z0-9._-]", "_", str(tool_call_id or "").strip())
-        if not safe_tool_call_id.strip("._-"):
-            safe_tool_call_id = f"tool_result_{uuid.uuid4().hex}"
-        filename = f"{safe_tool_call_id}.txt"
-        base = Path(self.tool_result_artifact_dir)
-        if cycle_index is None:
-            return base / filename
-        return base / f"cycle_{cycle_index}" / filename
+    def _estimate_tool_artifact_path(self, tool_call_id: str) -> str:
+        del tool_call_id
+        return ".vv-agent/artifacts/estimate/call-00000000000000000000000000000000.txt"
 
-    def _persist_tool_content(self, content: str, tool_call_id: str | None, *, cycle_index: int | None) -> str | None:
-        if self.workspace is None:
-            return None
-        artifact_rel_path = self._build_tool_artifact_path(tool_call_id, cycle_index=cycle_index)
-        if artifact_rel_path.is_absolute():
-            return None
-
-        workspace_root = self.workspace.resolve()
-        target = (workspace_root / artifact_rel_path).resolve()
-        try:
-            target.relative_to(workspace_root)
-        except ValueError:
-            return None
-
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-        except OSError:
-            logging.getLogger(__name__).warning(
-                "Failed to persist compacted tool result to %s",
-                target,
-                exc_info=True,
-            )
-            return None
-        return artifact_rel_path.as_posix()
-
-    def _build_compacted_tool_content(
+    def _archive_tool_message(
         self,
-        content: str,
-        *,
-        artifact_path: str | None,
-        tool_name: str | None,
-    ) -> str:
-        head_length = max(self.tool_result_excerpt_head, 0)
-        tail_length = max(self.tool_result_excerpt_tail, 0)
-        total_length = len(content)
+        message: Message,
+        candidate: MicrocompactCandidate,
+    ) -> ToolArtifactRef | None:
+        backend = self.workspace_backend
+        if backend is None:
+            return None
+        try:
+            if candidate.existing_artifact is not None:
+                if self._artifact_is_intact(candidate.existing_artifact):
+                    return candidate.existing_artifact
+                return None
+            if has_recovery_envelope(message.content):
+                return None
+            return persist_text_artifact(
+                backend,
+                self.artifact_scope,
+                candidate.tool_call_id,
+                message.content,
+            )
+        except Exception:
+            return None
 
-        head = content[:head_length] if head_length > 0 else ""
-        tail = content[-tail_length:] if tail_length > 0 and total_length > head_length else ""
+    @staticmethod
+    def _compaction_excerpt(message: Message) -> str:
+        excerpt = message.metadata.get(EXCERPT_METADATA_KEY)
+        return excerpt if isinstance(excerpt, str) else message.content
 
-        excerpt_parts: list[str] = []
-        if head:
-            excerpt_parts.append(head)
-        if tail:
-            if head:
-                excerpt_parts.append("...<snip>...")
-            excerpt_parts.append(tail)
-        excerpt = "\n".join(excerpt_parts).strip()
-        truncated_chars = max(total_length - len(head) - len(tail), 0)
-        artifact_line = artifact_path or "N/A"
-        tool_line = f"tool_name: {tool_name}\n" if tool_name else ""
+    @staticmethod
+    def _message_artifact_ref(message: Message) -> ToolArtifactRef | None:
+        return message.artifact_ref if isinstance(message.artifact_ref, ToolArtifactRef) else None
 
-        return (
-            "<Tool Result Compact>\n"
-            f"{tool_line}"
-            f"artifact_path: {artifact_line}\n"
-            f"total_chars: {total_length}\n"
-            f"truncated_chars: {truncated_chars}\n"
-            f"retrieval_hint: use {READ_FILE_TOOL_NAME} on artifact_path if needed\n"
-            "excerpt:\n"
-            f"{excerpt}\n"
-            "</Tool Result Compact>"
-        )
+    def _artifact_is_intact(self, artifact: ToolArtifactRef) -> bool:
+        backend = self.workspace_backend
+        if backend is None:
+            return False
+        try:
+            content = backend.read_bytes(artifact.path)
+            content.decode("utf-8")
+        except (OSError, UnicodeDecodeError, ValueError):
+            return False
+        return len(content) == artifact.size_bytes and hashlib.sha256(content).hexdigest() == artifact.sha256
 
     def _build_tool_call_id_to_info_map(self, messages: list[Message]) -> dict[str, dict[str, str]]:
         tool_call_id_to_info: dict[str, dict[str, str]] = {}
@@ -921,6 +1047,8 @@ class MemoryManager:
                 continue
 
             artifact_info: dict[str, str] = {}
+            if message.artifact_ref is not None:
+                artifact_info["path"] = message.artifact_ref.path
             for line in message.content.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("tool_name:"):

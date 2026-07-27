@@ -174,7 +174,7 @@ class RunAdapter:
         )
         checkpoint_config = run_config.checkpoint_config
         if checkpoint_config is None or checkpoint_config.store is None:
-            raise TurnResumeError("turn/resume requires a process-local checkpoint v2 store")
+            raise TurnResumeError("turn/resume requires a process-local checkpoint store")
         checkpoint_config = replace(
             checkpoint_config,
             key=checkpoint_key,

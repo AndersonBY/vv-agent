@@ -12,7 +12,7 @@ from vv_agent.sessions.base import (
 )
 from vv_agent.types import Message
 
-_SESSION_SCHEMA_VERSION = 1
+_SESSION_SCHEMA_VERSION = 2
 _CANONICAL_SCHEMA_OBJECTS = [
     ("index", "idx_session_items_session_id_item_index", "session_items"),
     ("table", "session_commits", "session_commits"),

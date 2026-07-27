@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v2",
+  "contract": "vv-agent-public-api-v3",
   "domains": [
     {
       "capabilities": [
@@ -484,6 +484,11 @@
           "rust": "vv_agent::ToolExecutionResult"
         },
         {
+          "id": "tools.message",
+          "python": "vv_agent.Message",
+          "rust": "vv_agent::Message"
+        },
+        {
           "id": "tools.artifact_ref",
           "python": "vv_agent.ToolArtifactRef",
           "rust": "vv_agent::ToolArtifactRef"
@@ -518,6 +523,11 @@
           "id": "tools.side_effect",
           "python": "vv_agent.ToolSideEffect",
           "rust": "vv_agent::ToolSideEffect"
+        },
+        {
+          "id": "tools.result_retention",
+          "python": "vv_agent.ToolResultRetention",
+          "rust": "vv_agent::ToolResultRetention"
         }
       ],
       "id": "tools"
@@ -569,6 +579,11 @@
           "id": "memory.manager",
           "python": "vv_agent.memory.MemoryManager",
           "rust": "vv_agent::MemoryManager"
+        },
+        {
+          "id": "memory.microcompaction_policy",
+          "python": "vv_agent.MicrocompactionPolicy",
+          "rust": "vv_agent::MicrocompactionPolicy"
         },
         {
           "id": "memory.provider",
@@ -865,7 +880,7 @@
       "id": "runtime_backend"
     }
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "surfaces": [
     {
       "id": "agent",
@@ -1537,6 +1552,16 @@
           "kind": "field",
           "python": {"declaration": "dataclass_field", "kind": "field", "name": "user_prompt"},
           "rust": {"kind": "field", "name": "user_prompt"}
+        },
+        {
+          "id": "microcompaction_policy",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "microcompaction_policy"
+          },
+          "rust": {"kind": "field", "name": "microcompaction_policy"}
         }
       ],
       "python_target": "vv_agent.AgentTask",
@@ -1582,6 +1607,19 @@
           "rust": {
             "kind": "field",
             "name": "model_settings"
+          }
+        },
+        {
+          "id": "microcompaction_policy",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "microcompaction_policy"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "microcompaction_policy"
           }
         },
         {
@@ -4004,6 +4042,114 @@
       ]
     },
     {
+      "id": "message",
+      "members": [
+        {
+          "id": "role",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "role"},
+          "rust": {"kind": "field", "name": "role"}
+        },
+        {
+          "id": "content",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "content"},
+          "rust": {"kind": "field", "name": "content"}
+        },
+        {
+          "id": "name",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "name"},
+          "rust": {"kind": "field", "name": "name"}
+        },
+        {
+          "id": "tool_call_id",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "tool_call_id"},
+          "rust": {"kind": "field", "name": "tool_call_id"}
+        },
+        {
+          "id": "tool_calls",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "tool_calls"},
+          "rust": {"kind": "field", "name": "tool_calls"}
+        },
+        {
+          "id": "reasoning_content",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "reasoning_content"},
+          "rust": {"kind": "field", "name": "reasoning_content"}
+        },
+        {
+          "id": "image_url",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "image_url"},
+          "rust": {"kind": "field", "name": "image_url"}
+        },
+        {
+          "id": "metadata",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "metadata"},
+          "rust": {"kind": "field", "name": "metadata"}
+        },
+        {
+          "id": "artifact_ref",
+          "kind": "field",
+          "python": {"declaration": "dataclass_field", "kind": "field", "name": "artifact_ref"},
+          "rust": {"kind": "field", "name": "artifact_ref"}
+        }
+      ],
+      "python_target": "vv_agent.Message",
+      "rust_target": "vv_agent::Message"
+    },
+    {
+      "id": "microcompaction_policy",
+      "members": [
+        {
+          "id": "trigger_ratio",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "trigger_ratio"
+          },
+          "rust": {"kind": "field", "name": "trigger_ratio"}
+        },
+        {
+          "id": "target_ratio",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "target_ratio"
+          },
+          "rust": {"kind": "field", "name": "target_ratio"}
+        },
+        {
+          "id": "keep_recent_cycles",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "keep_recent_cycles"
+          },
+          "rust": {"kind": "field", "name": "keep_recent_cycles"}
+        },
+        {
+          "id": "min_result_chars",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "min_result_chars"
+          },
+          "rust": {"kind": "field", "name": "min_result_chars"}
+        }
+      ],
+      "python_target": "vv_agent.MicrocompactionPolicy",
+      "rust_target": "vv_agent::MicrocompactionPolicy"
+    },
+    {
       "id": "tool_metadata",
       "members": [
         {
@@ -4043,6 +4189,19 @@
           "rust": {
             "kind": "field",
             "name": "terminal"
+          }
+        },
+        {
+          "id": "result_retention",
+          "kind": "field",
+          "python": {
+            "declaration": "dataclass_field",
+            "kind": "field",
+            "name": "result_retention"
+          },
+          "rust": {
+            "kind": "field",
+            "name": "result_retention"
           }
         },
         {

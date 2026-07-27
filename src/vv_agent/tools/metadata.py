@@ -10,7 +10,16 @@ from vv_agent.checkpoint import ToolIdempotency
 _PORTABLE_WHITESPACE = frozenset({"\t", "\n", "\r", " "})
 _MAX_COLLECTION_ITEMS = 32
 _MAX_LABEL_CODE_POINTS = 128
-_TOOL_METADATA_FIELDS = frozenset({"side_effect", "idempotency", "terminal", "capability_tags", "cost_dimensions"})
+_TOOL_METADATA_FIELDS = frozenset(
+    {
+        "side_effect",
+        "idempotency",
+        "terminal",
+        "result_retention",
+        "capability_tags",
+        "cost_dimensions",
+    }
+)
 
 
 class ToolSideEffect(StrEnum):
@@ -21,6 +30,11 @@ class ToolSideEffect(StrEnum):
     EXECUTE = "execute"
     NETWORK = "network"
     EXTERNAL = "external"
+
+
+class ToolResultRetention(StrEnum):
+    ARCHIVE = "archive"
+    PRESERVE = "preserve"
 
 
 def _trim_portable_whitespace(value: str) -> str:
@@ -74,6 +88,7 @@ class ToolMetadata:
     side_effect: ToolSideEffect = ToolSideEffect.UNKNOWN
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
     terminal: bool = False
+    result_retention: ToolResultRetention = ToolResultRetention.ARCHIVE
     capability_tags: list[str] = field(default_factory=list)
     cost_dimensions: list[str] = field(default_factory=list)
 
@@ -92,6 +107,14 @@ class ToolMetadata:
             raise ValueError(f"Unsupported tool idempotency: {self.idempotency!r}") from exc
         if not isinstance(self.terminal, bool):
             raise TypeError("tool metadata terminal must be a boolean")
+        try:
+            self.result_retention = (
+                self.result_retention
+                if isinstance(self.result_retention, ToolResultRetention)
+                else ToolResultRetention(self.result_retention)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Unsupported tool result retention: {self.result_retention!r}") from exc
         self.capability_tags = normalize_metadata_labels(
             self.capability_tags,
             field_name="capability_tags",
@@ -113,6 +136,7 @@ class ToolMetadata:
             side_effect=value.get("side_effect", ToolSideEffect.UNKNOWN),
             idempotency=value.get("idempotency", ToolIdempotency.UNKNOWN),
             terminal=value.get("terminal", False),
+            result_retention=value.get("result_retention", ToolResultRetention.ARCHIVE),
             capability_tags=value.get("capability_tags", []),
             cost_dimensions=value.get("cost_dimensions", []),
         )
@@ -122,6 +146,7 @@ class ToolMetadata:
             "side_effect": self.side_effect.value,
             "idempotency": self.idempotency.value,
             "terminal": self.terminal,
+            "result_retention": self.result_retention.value,
             "capability_tags": list(self.capability_tags),
             "cost_dimensions": list(self.cost_dimensions),
         }
@@ -162,6 +187,7 @@ def metadata_policy_denial_source(
 
 __all__ = [
     "ToolMetadata",
+    "ToolResultRetention",
     "ToolSideEffect",
     "metadata_policy_denial_source",
     "normalize_denied_side_effects",

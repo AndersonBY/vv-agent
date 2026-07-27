@@ -1,7 +1,7 @@
 {
   "contract": "run_events_invalid",
   "rules": {
-    "version": "v1",
+    "version": "v2",
     "unknown_top_level_fields": "reject",
     "unknown_event_types": "reject",
     "completion_fields": {
@@ -94,6 +94,16 @@
         "framework_fallback_capped_by_model_capability"
       ],
       "capacity_counters": "non_negative_json_safe_integer_or_null",
+      "microcompact_plan_counters": [
+        "microcompact_target",
+        "candidate_count",
+        "estimated_reclaimable_tokens"
+      ],
+      "microcompact_result_counters": [
+        "archived_count",
+        "reclaimed_tokens",
+        "artifact_failure_count"
+      ],
       "changed": "boolean",
       "missing_required_fields": "reject"
     },
@@ -138,9 +148,21 @@
       }
     },
     {
-      "id": "unsupported_version",
+      "id": "stale_version",
       "input": {
-        "version": "v2",
+        "version": "v1",
+        "type": "run_started",
+        "event_id": "evt_invalid",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello"
+      }
+    },
+    {
+      "id": "unknown_version",
+      "input": {
+        "version": "v3",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -152,7 +174,7 @@
     {
       "id": "unknown_event_type",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "mystery",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -163,7 +185,7 @@
     {
       "id": "legacy_llm_started_is_rejected",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "llm_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -177,7 +199,7 @@
     {
       "id": "unknown_top_level_field",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -190,7 +212,7 @@
     {
       "id": "missing_event_id",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_started",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -201,7 +223,7 @@
     {
       "id": "empty_event_id",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_started",
         "event_id": "",
         "run_id": "run_invalid",
@@ -213,7 +235,7 @@
     {
       "id": "non_string_run_id",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": 7,
@@ -225,7 +247,7 @@
     {
       "id": "empty_trace_id",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -237,7 +259,7 @@
     {
       "id": "missing_created_at",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -248,7 +270,7 @@
     {
       "id": "negative_created_at",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -260,7 +282,7 @@
     {
       "id": "boolean_cycle_index",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "cycle_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -272,7 +294,7 @@
     {
       "id": "negative_cycle_index",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "cycle_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -284,7 +306,7 @@
     {
       "id": "metadata_is_not_an_object",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -297,7 +319,7 @@
     {
       "id": "tool_arguments_are_not_an_object",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -311,7 +333,7 @@
     {
       "id": "approval_approved_field_is_rejected",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "approval_resolved",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -327,7 +349,7 @@
     {
       "id": "approval_preview_field_is_rejected",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "approval_requested",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -343,7 +365,7 @@
     {
       "id": "approval_action_is_missing",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "approval_resolved",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -357,7 +379,7 @@
     {
       "id": "approval_action_is_unknown",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "approval_resolved",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -372,7 +394,7 @@
     {
       "id": "unknown_completion_reason",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_completed",
         "event_id": "evt_invalid_completion_reason",
         "run_id": "run_invalid",
@@ -386,7 +408,7 @@
     {
       "id": "completion_reason_is_not_a_string_or_null",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_completed",
         "event_id": "evt_invalid_completion_reason_type",
         "run_id": "run_invalid",
@@ -400,7 +422,7 @@
     {
       "id": "completion_tool_name_is_not_a_string_or_null",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_completed",
         "event_id": "evt_invalid_completion_tool_name_type",
         "run_id": "run_invalid",
@@ -414,7 +436,7 @@
     {
       "id": "partial_output_is_not_a_string_or_null",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_completed",
         "event_id": "evt_invalid_partial_output_type",
         "run_id": "run_invalid",
@@ -430,7 +452,7 @@
     {
       "id": "budget_usage_is_not_an_object_or_null",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "run_failed",
         "event_id": "evt_invalid_budget_usage",
         "run_id": "run_invalid",
@@ -443,7 +465,7 @@
     {
       "id": "budget_exhaustion_unknown_dimension",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "budget_exhausted",
         "event_id": "evt_invalid_budget_dimension",
         "run_id": "run_invalid",
@@ -478,7 +500,7 @@
     {
       "id": "checkpoint_key_is_not_a_string",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "event_id": "evt_invalid_resume",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -493,7 +515,7 @@
     {
       "id": "resume_attempt_is_not_positive",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "event_id": "evt_invalid_resume",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -508,7 +530,7 @@
     {
       "id": "unknown_operation_kind",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "event_id": "evt_invalid_resume",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -524,7 +546,7 @@
     {
       "id": "invalid_resume_observation_state",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "event_id": "evt_invalid_resume",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -547,7 +569,7 @@
     {
       "id": "planned_arguments_are_not_an_object",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_planned",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -561,7 +583,7 @@
     {
       "id": "planned_tool_name_is_empty",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_planned",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -575,7 +597,7 @@
     {
       "id": "tool_metadata_has_unknown_field",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_started",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -592,7 +614,7 @@
     {
       "id": "tool_completed_status_is_unknown",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -610,7 +632,7 @@
     {
       "id": "tool_completed_directive_is_unknown",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -628,7 +650,7 @@
     {
       "id": "tool_completed_execution_started_is_not_boolean",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -646,7 +668,7 @@
     {
       "id": "tool_completed_duration_is_negative",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -664,7 +686,7 @@
     {
       "id": "tool_completed_not_started_cannot_have_duration",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -682,7 +704,7 @@
     {
       "id": "tool_completed_error_code_is_not_string_or_null",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -700,7 +722,7 @@
     {
       "id": "reasoning_delta_is_not_a_string",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "reasoning_delta",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -712,7 +734,7 @@
     {
       "id": "model_tool_call_id_is_empty",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "model_tool_call_started",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -725,7 +747,7 @@
     {
       "id": "model_tool_name_is_empty",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "model_tool_call_progress",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -738,7 +760,7 @@
     {
       "id": "stream_counter_is_negative",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "model_tool_call_progress",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -752,7 +774,7 @@
     {
       "id": "stream_counter_exceeds_json_safe_maximum",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "assistant_delta",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -765,7 +787,7 @@
     {
       "id": "diagnostic_level_is_unknown",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "diagnostic",
         "event_id": "evt_invalid_diagnostic",
         "run_id": "run_invalid",
@@ -779,7 +801,7 @@
     {
       "id": "diagnostic_code_is_empty",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "diagnostic",
         "event_id": "evt_invalid_diagnostic",
         "run_id": "run_invalid",
@@ -793,7 +815,7 @@
     {
       "id": "diagnostic_details_is_not_an_object",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "diagnostic",
         "event_id": "evt_invalid_diagnostic",
         "run_id": "run_invalid",
@@ -807,7 +829,7 @@
     {
       "id": "memory_compact_trigger_is_unknown",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -820,7 +842,7 @@
     {
       "id": "memory_compact_capacity_is_negative",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -833,7 +855,7 @@
     {
       "id": "memory_compact_reserved_output_source_is_unknown",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -846,7 +868,7 @@
     {
       "id": "memory_compact_mode_is_unknown",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -860,7 +882,7 @@
     {
       "id": "memory_compact_changed_is_not_boolean",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -872,9 +894,183 @@
       }
     },
     {
+      "id": "memory_compact_target_is_negative",
+      "input": {
+        "version": "v2",
+        "type": "memory_compact_started",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "message_count": 3,
+        "estimated_tokens": 200000,
+        "trigger": "micro_threshold",
+        "configured_threshold": 250000,
+        "effective_threshold": 250000,
+        "microcompact_threshold": 187500,
+        "microcompact_target": -1,
+        "candidate_count": 1,
+        "estimated_reclaimable_tokens": 50000,
+        "model_context_window": 1000000,
+        "model_max_output_tokens": 384000,
+        "reserved_output_tokens": 16000,
+        "reserved_output_source": "framework_fallback",
+        "autocompact_buffer_tokens": 13000
+      }
+    },
+    {
+      "id": "memory_compact_candidate_count_is_negative",
+      "input": {
+        "version": "v2",
+        "type": "memory_compact_started",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "message_count": 3,
+        "estimated_tokens": 200000,
+        "trigger": "micro_threshold",
+        "configured_threshold": 250000,
+        "effective_threshold": 250000,
+        "microcompact_threshold": 187500,
+        "microcompact_target": 150000,
+        "candidate_count": -1,
+        "estimated_reclaimable_tokens": 50000,
+        "model_context_window": 1000000,
+        "model_max_output_tokens": 384000,
+        "reserved_output_tokens": 16000,
+        "reserved_output_source": "framework_fallback",
+        "autocompact_buffer_tokens": 13000
+      }
+    },
+    {
+      "id": "memory_compact_estimated_reclaimable_tokens_is_negative",
+      "input": {
+        "version": "v2",
+        "type": "memory_compact_started",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "message_count": 3,
+        "estimated_tokens": 200000,
+        "trigger": "micro_threshold",
+        "configured_threshold": 250000,
+        "effective_threshold": 250000,
+        "microcompact_threshold": 187500,
+        "microcompact_target": 150000,
+        "candidate_count": 1,
+        "estimated_reclaimable_tokens": -1,
+        "model_context_window": 1000000,
+        "model_max_output_tokens": 384000,
+        "reserved_output_tokens": 16000,
+        "reserved_output_source": "framework_fallback",
+        "autocompact_buffer_tokens": 13000
+      }
+    },
+    {
+      "id": "memory_compact_archived_count_is_negative",
+      "input": {
+        "version": "v2",
+        "type": "memory_compact_completed",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "before_count": 3,
+        "after_count": 3,
+        "summary_tokens": 100,
+        "mode": "micro",
+        "changed": true,
+        "archived_count": -1,
+        "reclaimed_tokens": 50000,
+        "artifact_failure_count": 0
+      }
+    },
+    {
+      "id": "memory_compact_reclaimed_tokens_is_negative",
+      "input": {
+        "version": "v2",
+        "type": "memory_compact_completed",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "before_count": 3,
+        "after_count": 3,
+        "summary_tokens": 100,
+        "mode": "micro",
+        "changed": true,
+        "archived_count": 1,
+        "reclaimed_tokens": -1,
+        "artifact_failure_count": 0
+      }
+    },
+    {
+      "id": "memory_compact_artifact_failure_count_is_negative",
+      "input": {
+        "version": "v2",
+        "type": "memory_compact_completed",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "before_count": 3,
+        "after_count": 3,
+        "summary_tokens": 100,
+        "mode": "micro",
+        "changed": true,
+        "archived_count": 1,
+        "reclaimed_tokens": 50000,
+        "artifact_failure_count": -1
+      }
+    },
+    {
+      "id": "memory_compact_started_missing_plan_counter",
+      "input": {
+        "version": "v2",
+        "type": "memory_compact_started",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "message_count": 3,
+        "estimated_tokens": 200000,
+        "trigger": "micro_threshold",
+        "configured_threshold": 250000,
+        "effective_threshold": 250000,
+        "microcompact_threshold": 187500,
+        "candidate_count": 1,
+        "estimated_reclaimable_tokens": 50000,
+        "model_context_window": 1000000,
+        "model_max_output_tokens": 384000,
+        "reserved_output_tokens": 16000,
+        "reserved_output_source": "framework_fallback",
+        "autocompact_buffer_tokens": 13000
+      }
+    },
+    {
+      "id": "memory_compact_completed_missing_result_counter",
+      "input": {
+        "version": "v2",
+        "type": "memory_compact_completed",
+        "event_id": "evt_invalid_memory",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "before_count": 3,
+        "after_count": 3,
+        "summary_tokens": 100,
+        "mode": "micro",
+        "changed": true,
+        "archived_count": 1,
+        "reclaimed_tokens": 50000
+      }
+    },
+    {
       "id": "model_call_operation_is_unknown",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "model_call_started",
         "event_id": "evt_invalid_model",
         "run_id": "run_invalid",
@@ -892,7 +1088,7 @@
     {
       "id": "model_call_attempt_is_zero",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "model_call_started",
         "event_id": "evt_invalid_model",
         "run_id": "run_invalid",
@@ -910,7 +1106,7 @@
     {
       "id": "model_call_failed_missing_usage",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "model_call_failed",
         "event_id": "evt_invalid_model",
         "run_id": "run_invalid",
@@ -930,7 +1126,7 @@
     {
       "id": "model_call_event_contains_prompt",
       "input": {
-        "version": "v1",
+        "version": "v2",
         "type": "model_call_started",
         "event_id": "evt_invalid_model",
         "run_id": "run_invalid",

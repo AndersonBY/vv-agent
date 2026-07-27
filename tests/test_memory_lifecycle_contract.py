@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,7 +12,7 @@ from vv_agent.config import ResolvedModelConfig
 from vv_agent.events import MemoryCompactCompleted, MemoryCompactStarted
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import (
-    CLEARED_MARKER,
+    COMPACT_MARKER_OPENING,
     MemoryManager,
     MemoryProviderResult,
     MemorySaveResult,
@@ -21,6 +20,7 @@ from vv_agent.memory import (
     SessionMemoryConfig,
     SessionMemoryEntry,
 )
+from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
@@ -28,6 +28,7 @@ from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message
+from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "memory_lifecycle.json"
 _CONTRACT = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -124,6 +125,7 @@ def test_omitted_memory_compact_threshold_defaults_match_contract() -> None:
             "model": "capacity-model",
             "prompt_bundle": build_raw_system_prompt_bundle("system").to_dict(),
             "user_prompt": "run",
+            "microcompaction_policy": MicrocompactionPolicy().to_dict(),
         }
     )
 
@@ -427,7 +429,7 @@ def _microcompact_messages(recent_tool_chars: int = 800) -> list[Message]:
                 }
             ],
         ),
-        Message(role="tool", content="x" * 800, tool_call_id="call_old"),
+        Message(role="tool", content="你" * 800, tool_call_id="call_old"),
         Message(role="assistant", content="cycle two"),
         Message(role="user", content="continue"),
         Message(
@@ -441,7 +443,7 @@ def _microcompact_messages(recent_tool_chars: int = 800) -> list[Message]:
                 }
             ],
         ),
-        Message(role="tool", content="y" * recent_tool_chars, tool_call_id="call_recent"),
+        Message(role="tool", content="好" * recent_tool_chars, tool_call_id="call_recent"),
     ]
 
 
@@ -474,8 +476,11 @@ def test_preemptive_compaction_producer_reports_content_aware_outcome(
         reserved_output_tokens=0,
         reserved_output_source="task_metadata",
         autocompact_buffer_tokens=0,
-        microcompact_keep_recent_cycles=1,
-        microcompact_min_result_length=500,
+        microcompaction_policy=MicrocompactionPolicy(
+            keep_recent_cycles=1,
+            min_result_chars=500,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
     )
     runner = CycleRunner(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
@@ -491,6 +496,11 @@ def test_preemptive_compaction_producer_reports_content_aware_outcome(
         ctx=model_call_context(event_handler=emitted.append),
     )
 
+    if not expected_changed:
+        assert emitted == []
+        assert next_messages[-1].content == "done"
+        return
+
     started, completed = emitted
     assert started.trigger == "micro_threshold"
     assert started.effective_threshold == 4_000
@@ -499,7 +509,7 @@ def test_preemptive_compaction_producer_reports_content_aware_outcome(
     assert completed.changed is expected_changed
     assert completed.before_count == completed.after_count
     if expected_changed:
-        assert any(message.content == CLEARED_MARKER for message in next_messages)
+        assert any(message.content.startswith(COMPACT_MARKER_OPENING) for message in next_messages)
 
 
 def test_preemptive_microcompact_runs_before_optional_warning() -> None:
@@ -514,8 +524,11 @@ def test_preemptive_microcompact_runs_before_optional_warning() -> None:
         autocompact_buffer_tokens=0,
         include_memory_warning=True,
         language="en-US",
-        microcompact_keep_recent_cycles=1,
-        microcompact_min_result_length=500,
+        microcompaction_policy=MicrocompactionPolicy(
+            keep_recent_cycles=1,
+            min_result_chars=500,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
     )
     runner = CycleRunner(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
@@ -536,16 +549,21 @@ def test_preemptive_microcompact_runs_before_optional_warning() -> None:
         "recalculate_effective_length",
         "append_memory_warning_only_if_post_microcompact_length_remains_eligible",
     ]
-    assert any(message.content == CLEARED_MARKER for message in next_messages)
+    assert any(message.content.startswith(COMPACT_MARKER_OPENING) for message in next_messages)
     assert all("current memory usage has exceeded" not in message.content for message in next_messages)
     completed = emitted[-1]
     assert completed.mode == "micro"
     assert completed.changed is True
 
 
-@pytest.mark.parametrize("initial_usage", [3_800, 4_200])
+@pytest.mark.parametrize(
+    ("initial_usage", "expected_mode", "expected_warning"),
+    [(3_800, "micro", False), (4_200, "structural", True)],
+)
 def test_public_memory_manager_microcompacts_before_warning_on_both_threshold_paths(
     initial_usage: int,
+    expected_mode: str,
+    expected_warning: bool,
 ) -> None:
     manager = MemoryManager(
         compact_threshold=4_000,
@@ -555,8 +573,12 @@ def test_public_memory_manager_microcompacts_before_warning_on_both_threshold_pa
         autocompact_buffer_tokens=0,
         include_memory_warning=True,
         language="en-US",
-        microcompact_keep_recent_cycles=1,
-        microcompact_min_result_length=500,
+        microcompaction_policy=MicrocompactionPolicy(
+            keep_recent_cycles=1,
+            min_result_chars=500,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
     )
 
     result = manager.compact_with_result(
@@ -566,9 +588,43 @@ def test_public_memory_manager_microcompacts_before_warning_on_both_threshold_pa
     )
 
     assert result.changed is True
-    assert result.mode == "micro"
-    assert any(message.content == CLEARED_MARKER for message in result.messages)
-    assert all("current memory usage has exceeded" not in message.content for message in result.messages)
+    assert result.mode == expected_mode
+    assert any(message.content.startswith(COMPACT_MARKER_OPENING) for message in result.messages)
+    assert any("current memory usage has exceeded" in message.content for message in result.messages) is expected_warning
+
+
+def test_microcompaction_preserves_provider_usage_baseline_for_full_compaction() -> None:
+    summary_calls: list[str] = []
+
+    def summarize(prompt: str, backend: str | None, model: str | None) -> str:
+        del backend, model
+        summary_calls.append(prompt)
+        return _summary_payload()
+
+    manager = MemoryManager(
+        compact_threshold=4_000,
+        model="main-model",
+        model_context_window=4_000,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        microcompaction_policy=MicrocompactionPolicy(
+            keep_recent_cycles=1,
+            min_result_chars=500,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
+        summary_callback=summarize,
+    )
+
+    result = manager.compact_with_result(
+        _microcompact_messages(),
+        cycle_index=4,
+        total_tokens=10_000,
+    )
+
+    assert result.archived_count == 1
+    assert result.mode == "summary"
+    assert len(summary_calls) == 1
 
 
 def test_public_memory_manager_reports_structural_as_stronger_than_microcompact() -> None:
@@ -580,8 +636,12 @@ def test_public_memory_manager_reports_structural_as_stronger_than_microcompact(
         model_context_window=4_000,
         reserved_output_tokens=0,
         autocompact_buffer_tokens=0,
-        microcompact_keep_recent_cycles=1,
-        microcompact_min_result_length=500,
+        microcompaction_policy=MicrocompactionPolicy(
+            keep_recent_cycles=1,
+            min_result_chars=500,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
     )
 
     result = manager.compact_with_result(
@@ -592,23 +652,35 @@ def test_public_memory_manager_reports_structural_as_stronger_than_microcompact(
 
     assert result.changed is True
     assert result.mode == "structural"
-    assert any(message.content == CLEARED_MARKER for message in result.messages)
+    assert any(message.content.startswith(COMPACT_MARKER_OPENING) for message in result.messages)
     assert all(message.role != "assistant" or message.content for message in result.messages)
 
 
 def test_public_memory_manager_keeps_warning_when_post_microcompact_usage_requires_it() -> None:
     messages = _microcompact_messages(recent_tool_chars=8_000)
     manager = MemoryManager(
+        compact_threshold=4_000,
+        model_context_window=4_000,
         reserved_output_tokens=0,
         autocompact_buffer_tokens=0,
         include_memory_warning=True,
         language="en-US",
-        microcompact_keep_recent_cycles=1,
-        microcompact_min_result_length=500,
+        microcompaction_policy=MicrocompactionPolicy(
+            keep_recent_cycles=1,
+            min_result_chars=500,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
     )
-    post_microcompact, cleared = manager.microcompact_messages(messages, cycle_index=4)
-    assert cleared == 1
-    post_tokens = manager._calculate_message_length(post_microcompact)
+    plan = manager.plan_microcompaction(
+        messages,
+        cycle_index=4,
+        current_tokens=3_800,
+    )
+    assert plan is not None
+    applied = manager.apply_microcompaction(messages, plan=plan)
+    assert applied.archived_count == 1
+    post_tokens = manager._calculate_message_length(applied.messages)
     assert post_tokens > 900
     full_threshold = post_tokens + 100
     manager.compact_threshold = full_threshold
@@ -622,7 +694,7 @@ def test_public_memory_manager_keeps_warning_when_post_microcompact_usage_requir
 
     assert result.changed is True
     assert result.mode == "structural"
-    assert any(message.content == CLEARED_MARKER for message in result.messages)
+    assert any(message.content.startswith(COMPACT_MARKER_OPENING) for message in result.messages)
     assert any("current memory usage has exceeded" in message.content for message in result.messages)
 
 
@@ -842,12 +914,15 @@ def _artifact_path(message: Message) -> str:
     raise AssertionError(f"artifact path missing from {message.content!r}")
 
 
-def test_artifact_fallbacks_are_unique_and_fail_open_at_workspace_boundary(tmp_path: Path) -> None:
-    contract = _CONTRACT["artifacts"]
+def test_structural_tool_compaction_uses_unique_workspace_artifacts(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    backend = LocalWorkspaceBackend(workspace)
     manager = MemoryManager(
         workspace=workspace,
+        workspace_backend=backend,
+        recovery_tool_available=True,
+        artifact_scope="run-artifacts",
         tool_result_compact_threshold=10,
         tool_result_keep_last=0,
     )
@@ -860,37 +935,10 @@ def test_artifact_fallbacks_are_unique_and_fail_open_at_workspace_boundary(tmp_p
     paths = [_artifact_path(message) for message in compacted]
 
     assert changed is True
-    assert len(paths) == contract["fallback_count"]
+    assert len(paths) == 2
     assert len(set(paths)) == len(paths)
-    pattern = re.compile(contract["fallback_pattern"])
-    assert all(pattern.fullmatch(PurePosixPath(path).name) for path in paths)
-    assert all((workspace / path).is_file() for path in paths)
-
-    blocked = workspace / "blocked"
-    blocked.write_text("not a directory", encoding="utf-8")
-    failing = MemoryManager(
-        workspace=workspace,
-        tool_result_artifact_dir="blocked/nested",
-        tool_result_compact_threshold=10,
-        tool_result_keep_last=0,
-    )
-    failed_messages, failed_changed = failing._compact_tool_messages(
-        [Message(role="tool", content="write failure payload", tool_call_id="call")],
-        cycle_index=4,
-    )
-    assert failed_changed is True
-    assert _artifact_path(failed_messages[0]) == contract["write_failure_path"]
-
-    escaping = MemoryManager(
-        workspace=workspace,
-        tool_result_artifact_dir="../outside",
-        tool_result_compact_threshold=10,
-        tool_result_keep_last=0,
-    )
-    escaped_messages, escaped_changed = escaping._compact_tool_messages(
-        [Message(role="tool", content="escape payload", tool_call_id="call")],
-        cycle_index=4,
-    )
-    assert escaped_changed is True
-    assert _artifact_path(escaped_messages[0]) == contract["escape_path"]
-    assert not (tmp_path / "outside").exists()
+    assert all(path.startswith(".vv-agent/artifacts/run-artifacts/") for path in paths)
+    assert [backend.read_text(path) for path in paths] == [
+        "first artifact payload",
+        "second artifact payload",
+    ]

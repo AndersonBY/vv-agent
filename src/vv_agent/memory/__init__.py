@@ -2,7 +2,12 @@ from . import token_utils
 from .errors import CompactionExhaustedError
 from .manager import MemoryManager
 from .message_sanitizer import sanitize_for_resume
-from .microcompact import CLEARED_MARKER, COMPACTABLE_TOOLS, MicrocompactConfig, microcompact
+from .microcompact import (
+    COMPACT_MARKER_CLOSING,
+    COMPACT_MARKER_OPENING,
+    MicrocompactPlan,
+    plan_microcompact,
+)
 from .post_compact_restore import PostCompactRestoreConfig, restore_key_files
 from .provider import (
     MemoryCompactCompleted,
@@ -17,8 +22,8 @@ from .provider import (
 from .session_memory import SessionMemory, SessionMemoryConfig, SessionMemoryEntry, SessionMemoryState
 
 __all__ = [
-    "CLEARED_MARKER",
-    "COMPACTABLE_TOOLS",
+    "COMPACT_MARKER_CLOSING",
+    "COMPACT_MARKER_OPENING",
     "CompactionExhaustedError",
     "MemoryCompactCompleted",
     "MemoryCompactStarted",
@@ -29,13 +34,13 @@ __all__ = [
     "MemorySaveResult",
     "MemorySearchRequest",
     "MemorySearchResult",
-    "MicrocompactConfig",
+    "MicrocompactPlan",
     "PostCompactRestoreConfig",
     "SessionMemory",
     "SessionMemoryConfig",
     "SessionMemoryEntry",
     "SessionMemoryState",
-    "microcompact",
+    "plan_microcompact",
     "restore_key_files",
     "sanitize_for_resume",
     "token_utils",

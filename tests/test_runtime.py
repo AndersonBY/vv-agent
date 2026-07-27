@@ -14,6 +14,7 @@ from vv_agent.constants import (
 from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import SessionMemoryEntry, SessionMemoryState
+from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
 from vv_agent.tools import ToolContext, build_default_registry
@@ -24,6 +25,7 @@ from vv_agent.types import (
     Message,
     SubAgentConfig,
     SubTaskRequest,
+    ToolArtifactRef,
     ToolCall,
     ToolExecutionResult,
 )
@@ -107,6 +109,69 @@ def test_runtime_uses_the_frozen_bundle_as_the_only_initial_system_message(tmp_p
     )
 
     assert result.status == AgentStatus.COMPLETED
+
+
+def test_runtime_preserves_artifact_ref_when_copying_prepared_messages(tmp_path: Path) -> None:
+    artifact = ToolArtifactRef(
+        path=".vv-agent/artifacts/run/call.txt",
+        media_type="text/plain",
+        encoding="utf-8",
+        size_bytes=4,
+        sha256="a" * 64,
+    )
+
+    def assert_artifact_ref(request: LlmRequest) -> LLMResponse:
+        tool_message = next(message for message in request.messages if message.role == "tool")
+        assert tool_message.artifact_ref == artifact
+        return LLMResponse(content="done")
+
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(steps=[assert_artifact_ref]),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    task = AgentTask(
+        task_id="prepared-artifact",
+        model="dummy-model",
+        prompt_bundle=build_raw_system_prompt_bundle("canonical system"),
+        user_prompt="",
+        max_cycles=1,
+        no_tool_policy="finish",
+    )
+    result = runtime.run(
+        task,
+        prepared_initial_messages=[
+            Message(role="system", content="canonical system"),
+            Message(role="user", content="inspect prior output"),
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call",
+                        "type": "function",
+                        "function": {"name": "custom_search", "arguments": "{}"},
+                    }
+                ],
+            ),
+            Message(
+                role="tool",
+                content=(
+                    "<Tool Result Compact>\n"
+                    "tool_name: custom_search\n"
+                    "artifact_path: .vv-agent/artifacts/run/call.txt\n"
+                    "retrieval_hint: use read_file on artifact_path if needed\n"
+                    "excerpt:\nprior\n"
+                    "</Tool Result Compact>"
+                ),
+                tool_call_id="call",
+                artifact_ref=artifact,
+            ),
+        ],
+    )
+
+    assert result.status == AgentStatus.COMPLETED
+    assert next(message for message in result.messages if message.role == "tool").artifact_ref == artifact
 
 
 def test_runtime_waits_for_user_when_ask_user_called(tmp_path: Path) -> None:
@@ -352,14 +417,16 @@ def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_
         model="demo-model",
         prompt_bundle=build_raw_system_prompt_bundle("sys"),
         user_prompt="run",
+        microcompaction_policy=MicrocompactionPolicy(
+            trigger_ratio=0.5,
+            target_ratio=0.4,
+            keep_recent_cycles=5,
+            min_result_chars=900,
+        ),
         metadata={
             "model_context_window": 32_000,
             "reserved_output_tokens": 4_000,
             "autocompact_buffer_tokens": 2_000,
-            "microcompact_trigger_ratio": 0.5,
-            "microcompact_keep_recent_cycles": 5,
-            "microcompact_min_result_length": 900,
-            "microcompact_compactable_tools": ["read_file", "bash"],
             "session_memory_enabled": True,
             "session_memory_min_tokens": 2_000,
             "session_memory_max_tokens": 9_000,
@@ -375,15 +442,41 @@ def test_runtime_build_memory_manager_metadata_overrides_model_token_limits(tmp_
     assert manager.reserved_output_tokens == 4_000
     assert manager.reserved_output_source == "task_metadata"
     assert manager.autocompact_buffer_tokens == 2_000
-    assert manager.microcompact_trigger_ratio == 0.5
-    assert manager.microcompact_keep_recent_cycles == 5
-    assert manager.microcompact_min_result_length == 900
-    assert manager.microcompact_compactable_tools == {"read_file", "bash"}
+    assert manager.microcompaction_policy == MicrocompactionPolicy(
+        trigger_ratio=0.5,
+        target_ratio=0.4,
+        keep_recent_cycles=5,
+        min_result_chars=900,
+    )
     assert manager.session_memory is not None
     assert manager.session_memory.config.min_tokens_before_extraction == 2_000
     assert manager.session_memory.config.max_tokens == 9_000
     assert manager.session_memory.config.min_text_messages == 7
     assert manager.session_memory.config.storage_dir == ".custom/session-memory"
+
+
+def test_runtime_ignores_removed_microcompaction_metadata_controls(tmp_path: Path) -> None:
+    runtime = AgentRuntime(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    task = AgentTask(
+        task_id="task_removed_microcompact_metadata",
+        model="demo-model",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
+        user_prompt="run",
+        metadata={
+            "microcompact_trigger_ratio": 0.5,
+            "microcompact_keep_recent_cycles": 9,
+            "microcompact_min_result_length": 900,
+            "microcompact_compactable_tools": ["read_file"],
+        },
+    )
+
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
+
+    assert manager.microcompaction_policy == MicrocompactionPolicy()
 
 
 def test_runtime_injects_loaded_session_memory_into_system_prompt(tmp_path: Path) -> None:

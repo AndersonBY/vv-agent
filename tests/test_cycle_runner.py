@@ -14,11 +14,13 @@ from vv_agent.memory import (
     SessionMemory,
     SessionMemoryConfig,
 )
-from vv_agent.memory.microcompact import CLEARED_MARKER
+from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
+from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.cycle_runner import MAX_PTL_RETRIES, CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, LLMResponse, Message
+from vv_agent.workspace import MemoryWorkspaceBackend
 
 
 def _fake_summary(_prompt: str, _backend: str | None, _model: str | None) -> str:
@@ -237,9 +239,13 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
         model_context_window=240,
         reserved_output_tokens=10,
         autocompact_buffer_tokens=10,
-        microcompact_trigger_ratio=0.6,
-        microcompact_keep_recent_cycles=1,
-        microcompact_min_result_length=200,
+        microcompaction_policy=MicrocompactionPolicy(
+            trigger_ratio=0.6,
+            target_ratio=0.5,
+            keep_recent_cycles=1,
+            min_result_chars=200,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
         tool_result_compact_threshold=2_000,
     )
     messages = [
@@ -256,7 +262,7 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
                 }
             ],
         ),
-        Message(role="tool", content="x" * 600, tool_call_id="call_old"),
+        Message(role="tool", content="large result " * 600, tool_call_id="call_old"),
         Message(role="assistant", content="recent reply"),
         Message(role="user", content="latest ask"),
     ]
@@ -271,7 +277,7 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
 
     assert cycle_record.memory_compacted is True
     assert sent_messages
-    assert any(message.role == "tool" and message.content == CLEARED_MARKER for message in sent_messages[0])
+    assert any(message.role == "tool" and message.content.startswith(COMPACT_MARKER_OPENING) for message in sent_messages[0])
     assert all("<Compressed Agent Memory>" not in message.content for message in sent_messages[0])
 
 

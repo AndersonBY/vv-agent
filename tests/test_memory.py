@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig, SessionMemoryEntry
-from vv_agent.memory.microcompact import CLEARED_MARKER
+from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
+from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.types import Message
+from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
 
 
 def _fake_summary(_prompt: str, _backend: str | None, _model: str | None) -> str:
@@ -183,12 +185,16 @@ def test_memory_compaction_keeps_tool_boundary_consistent() -> None:
 
 
 def test_memory_compacts_large_tool_result_to_workspace_artifact(tmp_path: Path) -> None:
+    backend = LocalWorkspaceBackend(tmp_path)
     manager = _build_manager(
         model_context_window=50,
         reserved_output_tokens=10,
         autocompact_buffer_tokens=10,
         keep_recent_messages=2,
         workspace=tmp_path,
+        workspace_backend=backend,
+        recovery_tool_available=True,
+        artifact_scope="memory-artifact",
         tool_result_compact_threshold=30,
         tool_result_keep_last=0,
         summary_callback=_fake_summary,
@@ -209,11 +215,15 @@ def test_memory_compacts_large_tool_result_to_workspace_artifact(tmp_path: Path)
     compacted, changed = manager.compact(messages, cycle_index=3)
     assert changed is True
     assert len(compacted) == 2
-    artifact_file = tmp_path / ".memory" / "tool_results" / "cycle_3" / "call_1.txt"
-    assert artifact_file.exists()
-    assert artifact_file.read_text(encoding="utf-8") == large_tool_result
+    artifact_path = next(
+        line.removeprefix("- ").split(" ", 1)[0]
+        for line in compacted[1].content.splitlines()
+        if line.startswith("- .vv-agent/artifacts/")
+    )
+    assert artifact_path.startswith(".vv-agent/artifacts/memory-artifact/")
+    assert backend.read_text(artifact_path) == large_tool_result
     assert "<Persisted Artifacts>" in compacted[1].content
-    assert "call_1.txt" in compacted[1].content
+    assert "call_1-" in compacted[1].content
     assert "tool: read_file" in compacted[1].content
 
 
@@ -294,11 +304,14 @@ def test_memory_thresholds_fall_back_to_model_limit_when_smaller() -> None:
     assert manager.autocompact_threshold == 43_000
 
 
-def test_memory_recomputes_compacted_length_without_stale_total_tokens() -> None:
+def test_memory_recomputes_local_length_after_structural_compaction() -> None:
     manager = _build_manager(
-        model_context_window=160,
-        reserved_output_tokens=10,
-        autocompact_buffer_tokens=10,
+        compact_threshold=300,
+        model_context_window=300,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
         tool_result_compact_threshold=20,
         tool_result_keep_last=0,
     )
@@ -310,11 +323,11 @@ def test_memory_recomputes_compacted_length_without_stale_total_tokens() -> None
             content="",
             tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
         ),
-        Message(role="tool", content="x" * 400, tool_call_id="call_1"),
+        Message(role="tool", content="large result " * 200, tool_call_id="call_1"),
         Message(role="assistant", content="continue"),
     ]
 
-    compacted, changed = manager.compact(messages, total_tokens=500, recent_tool_call_ids=set())
+    compacted, changed = manager.compact(messages, total_tokens=None, recent_tool_call_ids=set())
 
     assert changed is True
     assert len(compacted) > 2
@@ -524,11 +537,16 @@ def test_memory_emergency_compact_preserves_recent_tool_context() -> None:
 
 def test_memory_compact_uses_microcompact_before_full_summary() -> None:
     manager = _build_manager(
-        model_context_window=150,
-        reserved_output_tokens=10,
-        autocompact_buffer_tokens=10,
-        microcompact_keep_recent_cycles=1,
-        microcompact_min_result_length=200,
+        compact_threshold=1_000,
+        model_context_window=1_000,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        microcompaction_policy=MicrocompactionPolicy(
+            keep_recent_cycles=1,
+            min_result_chars=200,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
         tool_result_compact_threshold=2_000,
         summary_callback=_fake_summary,
     )
@@ -546,15 +564,15 @@ def test_memory_compact_uses_microcompact_before_full_summary() -> None:
                 }
             ],
         ),
-        Message(role="tool", content="x" * 600, tool_call_id="call_old"),
+        Message(role="tool", content="large result " * 600, tool_call_id="call_old"),
         Message(role="assistant", content="recent reply"),
         Message(role="user", content="latest ask"),
     ]
 
-    compacted, changed = manager.compact(messages, cycle_index=3)
+    compacted, changed = manager.compact(messages, cycle_index=3, total_tokens=900)
 
     assert changed is True
-    assert any(message.role == "tool" and message.content == CLEARED_MARKER for message in compacted)
+    assert any(message.role == "tool" and message.content.startswith(COMPACT_MARKER_OPENING) for message in compacted)
     assert all("<Compressed Agent Memory>" not in message.content for message in compacted)
 
 

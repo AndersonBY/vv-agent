@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -9,6 +10,7 @@ from typing import Any, Literal, cast
 
 from vv_agent.budget import MAX_WIRE_INTEGER, BudgetExhaustion, BudgetUsageSnapshot
 from vv_agent.checkpoint import ResumeObservation, canonical_json_bytes, validate_sha256
+from vv_agent.microcompaction import MicrocompactionPolicy, normalize_microcompaction_policy
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import PromptBundle
 
@@ -18,6 +20,19 @@ _NO_TOOL_POLICIES = frozenset({"continue", "wait_user", "finish"})
 _MAX_U32 = (1 << 32) - 1
 _MAX_U64 = (1 << 64) - 1
 _MAX_U8 = (1 << 8) - 1
+_MESSAGE_FIELDS = frozenset(
+    {
+        "role",
+        "content",
+        "name",
+        "tool_call_id",
+        "tool_calls",
+        "reasoning_content",
+        "image_url",
+        "metadata",
+        "artifact_ref",
+    }
+)
 
 
 def _trim_portable_whitespace(value: str) -> str:
@@ -93,6 +108,7 @@ class Message:
     reasoning_content: str | None = None
     image_url: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    artifact_ref: ToolArtifactRef | None = None
 
     def to_openai_message(self, *, include_reasoning_content: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {"role": self.role, "content": self.content}
@@ -128,19 +144,44 @@ class Message:
             d["image_url"] = self.image_url
         if self.metadata:
             d["metadata"] = dict(self.metadata)
+        if self.artifact_ref is not None:
+            d["artifact_ref"] = self.artifact_ref.to_dict()
         return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Message:
+        if not isinstance(data, dict):
+            raise TypeError("Message payload must be a dict")
+        _reject_unknown_fields(data, _MESSAGE_FIELDS, "Message")
+        if "role" not in data or not isinstance(data["role"], str):
+            raise TypeError("Message field 'role' must be a string")
+        if data["role"] not in {"system", "user", "assistant", "tool"}:
+            raise ValueError(f"Unknown Message role: {data['role']}")
+        if "content" not in data or not isinstance(data["content"], str):
+            raise TypeError("Message field 'content' must be a string")
+        for field_name in ("name", "tool_call_id", "reasoning_content", "image_url"):
+            if field_name in data and data[field_name] is not None and not isinstance(data[field_name], str):
+                raise TypeError(f"Message field {field_name!r} must be a string")
+        if "tool_calls" in data:
+            tool_calls = data["tool_calls"]
+            if not isinstance(tool_calls, list) or not all(isinstance(item, dict) for item in tool_calls):
+                raise TypeError("Message field 'tool_calls' must be a list of dicts")
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, dict) or not all(isinstance(key, str) for key in metadata):
+            raise TypeError("Message field 'metadata' must be a dict with string keys")
+        raw_artifact_ref = data.get("artifact_ref")
+        if "artifact_ref" in data and not isinstance(raw_artifact_ref, dict):
+            raise TypeError("Message field 'artifact_ref' must be an object")
         return cls(
-            role=data["role"],
-            content=data.get("content", ""),
+            role=cast(Role, data["role"]),
+            content=data["content"],
             name=data.get("name"),
             tool_call_id=data.get("tool_call_id"),
             tool_calls=data.get("tool_calls"),
             reasoning_content=data.get("reasoning_content"),
             image_url=data.get("image_url"),
-            metadata=dict(data.get("metadata", {})),
+            metadata=dict(metadata),
+            artifact_ref=ToolArtifactRef.from_dict(raw_artifact_ref) if raw_artifact_ref is not None else None,
         )
 
 
@@ -722,7 +763,12 @@ class ToolExecutionResult:
             }
             recovery_json = canonical_json_bytes({"vv_agent_recovery": recovery}, "tool result recovery").decode("utf-8")
             content = f"{content}\n{recovery_json}"
-        return Message(role="tool", content=content, tool_call_id=self.tool_call_id)
+        return Message(
+            role="tool",
+            content=content,
+            tool_call_id=self.tool_call_id,
+            artifact_ref=self.artifact,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         self._validate()
@@ -1003,7 +1049,7 @@ def _agent_task_required_string(data: dict[str, Any], field_name: str) -> str:
     return value
 
 
-def _reject_unknown_fields(data: dict[str, Any], allowed: set[str], label: str) -> None:
+def _reject_unknown_fields(data: dict[str, Any], allowed: AbstractSet[str], label: str) -> None:
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise ValueError(f"{label} contains unknown fields: {', '.join(unknown)}")
@@ -1125,6 +1171,7 @@ class AgentTask:
     max_cycles: int = 8
     memory_compact_threshold: int = 250_000
     memory_threshold_percentage: int = 90
+    microcompaction_policy: MicrocompactionPolicy = field(default_factory=MicrocompactionPolicy)
     no_tool_policy: NoToolPolicy = "continue"
     allow_interruption: bool = True
     use_workspace: bool = True
@@ -1137,6 +1184,12 @@ class AgentTask:
     initial_messages: list[Message] = field(default_factory=list)
     initial_shared_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.microcompaction_policy = normalize_microcompaction_policy(self.microcompaction_policy)
+        if not isinstance(self.metadata, dict) or not all(isinstance(key, str) for key in self.metadata):
+            raise TypeError("AgentTask metadata must be a dict with string keys")
+        self.metadata = dict(self.metadata)
 
     @property
     def sub_agents_enabled(self) -> bool:
@@ -1151,6 +1204,7 @@ class AgentTask:
             "max_cycles": self.max_cycles,
             "memory_compact_threshold": self.memory_compact_threshold,
             "memory_threshold_percentage": self.memory_threshold_percentage,
+            "microcompaction_policy": self.microcompaction_policy.to_dict(),
             "no_tool_policy": self.no_tool_policy,
             "allow_interruption": self.allow_interruption,
             "use_workspace": self.use_workspace,
@@ -1180,6 +1234,7 @@ class AgentTask:
                 "max_cycles",
                 "memory_compact_threshold",
                 "memory_threshold_percentage",
+                "microcompaction_policy",
                 "no_tool_policy",
                 "allow_interruption",
                 "use_workspace",
@@ -1213,6 +1268,7 @@ class AgentTask:
                 default=90,
                 maximum=_MAX_U8,
             ),
+            microcompaction_policy=normalize_microcompaction_policy(data["microcompaction_policy"]),
             no_tool_policy=_agent_task_no_tool_policy(data),
             allow_interruption=_agent_task_bool(data, "allow_interruption", default=True),
             use_workspace=_agent_task_bool(data, "use_workspace", default=True),

@@ -30,10 +30,10 @@ from vv_agent.tools.metadata import (
     normalize_denied_side_effects,
     normalize_metadata_labels,
 )
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, SubAgentConfig
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, SubAgentConfig, ToolArtifactRef
 
-DISTRIBUTED_RUN_SCHEMA_VERSION = "vv-agent.distributed-run.v3"
-DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION = "vv-agent.distributed-worker-response.v2"
+DISTRIBUTED_RUN_SCHEMA_VERSION = "vv-agent.distributed-run.v5"
+DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION = "vv-agent.distributed-worker-response.v3"
 DEFAULT_TOOLSET_ID = "vv-agent.builtin-tools"
 DEFAULT_TOOLSET_VERSION = "1"
 DEFAULT_TOOLSET_SCHEMA_DIGEST = "d266963bff5d4dc90f4fd4c9897381aa589375078f0c08c23af474e27f6b0269"
@@ -103,6 +103,7 @@ _TASK_FIELDS = frozenset(
         "max_cycles",
         "memory_compact_threshold",
         "memory_threshold_percentage",
+        "microcompaction_policy",
         "no_tool_policy",
         "allow_interruption",
         "use_workspace",
@@ -162,6 +163,7 @@ _MESSAGE_FIELDS = frozenset(
         "reasoning_content",
         "image_url",
         "metadata",
+        "artifact_ref",
     }
 )
 _TOOL_CALL_FIELDS = frozenset({"id", "type", "function", "extra_content"})
@@ -521,6 +523,12 @@ def _validate_message_wire(value: Any, *, index: int) -> None:
     if "metadata" in message:
         metadata = _required_object(message["metadata"], f"{label}.metadata")
         _validate_open_json(metadata, f"{label}.metadata")
+    if "artifact_ref" in message:
+        artifact_ref = _required_object(message["artifact_ref"], f"{label}.artifact_ref")
+        try:
+            ToolArtifactRef.from_dict(dict(artifact_ref))
+        except (TypeError, ValueError) as exc:
+            raise DistributedContractError(f"{label}.artifact_ref is invalid") from exc
     if "tool_calls" not in message:
         return
     tool_calls = _required_array(message["tool_calls"], f"{label}.tool_calls")

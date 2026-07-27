@@ -6,20 +6,19 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current release is `0.9.0`. It implements language-neutral Contract
-`4.1.0` behavior with the Rust `vv-agent` crate while keeping a Python-idiomatic
-API.
+The current package release is `0.10.0`. Repository `HEAD` locks
+language-neutral Contract `6.0.1` with the Rust `vv-agent` crate while keeping
+a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.9.0"
+python -m pip install "vv-agent==0.10.0"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
-integrations are needed. Contract 4 and repository `HEAD` are forward-only:
-current readers accept only the current strict public and wire shapes. Pin an
-older package release when an application must retain an older protocol.
+integrations are needed. Repository `HEAD` is forward-only: current readers
+accept only the current strict public and wire shapes.
 
-### 0.9.0 Highlights
+### 0.10.0 Highlights
 
 - Every admitted model dispatch is recorded in
   `result.token_usage.model_calls`, including agent cycles, Session Memory,
@@ -44,10 +43,17 @@ older package release when an application must retain an older protocol.
   working directory and streams the complete capture into private storage.
   Large file reads return bounded text plus a verified cursor, so recovery does
   not repeat the original operation.
-- Durable execution uses `vv-agent.checkpoint.v4`,
-  `vv-agent.run-definition.v3`, `vv-agent.distributed-run.v3`, and
-  `vv-agent.distributed-worker-response.v2` for strict recovery and
-  distributed-controller boundaries.
+- `MicrocompactionPolicy` exposes the trigger ratio, target ratio, protected
+  recent cycles, and minimum result size. Old results from built-in and custom
+  tools default to archive retention; the runtime replaces them only after a
+  complete immutable artifact is available and only when `read_file` remains
+  model-visible. The compact marker keeps a short excerpt and recovery path
+  while integrity metadata stays host-only.
+- Durable execution uses `vv-agent.checkpoint.v5`,
+  `vv-agent.run-definition.v5`, `vv-agent.distributed-run.v5`, and
+  `vv-agent.distributed-worker-response.v3` for strict recovery and
+  distributed-controller boundaries. `RunEvent` uses wire version `v2`, and
+  SQLite session stores use `PRAGMA user_version=2`.
 
 See [output validation](docs/output-validation.md) and
 [checkpoint/resume](docs/checkpoint-resume.md) for the detailed contracts.
@@ -195,7 +201,7 @@ Argument parse failures emit none of these events. Schema validation, policy,
 approval, and unknown-tool short-circuits emit planned plus completed without
 started; completed events report `directive`, nullable `error_code`,
 `execution_started`, and nullable monotonic `duration_ms`. A started event may
-remain unmatched after cancellation or process loss, so checkpoint v3's
+remain unmatched after cancellation or process loss, so checkpoint v5's
 operation journal remains the recovery authority.
 
 The lower-level `AgentRuntime` API remains available for backend integrations
@@ -697,8 +703,9 @@ resolved auto-compaction threshold is exceeded.
   - `autocompact_threshold = min(memory_compact_threshold, derived_prompt_capacity)`;
     a configured threshold of zero selects the derived capacity, and a known
     derived capacity of zero stays zero.
-  - The default autocompact buffer is `13000`; the default microcompact trigger
-    is 75% of the effective full threshold.
+  - The default autocompact buffer is `13000`. `MicrocompactionPolicy` defaults
+    to trigger/target ratios of `0.75`/`0.60`, keeps 3 recent cycles, and only
+    considers results longer than 500 characters.
 - Effective-length strategy (backend-aligned):
   - If previous cycle token usage exists:
     - `effective_length = previous_prompt_tokens + token_count(recent_tool_messages)`
@@ -706,7 +713,9 @@ resolved auto-compaction threshold is exceeded.
     - `vv_llm.chat_clients.utils.get_message_token_counts(...)`
     - If tokenizer resolution fails, use a local CJK-aware estimate
 - Compaction pipeline:
-  1. Preemptive microcompact: clear old large tool results when usage crosses `microcompact_trigger_ratio`
+  1. Archive-backed microcompaction: after usage crosses the typed policy's
+     trigger, plan old tool results oldest-first and replace successfully
+     archived results until usage reaches the target
   2. Session Memory extraction: persist key facts before full summarization so they survive later compactions
   3. Structural cleanup (stale tool calls, orphan tool messages, assistant-no-tool collapse, old tool result artifactization)
   4. If still over threshold, generate a compressed memory summary that preserves original user messages, file operations, current work state, and resolved errors
@@ -714,12 +723,40 @@ resolved auto-compaction threshold is exceeded.
   6. After full compaction, re-inject relevant workspace files into `<Post-Compaction File Context>` under a bounded token budget
 - Compaction events:
   - New `memory_compact_started` producers include the typed trigger and the
-    complete resolved capacity snapshot.
+    complete resolved capacity snapshot plus the micro target, candidate count,
+    and estimated reclaimable tokens.
   - New `memory_compact_completed` producers include the strongest actual mode
     (`none`, `micro`, `structural`, `summary`, or `emergency`) and a
-    content-aware `changed` flag.
+    content-aware `changed` flag plus archive count, actual reclaimed tokens,
+    and artifact failure count.
   - Every current event includes the complete typed capacity and result fields;
     missing or unknown fields are rejected.
+- Archive recovery:
+  - Every tool defaults to `ToolResultRetention.ARCHIVE`; `PRESERVE` excludes a
+    result only from proactive microcompaction.
+  - Complete text is persisted through the effective `WorkspaceBackend` under
+    the immutable logical `.vv-agent/artifacts/` namespace before replacement.
+    A failed or short write leaves the original message inline.
+  - Microcompaction is disabled when model-visible `read_file` is unavailable,
+    including `use_workspace=False` and explicit tool exclusion.
+  - Existing typed artifacts are reused. The model sees only the compact
+    marker's tool name, artifact path, retrieval hint, and bounded excerpt.
+- Configure proactive compaction with
+  `RunConfig(microcompaction_policy=MicrocompactionPolicy(...))`. The policy is
+  copied to `AgentTask` and frozen/restored under
+  `runtime_controls.microcompaction_policy` in the run definition.
+- The model-visible replacement has this closed shape; byte size and SHA-256
+  remain only in the host-visible `ToolArtifactRef`:
+
+```text
+<Tool Result Compact>
+tool_name: web_search
+artifact_path: .vv-agent/artifacts/<run>/<call>.txt
+retrieval_hint: use read_file on artifact_path if needed
+excerpt:
+<bounded head/tail preview>
+</Tool Result Compact>
+```
 - Session Memory behavior:
   - Stored in `workspace/.memory/session/<session-or-task-scope>/session_memory.json` by default
   - Scoped to the current session when `metadata.session_id` is present; otherwise scoped to the current `task_id`
@@ -744,10 +781,6 @@ them into `AgentTask.metadata`:
 - `model_max_output_tokens` (resolved model capability; not an implicit request limit)
 - `reserved_output_tokens`
 - `autocompact_buffer_tokens`
-- `microcompact_trigger_ratio`
-- `microcompact_keep_recent_cycles`
-- `microcompact_min_result_length`
-- `microcompact_compactable_tools`
 - `include_memory_warning`
 - `session_memory_enabled`
 - `session_memory_min_tokens`
@@ -760,7 +793,6 @@ them into `AgentTask.metadata`:
 - `tool_result_excerpt_tail`
 - `tool_calls_keep_last`
 - `assistant_no_tool_keep_last`
-- `tool_result_artifact_dir`
 - `summary_event_limit`
 
 ### Memory summary model selection priority

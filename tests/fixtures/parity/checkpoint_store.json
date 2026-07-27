@@ -1,8 +1,8 @@
 {
   "contract": "checkpoint_store",
-  "version": 4,
-  "checkpoint_schema": "vv-agent.checkpoint.v4",
-  "run_definition_schema": "vv-agent.run-definition.v3",
+  "version": 5,
+  "checkpoint_schema": "vv-agent.checkpoint.v5",
+  "run_definition_schema": "vv-agent.run-definition.v5",
   "run_definition_storage": "credential_redacted_object_embedded_and_immutable_beside_matching_digest",
   "namespaces": {
     "sqlite_table": "checkpoints",
@@ -123,7 +123,7 @@
       {
         "name": "checkpoint_created_current_run_event",
         "event": {
-          "version": "v1",
+          "version": "v2",
           "type": "checkpoint_created",
           "event_id": "evt-1",
           "run_id": "run-1",
@@ -133,9 +133,9 @@
           "checkpoint_key": "checkpoint-1",
           "resume_attempt": 1
         },
-        "canonical_json_base64": "eyJjaGVja3BvaW50X2tleSI6ImNoZWNrcG9pbnQtMSIsImNyZWF0ZWRfYXQiOjEyMy40NTY3ODksImN5Y2xlX2luZGV4IjowLCJldmVudF9pZCI6ImV2dC0xIiwicmVzdW1lX2F0dGVtcHQiOjEsInJ1bl9pZCI6InJ1bi0xIiwidHJhY2VfaWQiOiJ0cmFjZS0xIiwidHlwZSI6ImNoZWNrcG9pbnRfY3JlYXRlZCIsInZlcnNpb24iOiJ2MSJ9",
+        "canonical_json_base64": "eyJjaGVja3BvaW50X2tleSI6ImNoZWNrcG9pbnQtMSIsImNyZWF0ZWRfYXQiOjEyMy40NTY3ODksImN5Y2xlX2luZGV4IjowLCJldmVudF9pZCI6ImV2dC0xIiwicmVzdW1lX2F0dGVtcHQiOjEsInJ1bl9pZCI6InJ1bi0xIiwidHJhY2VfaWQiOiJ0cmFjZS0xIiwidHlwZSI6ImNoZWNrcG9pbnRfY3JlYXRlZCIsInZlcnNpb24iOiJ2MiJ9",
         "canonical_json_utf8_bytes": 192,
-        "sha256": "7c7fb5303556f5d2d0fa927a6c1e91a63c17384ad5426d2b8e9ad7dbdce2cd6d"
+        "sha256": "a96e644b0d82bfa5afb6ec75dbd18f34486affdbc3f270cdb5efe25369b6bf22"
       }
     ]
   },
@@ -833,7 +833,7 @@
         "event_id": "evt-1",
         "payload_digest": "7c7fb5303556f5d2d0fa927a6c1e91a63c17384ad5426d2b8e9ad7dbdce2cd6d",
         "event": {
-          "version": "v1",
+          "version": "v2",
           "type": "checkpoint_created",
           "event_id": "evt-1",
           "run_id": "run-1",
@@ -864,7 +864,7 @@
         "event_id": "evt-1",
         "payload_digest": "7c7fb5303556f5d2d0fa927a6c1e91a63c17384ad5426d2b8e9ad7dbdce2cd6d",
         "event": {
-          "version": "v1",
+          "version": "v2",
           "type": "checkpoint_created",
           "event_id": "evt-1",
           "run_id": "run-1",
@@ -896,7 +896,7 @@
         "event_id": "evt-1",
         "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "event": {
-          "version": "v1",
+          "version": "v2",
           "type": "checkpoint_created",
           "event_id": "evt-1",
           "run_id": "run-1",

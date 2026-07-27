@@ -118,7 +118,7 @@ Useful live-test environment variables:
 | Provider contracts | `tests/test_approval_protocol.py`, `tests/test_context_providers.py`, `tests/test_memory_provider.py`, `tests/test_interactive_approval_bridge.py`, `tests/test_interactive_memory_provider_bridge.py` |
 | LLM/tool hooks and after-cycle lifecycle hooks | `tests/test_runtime_hooks.py`, `tests/test_after_cycle_hooks.py`, `tests/test_distributed_checkpoint.py` |
 | Tools and schemas | `tests/test_tools.py`, `tests/test_tool_schemas.py`, `tests/test_tool_planner.py`, `tests/test_tool_orchestrator.py` |
-| Memory and compaction | `tests/test_memory.py`, `tests/test_microcompact.py`, `tests/test_session_memory.py` |
+| Memory and compaction | `tests/test_memory.py`, `tests/test_microcompact.py`, `tests/test_microcompaction_policy.py`, `tests/test_microcompaction_events.py`, `tests/test_memory_local_contract.py`, `tests/test_session_memory.py` |
 | Execution backends | `tests/test_backends.py`, `tests/test_checkpoint.py` |
 | Workspace backends | `tests/test_workspace_backends.py` |
 | Live provider behavior | `tests/test_live_moonshot.py` |

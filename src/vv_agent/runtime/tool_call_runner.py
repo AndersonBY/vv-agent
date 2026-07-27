@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vv_agent.checkpoint import ToolIdempotency
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
+from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY
 from vv_agent.result import _PendingToolApproval
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
@@ -210,7 +211,7 @@ class ToolCallRunner:
                 )
 
             cycle_record.tool_results.append(result)
-            messages.append(result.to_tool_message())
+            messages.append(self._tool_result_message(result))
             image_notification = self._build_image_notification(
                 result=result,
                 include_image=task.native_multimodal,
@@ -244,7 +245,7 @@ class ToolCallRunner:
                         message=skip_message,
                     )
                     cycle_record.tool_results.append(skipped)
-                    messages.append(skipped.to_tool_message())
+                    messages.append(self._tool_result_message(skipped))
                     if on_tool_result is not None:
                         on_tool_result(skipped_call, skipped)
                 break
@@ -260,7 +261,7 @@ class ToolCallRunner:
                             message="Tool skipped due to queued steering message.",
                         )
                         cycle_record.tool_results.append(skipped)
-                        messages.append(skipped.to_tool_message())
+                        messages.append(self._tool_result_message(skipped))
                         if on_tool_result is not None:
                             on_tool_result(skipped_call, skipped)
                     break
@@ -273,6 +274,16 @@ class ToolCallRunner:
             completion_reason=completion_reason,
             completion_tool_name=completion_tool_name,
             interruption_messages=interruption_messages,
+        )
+
+    @staticmethod
+    def _tool_result_message(result: ToolExecutionResult) -> Message:
+        message = result.to_tool_message()
+        if result.artifact is None:
+            return message
+        return replace(
+            message,
+            metadata={**message.metadata, EXCERPT_METADATA_KEY: result.content},
         )
 
     @staticmethod

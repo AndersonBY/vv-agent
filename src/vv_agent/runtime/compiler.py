@@ -15,6 +15,7 @@ from vv_agent.context_providers import (
     collect_context_fragments,
 )
 from vv_agent.memory.session_memory import load_session_memory_context
+from vv_agent.microcompaction import normalize_microcompaction_policy
 from vv_agent.prompt import PromptBundle, PromptSection
 from vv_agent.prompt.builder import _trim_text, inject_session_memory_section
 from vv_agent.prompt.templates import render_sub_agents
@@ -149,6 +150,7 @@ class AgentCompiler:
             prompt_bundle=prompt_bundle,
             user_prompt=input,
             max_cycles=max_cycles,
+            microcompaction_policy=run_config.microcompaction_policy,
             no_tool_policy=no_tool_policy,
             sub_agents=deepcopy(agent.sub_agents),
             native_multimodal=resolved.native_multimodal,
@@ -273,6 +275,13 @@ class AgentCompiler:
         run_metadata = definition.get("run_metadata")
         if isinstance(run_metadata, dict):
             metadata.update(deepcopy(run_metadata))
+        try:
+            microcompaction_policy = normalize_microcompaction_policy(controls["microcompaction_policy"])
+        except (TypeError, ValueError) as exc:
+            raise CheckpointError(
+                "checkpoint run definition has an invalid microcompaction policy",
+                code="checkpoint_definition_invalid",
+            ) from exc
         metadata["trace_id"] = trace_id
         project_resolved_model_limits(
             metadata,
@@ -303,6 +312,7 @@ class AgentCompiler:
             max_cycles=int(controls["max_cycles"]),
             memory_compact_threshold=int(controls["memory_compact_threshold"]),
             memory_threshold_percentage=int(controls["memory_threshold_percentage"]),
+            microcompaction_policy=microcompaction_policy,
             no_tool_policy=cast(NoToolPolicy, controls["no_tool_policy"]),
             allow_interruption=bool(controls["allow_interruption"]),
             use_workspace=bool(stored_tool_names.intersection(WORKSPACE_TOOLS)),

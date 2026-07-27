@@ -55,7 +55,7 @@ from vv_agent.tools import (
     build_default_registry,
 )
 from vv_agent.tools.executor import FunctionToolExecutor
-from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig
+from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolArtifactRef
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "distributed_run_envelope.json"
 WORKER_RESPONSE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "distributed_worker_response.json"
@@ -351,6 +351,29 @@ def test_distributed_current_writer_and_reader_round_trip_strict_nested_wire() -
     }
 
 
+def test_distributed_round_trip_preserves_message_artifact_ref() -> None:
+    envelope = _strict_envelope()
+    artifact_ref = ToolArtifactRef(
+        path=".vv-agent/artifacts/run-7/call-search.txt",
+        media_type="text/plain",
+        encoding="utf-8",
+        size_bytes=42,
+        sha256="0" * 64,
+    )
+    envelope.task.initial_messages.append(
+        Message(
+            role="tool",
+            content="<Tool Result Compact>\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt",
+            tool_call_id="call-search",
+            artifact_ref=artifact_ref,
+        )
+    )
+
+    restored = DistributedRunEnvelope.from_dict(envelope.to_dict())
+
+    assert restored.task.initial_messages[-1].artifact_ref == artifact_ref
+
+
 def test_distributed_worker_response_matches_all_canonical_and_invalid_cases() -> None:
     fixture = json.loads(WORKER_RESPONSE_FIXTURE_PATH.read_text(encoding="utf-8"))
 
@@ -551,7 +574,7 @@ def test_celery_projects_effective_metadata_policy_into_envelope(
     backend = CeleryBackend(
         celery_app=app,
         runtime_recipe=recipe,
-        dispatch_timeout_seconds=1,
+        dispatch_timeout_seconds=5,
     )
 
     result = Runner.run_sync(

@@ -31,7 +31,7 @@ from vv_agent.types import (
     ToolExecutionResult,
 )
 
-CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v4"
+CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v5"
 MAX_WIRE_INTEGER = (1 << 53) - 1
 ClaimMode = Literal["continue", "recovery"]
 
@@ -632,7 +632,7 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         raise TypeError("checkpoint must be a Checkpoint")
     if checkpoint.schema_version != CHECKPOINT_SCHEMA:
         raise CheckpointError(
-            "unsupported checkpoint v3 schema_version",
+            f"unsupported checkpoint schema_version; expected {CHECKPOINT_SCHEMA}",
             code="checkpoint_schema_unsupported",
         )
     if checkpoint.run_definition_schema != RUN_DEFINITION_SCHEMA:

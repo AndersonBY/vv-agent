@@ -7,7 +7,7 @@ import re
 from typing import Any, Protocol, cast
 
 from vv_agent.checkpoint import canonical_json_bytes
-from vv_agent.types import Message, Role
+from vv_agent.types import Message, Role, ToolArtifactRef
 
 SESSION_COMMIT_SCHEMA = "vv-agent.session-commit.v1"
 SESSION_COMMIT_ID_PREFIX = "vv-agent:checkpoint-v2:session:"
@@ -22,6 +22,7 @@ _SESSION_MESSAGE_FIELDS = frozenset(
         "reasoning_content",
         "image_url",
         "metadata",
+        "artifact_ref",
     }
 )
 _TOOL_CALL_FIELDS = frozenset({"id", "type", "function", "extra_content"})
@@ -219,6 +220,8 @@ def _normalize_message(message: Message) -> Message:
         data["reasoning_content"] = message.reasoning_content
     if message.image_url is not None:
         data["image_url"] = message.image_url
+    if message.artifact_ref is not None:
+        data["artifact_ref"] = message.artifact_ref.to_dict()
     data["metadata"] = message.metadata
     return _decode_canonical_message(data)
 
@@ -250,6 +253,16 @@ def _decode_canonical_message(data: dict[str, Any]) -> Message:
             raise ValueError('"metadata" must be an object')
         metadata = cast(dict[str, Any], _canonical_json(raw_metadata, field_name="metadata"))
 
+    artifact_ref: ToolArtifactRef | None = None
+    if "artifact_ref" in data:
+        raw_artifact_ref = data["artifact_ref"]
+        if not isinstance(raw_artifact_ref, dict):
+            raise ValueError('"artifact_ref" must be an object')
+        try:
+            artifact_ref = ToolArtifactRef.from_dict(raw_artifact_ref)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('"artifact_ref" is invalid') from exc
+
     return Message(
         role=cast(Role, role),
         content=content,
@@ -259,6 +272,7 @@ def _decode_canonical_message(data: dict[str, Any]) -> Message:
         reasoning_content=_optional_string(data, "reasoning_content"),
         image_url=_optional_string(data, "image_url"),
         metadata=metadata,
+        artifact_ref=artifact_ref,
     )
 
 

@@ -7,8 +7,8 @@ to the Python implementation and shows the supported public entry point.
 ## Opt In
 
 Durable execution is disabled unless a `CheckpointConfig` is attached to the
-run. Enabled records require `schema_version=vv-agent.checkpoint.v4` and
-`run_definition_schema=vv-agent.run-definition.v3`; no other record shape is
+run. Enabled records require `schema_version=vv-agent.checkpoint.v5` and
+`run_definition_schema=vv-agent.run-definition.v5`; no other record shape is
 read or repaired.
 
 ```python
@@ -140,8 +140,8 @@ For a normal terminal, Runner orders work as follows:
 Terminal records remain replayable after acknowledgement. Session and event
 stores reject reuse of the same identity with different payload bytes.
 
-Distributed workers accept only `vv-agent.distributed-run.v3` and return only
-the closed tagged `vv-agent.distributed-worker-response.v2` object: `pending`, `committed`,
+Distributed workers accept only `vv-agent.distributed-run.v5` and return only
+the closed tagged `vv-agent.distributed-worker-response.v3` object: `pending`, `committed`,
 `terminal_candidate`, or `terminal_replay`. The response is an observation, so
 the scheduler reloads the authoritative checkpoint after every response,
 timeout, or transport error. A candidate still needs controller-side terminal
@@ -150,7 +150,7 @@ result. The old `finished` and terminal Boolean fields are rejected.
 
 ## Scope And Limits
 
-Checkpoint v4 provides durable resume with explicit ambiguity. It does not make
+Checkpoint v5 provides durable resume with explicit ambiguity. It does not make
 an arbitrary external API exactly-once, recover a provider response that was
 never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,

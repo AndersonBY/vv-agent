@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from vv_agent import constants as constants_module
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.constants import READ_FILE_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.events import DiagnosticEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.memory import MemoryManager
+from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import (
     AfterLLMEvent,
@@ -16,7 +20,9 @@ from vv_agent.runtime import (
     BeforeLLMPatch,
     BeforeToolCallEvent,
     ExecutionContext,
+    RuntimeHookManager,
 )
+from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import ToolContext, ToolSpec, build_default_registry
 from vv_agent.types import (
     AgentStatus,
@@ -28,6 +34,7 @@ from vv_agent.types import (
     ToolExecutionResult,
     ToolResultStatus,
 )
+from vv_agent.workspace import MemoryWorkspaceBackend
 
 TASK_LIST_TOOL_NAME = getattr(constants_module, "".join(("TO", "DO")) + "_WRITE_TOOL_NAME")
 
@@ -66,6 +73,67 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
     assert result.status == AgentStatus.COMPLETED
     assert result.final_answer == "ok"
     assert any(message.content == "HOOK_CONTEXT" for message in result.messages)
+
+
+def test_before_llm_hook_cannot_remove_recovery_tool_from_compacted_request() -> None:
+    class RemoveReadFileHook(BaseRuntimeHook):
+        def before_llm(self, event: BeforeLLMEvent) -> BeforeLLMPatch:
+            schemas = [schema for schema in event.tool_schemas if schema.get("function", {}).get("name") != READ_FILE_TOOL_NAME]
+            return BeforeLLMPatch(tool_schemas=schemas)
+
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="start"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "old",
+                    "type": "function",
+                    "function": {"name": "custom_search", "arguments": "{}"},
+                }
+            ],
+        ),
+        Message(role="tool", content="a" * 8_000, tool_call_id="old"),
+        Message(role="assistant", content="recent"),
+    ]
+    manager = MemoryManager(
+        compact_threshold=1_000,
+        model="unknown-provider-model",
+        model_context_window=1_000,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        microcompaction_policy=MicrocompactionPolicy(
+            trigger_ratio=0.75,
+            target_ratio=0.60,
+            keep_recent_cycles=1,
+            min_result_chars=500,
+        ),
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
+    )
+    runner = CycleRunner(
+        llm_client=ScriptedLLM(),
+        tool_registry=build_default_registry(),
+        hook_manager=RuntimeHookManager(hooks=[RemoveReadFileHook()]),
+    )
+    task = AgentTask(
+        task_id="hook-removes-recovery",
+        model="m",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
+        user_prompt="start",
+        max_cycles=1,
+    )
+
+    with pytest.raises(RuntimeError, match="microcompaction_recovery_unavailable"):
+        runner.run_cycle(
+            task=task,
+            messages=messages,
+            cycle_index=4,
+            memory_manager=manager,
+            previous_prompt_tokens=1_000,
+        )
 
 
 def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
