@@ -4,6 +4,12 @@
     "max_cycles": 10,
     "max_handoffs": 10,
     "no_tool_policy": "continue",
+    "microcompaction_policy": {
+      "trigger_ratio": 0.75,
+      "target_ratio": 0.6,
+      "keep_recent_cycles": 3,
+      "min_result_chars": 500
+    },
     "session_memory_enabled": false,
     "budget_limits": null,
     "host_cost_meter": null,
@@ -24,6 +30,13 @@
     "max_handoffs": {
       "minimum": 0,
       "maximum": 4294967295
+    },
+    "microcompaction_policy_u32": {
+      "minimum": 0,
+      "maximum": 4294967295,
+      "min_result_chars_minimum": 1,
+      "boolean_is_integer": false,
+      "float_integer_is_integer": false
     },
     "run_budget_wire_integer": {
       "minimum": 0,
@@ -73,6 +86,20 @@
       "metadata_override": false,
       "legacy_aliases": [],
       "seed_implies_enabled": false
+    },
+    {
+      "capability": "microcompaction_policy",
+      "python": "microcompaction_policy",
+      "rust": "microcompaction_policy",
+      "status": "equivalent",
+      "default": {
+        "trigger_ratio": 0.75,
+        "target_ratio": 0.6,
+        "keep_recent_cycles": 3,
+        "min_result_chars": 500
+      },
+      "merge": "whole_object_replace",
+      "fixture": "memory_local.json"
     },
     {
       "capability": "cycle_and_handoff_limits",

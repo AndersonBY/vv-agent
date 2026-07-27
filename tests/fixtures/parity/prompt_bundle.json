@@ -190,7 +190,7 @@
     "checkpoint_resume": "restore_frozen_bundle_without_producer_or_clock_access",
     "run_definition": {
       "field": "prompt_bundle",
-      "schema_version": "vv-agent.run-definition.v3",
+      "schema_version": "vv-agent.run-definition.v5",
       "forbidden_fields": [
         "compiled_prompt",
         "system_prompt_sections"

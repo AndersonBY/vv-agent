@@ -113,6 +113,12 @@
     "creation": "atomic_exclusive_create_then_fsync_before_reference",
     "collision": "generate_a_new_runtime_path_and_never_overwrite",
     "immutability": "bytes_do_not_change_after_reference_is_emitted",
+    "reuse_validation": {
+      "read_persisted_content_through_effective_workspace_backend": true,
+      "size_bytes": "must_equal_length_of_persisted_UTF8_bytes",
+      "sha256": "must_equal_lowercase_sha256_of_persisted_UTF8_bytes",
+      "failure_behavior": "preserve_original_message"
+    },
     "write_failure": {
       "status_code": "ERROR",
       "error_code": "artifact_persist_failed",

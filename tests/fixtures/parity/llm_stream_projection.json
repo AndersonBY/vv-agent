@@ -156,7 +156,7 @@
     ],
     "expected_wire_events": [
       {
-        "version": "v1",
+        "version": "v2",
         "type": "assistant_delta",
         "event_id": "evt_dynamic",
         "run_id": "run_dynamic",
@@ -170,7 +170,7 @@
         "estimated_tokens": 1
       },
       {
-        "version": "v1",
+        "version": "v2",
         "type": "reasoning_delta",
         "event_id": "evt_dynamic",
         "run_id": "run_dynamic",
@@ -184,7 +184,7 @@
         "estimated_tokens": 1
       },
       {
-        "version": "v1",
+        "version": "v2",
         "type": "model_tool_call_started",
         "event_id": "evt_dynamic",
         "run_id": "run_dynamic",
@@ -200,7 +200,7 @@
         "estimated_tokens": 0
       },
       {
-        "version": "v1",
+        "version": "v2",
         "type": "model_tool_call_progress",
         "event_id": "evt_dynamic",
         "run_id": "run_dynamic",

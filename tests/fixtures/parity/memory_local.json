@@ -39,22 +39,335 @@
     "tokens": 6
   },
   "microcompact": {
+    "schema_version": "vv-agent.microcompaction.v3",
     "content_unit": "你",
-    "minimum_chars": 500,
-    "keep_recent_cycles": 1,
+    "trigger_ratio_default": 0.75,
+    "target_ratio_default": 0.6,
+    "min_result_chars_default": 500,
+    "keep_recent_cycles_default": 3,
+    "fixture_keep_recent_cycles": 1,
+    "policy_wire": {
+      "closed": true,
+      "transport": [
+        "RunConfig.microcompaction_policy",
+        "AgentTask.microcompaction_policy",
+        "run_definition.runtime_controls.microcompaction_policy"
+      ],
+      "generic_metadata_transport": false,
+      "required_fields": [
+        "trigger_ratio",
+        "target_ratio",
+        "keep_recent_cycles",
+        "min_result_chars"
+      ],
+      "field_contracts": {
+        "trigger_ratio": {
+          "type": "finite_number",
+          "exclusive_minimum": 0,
+          "maximum": 1,
+          "boolean_is_number": false
+        },
+        "target_ratio": {
+          "type": "finite_number",
+          "exclusive_minimum": 0,
+          "maximum": 1,
+          "boolean_is_number": false,
+          "must_be_less_than": "trigger_ratio"
+        },
+        "keep_recent_cycles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "boolean_is_integer": false,
+          "float_integer_is_integer": false
+        },
+        "min_result_chars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "boolean_is_integer": false,
+          "float_integer_is_integer": false
+        }
+      },
+      "valid_boundary_cases": [
+        {
+          "name": "maximum_ratios_and_u32_values",
+          "policy": {
+            "trigger_ratio": 1,
+            "target_ratio": 0.999999,
+            "keep_recent_cycles": 4294967295,
+            "min_result_chars": 4294967295
+          }
+        },
+        {
+          "name": "minimum_integer_values",
+          "policy": {
+            "trigger_ratio": 0.000002,
+            "target_ratio": 0.000001,
+            "keep_recent_cycles": 0,
+            "min_result_chars": 1
+          }
+        }
+      ],
+      "invalid_cases": [
+        {
+          "name": "missing_trigger_ratio",
+          "mutation": {"remove": "trigger_ratio"}
+        },
+        {
+          "name": "missing_target_ratio",
+          "mutation": {"remove": "target_ratio"}
+        },
+        {
+          "name": "missing_keep_recent_cycles",
+          "mutation": {"remove": "keep_recent_cycles"}
+        },
+        {
+          "name": "missing_min_result_chars",
+          "mutation": {"remove": "min_result_chars"}
+        },
+        {
+          "name": "unknown_field",
+          "mutation": {"add": {"future_behavior": true}}
+        },
+        {
+          "name": "trigger_ratio_is_null",
+          "mutation": {"replace": {"trigger_ratio": null}}
+        },
+        {
+          "name": "trigger_ratio_is_boolean",
+          "mutation": {"replace": {"trigger_ratio": true}}
+        },
+        {
+          "name": "trigger_ratio_is_non_finite",
+          "generated_input": {"field": "trigger_ratio", "number_kind": "positive_infinity"}
+        },
+        {
+          "name": "trigger_ratio_is_zero",
+          "mutation": {"replace": {"trigger_ratio": 0}}
+        },
+        {
+          "name": "trigger_ratio_exceeds_one",
+          "mutation": {"replace": {"trigger_ratio": 1.000001}}
+        },
+        {
+          "name": "target_ratio_is_null",
+          "mutation": {"replace": {"target_ratio": null}}
+        },
+        {
+          "name": "target_ratio_is_boolean",
+          "mutation": {"replace": {"target_ratio": false}}
+        },
+        {
+          "name": "target_ratio_is_non_finite",
+          "generated_input": {"field": "target_ratio", "number_kind": "NaN"}
+        },
+        {
+          "name": "target_ratio_is_zero",
+          "mutation": {"replace": {"target_ratio": 0}}
+        },
+        {
+          "name": "target_ratio_exceeds_one",
+          "mutation": {"replace": {"target_ratio": 1.000001}}
+        },
+        {
+          "name": "target_ratio_not_below_trigger",
+          "mutation": {"replace": {"target_ratio": 0.75}}
+        },
+        {
+          "name": "keep_recent_cycles_is_null",
+          "mutation": {"replace": {"keep_recent_cycles": null}}
+        },
+        {
+          "name": "keep_recent_cycles_is_boolean",
+          "mutation": {"replace": {"keep_recent_cycles": true}}
+        },
+        {
+          "name": "keep_recent_cycles_is_float_integer",
+          "mutation": {"replace": {"keep_recent_cycles": 3.0}}
+        },
+        {
+          "name": "keep_recent_cycles_is_negative",
+          "mutation": {"replace": {"keep_recent_cycles": -1}}
+        },
+        {
+          "name": "keep_recent_cycles_exceeds_u32",
+          "mutation": {"replace": {"keep_recent_cycles": 4294967296}}
+        },
+        {
+          "name": "min_result_chars_is_null",
+          "mutation": {"replace": {"min_result_chars": null}}
+        },
+        {
+          "name": "min_result_chars_is_boolean",
+          "mutation": {"replace": {"min_result_chars": false}}
+        },
+        {
+          "name": "min_result_chars_is_float_integer",
+          "mutation": {"replace": {"min_result_chars": 500.0}}
+        },
+        {
+          "name": "min_result_chars_is_zero",
+          "mutation": {"replace": {"min_result_chars": 0}}
+        },
+        {
+          "name": "min_result_chars_exceeds_u32",
+          "mutation": {"replace": {"min_result_chars": 4294967296}}
+        }
+      ],
+      "error_code": "microcompaction_policy_invalid"
+    },
+    "single_plan_and_apply_pass_per_cycle": true,
+    "candidate_required_for_micro_lifecycle_event": true,
+    "task_semantics_are_not_inspected": true,
+    "tool_name_allowlist": false,
+    "result_retention": {
+      "default": "archive",
+      "values": [
+        "archive",
+        "preserve"
+      ],
+      "preserve_applies_to": "proactive_microcompaction_only"
+    },
+    "archive": {
+      "required_before_replacement": true,
+      "logical_path_prefix": ".vv-agent/artifacts/",
+      "persistence_failure": "preserve_original_message",
+      "existing_artifact": {
+        "reuse_only_after_validation": true,
+        "read_through": "effective_workspace_backend",
+        "size_check": "length_of_persisted_UTF8_bytes_equals_artifact_ref.size_bytes",
+        "digest_check": "lowercase_sha256_of_persisted_UTF8_bytes_equals_artifact_ref.sha256",
+        "validation_failure": "preserve_original_message"
+      }
+    },
+    "application": {
+      "planned_estimates_do_not_satisfy_target": true,
+      "replacement_reclaim_tokens": "actual_original_message_tokens_minus_actual_replacement_message_tokens",
+      "recalculate_after_each_successful_replacement": true,
+      "target_reached_when": "actual_post_replacement_tokens_at_or_below_target",
+      "persistence_or_validation_failure_reclaim_tokens": 0,
+      "continue_with_later_planned_candidates_after_failure": true
+    },
+    "model_visible_marker": {
+      "opening": "<Tool Result Compact>",
+      "closing": "</Tool Result Compact>",
+      "field_order": [
+        "tool_name",
+        "artifact_path",
+        "retrieval_hint",
+        "excerpt"
+      ],
+      "retrieval_hint": "use read_file on artifact_path if needed",
+      "forbidden_fields": [
+        "original_bytes",
+        "visible_bytes",
+        "size_bytes",
+        "sha256",
+        "total_chars",
+        "truncated_chars"
+      ],
+      "example": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>"
+    },
     "cases": [
       {
+        "name": "below_minimum",
+        "tool_name": "custom_search",
+        "result_retention": "archive",
         "repeat": 300,
-        "cleared": false
+        "replaced_with_compact_marker": false
       },
       {
+        "name": "at_minimum",
+        "tool_name": "custom_search",
+        "result_retention": "archive",
         "repeat": 500,
-        "cleared": false
+        "replaced_with_compact_marker": false
       },
       {
+        "name": "custom_tool_archived",
+        "tool_name": "custom_search",
+        "result_retention": "archive",
         "repeat": 501,
-        "cleared": true,
-        "original_chars": 501
+        "replaced_with_compact_marker": true,
+        "artifact_required": true
+      },
+      {
+        "name": "preserved_tool_remains_inline",
+        "tool_name": "custom_control",
+        "result_retention": "preserve",
+        "repeat": 501,
+        "replaced_with_compact_marker": false
+      },
+      {
+        "name": "archive_failure_remains_inline",
+        "tool_name": "custom_search",
+        "result_retention": "archive",
+        "repeat": 501,
+        "artifact_write_succeeds": false,
+        "replaced_with_compact_marker": false
+      },
+      {
+        "name": "validated_existing_artifact_is_reused",
+        "tool_name": "custom_search",
+        "result_retention": "archive",
+        "repeat": 501,
+        "existing_artifact_ref": {
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 26,
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+        },
+        "persisted_utf8_text": "full archived tool output\n",
+        "replaced_with_compact_marker": true
+      },
+      {
+        "name": "existing_artifact_size_mismatch_remains_inline",
+        "tool_name": "custom_search",
+        "result_retention": "archive",
+        "repeat": 501,
+        "existing_artifact_ref": {
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 25,
+          "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+        },
+        "persisted_utf8_text": "full archived tool output\n",
+        "replaced_with_compact_marker": false,
+        "original_message_preserved": true
+      },
+      {
+        "name": "existing_artifact_sha256_mismatch_remains_inline",
+        "tool_name": "custom_search",
+        "result_retention": "archive",
+        "repeat": 501,
+        "existing_artifact_ref": {
+          "path": ".vv-agent/artifacts/run-7/call-search.txt",
+          "media_type": "text/plain",
+          "encoding": "utf-8",
+          "size_bytes": 26,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "persisted_utf8_text": "full archived tool output\n",
+        "replaced_with_compact_marker": false,
+        "original_message_preserved": true
+      },
+      {
+        "name": "actual_replacement_delta_reaches_target",
+        "planned_candidate_reclaim_tokens": [
+          300,
+          300
+        ],
+        "actual_replacement_reclaim_tokens": [
+          180,
+          260
+        ],
+        "tokens_before_application": 1000,
+        "target_tokens": 600,
+        "applied_candidate_count": 2,
+        "tokens_after_application": 560
       }
     ]
   },
