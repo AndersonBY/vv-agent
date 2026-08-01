@@ -95,6 +95,21 @@ class TestThreadBackend:
 
 
 class TestCeleryBackend:
+    def test_nonblocking_driver_types_are_public_exports(self):
+        import vv_agent
+        from vv_agent.runtime import backends
+        from vv_agent.runtime.backends import distributed
+
+        for name in (
+            "DistributedAdvanceDecision",
+            "DistributedDeliveryOutcome",
+            "DistributedRunHandle",
+            "DistributedWaitReason",
+        ):
+            expected = getattr(distributed, name)
+            assert getattr(backends, name) is expected
+            assert getattr(vv_agent, name) is expected
+
     def test_import_without_celery(self):
         """CeleryBackend can be imported even without celery installed."""
         from vv_agent.runtime.backends.celery import CeleryBackend

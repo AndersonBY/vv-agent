@@ -812,6 +812,33 @@
           "rust": "vv_agent::DistributedBackend"
         },
         {
+          "id": "runtime_backend.distributed_run_handle",
+          "python": "vv_agent.runtime.backends.distributed.DistributedRunHandle",
+          "rust": "vv_agent::DistributedRunHandle"
+        },
+        {
+          "id": "runtime_backend.distributed_delivery_outcome",
+          "python": "vv_agent.runtime.backends.distributed.DistributedDeliveryOutcome",
+          "rust": "vv_agent::DistributedDeliveryOutcome"
+        },
+        {
+          "id": "runtime_backend.distributed_advance_decision",
+          "python": "vv_agent.runtime.backends.distributed.DistributedAdvanceDecision",
+          "rust": "vv_agent::DistributedAdvanceDecision"
+        },
+        {
+          "adaptation": "Python enqueues through Celery and Rust enqueues through an Apalis-compatible sink; neither waits for completion.",
+          "id": "runtime_backend.distributed_start",
+          "python": "vv_agent.runtime.backends.celery.CeleryBackend.start",
+          "rust": "vv_agent::DistributedBackend::start"
+        },
+        {
+          "adaptation": "Each implementation reloads the authoritative checkpoint once and returns one scheduler decision.",
+          "id": "runtime_backend.distributed_advance",
+          "python": "vv_agent.runtime.backends.celery.CeleryBackend.advance",
+          "rust": "vv_agent::DistributedBackend::advance"
+        },
+        {
           "id": "runtime_backend.envelope",
           "python": "vv_agent.runtime.backends.distributed.DistributedRunEnvelope",
           "rust": "vv_agent::DistributedRunEnvelope"
@@ -1436,6 +1463,82 @@
           "rust": {
             "kind": "method",
             "name": "start"
+          }
+        },
+        {
+          "adaptation": "Both implementations prepare a durable checkpoint, enqueue cycle 1, and return a passive DistributedRunHandle without waiting.",
+          "id": "start_distributed",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "start_distributed",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "agent",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "input",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "run_config",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "continuation",
+                  "required": false
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "start_distributed"
+          }
+        },
+        {
+          "adaptation": "Both implementations consume a finalize_required decision in a separate bounded framework finalizer.",
+          "id": "finalize_distributed",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "finalize_distributed",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "agent",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "input",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "decision",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "run_config",
+                  "required": true
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "finalize_distributed"
           }
         },
         {

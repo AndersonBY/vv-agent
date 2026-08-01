@@ -138,6 +138,30 @@ cache total only when every included cycle reports that metric.
   `RuntimeRecipe`, a declared checkpoint-store capability, and a shared
   `CheckpointStore` resolved by each worker.
 
+`CeleryBackend.execute()` remains the synchronous controller path for hosts that
+intentionally wait outside a Celery worker. Event-driven hosts use
+`Runner.start_distributed()` plus `CeleryBackend.start()` and `advance()`.
+`start()` admits the checkpoint, enqueues at most Cycle 1, and returns a passive
+`DistributedRunHandle`; `advance()` performs one authoritative checkpoint read,
+returns one `DistributedAdvanceDecision`, and enqueues at most one envelope. It
+does not poll, sleep, call `AsyncResult.get()`, or recursively drive the run.
+
+The transport callback passes its decision to `Runner.finalize_distributed()`
+only for `finalize_required`. Output guardrails, optional validation,
+append-once session persistence, the terminal event outbox, checkpoint
+finalization, and acknowledgement therefore remain framework-owned. Celery
+Cycle tasks registered by `register_cycle_task()` use late acknowledgement and
+reject-on-worker-loss so a worker loss after durable progress can replay from
+the checkpoint. Host-registered advance callbacks and terminal-finalizer tasks
+must use the same Celery options. Duplicate deliveries reuse the stable Cycle
+task id; callbacks older than authoritative progress return
+`superseded_delivery` without dispatching another Cycle.
+
+Nonblocking runs reject brokered approval providers before enqueueing. A tool
+approval without a blocking provider may still produce `wait_user` and stop
+dispatch, but cross-process approval continuation requires the separate durable
+approval protocol rather than an in-process `ApprovalBroker`.
+
 Checkpoint stores live under `runtime/stores/` and support SQLite and Redis.
 Backends must preserve the same `AgentResult` and checkpoint payload shape as
 inline execution.

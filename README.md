@@ -6,17 +6,26 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current package release is `0.10.0`. Repository `HEAD` locks
-language-neutral Contract `6.0.1` with the Rust `vv-agent` crate while keeping
+The current package release is `0.11.0`. Repository `HEAD` locks
+language-neutral Contract `6.1.0` with the Rust `vv-agent` crate while keeping
 a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.10.0"
+python -m pip install "vv-agent==0.11.0"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
 integrations are needed. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
+
+### 0.11.0 Highlights
+
+- `Runner.start_distributed()` prepares a durable checkpoint, enqueues Cycle 1,
+  and immediately returns a passive `DistributedRunHandle`.
+- `CeleryBackend.advance()` reloads the shared checkpoint once and makes one
+  bounded dispatch, retry, wait, finalization, or terminal-replay decision.
+- Cycle tasks acknowledge late and reject worker loss; terminal processing runs
+  in a separate idempotent `Runner.finalize_distributed()` task.
 
 ### 0.10.0 Highlights
 

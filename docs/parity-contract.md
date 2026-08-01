@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `6.0.1` at revision
-`77a2a55732fb1197da0239186dcad00806776063`. Its immutable release artifact has
-SHA-256 `0d07e463297a58f2ceed17bf15acca05ef6b7dec9b84237907e1300ba9335ad2`.
+`contract.lock.json` selects contract `6.1.0` at revision
+`4efeb24ca0c05d56068314fe75b0c6e5cf78fdc4`. Its immutable release artifact has
+SHA-256 `1ac62903ffa9d5b204dfb14fa538ea33796dc8346c304cf4695b9d158f48d56c`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,8 +44,8 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-6.0.1.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v6.0.1/vv-agent-contract-6.0.1.zip
+  --artifact /path/to/vv-agent-contract-6.1.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v6.1.0/vv-agent-contract-6.1.0.zip
 ```
 
 ## Python Producer Map
@@ -254,6 +254,11 @@ behavior remains identical:
 - Python output coercion maps to Rust typed deserialization.
 - Celery maps to Apalis through the same envelope, lease, checkpoint, and
   terminal contract.
+- Python exposes `DistributedRunHandle`, `DistributedDeliveryOutcome`, and
+  `DistributedAdvanceDecision` as the passive handle, transport observation,
+  and one-step scheduler decision mapped by the central nonblocking driver
+  contract. `CeleryBackend.start()` and `advance()` are enqueue-only; synchronous
+  `execute()` remains a separate controller entry point.
 - Python settings-file resolution maps to Rust's explicit `ModelProvider`.
 
 ## Completion Gate

@@ -148,6 +148,38 @@ timeout, or transport error. A candidate still needs controller-side terminal
 finalization; a replay is already durable and must exactly match the retained
 result. The old `finished` and terminal Boolean fields are rejected.
 
+## Nonblocking Celery Driver
+
+`Runner.start_distributed()` requires an explicit checkpoint key, prepares the
+same frozen run definition and checkpoint as the synchronous path, calls
+`CeleryBackend.start()`, and returns a
+passive `DistributedRunHandle` without waiting for Cycle 1. The handle contains
+only checkpoint, run, and trace identity; the shared checkpoint store remains
+the status and result authority.
+
+Each `CeleryBackend.advance()` invocation consumes one worker response or
+transport-failure observation, reloads the checkpoint exactly once, and makes
+one decision: dispatch one next Cycle, schedule one recovery delivery at lease
+expiry, wait, request terminal finalization, or return a retained terminal
+replay. Duplicate callbacks reuse the same next-Cycle idempotency key. A callback
+superseded by newer durable Cycle progress returns a wait decision and never
+skips forward from its stale envelope. A `pending` response or transport error
+cannot force recovery when the checkpoint already proves that Cycle committed.
+
+`finalize_required` is passed to `Runner.finalize_distributed()`. A worker
+terminal candidate retains its claim until finalization; a scheduler-generated
+`max_cycles` terminal is finalized from the matching unclaimed checkpoint
+revision. Both use the ordinary guardrail, validation, append-once session,
+outbox, terminal CAS, delivery, and acknowledgement sequence. A replay never
+runs this sequence again.
+
+`register_cycle_task()` sets `acks_late=True` and
+`reject_on_worker_lost=True`; host callback and finalizer task registrations
+must set the same options. Nonblocking driver code never calls
+`AsyncResult.get()`. Brokered approval providers are rejected before checkpoint
+creation or Cycle enqueue because their `decide()`/`wait()` flow can retain a
+worker; durable cross-process approval continuation remains a separate protocol.
+
 ## Scope And Limits
 
 Checkpoint v5 provides durable resume with explicit ambiguity. It does not make

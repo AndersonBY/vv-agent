@@ -126,6 +126,12 @@ from vv_agent.result import ApprovalSnapshot, RunResult, RunState
 from vv_agent.run_config import ApprovalPolicy, RunConfig, ToolPolicy
 from vv_agent.run_handle import RunHandle, RunHandleController, RunHandleState
 from vv_agent.runner import ConfiguredRunner, Runner
+from vv_agent.runtime.backends.distributed import (
+    DistributedAdvanceDecision,
+    DistributedDeliveryOutcome,
+    DistributedRunHandle,
+    DistributedWaitReason,
+)
 from vv_agent.runtime.lifecycle import (
     AfterCycleAction,
     AfterCycleDecision,
@@ -241,6 +247,10 @@ __all__ = [
     "CycleStartedEvent",
     "DefaultAppServerHost",
     "DiagnosticEvent",
+    "DistributedAdvanceDecision",
+    "DistributedDeliveryOutcome",
+    "DistributedRunHandle",
+    "DistributedWaitReason",
     "EndpointConfig",
     "EndpointOption",
     "EventStoreError",

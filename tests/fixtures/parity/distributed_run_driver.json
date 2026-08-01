@@ -1,0 +1,151 @@
+{
+  "schema_version": "vv-agent.distributed-run-driver.v1",
+  "handle": {
+    "fields": [
+      "checkpoint_key",
+      "run_id",
+      "trace_id"
+    ],
+    "passive": true,
+    "status_source": "authoritative_checkpoint_store"
+  },
+  "operations": {
+    "start": {
+      "requires_prepared_checkpoint": true,
+      "maximum_envelopes_enqueued": 1,
+      "waits_for_completion": false
+    },
+    "advance": {
+      "authoritative_checkpoint_reads": 1,
+      "maximum_envelopes_enqueued": 1,
+      "polls": false,
+      "sleeps": false,
+      "waits_for_completion": false
+    },
+    "finalize": {
+      "consumes_decision": "finalize_required",
+      "framework_owned": true,
+      "bounded_task": true,
+      "accepts_claimed_worker_candidate": true,
+      "accepts_unclaimed_max_cycles_candidate": true,
+      "waits_for_child_task": false
+    }
+  },
+  "decisions": [
+    "dispatch",
+    "retry_at",
+    "wait",
+    "finalize_required",
+    "terminal_replay"
+  ],
+  "decision_fields": {
+    "dispatch": [
+      "handle",
+      "envelope"
+    ],
+    "retry_at": [
+      "handle",
+      "envelope",
+      "not_before_unix_ms"
+    ],
+    "wait": [
+      "handle",
+      "reason"
+    ],
+    "finalize_required": [
+      "handle",
+      "checkpoint_revision",
+      "result"
+    ],
+    "terminal_replay": [
+      "handle",
+      "checkpoint_revision",
+      "result"
+    ]
+  },
+  "wait_reasons": [
+    "active_claim",
+    "reconciliation_required",
+    "host_interaction",
+    "superseded_delivery"
+  ],
+  "rules": {
+    "worker_response_is_observation": true,
+    "cycle_callback_is_bounded_advance": true,
+    "advance_executes_terminal_work": false,
+    "terminal_finalizer_is_separate_bounded_task": true,
+    "terminal_candidate_requires_controller_finalization": true,
+    "terminal_replay_skips_finalization": true,
+    "transport_failure_is_out_of_band": true,
+    "duplicate_callbacks_are_idempotent": true,
+    "brokered_approval_must_not_block": true,
+    "celery_async_result_get_forbidden": true,
+    "apalis_wait_for_completion_forbidden": true,
+    "transport_tasks_acknowledge_late": true,
+    "transport_tasks_reject_on_worker_loss": true,
+    "lost_callback_recovered_by_late_ack_or_reconciler": true,
+    "running_checkpoint_reconciler_required": true
+  },
+  "transition_cases": [
+    {
+      "name": "start",
+      "checkpoint": "running_unclaimed_cycle_0",
+      "decision": "dispatch",
+      "cycle_index": 1,
+      "claim_mode": "continue"
+    },
+    {
+      "name": "committed_cycle",
+      "observation": "committed",
+      "checkpoint": "matching_running_unclaimed",
+      "decision": "dispatch",
+      "cycle_index": 2,
+      "claim_mode": "continue"
+    },
+    {
+      "name": "live_claim_after_transport_failure",
+      "observation": "transport_failure",
+      "checkpoint": "running_live_claim",
+      "decision": "retry_at",
+      "claim_mode": "recovery"
+    },
+    {
+      "name": "expired_claim",
+      "checkpoint": "running_expired_claim",
+      "decision": "dispatch",
+      "claim_mode": "recovery"
+    },
+    {
+      "name": "terminal_candidate",
+      "observation": "terminal_candidate",
+      "checkpoint": "matching_claimed_nonterminal",
+      "decision": "finalize_required"
+    },
+    {
+      "name": "max_cycles_after_commit",
+      "observation": "committed",
+      "checkpoint": "matching_running_unclaimed_at_max_cycles",
+      "decision": "finalize_required",
+      "result_status": "max_cycles"
+    },
+    {
+      "name": "superseded_delivery",
+      "observation": "committed_for_earlier_cycle",
+      "checkpoint": "running_at_later_cycle",
+      "decision": "wait",
+      "reason": "superseded_delivery"
+    },
+    {
+      "name": "terminal_replay",
+      "observation": "terminal_replay",
+      "checkpoint": "matching_durable_terminal",
+      "decision": "terminal_replay"
+    },
+    {
+      "name": "reconciliation",
+      "checkpoint": "reconciliation_required",
+      "decision": "wait",
+      "reason": "reconciliation_required"
+    }
+  ]
+}

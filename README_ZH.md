@@ -6,16 +6,25 @@
 
 ## 安装
 
-当前包版本为 `0.10.0`。仓库 `HEAD` 和 Rust `vv-agent` crate 都锁定语言无关的
-Contract `6.0.1`，两边能力一致，只保留符合各自语言习惯的 API 写法。
+当前包版本为 `0.11.0`。仓库 `HEAD` 和 Rust `vv-agent` crate 都锁定语言无关的
+Contract `6.1.0`，两边能力一致，只保留符合各自语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.10.0"
+python -m pip install "vv-agent==0.11.0"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
 `vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
+
+### 0.11.0 重点能力
+
+- `Runner.start_distributed()` 创建持久 checkpoint、投递 Cycle 1，并立即返回被动的
+  `DistributedRunHandle`。
+- `CeleryBackend.advance()` 每次只重读一次共享 checkpoint，并只执行一次投递、延迟重试、
+  等待、终态收尾或终态重放决策。
+- Cycle 任务使用 late ack 和 worker 丢失拒绝语义；终态处理由独立且幂等的
+  `Runner.finalize_distributed()` 任务完成。
 
 ### 0.10.0 重点能力
 

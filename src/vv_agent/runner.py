@@ -45,6 +45,10 @@ from vv_agent.result import ApprovalSnapshot, RunResult, RunState, _PendingToolA
 from vv_agent.run_config import RunConfig, ToolPolicy, _validate_bounded_int, merge_tool_policy_layers
 from vv_agent.run_handle import RunHandle, RunHandleRunner
 from vv_agent.runtime import AgentRuntime, ToolCallRunner
+from vv_agent.runtime.backends.distributed import (
+    DistributedAdvanceDecision,
+    DistributedRunHandle,
+)
 from vv_agent.runtime.checkpoint_resume import (
     CheckpointReconciliationRequired,
     CheckpointResumeController,
@@ -247,6 +251,72 @@ class Runner:
     @classmethod
     def run_sync(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> RunResult:
         return cls._run(agent, input, run_config=run_config or RunConfig())
+
+    @classmethod
+    def start_distributed(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig,
+        continuation: Any | None = None,
+    ) -> DistributedRunHandle:
+        """Prepare a durable run, enqueue cycle 1, and return without waiting."""
+        if run_config.checkpoint_config is None:
+            raise CheckpointError(
+                "nonblocking distributed start requires checkpoint configuration",
+                code="checkpoint_config_invalid",
+            )
+        if run_config.checkpoint_config.key is None:
+            raise CheckpointError(
+                "nonblocking distributed start requires an explicit checkpoint key",
+                code="checkpoint_key_required",
+            )
+        if not callable(getattr(run_config.execution_backend, "start", None)):
+            raise TypeError("nonblocking distributed start requires an execution backend with start()")
+        if run_config.approval_provider is not None:
+            raise ValueError("nonblocking distributed runs do not support brokered approval waits")
+        effective_config = cls._effective_run_config(agent, run_config, runner_defaults=RunConfig())
+        result = cls._run_single_agent(
+            agent,
+            input,
+            run_config=effective_config,
+            _distributed_start=True,
+            _distributed_continuation=continuation,
+        )
+        if not isinstance(result, DistributedRunHandle):
+            raise RuntimeError("distributed start did not return a durable run handle")
+        return result
+
+    @classmethod
+    def finalize_distributed(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        decision: DistributedAdvanceDecision | dict[str, Any],
+        run_config: RunConfig,
+    ) -> RunResult:
+        """Finalize one verified terminal candidate in a controller worker."""
+        if isinstance(decision, dict):
+            decision = DistributedAdvanceDecision.from_dict(decision)
+        elif not isinstance(decision, DistributedAdvanceDecision):
+            raise TypeError("distributed finalization requires a DistributedAdvanceDecision or object")
+        if decision.action != "finalize_required" or decision.result is None or decision.checkpoint_revision is None:
+            raise ValueError("distributed finalization requires a finalize_required decision")
+        checkpoint_config = run_config.checkpoint_config
+        if checkpoint_config is None or checkpoint_config.key != decision.handle.checkpoint_key:
+            raise ValueError("distributed finalization checkpoint does not match the run handle")
+        effective_config = cls._effective_run_config(agent, run_config, runner_defaults=RunConfig())
+        result = cls._run_single_agent(
+            agent,
+            input,
+            run_config=effective_config,
+            _distributed_terminal_decision=decision,
+        )
+        if not isinstance(result, RunResult):
+            raise RuntimeError("distributed terminal finalization did not return a RunResult")
+        return result
 
     @classmethod
     def stream_sync(cls, agent: Agent, input: str, *, run_config: RunConfig | None = None) -> Iterator[RunEvent]:
@@ -975,16 +1045,19 @@ class Runner:
                 next_result = None
             else:
                 try:
-                    result = cls._run_single_agent(
-                        current_agent,
-                        current_input,
-                        run_config=effective_config,
-                        event_sink=event_sink,
-                        resume_runner=resume_runner,
-                        resume_config=base_config,
-                        _compiled_invocation=next_compiled_invocation,
-                        _approval_invocation=next_approval_invocation,
-                        _run_id=next_run_id,
+                    result = cast(
+                        RunResult,
+                        cls._run_single_agent(
+                            current_agent,
+                            current_input,
+                            run_config=effective_config,
+                            event_sink=event_sink,
+                            resume_runner=resume_runner,
+                            resume_config=base_config,
+                            _compiled_invocation=next_compiled_invocation,
+                            _approval_invocation=next_approval_invocation,
+                            _run_id=next_run_id,
+                        ),
                     )
                     next_compiled_invocation = None
                     next_approval_invocation = None
@@ -1152,7 +1225,10 @@ class Runner:
         _compiled_invocation: _CompiledTaskInvocation | None = None,
         _approval_invocation: _ApprovalResumeInvocation | None = None,
         _run_id: str | None = None,
-    ) -> RunResult:
+        _distributed_start: bool = False,
+        _distributed_continuation: Any | None = None,
+        _distributed_terminal_decision: DistributedAdvanceDecision | None = None,
+    ) -> RunResult | DistributedRunHandle:
         preloaded_checkpoint = CheckpointResumeController.preload(run_config.checkpoint_config)
         if run_config.approval_provider is not None and run_config.approval_broker is None:
             run_config = replace(run_config, approval_broker=ApprovalBroker())
@@ -1187,6 +1263,9 @@ class Runner:
                 _compiled_invocation=_compiled_invocation,
                 _approval_invocation=_approval_invocation,
                 preloaded_checkpoint=preloaded_checkpoint,
+                _distributed_start=_distributed_start,
+                _distributed_continuation=_distributed_continuation,
+                _distributed_terminal_decision=_distributed_terminal_decision,
             )
             return result
         except BaseException as exc:
@@ -1194,7 +1273,7 @@ class Runner:
             raise
         finally:
             ended_run_span = trace.finish(trace_metadata)
-            if "result" in locals():
+            if "result" in locals() and isinstance(result, RunResult):
                 result.metadata["run_span"] = ended_run_span.to_dict()
 
     @classmethod
@@ -1213,7 +1292,10 @@ class Runner:
         _compiled_invocation: _CompiledTaskInvocation | None = None,
         _approval_invocation: _ApprovalResumeInvocation | None = None,
         preloaded_checkpoint: Any | None = None,
-    ) -> tuple[RunResult, dict[str, Any]]:
+        _distributed_start: bool = False,
+        _distributed_continuation: Any | None = None,
+        _distributed_terminal_decision: DistributedAdvanceDecision | None = None,
+    ) -> tuple[RunResult | DistributedRunHandle, dict[str, Any]]:
         if run_config.checkpoint_config is not None:
             if agent.handoffs:
                 raise CheckpointError(
@@ -1448,8 +1530,35 @@ class Runner:
                 event_store=run_config.event_store,
                 preloaded_checkpoint=preloaded_checkpoint,
             )
-            replayed_result = checkpoint_controller.admit()
-            terminal_replayed = replayed_result is not None
+            if _distributed_terminal_decision is not None:
+                if preloaded_checkpoint is None:
+                    raise CheckpointError("distributed terminal checkpoint disappeared", code="checkpoint_not_found")
+                if (
+                    _distributed_terminal_decision.handle.run_id != preloaded_checkpoint.root_run_id
+                    or _distributed_terminal_decision.handle.trace_id != preloaded_checkpoint.trace_id
+                ):
+                    raise CheckpointError(
+                        "distributed terminal handle does not match the checkpoint",
+                        code="checkpoint_store_conflict",
+                    )
+                if preloaded_checkpoint.terminal_result is not None:
+                    replayed_result = checkpoint_controller.admit()
+                    terminal_replayed = replayed_result is not None
+                else:
+                    assert _distributed_terminal_decision.checkpoint_revision is not None
+                    lease_duration_ms = getattr(
+                        run_config.execution_backend,
+                        "lease_duration_ms",
+                        checkpoint_controller.lease_duration_ms,
+                    )
+                    checkpoint_controller.admit_terminal_candidate(
+                        checkpoint_revision=_distributed_terminal_decision.checkpoint_revision,
+                        claim_token=preloaded_checkpoint.claim_token,
+                        lease_duration_ms=lease_duration_ms,
+                    )
+            else:
+                replayed_result = checkpoint_controller.admit()
+                terminal_replayed = replayed_result is not None
             initial_budget_usage = checkpoint_controller.budget_usage
         runtime_metadata = dict(run_config.metadata)
         runtime_metadata.pop(_INITIAL_BUDGET_USAGE_METADATA_KEY, None)
@@ -1481,7 +1590,47 @@ class Runner:
             },
         )
 
-        if replayed_result is not None:
+        if _distributed_start:
+            if checkpoint_controller is None:
+                raise CheckpointError(
+                    "distributed start requires checkpoint configuration",
+                    code="checkpoint_config_invalid",
+                )
+            if replayed_result is not None:
+                checkpoint_controller.close()
+                checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+                if checkpoint is None:
+                    raise CheckpointError("checkpoint disappeared during distributed start", code="checkpoint_not_found")
+                return (
+                    DistributedRunHandle(
+                        checkpoint_key=checkpoint.checkpoint_key,
+                        run_id=checkpoint.root_run_id,
+                        trace_id=checkpoint.trace_id,
+                    ),
+                    {"status": "terminal_replay"},
+                )
+            backend_start = getattr(run_config.execution_backend, "start", None)
+            if not callable(backend_start):
+                checkpoint_controller.close()
+                raise TypeError("distributed start requires an execution backend with start()")
+            ctx.metadata["_vv_agent_budget_limits"] = run_config.budget_limits
+            try:
+                handle = backend_start(
+                    task=task,
+                    checkpoint_controller=checkpoint_controller,
+                    ctx=ctx,
+                    continuation=_distributed_continuation,
+                )
+            finally:
+                checkpoint_controller.close()
+            if not isinstance(handle, DistributedRunHandle):
+                raise TypeError("distributed backend start() must return DistributedRunHandle")
+            return handle, {"status": "pending", "run_id": handle.run_id}
+
+        if _distributed_terminal_decision is not None and not terminal_replayed:
+            assert _distributed_terminal_decision.result is not None
+            raw_result = deepcopy(_distributed_terminal_decision.result)
+        elif replayed_result is not None:
             raw_result = replayed_result
         elif _approval_invocation is not None:
             if checkpoint_controller is None:

@@ -212,6 +212,44 @@ class CheckpointResumeController:
         self._renew_claim_before_dispatch()
         self._start_heartbeat()
 
+    def admit_terminal_candidate(
+        self,
+        *,
+        checkpoint_revision: int,
+        claim_token: str | None,
+        lease_duration_ms: int,
+    ) -> None:
+        """Admit a verified claimed or scheduler-generated terminal candidate."""
+        checkpoint = self.store.load_checkpoint(self.config.key or "")
+        if checkpoint is None:
+            raise CheckpointError(
+                "checkpoint disappeared before terminal candidate admission",
+                code="checkpoint_not_found",
+            )
+        if (
+            checkpoint.revision != checkpoint_revision
+            or checkpoint.task_id != self.task_id
+            or checkpoint.root_run_id != self.run_id
+            or checkpoint.trace_id != self.trace_id
+            or checkpoint.run_definition_digest != self.run_definition_digest
+            or checkpoint.claim_token != claim_token
+        ):
+            raise CheckpointError(
+                "terminal candidate does not match the authoritative checkpoint",
+                code="checkpoint_store_conflict",
+            )
+        if checkpoint.terminal_result is not None:
+            raise CheckpointError(
+                "terminal candidate cannot replace a durable terminal",
+                code="checkpoint_store_conflict",
+            )
+        self.checkpoint = checkpoint
+        if claim_token is not None:
+            self.adopt_claim_for_terminal_finalize(
+                claim_token=claim_token,
+                lease_duration_ms=lease_duration_ms,
+            )
+
     def assert_heartbeat_healthy(self) -> None:
         self._assert_heartbeat()
 

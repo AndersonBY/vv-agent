@@ -20,8 +20,9 @@ from vv_agent import (
     Runner,
     ToolPolicy,
 )
+from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.budget import HostCost, RunBudgetLimits
-from vv_agent.checkpoint import AmbiguousModelPolicy, AmbiguousToolPolicy, ResumePolicy, ToolIdempotency
+from vv_agent.checkpoint import AmbiguousModelPolicy, AmbiguousToolPolicy, CheckpointError, ResumePolicy, ToolIdempotency
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
@@ -34,18 +35,22 @@ from vv_agent.runtime.backends.distributed import (
     DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION,
     CapabilityRef,
     CheckpointExtensionRef,
+    DistributedAdvanceDecision,
     DistributedCapabilities,
     DistributedCapabilityError,
     DistributedCapabilityRegistry,
     DistributedCheckpointConfig,
     DistributedContractError,
+    DistributedDeliveryOutcome,
     DistributedRunEnvelope,
+    DistributedRunHandle,
     DistributedToolPolicy,
     DistributedWorkerResponse,
     RuntimeRecipe,
     ToolsetRef,
     toolset_schema_digest,
 )
+from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.tools import (
     FunctionTool,
@@ -55,7 +60,7 @@ from vv_agent.tools import (
     build_default_registry,
 )
 from vv_agent.tools.executor import FunctionToolExecutor
-from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolArtifactRef
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolArtifactRef
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "distributed_run_envelope.json"
 WORKER_RESPONSE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "distributed_worker_response.json"
@@ -321,6 +326,28 @@ class _ImmediateApp:
         key = envelope["checkpoint_config"]["key"]
         self.worker_snapshots.append(self.store.load_checkpoint(key))
         return _ImmediateResult(result)
+
+
+class _EnqueueOnlyResult:
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("nonblocking dispatch must not wait for a Celery result")
+
+
+class _EnqueueOnlyApp:
+    def __init__(self) -> None:
+        self.envelopes: list[dict[str, Any]] = []
+        self.options: list[dict[str, Any]] = []
+
+    def send_task(self, _name: str, *, kwargs: dict[str, Any], **options: Any) -> _EnqueueOnlyResult:
+        self.envelopes.append(copy.deepcopy(kwargs["envelope_dict"]))
+        self.options.append(copy.deepcopy(options))
+        return _EnqueueOnlyResult()
+
+
+class _StartProbeBackend(InlineBackend):
+    def start(self, **_kwargs: Any) -> None:
+        return None
 
 
 def test_distributed_current_writer_and_reader_round_trip_strict_nested_wire() -> None:
@@ -617,6 +644,516 @@ def test_celery_projects_effective_metadata_policy_into_envelope(
     }
 
 
+def test_nonblocking_celery_start_and_terminal_finalize_never_wait_for_result(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-terminal", "1")
+    llm_ref = CapabilityRef("llm.nonblocking-terminal", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[LLMResponse(content="worker answer")]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=recipe,
+        capability_registry=registry,
+        dispatch_timeout_seconds=5,
+    )
+    agent = Agent(
+        name="nonblocking-terminal-agent",
+        instructions="Return one answer.",
+        model="test-model",
+        output_guardrails=[lambda _context, output: GuardrailResult.rewrite(f"guarded: {output}")],
+    )
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=1,
+        no_tool_policy="finish",
+        checkpoint_config=CheckpointConfig(
+            key="nonblocking-terminal",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+            capability_refs={
+                "output_guardrail:0": {"id": "guardrail.nonblocking-terminal", "version": "1"},
+            },
+        ),
+    )
+
+    callback: dict[str, Any] = {"task": "advance-live-room-agent"}
+    continuation_call: dict[str, Any] = {}
+
+    def continuation(handle: DistributedRunHandle, envelope: DistributedRunEnvelope) -> dict[str, Any]:
+        continuation_call["handle"] = handle
+        continuation_call["envelope"] = envelope
+        return callback
+
+    handle = Runner.start_distributed(
+        agent,
+        "answer",
+        run_config=run_config,
+        continuation=continuation,
+    )
+
+    assert isinstance(handle, DistributedRunHandle)
+    assert handle.checkpoint_key == "nonblocking-terminal"
+    assert len(app.envelopes) == 1
+    assert continuation_call == {
+        "handle": handle,
+        "envelope": DistributedRunEnvelope.from_dict(app.envelopes[0]),
+    }
+    assert app.options[0]["link"] == callback
+    checkpoint = store.load_checkpoint(handle.checkpoint_key)
+    assert checkpoint is not None
+    assert checkpoint.cycle_index == 0
+    assert checkpoint.claim_token is None
+
+    response = run_single_cycle(
+        envelope_dict=app.envelopes[0],
+        capability_registry=registry,
+    )
+    decision = backend.advance(
+        previous_envelope=app.envelopes[0],
+        outcome=DistributedDeliveryOutcome.worker(response),
+    )
+
+    assert isinstance(decision, DistributedAdvanceDecision)
+    assert decision.action == "finalize_required"
+    assert DistributedAdvanceDecision.from_dict(decision.to_dict()) == decision
+    assert len(app.envelopes) == 1
+    result = Runner.finalize_distributed(
+        agent,
+        "answer",
+        decision=decision.to_dict(),
+        run_config=run_config,
+    )
+    assert result.status is AgentStatus.COMPLETED
+    assert result.final_output == "guarded: worker answer"
+    terminal = store.load_checkpoint(handle.checkpoint_key)
+    assert terminal is not None
+    assert terminal.terminal_result is not None
+    assert terminal.terminal_acknowledged
+    assert terminal.claim_token is None
+
+    replayed = Runner.finalize_distributed(
+        agent,
+        "answer",
+        decision=decision,
+        run_config=run_config,
+    )
+    assert replayed.status is AgentStatus.COMPLETED
+    assert replayed.final_output == "guarded: worker answer"
+    replayed_terminal = store.load_checkpoint(handle.checkpoint_key)
+    assert replayed_terminal is not None
+    assert replayed_terminal.revision == terminal.revision
+
+
+def test_nonblocking_distributed_start_requires_explicit_checkpoint_key() -> None:
+    store = InMemoryCheckpointStore()
+    backend = _StartProbeBackend()
+
+    with pytest.raises(CheckpointError) as exc_info:
+        Runner.start_distributed(
+            Agent(name="distributed-explicit-key", instructions="Return one answer."),
+            "answer",
+            run_config=RunConfig(
+                execution_backend=backend,
+                checkpoint_config=CheckpointConfig(store=store),
+            ),
+        )
+
+    assert exc_info.value.code == "checkpoint_key_required"
+
+
+def test_nonblocking_celery_advance_enqueues_one_cycle_per_committed_callback(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-chain", "1")
+    llm_ref = CapabilityRef("llm.nonblocking-chain", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register(
+        "llm_client",
+        llm_ref,
+        ScriptedLLM(
+            steps=[
+                LLMResponse(content="cycle one"),
+                LLMResponse(content="cycle two"),
+            ]
+        ),
+    )
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=recipe,
+        capability_registry=registry,
+        dispatch_timeout_seconds=5,
+    )
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=2,
+        no_tool_policy="continue",
+        checkpoint_config=CheckpointConfig(
+            key="nonblocking-chain",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+        ),
+    )
+
+    agent = Agent(name="nonblocking-chain-agent", instructions="Continue.", model="test-model")
+    Runner.start_distributed(
+        agent,
+        "work",
+        run_config=run_config,
+    )
+    first_response = run_single_cycle(envelope_dict=app.envelopes[0], capability_registry=registry)
+    first_decision = backend.advance(previous_envelope=app.envelopes[0], outcome=first_response)
+
+    assert first_decision.action == "dispatch"
+    assert len(app.envelopes) == 2
+    assert app.envelopes[1]["cycle_index"] == 2
+    second_response = run_single_cycle(envelope_dict=app.envelopes[1], capability_registry=registry)
+    second_decision = backend.advance(previous_envelope=app.envelopes[1], outcome=second_response)
+    assert second_decision.action == "finalize_required"
+    assert second_decision.result is not None
+    assert second_decision.result.status is AgentStatus.MAX_CYCLES
+    assert len(app.envelopes) == 2
+
+    result = Runner.finalize_distributed(
+        agent,
+        "work",
+        decision=second_decision,
+        run_config=run_config,
+    )
+    assert result.status is AgentStatus.MAX_CYCLES
+    terminal = store.load_checkpoint("nonblocking-chain")
+    assert terminal is not None
+    assert terminal.terminal_result is not None
+    assert terminal.terminal_acknowledged
+
+
+def test_nonblocking_celery_duplicate_and_out_of_order_callbacks_do_not_skip_cycles(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-callback-order", "1")
+    llm_ref = CapabilityRef("llm.nonblocking-callback-order", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register(
+        "llm_client",
+        llm_ref,
+        ScriptedLLM(steps=[LLMResponse(content="cycle one"), LLMResponse(content="cycle two")]),
+    )
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=recipe,
+        capability_registry=registry,
+        dispatch_timeout_seconds=5,
+    )
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=3,
+        no_tool_policy="continue",
+        checkpoint_config=CheckpointConfig(
+            key="nonblocking-callback-order",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+        ),
+    )
+    Runner.start_distributed(
+        Agent(name="callback-order-agent", instructions="Continue.", model="test-model"),
+        "work",
+        run_config=run_config,
+    )
+
+    first_envelope = app.envelopes[0]
+    first_response = run_single_cycle(envelope_dict=first_envelope, capability_registry=registry)
+    first = backend.advance(previous_envelope=first_envelope, outcome=first_response)
+    duplicate = backend.advance(previous_envelope=first_envelope, outcome=first_response)
+
+    assert first.action == duplicate.action == "dispatch"
+    assert first.envelope is not None and duplicate.envelope is not None
+    assert first.envelope.job_id == duplicate.envelope.job_id
+    assert first.envelope.idempotency_key == duplicate.envelope.idempotency_key
+    assert first.envelope.cycle_index == 2
+
+    second_envelope = app.envelopes[1]
+    second_response = run_single_cycle(envelope_dict=second_envelope, capability_registry=registry)
+    second = backend.advance(previous_envelope=second_envelope, outcome=second_response)
+    enqueued_before_stale_callback = len(app.envelopes)
+    stale = backend.advance(previous_envelope=first_envelope, outcome=first_response)
+
+    assert second.action == "dispatch"
+    assert second.envelope is not None and second.envelope.cycle_index == 3
+    assert stale.action == "wait"
+    assert stale.reason == "superseded_delivery"
+    assert len(app.envelopes) == enqueued_before_stale_callback
+
+
+def test_nonblocking_celery_rejects_brokered_approval_before_checkpoint_creation(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-approval", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    backend = CeleryBackend(
+        celery_app=_EnqueueOnlyApp(),
+        runtime_recipe=RuntimeRecipe(
+            settings_file=str(tmp_path / "unused-settings.py"),
+            backend="test",
+            model="test-model",
+            workspace=str(tmp_path / "workspace"),
+            capabilities=DistributedCapabilities(checkpoint_store_ref=checkpoint_ref),
+        ),
+        capability_registry=registry,
+    )
+
+    class BlockingApprovalProvider(ApprovalProvider):
+        def should_request(self, request: ApprovalRequest) -> bool:
+            del request
+            return True
+
+        def decide(self, request: ApprovalRequest) -> ApprovalDecision | None:
+            del request
+            return None
+
+    provider = BlockingApprovalProvider()
+
+    with pytest.raises(ValueError, match="do not support brokered approval waits"):
+        Runner.start_distributed(
+            Agent(name="approval-agent", instructions="Ask first.", model="test-model"),
+            "work",
+            run_config=RunConfig(
+                model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+                execution_backend=backend,
+                approval_provider=provider,
+                checkpoint_config=CheckpointConfig(
+                    key="nonblocking-approval",
+                    resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    store=store,
+                ),
+            ),
+        )
+
+    assert store.load_checkpoint("nonblocking-approval") is None
+
+
+def test_nonblocking_celery_rejects_brokered_approval_recipe(tmp_path: Path) -> None:
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-recipe-approval", "1")
+    backend = CeleryBackend(
+        celery_app=_EnqueueOnlyApp(),
+        runtime_recipe=RuntimeRecipe(
+            settings_file=str(tmp_path / "unused-settings.py"),
+            backend="test",
+            model="test-model",
+            workspace=str(tmp_path / "workspace"),
+            capabilities=DistributedCapabilities(
+                approval_provider_ref=CapabilityRef("approval.provider", "1"),
+                approval_broker_ref=CapabilityRef("approval.broker", "1"),
+                checkpoint_store_ref=checkpoint_ref,
+            ),
+        ),
+        capability_registry=DistributedCapabilityRegistry(),
+    )
+
+    with pytest.raises(DistributedContractError, match="do not support brokered approval waits"):
+        backend.advance(previous_envelope={}, outcome="transport failed")
+
+
+def test_nonblocking_celery_resolves_recipe_before_first_enqueue(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-capabilities", "1")
+    missing_llm_ref = CapabilityRef("llm.nonblocking-missing", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=RuntimeRecipe(
+            settings_file=str(tmp_path / "unused-settings.py"),
+            backend="test",
+            model="test-model",
+            workspace=str(tmp_path / "workspace"),
+            capabilities=DistributedCapabilities(
+                llm_client_ref=missing_llm_ref,
+                checkpoint_store_ref=checkpoint_ref,
+            ),
+        ),
+        capability_registry=registry,
+    )
+
+    with pytest.raises(DistributedCapabilityError, match="unknown distributed capability llm_client"):
+        Runner.start_distributed(
+            Agent(name="capability-agent", instructions="Answer.", model="test-model"),
+            "work",
+            run_config=RunConfig(
+                model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+                execution_backend=backend,
+                checkpoint_config=CheckpointConfig(
+                    key="nonblocking-capabilities",
+                    resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    store=store,
+                ),
+            ),
+        )
+
+    assert app.envelopes == []
+
+
+def test_distributed_advance_decision_rejects_nonterminal_finalize_result() -> None:
+    with pytest.raises(DistributedContractError, match="must have a terminal status"):
+        DistributedAdvanceDecision(
+            action="finalize_required",
+            handle=DistributedRunHandle(
+                checkpoint_key="nonterminal-finalize",
+                run_id="run-nonterminal-finalize",
+                trace_id="trace-nonterminal-finalize",
+            ),
+            checkpoint_revision=1,
+            result=AgentResult(
+                status=AgentStatus.RUNNING,
+                messages=[],
+                cycles=[],
+            ),
+        )
+
+
+def test_nonblocking_celery_requires_the_recipe_checkpoint_fact_source(tmp_path: Path) -> None:
+    controller_store = InMemoryCheckpointStore()
+    recipe_store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-mismatch", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, recipe_store)
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=RuntimeRecipe(
+            settings_file=str(tmp_path / "unused-settings.py"),
+            backend="test",
+            model="test-model",
+            workspace=str(tmp_path / "workspace"),
+            capabilities=DistributedCapabilities(checkpoint_store_ref=checkpoint_ref),
+        ),
+        capability_registry=registry,
+    )
+
+    with pytest.raises(CheckpointError, match="does not match the runtime recipe fact source") as caught:
+        Runner.start_distributed(
+            Agent(name="store-mismatch-agent", instructions="Answer.", model="test-model"),
+            "work",
+            run_config=RunConfig(
+                model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+                execution_backend=backend,
+                checkpoint_config=CheckpointConfig(
+                    key="nonblocking-store-mismatch",
+                    resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    store=controller_store,
+                ),
+            ),
+        )
+
+    assert caught.value.code == "checkpoint_store_conflict"
+    assert app.envelopes == []
+
+
+def test_nonblocking_celery_transport_failure_schedules_recovery_after_live_lease(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-recovery", "1")
+    llm_ref = CapabilityRef("llm.nonblocking-recovery", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[LLMResponse(content="unused")]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=recipe,
+        capability_registry=registry,
+        dispatch_timeout_seconds=5,
+    )
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=1,
+        no_tool_policy="finish",
+        checkpoint_config=CheckpointConfig(
+            key="nonblocking-recovery",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+        ),
+    )
+    Runner.start_distributed(
+        Agent(name="nonblocking-recovery-agent", instructions="Answer.", model="test-model"),
+        "work",
+        run_config=run_config,
+    )
+    now_ms = 1_000
+    lease_expires_at_ms = 6_000
+    claimed = store.claim_checkpoint(
+        "nonblocking-recovery",
+        1,
+        claim_token="live-worker",
+        lease_expires_at_ms=lease_expires_at_ms,
+        now_ms=now_ms,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+
+    decision = backend.advance(
+        previous_envelope=app.envelopes[0],
+        outcome=DistributedDeliveryOutcome.transport_failure("connection lost"),
+        now_unix_ms=now_ms,
+    )
+
+    assert decision.action == "retry_at"
+    assert decision.not_before_unix_ms == lease_expires_at_ms
+    assert decision.envelope is not None
+    assert decision.envelope.claim_mode == "recovery"
+    assert decision.envelope.deadline_unix_ms == lease_expires_at_ms + 5_000
+    assert len(app.envelopes) == 2
+    assert app.options[-1]["countdown"] >= 0
+    transport_outcome = DistributedDeliveryOutcome.transport_failure("connection lost")
+    assert DistributedDeliveryOutcome.from_dict(transport_outcome.to_dict()) == transport_outcome
+
+
 def test_celery_rejects_resolved_tool_metadata_drift_before_claim(
     tmp_path: Path,
 ) -> None:
@@ -829,7 +1366,7 @@ def test_celery_resolves_and_restores_stateful_after_cycle_hook(
     backend = CeleryBackend(
         celery_app=app,
         runtime_recipe=recipe,
-        dispatch_timeout_seconds=1,
+        dispatch_timeout_seconds=5,
     )
     config = RunConfig(
         model_provider=_provider(lambda: ScriptedLLM(steps=[])),
@@ -1220,6 +1757,8 @@ def test_registered_celery_task_forwards_transport_redelivery_metadata(
 
     assert result == DistributedWorkerResponse.pending().to_dict()
     assert app.options["bind"] is True
+    assert app.options["acks_late"] is True
+    assert app.options["reject_on_worker_lost"] is True
     assert captured == {
         "envelope_dict": {"schema_version": "test"},
         "capability_registry": registry,

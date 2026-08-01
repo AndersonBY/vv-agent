@@ -7,6 +7,7 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from typing import Any, Literal
 
 from vv_agent.budget import RunBudgetLimits
@@ -66,6 +67,13 @@ DistributedWorkerResponseType = Literal[
     "pending",
     "committed",
     "terminal_candidate",
+    "terminal_replay",
+]
+DistributedAdvanceAction = Literal[
+    "dispatch",
+    "retry_at",
+    "wait",
+    "finalize_required",
     "terminal_replay",
 ]
 
@@ -935,6 +943,203 @@ class DistributedCheckpointConfig:
         if decoded.to_dict() != dict(payload):
             raise DistributedContractError("checkpoint_config must use the complete canonical current wire shape")
         return decoded
+
+
+@dataclass(frozen=True, slots=True)
+class DistributedRunHandle:
+    """Passive identity for a run whose state lives in a CheckpointStore."""
+
+    checkpoint_key: str
+    run_id: str
+    trace_id: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("checkpoint_key", "run_id", "trace_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise DistributedContractError(f"distributed run handle {field_name} must be a non-empty string")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "checkpoint_key": self.checkpoint_key,
+            "run_id": self.run_id,
+            "trace_id": self.trace_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> DistributedRunHandle:
+        if not isinstance(payload, Mapping):
+            raise DistributedContractError("distributed run handle must be an object")
+        _require_exact_fields(payload, {"checkpoint_key", "run_id", "trace_id"}, "distributed run handle")
+        return cls(
+            checkpoint_key=_required_string(payload, "checkpoint_key"),
+            run_id=_required_string(payload, "run_id"),
+            trace_id=_required_string(payload, "trace_id"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DistributedDeliveryOutcome:
+    """One worker response or one out-of-band transport failure observation."""
+
+    response: DistributedWorkerResponse | None = None
+    transport_error: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.response is None) == (self.transport_error is None):
+            raise DistributedContractError("distributed delivery outcome requires exactly one observation")
+        if self.response is not None and not isinstance(self.response, DistributedWorkerResponse):
+            raise TypeError("distributed delivery response must be a DistributedWorkerResponse")
+        if self.transport_error is not None and (not isinstance(self.transport_error, str) or not self.transport_error.strip()):
+            raise DistributedContractError("distributed transport error must be a non-empty string")
+
+    @classmethod
+    def worker(cls, response: DistributedWorkerResponse | Mapping[str, Any]) -> DistributedDeliveryOutcome:
+        decoded = response if isinstance(response, DistributedWorkerResponse) else DistributedWorkerResponse.from_dict(response)
+        return cls(response=decoded)
+
+    @classmethod
+    def transport_failure(cls, error: BaseException | str) -> DistributedDeliveryOutcome:
+        message = str(error).strip()
+        return cls(transport_error=message or type(error).__name__)
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.response is not None:
+            return {"response": self.response.to_dict()}
+        return {"transport_error": self.transport_error}
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> DistributedDeliveryOutcome:
+        if not isinstance(payload, Mapping):
+            raise DistributedContractError("distributed delivery outcome must be an object")
+        if set(payload) == {"response"}:
+            return cls.worker(_required_object(payload["response"], "distributed delivery outcome response"))
+        if set(payload) == {"transport_error"}:
+            error = payload["transport_error"]
+            if not isinstance(error, str):
+                raise DistributedContractError("distributed transport error must be a non-empty string")
+            return cls.transport_failure(error)
+        raise DistributedContractError("distributed delivery outcome requires exactly one observation")
+
+
+class DistributedWaitReason(StrEnum):
+    ACTIVE_CLAIM = "active_claim"
+    RECONCILIATION_REQUIRED = "reconciliation_required"
+    HOST_INTERACTION = "host_interaction"
+    SUPERSEDED_DELIVERY = "superseded_delivery"
+
+
+@dataclass(frozen=True, slots=True)
+class DistributedAdvanceDecision:
+    """One enqueue-only scheduler decision derived from authoritative state."""
+
+    action: DistributedAdvanceAction
+    handle: DistributedRunHandle
+    envelope: DistributedRunEnvelope | None = None
+    not_before_unix_ms: int | None = None
+    checkpoint_revision: int | None = None
+    result: AgentResult | None = None
+    reason: DistributedWaitReason | None = None
+
+    def __post_init__(self) -> None:
+        if self.action not in {
+            "dispatch",
+            "retry_at",
+            "wait",
+            "finalize_required",
+            "terminal_replay",
+        }:
+            raise DistributedContractError("unsupported distributed advance action")
+        if not isinstance(self.handle, DistributedRunHandle):
+            raise TypeError("distributed advance handle must be a DistributedRunHandle")
+        if self.envelope is not None and not isinstance(self.envelope, DistributedRunEnvelope):
+            raise TypeError("distributed advance envelope must be a DistributedRunEnvelope")
+        if self.result is not None and not isinstance(self.result, AgentResult):
+            raise TypeError("distributed advance result must be an AgentResult")
+        if (
+            self.result is not None
+            and self.action in {"finalize_required", "terminal_replay"}
+            and self.result.status
+            not in {
+                AgentStatus.WAIT_USER,
+                AgentStatus.COMPLETED,
+                AgentStatus.FAILED,
+                AgentStatus.MAX_CYCLES,
+            }
+        ):
+            raise DistributedContractError("distributed advance result must have a terminal status")
+        if self.reason is not None and not isinstance(self.reason, DistributedWaitReason):
+            raise TypeError("distributed advance reason must be a DistributedWaitReason")
+        expected = {
+            "dispatch": (True, False, False, False),
+            "retry_at": (True, True, False, False),
+            "wait": (False, False, False, True),
+            "finalize_required": (False, False, True, False),
+            "terminal_replay": (False, False, True, False),
+        }[self.action]
+        actual = (
+            self.envelope is not None,
+            self.not_before_unix_ms is not None,
+            self.result is not None and self.checkpoint_revision is not None,
+            self.reason is not None,
+        )
+        if actual != expected:
+            raise DistributedContractError(f"distributed advance fields do not match action {self.action}")
+        if self.not_before_unix_ms is not None:
+            _worker_response_integer(self.not_before_unix_ms, "not_before_unix_ms")
+        if self.checkpoint_revision is not None:
+            _worker_response_integer(self.checkpoint_revision, "checkpoint_revision")
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "action": self.action,
+            "handle": self.handle.to_dict(),
+        }
+        if self.envelope is not None:
+            payload["envelope"] = self.envelope.to_dict()
+        if self.not_before_unix_ms is not None:
+            payload["not_before_unix_ms"] = self.not_before_unix_ms
+        if self.checkpoint_revision is not None:
+            payload["checkpoint_revision"] = self.checkpoint_revision
+        if self.result is not None:
+            payload["result"] = self.result.to_dict()
+        if self.reason is not None:
+            payload["reason"] = self.reason.value
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> DistributedAdvanceDecision:
+        if not isinstance(payload, Mapping):
+            raise DistributedContractError("distributed advance decision must be an object")
+        action = payload.get("action")
+        if action not in {"dispatch", "retry_at", "wait", "finalize_required", "terminal_replay"}:
+            raise DistributedContractError("unsupported distributed advance action")
+        expected_fields = {
+            "dispatch": {"action", "handle", "envelope"},
+            "retry_at": {"action", "handle", "envelope", "not_before_unix_ms"},
+            "wait": {"action", "handle", "reason"},
+            "finalize_required": {"action", "handle", "checkpoint_revision", "result"},
+            "terminal_replay": {"action", "handle", "checkpoint_revision", "result"},
+        }[action]
+        _require_exact_fields(payload, expected_fields, "distributed advance decision")
+        try:
+            reason = DistributedWaitReason(payload["reason"]) if action == "wait" else None
+        except ValueError as exc:
+            raise DistributedContractError("unsupported distributed wait reason") from exc
+        raw_result = payload.get("result")
+        try:
+            result = AgentResult.from_dict(raw_result) if raw_result is not None else None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DistributedContractError("distributed advance result must be a complete current AgentResult") from exc
+        return cls(
+            action=action,
+            handle=DistributedRunHandle.from_dict(payload["handle"]),
+            envelope=(DistributedRunEnvelope.from_dict(payload["envelope"]) if "envelope" in payload else None),
+            not_before_unix_ms=payload.get("not_before_unix_ms"),
+            checkpoint_revision=payload.get("checkpoint_revision"),
+            result=result,
+            reason=reason,
+        )
 
 
 @dataclass(frozen=True, slots=True)
