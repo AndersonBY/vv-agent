@@ -68,6 +68,57 @@ from vv_agent.types import (
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
+CHECKPOINT_SQL_FIXTURE = FIXTURE_DIR / "checkpoint_sqlite_canonical.sql"
+
+
+def _seed_checkpoint_sqlite_database(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.executescript(CHECKPOINT_SQL_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _sqlite_master_state(path: Path) -> tuple[tuple[str, str, str, str | None], ...]:
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+            ORDER BY type, name
+            """
+        ).fetchall()
+    return tuple(
+        (
+            str(row[0]),
+            str(row[1]),
+            str(row[2]),
+            None if row[3] is None else str(row[3]),
+        )
+        for row in rows
+    )
+
+
+def _sqlite_pragma_state(path: Path) -> tuple[int, int, str]:
+    with sqlite3.connect(path) as connection:
+        schema_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
+    return schema_version, user_version, journal_mode
+
+
+def _seed_business_probe(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE business_probe (business_key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute("INSERT INTO business_probe (business_key, value) VALUES ('probe', 'unchanged')")
+
+
+def _sqlite_business_state(path: Path) -> tuple[tuple[str, str], ...]:
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute("SELECT business_key, value FROM business_probe ORDER BY business_key").fetchall()
+    return tuple((str(row[0]), str(row[1])) for row in rows)
+
+
+def _normalized_sql(sql: str) -> str:
+    return " ".join(sql.replace("IF NOT EXISTS", "").split())
 
 
 class _FakeWatchError(Exception):
@@ -1542,14 +1593,287 @@ def test_sqlite_rejects_non_current_checkpoint_table_schema(tmp_path: Path) -> N
         SqliteCheckpointStore(database)
 
 
+def test_sqlite_schema_mismatch_closes_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    database = tmp_path / "mismatch-close.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE checkpoints (task_id TEXT PRIMARY KEY)")
+
+    class _TrackingConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+            self.closed = False
+
+        def execute(self, *args: Any, **kwargs: Any) -> Any:
+            return self._connection.execute(*args, **kwargs)
+
+        def close(self) -> None:
+            self.closed = True
+            self._connection.close()
+
+    real_connect = sqlite3.connect
+    connections: list[_TrackingConnection] = []
+
+    def tracking_connect(*args: Any, **kwargs: Any) -> _TrackingConnection:
+        connection = _TrackingConnection(real_connect(*args, **kwargs))
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracking_connect)
+    with pytest.raises(RuntimeError, match="checkpoint_store_schema_mismatch"):
+        SqliteCheckpointStore(database)
+
+    assert len(connections) == 1
+    assert connections[0].closed
+    with pytest.raises(sqlite3.ProgrammingError):
+        connections[0].execute("SELECT 1")
+
+
 def test_sqlite_ignores_unrelated_checkpoint_prefixed_tables(tmp_path: Path) -> None:
     database = tmp_path / "unrelated.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE checkpoint_archive (task_id TEXT PRIMARY KEY)")
+        connection.execute("CREATE TRIGGER checkpoint_archive_trigger AFTER INSERT ON checkpoint_archive BEGIN SELECT 1; END")
 
     store = SqliteCheckpointStore(database)
-    assert store._schema_sql("table", "checkpoint_archive") is not None
-    assert store._schema_sql("table", "checkpoints") is not None
+    try:
+        assert store._schema_sql("table", "checkpoint_archive") is not None
+        assert store._schema_sql("table", "checkpoints") is not None
+    finally:
+        store.close()
+
+
+def test_sqlite_opens_vendored_canonical_checkpoint_schema(tmp_path: Path) -> None:
+    database = tmp_path / "canonical.sqlite3"
+    _seed_checkpoint_sqlite_database(database)
+
+    store = SqliteCheckpointStore(database)
+    try:
+        assert store._schema_sql("table", "checkpoints") is not None
+        assert store._schema_sql("index", "checkpoints_status_idx") is not None
+        assert store._schema_sql("table", "deferred_resolution_receipts") is not None
+        assert store._schema_sql("index", "deferred_receipts_checkpoint_idx") is not None
+    finally:
+        store.close()
+
+
+def test_sqlite_schema_sql_matches_vendored_canonical_fixture(tmp_path: Path) -> None:
+    canonical_database = tmp_path / "canonical.sqlite3"
+    generated_database = tmp_path / "generated.sqlite3"
+    _seed_checkpoint_sqlite_database(canonical_database)
+    generated_store = SqliteCheckpointStore(generated_database)
+    generated_store.close()
+
+    canonical_objects = {
+        name: sql
+        for _object_type, name, _table_name, sql in _sqlite_master_state(canonical_database)
+        if name
+        in {
+            "checkpoints",
+            "checkpoints_status_idx",
+            "deferred_resolution_receipts",
+            "deferred_receipts_checkpoint_idx",
+        }
+    }
+    generated_objects = {
+        name: sql
+        for _object_type, name, _table_name, sql in _sqlite_master_state(generated_database)
+        if name in canonical_objects
+    }
+    assert set(generated_objects) == set(canonical_objects)
+    for name, canonical_sql in canonical_objects.items():
+        assert canonical_sql is not None
+        generated_sql = generated_objects[name]
+        assert generated_sql is not None
+        assert _normalized_sql(generated_sql) == _normalized_sql(canonical_sql)
+
+
+@pytest.mark.parametrize(
+    ("name", "mutation"),
+    [
+        ("missing-receipt", "DROP TABLE deferred_resolution_receipts"),
+        ("missing-receipt-index", "DROP INDEX deferred_receipts_checkpoint_idx"),
+    ],
+)
+def test_sqlite_rejects_incomplete_related_schema_without_ddl(
+    tmp_path: Path,
+    name: str,
+    mutation: str,
+) -> None:
+    database = tmp_path / f"{name}.sqlite3"
+    _seed_checkpoint_sqlite_database(database)
+    _seed_business_probe(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(mutation)
+
+    before_master = _sqlite_master_state(database)
+    before_pragmas = _sqlite_pragma_state(database)
+    before_business = _sqlite_business_state(database)
+    with pytest.raises(RuntimeError, match="checkpoint_store_schema_mismatch"):
+        SqliteCheckpointStore(database)
+    assert _sqlite_master_state(database) == before_master
+    assert _sqlite_pragma_state(database) == before_pragmas
+    assert _sqlite_business_state(database) == before_business
+
+
+def test_sqlite_rejects_malformed_auxiliary_schema_without_ddl(tmp_path: Path) -> None:
+    database = tmp_path / "malformed-receipt.sqlite3"
+    _seed_checkpoint_sqlite_database(database)
+    _seed_business_probe(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE deferred_resolution_receipts")
+        connection.execute(
+            """
+            CREATE TABLE deferred_resolution_receipts (
+                handle_key TEXT PRIMARY KEY,
+                checkpoint_key TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX deferred_receipts_checkpoint_idx ON deferred_resolution_receipts(checkpoint_key)")
+
+    before_master = _sqlite_master_state(database)
+    before_pragmas = _sqlite_pragma_state(database)
+    before_business = _sqlite_business_state(database)
+    with pytest.raises(RuntimeError, match="checkpoint_store_schema_mismatch"):
+        SqliteCheckpointStore(database)
+    assert _sqlite_master_state(database) == before_master
+    assert _sqlite_pragma_state(database) == before_pragmas
+    assert _sqlite_business_state(database) == before_business
+
+
+@pytest.mark.parametrize(
+    ("name", "seed_canonical", "mutation"),
+    [
+        (
+            "case-variant-table",
+            False,
+            "CREATE TABLE CheckPoints (status TEXT)",
+        ),
+        (
+            "case-variant-index",
+            True,
+            "DROP INDEX checkpoints_status_idx; CREATE INDEX CheckPoints_Status_Idx ON checkpoints(status)",
+        ),
+        (
+            "case-variant-receipt-table",
+            True,
+            "DROP TABLE deferred_resolution_receipts; CREATE VIEW Deferred_Resolution_Receipts AS SELECT 1",
+        ),
+        (
+            "case-variant-receipt-index",
+            True,
+            "DROP INDEX deferred_receipts_checkpoint_idx; CREATE INDEX "
+            "Deferred_Receipts_Checkpoint_Idx ON deferred_resolution_receipts(checkpoint_key)",
+        ),
+    ],
+)
+def test_sqlite_rejects_case_variant_or_conflicting_related_objects_without_changes(
+    tmp_path: Path,
+    name: str,
+    seed_canonical: bool,
+    mutation: str,
+) -> None:
+    database = tmp_path / f"{name}.sqlite3"
+    if seed_canonical:
+        _seed_checkpoint_sqlite_database(database)
+    _seed_business_probe(database)
+    with sqlite3.connect(database) as connection:
+        connection.executescript(mutation)
+
+    before_master = _sqlite_master_state(database)
+    before_pragmas = _sqlite_pragma_state(database)
+    before_business = _sqlite_business_state(database)
+    with pytest.raises(RuntimeError, match="checkpoint_store_schema_mismatch"):
+        SqliteCheckpointStore(database)
+    assert _sqlite_master_state(database) == before_master
+    assert _sqlite_pragma_state(database) == before_pragmas
+    assert _sqlite_business_state(database) == before_business
+
+
+@pytest.mark.parametrize(
+    ("name", "trigger_name", "trigger_table"),
+    [
+        ("canonical-table-trigger", "CHECKPOINTS", "checkpoints"),
+        ("canonical-index-trigger", "CHECKPOINTS_STATUS_IDX", "checkpoints"),
+        ("canonical-receipt-table-trigger", "DEFERRED_RESOLUTION_RECEIPTS", "deferred_resolution_receipts"),
+        ("canonical-receipt-index-trigger", "DEFERRED_RECEIPTS_CHECKPOINT_IDX", "deferred_resolution_receipts"),
+    ],
+)
+def test_sqlite_rejects_canonical_object_and_same_name_trigger_without_changes(
+    tmp_path: Path,
+    name: str,
+    trigger_name: str,
+    trigger_table: str,
+) -> None:
+    database = tmp_path / f"{name}.sqlite3"
+    _seed_checkpoint_sqlite_database(database)
+    _seed_business_probe(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(f'CREATE TRIGGER "{trigger_name}" AFTER INSERT ON "{trigger_table}" BEGIN SELECT 1; END')
+
+    before_master = _sqlite_master_state(database)
+    before_pragmas = _sqlite_pragma_state(database)
+    before_business = _sqlite_business_state(database)
+    with pytest.raises(RuntimeError, match="checkpoint_store_schema_mismatch"):
+        SqliteCheckpointStore(database)
+    assert _sqlite_master_state(database) == before_master
+    assert _sqlite_pragma_state(database) == before_pragmas
+    assert _sqlite_business_state(database) == before_business
+
+
+def test_sqlite_schema_collision_closes_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    database = tmp_path / "collision-close.sqlite3"
+    _seed_checkpoint_sqlite_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute('CREATE TRIGGER "CHECKPOINTS" AFTER INSERT ON checkpoints BEGIN SELECT 1; END')
+
+    class _TrackingConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+            self.closed = False
+
+        def execute(self, *args: Any, **kwargs: Any) -> Any:
+            return self._connection.execute(*args, **kwargs)
+
+        def close(self) -> None:
+            self.closed = True
+            self._connection.close()
+
+    real_connect = sqlite3.connect
+    connections: list[_TrackingConnection] = []
+
+    def tracking_connect(*args: Any, **kwargs: Any) -> _TrackingConnection:
+        connection = _TrackingConnection(real_connect(*args, **kwargs))
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracking_connect)
+    with pytest.raises(RuntimeError, match="checkpoint_store_schema_mismatch"):
+        SqliteCheckpointStore(database)
+
+    assert len(connections) == 1
+    assert connections[0].closed
+    with pytest.raises(sqlite3.ProgrammingError):
+        connections[0].execute("SELECT 1")
+
+
+def test_sqlite_rejects_auxiliary_only_schema_without_ddl(tmp_path: Path) -> None:
+    database = tmp_path / "auxiliary-only.sqlite3"
+    _seed_checkpoint_sqlite_database(database)
+    _seed_business_probe(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("DROP INDEX checkpoints_status_idx")
+        connection.execute("DROP TABLE checkpoints")
+
+    before_master = _sqlite_master_state(database)
+    before_pragmas = _sqlite_pragma_state(database)
+    before_business = _sqlite_business_state(database)
+    with pytest.raises(RuntimeError, match="checkpoint_store_schema_mismatch"):
+        SqliteCheckpointStore(database)
+    assert _sqlite_master_state(database) == before_master
+    assert _sqlite_pragma_state(database) == before_pragmas
+    assert _sqlite_business_state(database) == before_business
 
 
 def test_redis_key_vectors_match_contract() -> None:

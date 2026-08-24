@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from threading import RLock
@@ -38,39 +39,58 @@ class SqliteCheckpointStore:
         raw_path = str(db_path)
         self._db_path = raw_path if raw_path == ":memory:" else str(Path(raw_path).resolve())
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._lock = RLock()
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._create_table()
+        try:
+            self._lock = RLock()
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._create_table()
+            self._conn.execute("PRAGMA journal_mode=WAL")
+        except BaseException:
+            with suppress(BaseException):
+                self._conn.close()
+            raise
 
     def _create_table(self) -> None:
-        existing_table = self._schema_sql("table", "checkpoints")
-        if existing_table is None:
-            self._conn.execute(_CREATE_TABLE_SQL)
-            self._conn.execute(_CREATE_INDEX_SQL)
-            self._conn.execute(_CREATE_RECEIPTS_TABLE_SQL)
-            self._conn.execute(_CREATE_RECEIPTS_INDEX_SQL)
+        definitions = (
+            ("table", "checkpoints", _CREATE_TABLE_SQL),
+            ("index", "checkpoints_status_idx", _CREATE_INDEX_SQL),
+            ("table", "deferred_resolution_receipts", _CREATE_RECEIPTS_TABLE_SQL),
+            ("index", "deferred_receipts_checkpoint_idx", _CREATE_RECEIPTS_INDEX_SQL),
+        )
+        existing = {name: self._schema_object(name) for _object_type, name, _sql in definitions}
+        if not any(schema is not None for schema in existing.values()):
+            for _object_type, _name, sql in definitions:
+                self._conn.execute(sql)
             self._conn.commit()
             return
 
-        if _normalize_schema_sql(existing_table) != _normalize_schema_sql(_CREATE_TABLE_SQL):
-            raise RuntimeError("existing checkpoints table does not match the current schema; create a new database")
-        existing_index = self._schema_sql("index", "checkpoints_status_idx")
-        if existing_index is None or _normalize_schema_sql(existing_index) != _normalize_schema_sql(_CREATE_INDEX_SQL):
-            raise RuntimeError("existing checkpoints index does not match the current schema; create a new database")
-        existing_receipts = self._schema_sql("table", "deferred_resolution_receipts")
-        if existing_receipts is None:
-            self._conn.execute(_CREATE_RECEIPTS_TABLE_SQL)
-            self._conn.execute(_CREATE_RECEIPTS_INDEX_SQL)
-        elif _normalize_schema_sql(existing_receipts) != _normalize_schema_sql(_CREATE_RECEIPTS_TABLE_SQL):
-            raise RuntimeError("existing deferred receipt table does not match the current schema; create a new database")
-        existing_receipt_index = self._schema_sql("index", "deferred_receipts_checkpoint_idx")
-        if existing_receipt_index is None or _normalize_schema_sql(existing_receipt_index) != _normalize_schema_sql(
-            _CREATE_RECEIPTS_INDEX_SQL
-        ):
-            raise RuntimeError("existing deferred receipt index does not match the current schema; create a new database")
-        self._conn.commit()
+        for expected_type, name, expected_sql in definitions:
+            schema = existing[name]
+            if schema is None:
+                raise RuntimeError(
+                    f"checkpoint_store_schema_mismatch: existing {name} schema is incomplete; create a new database"
+                )
+            actual_type, actual_sql = schema
+            if (
+                actual_type != expected_type
+                or actual_sql is None
+                or _normalize_schema_sql(actual_sql) != _normalize_schema_sql(expected_sql)
+            ):
+                raise RuntimeError(
+                    f"checkpoint_store_schema_mismatch: existing {name} does not match the current schema; create a new database"
+                )
+
+    def _schema_object(self, name: str) -> tuple[str, str | None] | None:
+        rows = self._conn.execute(
+            "SELECT type, sql FROM sqlite_master WHERE lower(name) = lower(?)",
+            (name,),
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError(f"checkpoint_store_schema_mismatch: multiple schema objects match {name}; create a new database")
+        row = rows[0]
+        return str(row[0]), str(row[1]) if row[1] is not None else None
 
     def _schema_sql(self, object_type: str, name: str) -> str | None:
         row = self._conn.execute(
@@ -707,15 +727,15 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     lease_expires_at_ms INTEGER,
     terminal_result TEXT,
     terminal_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (terminal_acknowledged IN (0, 1)),
+    CHECK (status <> 'deferred' OR (claim_token IS NULL AND claimed_cycle IS NULL AND lease_expires_at_ms IS NULL)),
+    CHECK (status <> 'deferred' OR tool_journal <> '[]'),
     CHECK (
         (claim_token IS NULL AND claimed_cycle IS NULL AND lease_expires_at_ms IS NULL)
         OR
         (claim_token IS NOT NULL AND claimed_cycle IS NOT NULL AND lease_expires_at_ms IS NOT NULL)
     ),
     CHECK (claim_token IS NULL OR claimed_cycle = cycle_index + 1),
-    CHECK (terminal_result IS NULL OR claim_token IS NULL),
-    CHECK (status <> 'deferred' OR (claim_token IS NULL AND claimed_cycle IS NULL AND lease_expires_at_ms IS NULL)),
-    CHECK (status <> 'deferred' OR tool_journal <> '[]')
+    CHECK (terminal_result IS NULL OR claim_token IS NULL)
 )
 """
 _CREATE_INDEX_SQL = """
