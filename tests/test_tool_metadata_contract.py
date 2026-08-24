@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from support import require_tool_result
 
 from vv_agent import (
     Agent,
@@ -345,6 +346,7 @@ def test_real_orchestrator_consumes_canonical_producer_cases(
         context=_tool_context(tmp_path, policy),
         event_sink=events.append,
     )
+    result = require_tool_result(result)
     event_types = [event.type for event in events]
 
     if expected_events:
@@ -380,6 +382,7 @@ def test_parse_failure_boundary_is_driven_by_canonical_telemetry_contract(tmp_pa
         context=_tool_context(tmp_path),
         event_sink=events.append,
     )
+    result = require_tool_result(result)
 
     assert _CONTRACT["telemetry_contract"]["parse_failure_before_planning_has_no_tool_lifecycle"] is True
     assert result.error_code == "invalid_arguments_json"

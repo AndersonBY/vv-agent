@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from vv_agent.checkpoint import MAX_WIRE_INTEGER, canonical_json_sha256, validate_sha256
+from vv_agent.types import ToolExecutionResult
 
 DEFERRED_HANDLE_SCHEMA = "vv-agent.deferred-tool-handle.v2"
 TOOL_CALL_OUTCOME_SCHEMA = "vv-agent.tool-call-outcome.v2"
@@ -155,7 +156,7 @@ class ToolCallOutcome:
     """
 
     kind: str
-    result: Any | None = None
+    result: ToolExecutionResult | None = None
     handle: DeferredToolHandle | None = None
     schema_version: str = TOOL_CALL_OUTCOME_SCHEMA
 
@@ -182,11 +183,11 @@ class ToolCallOutcome:
             raise ValueError("tool_call_outcome_invalid: unknown outcome kind")
 
     @classmethod
-    def Completed(cls, result: Any) -> ToolCallOutcome:
+    def Completed(cls, result: ToolExecutionResult) -> ToolCallOutcome:
         return cls(kind="completed", result=result)
 
     @classmethod
-    def completed(cls, result: Any) -> ToolCallOutcome:
+    def completed(cls, result: ToolExecutionResult) -> ToolCallOutcome:
         return cls.Completed(result)
 
     @classmethod

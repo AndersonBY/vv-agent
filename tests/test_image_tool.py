@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from support import require_tool_result
+
 from vv_agent.constants import READ_IMAGE_TOOL_NAME
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import ToolCall, ToolResultStatus
@@ -35,6 +37,7 @@ def test_read_image_from_workspace_file(tmp_path: Path) -> None:
         ToolCall(id="c1", name=READ_IMAGE_TOOL_NAME, arguments={"path": "img.png"}),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
@@ -53,6 +56,7 @@ def test_read_image_from_url(tmp_path: Path) -> None:
         ToolCall(id="c2", name=READ_IMAGE_TOOL_NAME, arguments={"path": "https://example.com/a.png"}),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.SUCCESS
     assert result.image_url == "https://example.com/a.png"
@@ -69,6 +73,7 @@ def test_read_image_rejects_unsupported_extension(tmp_path: Path) -> None:
         ToolCall(id="c3", name=READ_IMAGE_TOOL_NAME, arguments={"path": "x.txt"}),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "unsupported_image_format"

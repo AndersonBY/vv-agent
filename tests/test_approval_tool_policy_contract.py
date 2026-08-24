@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
-from support import FixedModelProvider
+from support import FixedModelProvider, require_tool_result
 
 from vv_agent import Agent, AgentStatus, RunConfig, Runner, ToolPolicy, function_tool
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalRequest
@@ -117,7 +117,7 @@ def _runner_tool_result(
             approval_broker=approval_broker,
         ),
     )
-    return result.raw_result.cycles[0].tool_results[0], result.events
+    return require_tool_result(result.raw_result.cycles[0].tool_results[0]), result.events
 
 
 def _orchestrator_tool_result(
@@ -149,7 +149,7 @@ def _orchestrator_tool_result(
         context=context,
         allowed_tool_names=planned_tools,
     )
-    return result, events
+    return require_tool_result(result), events
 
 
 def _assert_result_shape(result: ToolExecutionResult, shape: dict[str, Any]) -> dict[str, Any]:

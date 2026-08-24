@@ -87,22 +87,24 @@ def test_deferred_event_rejects_top_level_identity_tampering(
 
 def test_deferred_event_constructor_rejects_model_operation_kind() -> None:
     payload = next(item for item in _fixture_events() if item["type"] == "tool_call_deferred")
-    handle = DeferredToolHandle.from_dict(payload["handle"])
+    event = event_from_dict(payload)
+    assert isinstance(event, ToolCallDeferredEvent)
+    assert isinstance(event.handle, DeferredToolHandle)
 
     with pytest.raises(ValueError, match="deferred operation_kind must be tool"):
         ToolCallDeferredEvent(
-            run_id=payload["run_id"],
-            trace_id=payload["trace_id"],
-            cycle_index=payload["cycle_index"],
-            tool_call_id=payload["tool_call_id"],
-            tool_name=payload["tool_name"],
-            operation_id=payload["operation_id"],
-            attempt=payload["attempt"],
-            handle=handle,
-            execution_started=payload["execution_started"],
-            duration_ms=payload["duration_ms"],
-            checkpoint_key=payload["checkpoint_key"],
+            run_id=event.run_id,
+            trace_id=event.trace_id,
+            cycle_index=event.cycle_index,
+            tool_call_id=event.tool_call_id,
+            tool_name=event.tool_name,
+            operation_id=event.operation_id,
+            attempt=event.attempt,
+            handle=event.handle,
+            execution_started=event.execution_started,
+            duration_ms=event.duration_ms,
+            checkpoint_key=event.checkpoint_key,
             operation_kind="model",
-            event_id=payload["event_id"],
-            created_at=payload["created_at"],
+            event_id=event.event_id,
+            created_at=event.created_at,
         )

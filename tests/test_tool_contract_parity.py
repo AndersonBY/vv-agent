@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, ClassVar, cast
 
 import pytest
+from support import require_tool_result
 
 from vv_agent import Agent, RunConfig, Runner, ToolContext, ToolOutputText
 from vv_agent.llm import LlmRequest
@@ -127,6 +128,7 @@ def test_orchestrator_applies_registry_executor_failure_formatter(tmp_path: Path
         ToolCall(id="registry-call", name="registry_failure", arguments={}),
         context=context,
     )
+    result = require_tool_result(result)
 
     assert result.error_code == "tool_execution_failed"
     assert json.loads(result.content)["error"] == "mapped: upstream unavailable"

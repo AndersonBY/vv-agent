@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from support import require_tool_result
 
 from vv_agent.agent import Agent, RunContext
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalRequest
@@ -893,6 +894,8 @@ def test_create_sub_task_handler_ignores_non_string_parent_lineage_sources(
         ),
         missing_context,
     )
+    fallback_result = require_tool_result(fallback_result)
+    missing_result = require_tool_result(missing_result)
 
     assert fallback_result.status_code == ToolResultStatus.SUCCESS
     assert missing_result.status_code == ToolResultStatus.SUCCESS

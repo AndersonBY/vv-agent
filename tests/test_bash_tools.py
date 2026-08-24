@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from support import require_tool_result
 
 from vv_agent.constants import BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME
 from vv_agent.runtime import background_sessions as background_runtime
@@ -42,6 +43,7 @@ def test_bash_tool_executes_command(tmp_path: Path) -> None:
         ),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.SUCCESS
     assert result.content == "hello\n"
@@ -61,6 +63,7 @@ def test_bash_tool_blocks_dangerous_command(tmp_path: Path) -> None:
         ),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "dangerous_command"
@@ -85,6 +88,7 @@ def test_bash_tool_allows_absolute_exec_dir_when_enabled(tmp_path: Path) -> None
         ),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.SUCCESS
     assert result.content == "outside\n"
@@ -107,6 +111,7 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
         ),
         context,
     )
+    start = require_tool_result(start)
     start_payload = json.loads(start.content)
     assert start.status_code == ToolResultStatus.RUNNING
     assert "command" not in start_payload
@@ -122,6 +127,7 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
             ),
             context,
         )
+        probe = require_tool_result(probe)
         if probe.status_code == ToolResultStatus.RUNNING:
             json.loads(probe.content)
             time.sleep(0.05)
@@ -213,6 +219,7 @@ def test_bash_tool_uses_context_shell_defaults(tmp_path: Path, monkeypatch) -> N
         ),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.SUCCESS
     assert result.content == "ok\n"
@@ -280,6 +287,7 @@ def test_bash_tool_applies_context_bash_env(tmp_path: Path, monkeypatch) -> None
         ),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.SUCCESS
     assert result.content == "ok\n"
@@ -527,6 +535,7 @@ def test_bash_tool_timeout_moves_process_to_background_and_returns_session(tmp_p
         ),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.RUNNING
@@ -601,6 +610,7 @@ def test_bash_tool_rejects_invalid_bash_env_metadata(tmp_path: Path) -> None:
         ),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.ERROR
@@ -623,6 +633,7 @@ def test_foreground_bash_uses_exact_preview_boundary_and_persists_complete_artif
         ),
         context,
     )
+    exact = require_tool_result(exact)
 
     assert exact.status_code is ToolResultStatus.SUCCESS
     assert len(exact.content) == 12_000
@@ -641,6 +652,7 @@ def test_foreground_bash_uses_exact_preview_boundary_and_persists_complete_artif
         ),
         context,
     )
+    truncated = require_tool_result(truncated)
 
     assert truncated.status_code is ToolResultStatus.SUCCESS
     assert truncated.truncated is True
@@ -683,6 +695,7 @@ def test_foreground_bash_artifact_failure_keeps_complete_capture(tmp_path: Path,
         ToolCall(id="artifact_failure", name=BASH_TOOL_NAME, arguments={"command": "printf ignored"}),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code is ToolResultStatus.ERROR
     assert result.error_code == "artifact_persist_failed"
@@ -719,6 +732,7 @@ def test_foreground_bash_ignores_workspace_artifact_symlink(tmp_path: Path, monk
         ToolCall(id="artifact_symlink", name=BASH_TOOL_NAME, arguments={"command": "printf ignored"}),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code is ToolResultStatus.SUCCESS
     assert result.artifact is not None
@@ -742,6 +756,7 @@ def test_background_bash_reuses_terminal_artifact_across_polls(tmp_path: Path) -
         ),
         context,
     )
+    start = require_tool_result(start)
     session_id = json.loads(start.content)["session_id"]
 
     deadline = time.monotonic() + 10
@@ -754,6 +769,7 @@ def test_background_bash_reuses_terminal_artifact_across_polls(tmp_path: Path) -
             ),
             context,
         )
+        probe = require_tool_result(probe)
         if probe.status_code is not ToolResultStatus.RUNNING:
             break
         assert time.monotonic() < deadline
@@ -770,6 +786,7 @@ def test_background_bash_reuses_terminal_artifact_across_polls(tmp_path: Path) -
         ),
         context,
     )
+    second = require_tool_result(second)
 
     assert second.artifact == first_artifact
     assert second.content == probe.content
@@ -797,6 +814,7 @@ def test_background_bash_artifact_failure_keeps_complete_capture(tmp_path: Path)
         ),
         context,
     )
+    start = require_tool_result(start)
     session_id = json.loads(start.content)["session_id"]
 
     deadline = time.monotonic() + 10
@@ -809,6 +827,7 @@ def test_background_bash_artifact_failure_keeps_complete_capture(tmp_path: Path)
             ),
             context,
         )
+        probe = require_tool_result(probe)
         if probe.status_code is not ToolResultStatus.RUNNING:
             break
         assert time.monotonic() < deadline

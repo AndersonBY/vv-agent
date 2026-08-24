@@ -6,7 +6,7 @@ from threading import Event
 from typing import Any
 
 import pytest
-from support import ModelMapProvider
+from support import ModelMapProvider, require_tool_result
 
 from vv_agent import Agent, RunConfig, Runner, ToolPolicy, function_tool, handoff
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -205,6 +205,7 @@ def test_handoff_tool_schema_and_marker_match_shared_contract(tmp_path: Path) ->
         ToolCall(id="handoff-call", name="transfer_to_writer", arguments={"input": "write this"}),
         context,
     )
+    result = require_tool_result(result)
     assert json.loads(result.content) == _contract()["tool_result"]["content"]
     assert result.metadata == _contract()["tool_result"]["metadata"]
 
@@ -212,6 +213,7 @@ def test_handoff_tool_schema_and_marker_match_shared_contract(tmp_path: Path) ->
         ToolCall(id="invalid", name="transfer_to_writer", arguments={"input": "   "}),
         context,
     )
+    invalid = require_tool_result(invalid)
     assert invalid.status_code == ToolResultStatus.ERROR
     assert invalid.error_code == "invalid_handoff_arguments"
 

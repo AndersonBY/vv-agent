@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from support import require_tool_result
+
 from vv_agent import constants as constants_module
 from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.tools import ToolContext, build_default_registry
@@ -38,6 +40,7 @@ def test_todo_write_enforces_single_in_progress(tmp_path: Path) -> None:
         ),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.status_code is ToolResultStatus.ERROR
@@ -61,6 +64,7 @@ def test_ask_user_returns_structured_selection_metadata(tmp_path: Path) -> None:
         ),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.directive == ToolDirective.WAIT_USER
@@ -90,6 +94,7 @@ def test_task_finish_blocks_when_todo_incomplete(tmp_path: Path) -> None:
         ),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.status_code is ToolResultStatus.ERROR
@@ -107,5 +112,6 @@ def test_task_finish_returns_canonical_json_wire(tmp_path: Path) -> None:
         ),
         _context(tmp_path),
     )
+    result = require_tool_result(result)
 
     assert result.content == '{"message":"done","ok":true}'

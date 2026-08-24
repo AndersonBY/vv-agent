@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass
 from typing import TypedDict
 
+from support import require_tool_result
+
 from vv_agent import (
     FunctionTool,
     ToolContext,
@@ -69,6 +71,7 @@ def test_function_tool_timeout_returns_structured_retryable_error(tmp_path) -> N
         workspace_backend=MemoryWorkspaceBackend(),
     )
     result = slow.to_executor().execute(ToolCall(id="slow-call", name="slow", arguments={}), context)
+    result = require_tool_result(result)
 
     assert result.error_code == "tool_timeout"
     assert json.loads(result.content)["retryable"] is True
@@ -106,6 +109,8 @@ def test_manual_function_tool_normalizes_formatted_and_default_failures(tmp_path
         ToolCall(id="default-call", name="default", arguments={}),
         context,
     )
+    formatted_result = require_tool_result(formatted_result)
+    default_result = require_tool_result(default_result)
 
     assert formatted_result.error_code == "tool_execution_failed"
     assert json.loads(formatted_result.content)["error"] == "host error: database unavailable"
@@ -201,6 +206,7 @@ def test_tool_output_variants_preserve_shared_metadata_contract() -> None:
     json_result = noop.to_tool_execution_result(
         ToolOutputJson(data={"ok": True}, metadata={"source": "test"}), tool_call_id="json"
     )
+    json_result = require_tool_result(json_result)
     assert json_result.metadata == {"output_type": "json", "source": "test"}
 
     image_result = noop.to_tool_execution_result(
@@ -212,6 +218,7 @@ def test_tool_output_variants_preserve_shared_metadata_contract() -> None:
         ),
         tool_call_id="image",
     )
+    image_result = require_tool_result(image_result)
     assert json.loads(image_result.content)["mime_type"] == "image/png"
     assert image_result.metadata == {"output_type": "image", "source": "test"}
 
@@ -219,6 +226,7 @@ def test_tool_output_variants_preserve_shared_metadata_contract() -> None:
         ToolOutputFile(path="report.json", mime_type="application/json", metadata={"source": "test"}),
         tool_call_id="file",
     )
+    file_result = require_tool_result(file_result)
     assert file_result.metadata == {"output_type": "file", "source": "test"}
 
     error_result = noop.to_tool_execution_result(
@@ -230,6 +238,7 @@ def test_tool_output_variants_preserve_shared_metadata_contract() -> None:
         ),
         tool_call_id="error",
     )
+    error_result = require_tool_result(error_result)
     assert json.loads(error_result.content) == {
         "ok": False,
         "error": "temporary failure",

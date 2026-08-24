@@ -8,7 +8,7 @@ from threading import Barrier, Thread
 from typing import Any
 
 import pytest
-from support import FactoryModelProvider
+from support import FactoryModelProvider, require_tool_result
 
 from vv_agent import (
     Agent,
@@ -40,6 +40,7 @@ from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime.checkpoint_codec import checkpoint_to_dict
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.types import LLMResponse, ToolCall, ToolResultStatus
+from vv_agent.workspace import MemoryWorkspaceBackend
 
 _EMPTY_SCHEMA = {"type": "object", "properties": {}, "required": []}
 
@@ -66,7 +67,7 @@ def _context(*, metadata: dict[str, Any] | None = None) -> ToolContext:
         workspace=Path.cwd(),
         shared_state={},
         cycle_index=1,
-        workspace_backend=None,  # type: ignore[arg-type]
+        workspace_backend=MemoryWorkspaceBackend(),
         tool_call_id="call-without-checkpoint",
         metadata=metadata or {},
     )
@@ -87,6 +88,27 @@ def test_function_tool_preserves_closed_outcome_and_fails_closed_without_checkpo
     assert outcome.result is not None
     assert outcome.result.status_code is ToolResultStatus.ERROR
     assert outcome.result.error_code == "deferred_requires_checkpoint"
+
+
+def test_require_tool_result_rejects_deferred_and_unwraps_completed() -> None:
+    handle = DeferredToolHandle(
+        checkpoint_key="require-tool-result",
+        operation_id="op_tool_cycle_1_require_result",
+        attempt=1,
+        request_digest="a" * 64,
+    )
+    deferred = ToolCallOutcome.Deferred(handle)
+
+    with pytest.raises(AssertionError, match="deferred outcome"):
+        require_tool_result(deferred)
+
+    completed = ToolExecutionResult(
+        tool_call_id="require-result",
+        content="done",
+        status_code=ToolResultStatus.SUCCESS,
+    )
+    assert require_tool_result(completed) is completed
+    assert require_tool_result(ToolCallOutcome.Completed(completed)) is completed
 
 
 def test_checkpointed_non_definitive_tool_outcome_uses_normal_wait_user_lifecycle() -> None:

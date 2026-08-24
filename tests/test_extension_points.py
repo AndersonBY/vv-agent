@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from support import require_tool_result
+
 from vv_agent.constants import ACTIVATE_SKILL_TOOL_NAME
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.tool_planner import plan_tool_schemas
@@ -40,6 +42,7 @@ def test_skill_extension_handler_requires_available_skills(tmp_path: Path) -> No
         ToolCall(id="c1", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.ERROR
     assert json.loads(result.content)["error_code"] == "no_skills_configured"
@@ -61,6 +64,7 @@ def test_skill_extension_handler_activates_inline_skill(tmp_path: Path) -> None:
         ToolCall(id="c2", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo", "reason": "need workflow"}),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
@@ -99,6 +103,7 @@ Follow this guide.
         ToolCall(id="c3", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS
@@ -126,6 +131,7 @@ def test_skill_extension_handler_rejects_invalid_standard_skill(tmp_path: Path) 
         ToolCall(id="c4", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.ERROR
     payload = json.loads(result.content)
@@ -169,6 +175,7 @@ Follow this guide.
         ToolCall(id="c5", name=ACTIVATE_SKILL_TOOL_NAME, arguments={"skill_name": "demo"}),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.SUCCESS

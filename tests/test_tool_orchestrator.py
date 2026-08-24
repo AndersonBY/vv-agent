@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
+from support import require_tool_result
 
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.tools import ToolContext
@@ -45,6 +46,7 @@ def test_orchestrator_rejects_tool_not_allowed_for_batch(tmp_path) -> None:
         allowed_tool_names={"other"},
         event_sink=events.append,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "tool_not_allowed"
@@ -71,6 +73,7 @@ def test_orchestrator_approval_short_circuit_does_not_emit_started(tmp_path) -> 
         context=context,
         event_sink=events.append,
     )
+    result = require_tool_result(result)
 
     assert result.error_code == "tool_approval_required"
     assert [event.type for event in events] == ["tool_call_planned", "tool_call_completed"]
@@ -103,6 +106,7 @@ def test_orchestrator_rejects_schema_invalid_arguments_before_approval_or_execut
         context=context,
         event_sink=events.append,
     )
+    result = require_tool_result(result)
 
     assert result.error_code == "invalid_tool_arguments"
     assert observed == []
@@ -123,6 +127,7 @@ def test_orchestrator_unknown_tool_returns_error(tmp_path) -> None:
         ToolCall(id="call_1", name="missing", arguments={}),
         context=context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "tool_not_found"
@@ -144,6 +149,7 @@ def test_orchestrator_normalizes_tool_exceptions(tmp_path) -> None:
         ToolCall(id="call_1", name="fails", arguments={}),
         context=context,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.ERROR
     assert result.error_code == "tool_execution_failed"
@@ -167,6 +173,7 @@ def test_orchestrator_emits_tool_started_and_completed_events(tmp_path) -> None:
         context=context,
         event_sink=events.append,
     )
+    result = require_tool_result(result)
 
     assert result.status_code == ToolResultStatus.SUCCESS
     assert [event.type for event in events] == [
@@ -194,6 +201,7 @@ def test_orchestrator_parse_failure_has_no_tool_lifecycle(tmp_path) -> None:
         context=context,
         event_sink=events.append,
     )
+    result = require_tool_result(result)
 
     assert result.error_code == "invalid_arguments_json"
     assert events == []

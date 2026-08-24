@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from support import require_tool_result
 
 from vv_agent.agent import RunContext
 from vv_agent.approval import ApprovalBroker
@@ -841,6 +842,7 @@ def test_running_worker_hides_early_recorded_outcome_until_exit(tmp_path: Path) 
             {"task_ids": ["worker-task"]},
         )
     )
+    result = require_tool_result(result)
     payload = json.loads(result.content)
     assert payload["tasks"][0]["status"] == AgentStatus.RUNNING.value
     assert "final_answer" not in payload["tasks"][0]

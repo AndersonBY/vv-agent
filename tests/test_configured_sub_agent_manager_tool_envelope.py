@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from support import require_tool_result
 
-from vv_agent import SubRunCompletedEvent
+from vv_agent import SubRunCompletedEvent, ToolCallOutcome
 from vv_agent.runtime import SubTaskManager
 from vv_agent.tools import ToolContext, build_default_registry
-from vv_agent.types import AgentStatus, CompletionReason, SubTaskOutcome, ToolCall, ToolResultStatus
+from vv_agent.types import AgentStatus, CompletionReason, SubTaskOutcome, ToolCall, ToolExecutionResult, ToolResultStatus
 from vv_agent.workspace import MemoryWorkspaceBackend
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "manager_tool_envelope.json"
@@ -35,13 +36,15 @@ def _context(tmp_path: Path) -> ToolContext:
     )
 
 
-def _assert_error_metadata_matches_content(result: Any) -> None:
+def _assert_error_metadata_matches_content(result: ToolExecutionResult | ToolCallOutcome) -> None:
+    result = require_tool_result(result)
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.ERROR
     assert result.metadata == payload
 
 
-def _assert_schema_error_metadata(result: Any) -> None:
+def _assert_schema_error_metadata(result: ToolExecutionResult | ToolCallOutcome) -> None:
+    result = require_tool_result(result)
     payload = json.loads(result.content)
     assert result.status_code == ToolResultStatus.ERROR
     assert payload["error_code"] == "invalid_tool_arguments"
@@ -64,6 +67,7 @@ def test_create_sub_task_error_corpus_matches_full_envelope(tmp_path: Path, case
         ToolCall(id=case["name"], name="create_sub_task", arguments=case["arguments"]),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert payload == case["expected"]
@@ -80,6 +84,7 @@ def test_sub_task_status_error_corpus_matches_full_envelope(tmp_path: Path, case
         ToolCall(id=case["name"], name="sub_task_status", arguments=case["arguments"]),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert payload == case["expected"]
@@ -96,6 +101,7 @@ def test_sub_task_status_success_corpus_matches_full_envelope(tmp_path: Path, ca
         ToolCall(id=case["name"], name="sub_task_status", arguments=case["arguments"]),
         context,
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert payload == case["expected"]
@@ -125,6 +131,7 @@ def test_sync_failed_outcome_normalizes_blank_error_code(tmp_path: Path) -> None
             {"agent_id": "researcher", "task_description": "fail"},
         )
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert payload == contract["expected"]
@@ -159,6 +166,7 @@ def test_sync_wait_outcome_preserves_completion_observation(tmp_path: Path) -> N
             {"agent_id": "researcher", "task_description": "wait"},
         )
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert payload == contract["expected"]
@@ -177,6 +185,7 @@ def test_sync_wait_outcome_preserves_completion_observation(tmp_path: Path) -> N
             {"task_ids": ["wait-child"]},
         )
     )
+    status_result = require_tool_result(status_result)
     status_entry = json.loads(status_result.content)["tasks"][0]
     assert "error_code" not in status_entry
 
@@ -233,6 +242,7 @@ def test_manager_outcome_identity_blank_code_and_unicode_preview_match_contract(
             {"task_ids": [contract["lookup_task_id"]]},
         )
     )
+    result = require_tool_result(result)
     assert json.loads(result.content)["tasks"][0] == contract["status_entry"]
 
     preview = contract["unicode_preview"]["text"] * contract["unicode_preview"]["repeat"]
@@ -289,6 +299,7 @@ def test_pending_interaction_previous_status_matches_contract(tmp_path: Path) ->
             {"task_ids": ["pending-task"], "message": "continue"},
         )
     )
+    result = require_tool_result(result)
 
     payload = json.loads(result.content)
     assert payload["interaction"]["previous_status"] == _fixture()["pending_interaction_previous_status"]
@@ -364,6 +375,7 @@ def test_schema_and_payload_mode_validation_precede_exclude_pattern(
         ToolCall(id="payload_priority", name="create_sub_task", arguments=arguments),
         context,
     )
+    result = require_tool_result(result)
 
     assert result.error_code == expected_code
     if expected_code == "invalid_tool_arguments":
@@ -409,6 +421,7 @@ def test_create_sub_task_rejects_non_string_schema_values(
         ToolCall(id="invalid_create_arguments", name="create_sub_task", arguments=arguments),
         context,
     )
+    result = require_tool_result(result)
 
     _assert_schema_error_metadata(result)
     assert result.error_code == "invalid_tool_arguments"
@@ -435,6 +448,7 @@ def test_sub_task_status_rejects_non_string_schema_values(
         ToolCall(id="invalid_status_arguments", name="sub_task_status", arguments=arguments),
         context,
     )
+    result = require_tool_result(result)
 
     _assert_schema_error_metadata(result)
     assert result.error_code == "invalid_tool_arguments"
@@ -473,6 +487,7 @@ def test_status_envelope_preserves_lineage_and_omits_unknown_activity(tmp_path: 
             {"task_ids": ["status-task"], "detail_level": "snapshot"},
         )
     )
+    result = require_tool_result(result)
     payload = json.loads(result.content)
     entry = payload["tasks"][0]
     fixture = _fixture()["status_envelope"]
