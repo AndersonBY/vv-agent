@@ -8,6 +8,7 @@ from threading import RLock
 from typing import Any
 
 from vv_agent.checkpoint import EventCursor
+from vv_agent.deferred import DeferredResolutionReceipt, DeferredResolveDecision, DeferredToolHandle
 from vv_agent.runtime.checkpoint_codec import (
     _strict_json_loads,
     checkpoint_from_dict,
@@ -40,6 +41,7 @@ class SqliteCheckpointStore:
         self._lock = RLock()
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_table()
 
     def _create_table(self) -> None:
@@ -47,6 +49,8 @@ class SqliteCheckpointStore:
         if existing_table is None:
             self._conn.execute(_CREATE_TABLE_SQL)
             self._conn.execute(_CREATE_INDEX_SQL)
+            self._conn.execute(_CREATE_RECEIPTS_TABLE_SQL)
+            self._conn.execute(_CREATE_RECEIPTS_INDEX_SQL)
             self._conn.commit()
             return
 
@@ -55,6 +59,17 @@ class SqliteCheckpointStore:
         existing_index = self._schema_sql("index", "checkpoints_status_idx")
         if existing_index is None or _normalize_schema_sql(existing_index) != _normalize_schema_sql(_CREATE_INDEX_SQL):
             raise RuntimeError("existing checkpoints index does not match the current schema; create a new database")
+        existing_receipts = self._schema_sql("table", "deferred_resolution_receipts")
+        if existing_receipts is None:
+            self._conn.execute(_CREATE_RECEIPTS_TABLE_SQL)
+            self._conn.execute(_CREATE_RECEIPTS_INDEX_SQL)
+        elif _normalize_schema_sql(existing_receipts) != _normalize_schema_sql(_CREATE_RECEIPTS_TABLE_SQL):
+            raise RuntimeError("existing deferred receipt table does not match the current schema; create a new database")
+        existing_receipt_index = self._schema_sql("index", "deferred_receipts_checkpoint_idx")
+        if existing_receipt_index is None or _normalize_schema_sql(existing_receipt_index) != _normalize_schema_sql(
+            _CREATE_RECEIPTS_INDEX_SQL
+        ):
+            raise RuntimeError("existing deferred receipt index does not match the current schema; create a new database")
         self._conn.commit()
 
     def _schema_sql(self, object_type: str, name: str) -> str | None:
@@ -67,7 +82,7 @@ class SqliteCheckpointStore:
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
         snapshot = checkpoint_from_json(checkpoint_to_json(checkpoint))
         if snapshot.revision != 0 or snapshot.resume_attempt != 1 or snapshot.claim_token is not None:
-            raise ValueError("new checkpoint v5 records must be unclaimed at revision zero")
+            raise ValueError("new checkpoint v7 records must be unclaimed at revision zero")
         row = _checkpoint_row(snapshot)
         with self._lock, self._conn:
             cursor = self._conn.execute(
@@ -194,7 +209,7 @@ class SqliteCheckpointStore:
             return False
         claimed_cycle = checkpoint.claimed_cycle
         if claimed_cycle is None:
-            raise ValueError("checkpoint v5 suspend requires an active claim")
+            raise ValueError("checkpoint v7 suspend requires an active claim")
         snapshot = replace(
             checkpoint,
             revision=expected_revision + 1,
@@ -237,7 +252,7 @@ class SqliteCheckpointStore:
             return False
         claimed_cycle = checkpoint.claimed_cycle
         if claimed_cycle is None:
-            raise ValueError("checkpoint v5 commit requires an active claim")
+            raise ValueError("checkpoint v7 commit requires an active claim")
         if (
             checkpoint.cycle_index != claimed_cycle
             or checkpoint.status is not AgentStatus.RUNNING
@@ -287,7 +302,7 @@ class SqliteCheckpointStore:
             return False
         snapshot = checkpoint_from_json(checkpoint_to_json(checkpoint))
         if snapshot.terminal_result is None or snapshot.claim_token is not None:
-            raise ValueError("finalized checkpoint v5 must be terminal and unclaimed")
+            raise ValueError("finalized checkpoint v7 must be terminal and unclaimed")
         snapshot.revision = expected_revision + 1
         row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
         columns = _FINALIZE_COLUMNS
@@ -450,6 +465,213 @@ class SqliteCheckpointStore:
                 "DELETE FROM checkpoints WHERE checkpoint_key = ?",
                 (checkpoint_key,),
             )
+            self._conn.execute(
+                "DELETE FROM deferred_resolution_receipts WHERE checkpoint_key = ?",
+                (checkpoint_key,),
+            )
+
+    def preflight_tool_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        tool_call_count: int,
+        expected_revision: int,
+        claim_token: str,
+        claimed_cycle: int,
+    ) -> bool:
+        if isinstance(tool_call_count, bool) or not isinstance(tool_call_count, int) or tool_call_count <= 0:
+            return False
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                row = self._conn.execute(
+                    _SELECT_CHECKPOINT + " WHERE checkpoint_key = ?", (checkpoint.checkpoint_key,)
+                ).fetchone()
+                if row is None:
+                    self._conn.rollback()
+                    return False
+                current = _checkpoint_from_row(row)
+                if (
+                    current.revision != expected_revision
+                    or checkpoint.revision != expected_revision
+                    or current.claim_token != claim_token
+                    or current.claimed_cycle != claimed_cycle
+                    or current.status is not AgentStatus.RUNNING
+                    or current.terminal_result is not None
+                ):
+                    self._conn.rollback()
+                    return False
+                # A same-value write inside the immediate transaction proves
+                # that the checkpoint/outbox row is writable before a tool
+                # provider can perform an external effect. It is rolled back,
+                # so no revision or event is added by the preflight.
+                self._conn.execute(
+                    "UPDATE checkpoints SET event_outbox = event_outbox WHERE checkpoint_key = ?",
+                    (checkpoint.checkpoint_key,),
+                )
+                self._conn.rollback()
+                return True
+            except sqlite3.DatabaseError:
+                self._conn.rollback()
+                return False
+
+    def admit_deferred_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        outcomes: list[Any],
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool:
+        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    _SELECT_CHECKPOINT + " WHERE checkpoint_key = ?", (checkpoint.checkpoint_key,)
+                ).fetchone()
+                if row is None:
+                    self._conn.rollback()
+                    return False
+                current = _checkpoint_from_row(row)
+                helper = InMemoryCheckpointStore()
+                helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
+                if not helper.admit_deferred_batch(
+                    current,
+                    outcomes=outcomes,
+                    claim_token=claim_token,
+                    expected_revision=expected_revision,
+                    claimed_cycle=claimed_cycle,
+                ):
+                    self._conn.rollback()
+                    return False
+                updated = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
+                self._write_checkpoint_tx(updated, expected_revision=expected_revision, claim_token=claim_token)
+                self._conn.commit()
+                return True
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def resolve_deferred(self, handle: DeferredToolHandle, result: Any) -> DeferredResolveDecision:
+        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                receipt_row = self._conn.execute(
+                    "SELECT handle_key, checkpoint_key, handle, result, result_digest, "
+                    "event_id, event_payload_digest, receipt_status "
+                    "FROM deferred_resolution_receipts WHERE handle_key = ?",
+                    (handle.key,),
+                ).fetchone()
+                helper = InMemoryCheckpointStore()
+                if receipt_row is not None:
+                    receipt = _receipt_from_row(receipt_row)
+                    helper._deferred_receipts[handle.key] = receipt  # type: ignore[attr-defined]
+                row = self._conn.execute(_SELECT_CHECKPOINT + " WHERE checkpoint_key = ?", (handle.checkpoint_key,)).fetchone()
+                if row is not None:
+                    current = _checkpoint_from_row(row)
+                    helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
+                decision = helper.resolve_deferred(handle, result)
+                if decision.kind == "replayed" or decision.kind in {"not_admitted", "reconciliation_required"}:
+                    self._conn.rollback()
+                    return decision
+                if row is None:
+                    self._conn.rollback()
+                    return decision
+                updated = helper._store[handle.checkpoint_key]  # type: ignore[attr-defined]
+                current_revision = current.revision  # type: ignore[union-attr]
+                self._write_checkpoint_tx(updated, expected_revision=current_revision, claim_token=None)
+                receipt = decision.receipt
+                assert receipt is not None
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO deferred_resolution_receipts ("
+                    "handle_key, checkpoint_key, handle, result, result_digest, "
+                    "event_id, event_payload_digest, receipt_status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        receipt.handle.key,
+                        receipt.handle.checkpoint_key,
+                        _json_dump(receipt.handle.to_dict()),
+                        _json_dump(receipt.result.to_dict()),
+                        receipt.result_digest,
+                        receipt.event_id,
+                        receipt.event_payload_digest,
+                        receipt.receipt_status,
+                    ),
+                )
+                self._conn.commit()
+                return decision
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def accept_deferred_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        decisions: list[Any],
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool:
+        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    _SELECT_CHECKPOINT + " WHERE checkpoint_key = ?", (checkpoint.checkpoint_key,)
+                ).fetchone()
+                if row is None:
+                    self._conn.rollback()
+                    return False
+                current = _checkpoint_from_row(row)
+                helper = InMemoryCheckpointStore()
+                helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
+                if not helper.accept_deferred_batch(
+                    current,
+                    decisions=decisions,
+                    claim_token=claim_token,
+                    expected_revision=expected_revision,
+                    claimed_cycle=claimed_cycle,
+                ):
+                    self._conn.rollback()
+                    return False
+                updated = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
+                if updated.revision == current.revision:
+                    # Exact repeated accept_deferred decisions are already
+                    # durable replays; no checkpoint write or revision bump.
+                    self._conn.rollback()
+                    return True
+                self._write_checkpoint_tx(updated, expected_revision=expected_revision, claim_token=claim_token)
+                self._conn.commit()
+                return True
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def _write_checkpoint_tx(self, checkpoint: Checkpoint, *, expected_revision: int, claim_token: str | None) -> None:
+        row = dict(zip(_COLUMNS, _checkpoint_row(checkpoint), strict=True))
+        where = "checkpoint_key = ? AND revision = ?"
+        params: tuple[Any, ...] = (checkpoint.checkpoint_key, expected_revision)
+        if claim_token is not None:
+            where += " AND claim_token = ?"
+            params += (claim_token,)
+        else:
+            where += " AND claim_token IS NULL"
+        cursor = self._conn.execute(
+            "UPDATE checkpoints SET "
+            + ", ".join(f"{column} = ?" for column in _COLUMNS if column != "checkpoint_key")
+            + " WHERE "
+            + where,
+            tuple(row[column] for column in _COLUMNS if column != "checkpoint_key") + params,
+        )
+        if cursor.rowcount != 1:
+            raise CheckpointConflictError("checkpoint revision conflict")
 
     def close(self) -> None:
         with self._lock:
@@ -459,7 +681,7 @@ class SqliteCheckpointStore:
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v5'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v7'),
     run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v5'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,
@@ -491,11 +713,29 @@ CREATE TABLE IF NOT EXISTS checkpoints (
         (claim_token IS NOT NULL AND claimed_cycle IS NOT NULL AND lease_expires_at_ms IS NOT NULL)
     ),
     CHECK (claim_token IS NULL OR claimed_cycle = cycle_index + 1),
-    CHECK (terminal_result IS NULL OR claim_token IS NULL)
+    CHECK (terminal_result IS NULL OR claim_token IS NULL),
+    CHECK (status <> 'deferred' OR (claim_token IS NULL AND claimed_cycle IS NULL AND lease_expires_at_ms IS NULL)),
+    CHECK (status <> 'deferred' OR tool_journal <> '[]')
 )
 """
 _CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS checkpoints_status_idx ON checkpoints(status)
+"""
+_CREATE_RECEIPTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS deferred_resolution_receipts (
+    handle_key TEXT PRIMARY KEY,
+    checkpoint_key TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    result TEXT NOT NULL,
+    result_digest TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_payload_digest TEXT NOT NULL,
+    receipt_status TEXT NOT NULL CHECK (receipt_status IN ('succeeded', 'failed')),
+    FOREIGN KEY (checkpoint_key) REFERENCES checkpoints(checkpoint_key) ON DELETE CASCADE
+)
+"""
+_CREATE_RECEIPTS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS deferred_receipts_checkpoint_idx ON deferred_resolution_receipts(checkpoint_key)
 """
 
 
@@ -665,4 +905,34 @@ def _json_load(value: object, field_name: str) -> Any:
     try:
         return _strict_json_loads(str(value))
     except (json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(f"invalid checkpoint v5 {field_name} JSON") from exc
+        raise ValueError(f"invalid checkpoint v7 {field_name} JSON") from exc
+
+
+def _receipt_from_row(row: tuple[object, ...]) -> DeferredResolutionReceipt:
+    values = dict(
+        zip(
+            (
+                "handle_key",
+                "checkpoint_key",
+                "handle",
+                "result",
+                "result_digest",
+                "event_id",
+                "event_payload_digest",
+                "receipt_status",
+            ),
+            row,
+            strict=True,
+        )
+    )
+    return DeferredResolutionReceipt.from_dict(
+        {
+            "handle_key": values["handle_key"],
+            "handle": _json_load(values["handle"], "deferred receipt handle"),
+            "result": _json_load(values["result"], "deferred receipt result"),
+            "result_digest": values["result_digest"],
+            "event_id": values["event_id"],
+            "event_payload_digest": values["event_payload_digest"],
+            "receipt_status": values["receipt_status"],
+        }
+    )

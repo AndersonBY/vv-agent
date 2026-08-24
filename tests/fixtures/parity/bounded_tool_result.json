@@ -1,5 +1,5 @@
 {
-  "schema_version": "vv-agent.tool-execution-result.v2",
+  "schema_version": "vv-agent.tool-execution-result.v4",
   "result_contract": {
     "required_fields": [
       "tool_call_id",
@@ -23,6 +23,15 @@
     "optional_fields_reject_null": true,
     "unknown_fields": "reject",
     "content": "bounded_model_visible_text",
+    "status_values": [
+      "SUCCESS",
+      "ERROR",
+      "WAIT_RESPONSE",
+      "RUNNING",
+      "PENDING_COMPRESS"
+    ],
+    "deferred_representation": "ToolCallOutcome.Deferred(handle)",
+    "completed_never_accepts_deferred": true,
     "metadata_forbidden_large_keys": [
       "content",
       "instructions",

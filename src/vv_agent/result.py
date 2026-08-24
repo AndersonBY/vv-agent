@@ -136,6 +136,10 @@ class RunResult:
         return self.raw_result.partial_output
 
     @property
+    def wait_reason(self) -> str | None:
+        return self.raw_result.wait_reason
+
+    @property
     def budget_usage(self) -> BudgetUsageSnapshot | None:
         return self.raw_result.budget_usage
 

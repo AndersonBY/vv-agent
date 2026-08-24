@@ -48,6 +48,14 @@ class InlineBackend:
                 shared_state=shared_state,
                 budget_snapshot_provider=(snapshot_provider if callable(snapshot_provider) else None),
             )
+            deferred_result = checkpoint_controller.deferred_pending_result(
+                messages=messages,
+                cycles=cycles,
+                shared_state=shared_state,
+                token_usage=_task_token_usage(ctx),
+            )
+            if deferred_result is not None:
+                return deferred_result
 
         for cycle_index in range(start_cycle, max_cycles + 1):
             if ctx is not None:

@@ -1,8 +1,8 @@
 {
   "contract": "checkpoint_codec",
-  "version": 5,
+  "version": 7,
   "discriminator": {
-    "required_value": "vv-agent.checkpoint.v5",
+    "required_value": "vv-agent.checkpoint.v7",
     "missing_or_unknown_error": "checkpoint_schema_unsupported"
   },
   "message_wire": {
@@ -11,8 +11,59 @@
     "artifact_ref_omitted_when_absent": true,
     "model_projection_strips_artifact_ref": true
   },
+  "deferred_receipt_index": {
+    "namespace": "deferred_resolution_receipts",
+    "checkpoint_field": null,
+    "independent": true,
+    "key": "sha256_rfc8785_canonical_exact_deferred_handle",
+    "bounded": false,
+    "lifecycle_bounded": true,
+    "bound_kind": "checkpoint_and_retained_terminal_lifecycle",
+    "fixed_cardinality_or_bytes_cap": false,
+    "arbitrary_cardinality": true,
+    "retained_with_checkpoint_and_terminal": true,
+    "cleanup_with_checkpoint": true,
+    "same_store_transaction": true,
+    "tombstone_fields": [
+      "handle_key",
+      "handle",
+      "result",
+      "result_digest",
+      "event_id",
+      "event_payload_digest",
+      "receipt_status"
+    ]
+  },
+  "event_outbox_contract": {
+    "bounded": true,
+    "bound_kind": "lifecycle_bounded",
+    "fixed_cardinality_or_bytes_cap": false,
+    "lifecycle_bounded_definition": "the outbox is bounded by the finite current lifecycle and is drained/retained with checkpoint lifecycle, not by an arbitrary entry or byte limit",
+    "batch_size_known_before_external_effect": true,
+    "preflight_before_first_external_tool_effect": true,
+    "preflight_reserves": [
+      "every possible started journal event in the current model-tool batch",
+      "every completed SUCCESS or ERROR event in that batch",
+      "every deferred admission event in that batch",
+      "every later deferred resolution completion event and lifecycle identity"
+    ],
+    "ordinary_and_deferred_tools": true,
+    "capacity_failure_after_external_effect": false,
+    "admission_or_resolution_rejects_for_capacity": false,
+    "storage_strategy": "reserve lifecycle outbox capacity before the first external tool effect; an equivalent independent outbox store may be used when it has no fixed cardinality or byte cap",
+    "negative_cases": [
+      {
+        "name": "outbox_full_after_started_effect",
+        "expected": "invalid_contract_behavior_no_post_effect_outbox_full"
+      },
+      {
+        "name": "deferred_resolution_capacity_rejected_after_provider_effect",
+        "expected": "invalid_contract_behavior_no_post_effect_outbox_full"
+      }
+    ]
+  },
   "canonical_checkpoint": {
-    "schema_version": "vv-agent.checkpoint.v5",
+    "schema_version": "vv-agent.checkpoint.v7",
     "run_definition_schema": "vv-agent.run-definition.v5",
     "run_definition": {
       "schema_version": "vv-agent.run-definition.v5",
@@ -204,10 +255,10 @@
     "event_outbox": [
       {
         "event_id": "evt_model_call_started_2",
-        "payload_digest": "dc31a9f274d5f52963b667bc5dd6006245beb226e8c10c96951438ddbef470b1",
+        "payload_digest": "b9da671a4f12d0053589a57b377b9c5670cbf5be28f55917402019ff0e24436e",
         "state": "pending",
         "event": {
-          "version": "v2",
+          "version": "v4",
           "type": "model_call_started",
           "event_id": "evt_model_call_started_2",
           "run_id": "run_01JZCHECKPOINT",
@@ -331,6 +382,13 @@
   "status_rules": {
     "reconciliation_required_requires_ambiguous_journal": true,
     "reconciliation_required_has_no_claim": true,
+    "deferred_requires_at_least_one_deferred_journal": true,
+    "deferred_has_no_claim": true,
+    "deferred_journal_handle_is_framework_identity_only": true,
+    "deferred_resolve_requires_definitive_tool_result": true,
+    "deferred_resolve_is_revision_cas": true,
+    "deferred_resolve_same_replay_is_idempotent": true,
+    "deferred_resolve_conflict_or_stale_is_rejected": true,
     "running_with_ambiguous_journal_requires_active_recovery_claim": true,
     "terminal_result_requires_no_active_journal_except_explicit_operator_abort": true,
     "operator_abort_terminal_preserves_ambiguous_journal_and_resume_observation": true,
@@ -356,7 +414,23 @@
     "receipt_replay_does_not_append_model_call_or_budget": true,
     "terminal_result_task_usage_model_calls_equal_checkpoint_ledger": true,
     "duplicate_event_id_error": "event_identity_conflict",
-    "invalid_error_code": "checkpoint_status_invalid"
+    "invalid_error_code": "checkpoint_status_invalid",
+    "deferred_receipt_index_independent": true,
+    "deferred_receipt_index_unbounded": true,
+    "deferred_receipt_index_same_store_transaction": true,
+    "deferred_receipt_index_survives_terminal_retention": true,
+    "deferred_receipt_index_cleanup_with_checkpoint": true,
+    "deferred_resolution_cas_updates_journal_receipt_index_event_barrier_and_revision": true,
+    "deferred_resolution_early_started_is_not_admitted_without_write": true,
+    "deferred_resolution_ambiguous_requires_reconciliation": true,
+    "deferred_resolution_returns_ready_or_waiting": true,
+    "event_outbox_bounded_by_lifecycle_not_fixed_cardinality_or_bytes": true,
+    "event_outbox_preflight_before_first_external_tool_effect": true,
+    "event_outbox_reserves_started_completed_deferred_and_resolution_lifecycle": true,
+    "event_outbox_has_no_post_effect_capacity_failure": true,
+    "deferred_success_and_failed_release_one_barrier_item": true,
+    "deferred_last_resolution_sets_unclaimed_running": true,
+    "deferred_not_claimable": true
   },
   "status_cases": [
     {
@@ -397,6 +471,57 @@
         }
       },
       "error_code": "checkpoint_status_invalid"
+    },
+    {
+      "name": "deferred_status_requires_deferred_journal",
+      "fixture": "deferred_tool.json",
+      "case": "deferred_without_journal_is_invalid",
+      "error_code": "checkpoint_status_invalid"
+    },
+    {
+      "name": "deferred_status_with_claim_is_invalid",
+      "fixture": "deferred_tool.json",
+      "case": "deferred_checkpoint_with_claim_is_invalid",
+      "error_code": "checkpoint_status_invalid"
+    }
+  ],
+  "deferred_cases": [
+    {
+      "name": "deferred_checkpoint_releases_claim",
+      "source": "deferred_tool.json",
+      "status": "deferred",
+      "journal_state": "deferred",
+      "claim_token": null,
+      "claimed_cycle": null,
+      "lease_expires_at_ms": null,
+      "event_outbox_types": [
+        "tool_call_deferred"
+      ],
+      "cycle_commit_blocked": true,
+      "next_model_call_blocked": true,
+      "deferred_receipt_index": "independent_store_namespace"
+    },
+    {
+      "name": "deferred_checkpoint_releases_claim_with_claim_mutation",
+      "source": "deferred_tool.json",
+      "mutation": {
+        "claim_token": "owner",
+        "claimed_cycle": 2,
+        "lease_expires_at_ms": 600
+      },
+      "error_code": "checkpoint_status_invalid"
+    },
+    {
+      "name": "resolved_last_deferred_returns_to_running",
+      "source": "deferred_tool.json",
+      "operation": "resolve_deferred",
+      "expected": {
+        "status": "running",
+        "journal_state": "succeeded",
+        "claim_token": null,
+        "tool_result_order": "original_tool_call_order",
+        "resolution_decision": "applied_ready"
+      }
     }
   ],
   "run_definition_schema_rules": {
@@ -580,7 +705,7 @@
     {
       "name": "minimal_running",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -682,7 +807,7 @@
     {
       "name": "reconciliation_required_retains_ambiguous_journal",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -803,7 +928,7 @@
     {
       "name": "claimed_active_cycle",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -940,10 +1065,10 @@
         "event_outbox": [
           {
             "event_id": "evt_model_call_started_2",
-            "payload_digest": "dc31a9f274d5f52963b667bc5dd6006245beb226e8c10c96951438ddbef470b1",
+            "payload_digest": "b9da671a4f12d0053589a57b377b9c5670cbf5be28f55917402019ff0e24436e",
             "state": "pending",
             "event": {
-              "version": "v2",
+              "version": "v4",
               "type": "model_call_started",
               "event_id": "evt_model_call_started_2",
               "run_id": "run_01JZCHECKPOINT",
@@ -1061,7 +1186,7 @@
     {
       "name": "acknowledged_terminal_is_retained",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1196,7 +1321,7 @@
     {
       "name": "unknown_optional_extension_is_preserved",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1339,7 +1464,7 @@
     {
       "name": "blank_checkpoint_key",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1442,7 +1567,7 @@
     {
       "name": "bad_definition_digest",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1545,7 +1670,7 @@
     {
       "name": "zero_resume_attempt",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1648,7 +1773,7 @@
     {
       "name": "partial_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1751,7 +1876,7 @@
     {
       "name": "claimed_cycle_not_next",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1854,7 +1979,7 @@
     {
       "name": "terminal_with_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1990,7 +2115,7 @@
     {
       "name": "journal_cycle_not_active",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2109,7 +2234,7 @@
     {
       "name": "unknown_required_extension",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2221,7 +2346,7 @@
     {
       "name": "invalid_extension_namespace",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2330,7 +2455,7 @@
     {
       "name": "unknown_top_level_is_rejected",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v5",
+        "schema_version": "vv-agent.checkpoint.v7",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",

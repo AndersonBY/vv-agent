@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Any, cast
 
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalProvider, ApprovalRequest, bind_request_cancellation
+from vv_agent.deferred import ToolCallOutcome
 from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
@@ -75,7 +76,7 @@ class ToolOrchestrator:
         event_sink: ToolEventSink | None = None,
         _precomputed_result: ToolExecutionResult | None = None,
         _result_finalizer: ToolResultFinalizer | None = None,
-    ) -> ToolExecutionResult:
+    ) -> ToolExecutionResult | ToolCallOutcome:
         arguments, parse_error = _parse_arguments(call.id, call.arguments)
         if parse_error is not None:
             return parse_error
@@ -164,6 +165,16 @@ class ToolOrchestrator:
                     error_code="tool_execution_failed",
                 )
 
+        # Deferred is a framework outcome, not a ToolExecutionResult.  Do not
+        # run ordinary result hooks or emit a completed event: admission owns
+        # the deferred lifecycle event and will persist it atomically with the
+        # batch journal/barrier.
+        if isinstance(result, ToolCallOutcome):
+            if result.kind == "deferred":
+                return result
+            assert result.result is not None
+            result = result.result
+
         self._capture_execution_duration(call_context)
 
         if _result_finalizer is not None:
@@ -175,7 +186,22 @@ class ToolOrchestrator:
         if result.directive == ToolDirective.WAIT_USER and result.status_code == ToolResultStatus.SUCCESS:
             result.status_code = ToolResultStatus.WAIT_RESPONSE
 
-        self._emit_completed(normalized_call, result=result, context=call_context, event_sink=event_sink)
+        # For a checkpointed external invocation, the admission CAS owns the
+        # durable completed lifecycle event.  Emitting here as well would
+        # produce a second, non-stable completion event before the batch
+        # barrier is committed.  Replay/pre-dispatch results still emit their
+        # ordinary non-effect completion event because they never crossed the
+        # started boundary.
+        durable_started = call_context.metadata.get(_TOOL_DISPATCH_STARTED_METADATA_KEY) is True and (
+            call_context.metadata.get("_vv_agent_checkpoint_controller") is not None
+            or getattr(call_context.ctx, "metadata", {}).get("_vv_agent_checkpoint_controller") is not None
+        )
+        admission_owned_completion = durable_started and result.status_code in {
+            ToolResultStatus.SUCCESS,
+            ToolResultStatus.ERROR,
+        }
+        if not admission_owned_completion:
+            self._emit_completed(normalized_call, result=result, context=call_context, event_sink=event_sink)
         return result
 
     @staticmethod

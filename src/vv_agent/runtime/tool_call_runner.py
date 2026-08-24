@@ -6,8 +6,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from vv_agent.checkpoint import ToolIdempotency
+from vv_agent.checkpoint import CheckpointError, OperationState, ToolIdempotency
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
+from vv_agent.deferred import ToolCallOutcome
 from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY
 from vv_agent.result import _PendingToolApproval
 from vv_agent.runtime.cancellation import CancelledError
@@ -40,6 +41,7 @@ class ToolRunOutcome:
     completion_reason: CompletionReason | None = None
     completion_tool_name: str | None = None
     interruption_messages: list[Message] = field(default_factory=list)
+    deferred_outcomes: list[tuple[ToolCall, ToolCallOutcome]] = field(default_factory=list)
 
 
 class _ConfiguredSubTaskCancelledError(CancelledError):
@@ -70,8 +72,37 @@ class ToolCallRunner:
         completion_tool_name: str | None = None
         interruption_messages: list[Message] = []
         image_notifications: list[Message] = []
+        deferred_outcomes: list[tuple[ToolCall, ToolCallOutcome]] = []
+        checkpointed_calls: list[tuple[ToolCall, ToolCallOutcome]] = []
         planned_tool_names = cycle_record._planned_tool_names
         allowed_tool_names = set(plan_tool_names(task) if planned_tool_names is None else planned_tool_names)
+
+        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
+        if isinstance(checkpoint_controller, CheckpointResumeController) and tool_calls:
+            # Claim first, then prove the complete lifecycle outbox is
+            # writable before the first provider handler can run. A bounded
+            # or unavailable store may reject this preflight; no external
+            # tool effect is attempted after rejection.
+            checkpoint_controller._ensure_claim(context.cycle_index)
+            checkpoint = checkpoint_controller._require_checkpoint()
+            try:
+                preflighted = checkpoint_controller.store.preflight_tool_batch(
+                    checkpoint,
+                    tool_call_count=len(tool_calls),
+                    expected_revision=checkpoint.revision,
+                    claim_token=checkpoint.claim_token or "",
+                    claimed_cycle=checkpoint.claimed_cycle or context.cycle_index,
+                )
+            except Exception as exc:
+                raise CheckpointError(
+                    f"checkpoint outbox preflight failed: {exc}",
+                    code="outbox_preflight_contract_invalid",
+                ) from exc
+            if not preflighted:
+                raise CheckpointError(
+                    "checkpoint outbox preflight failed before tool effects",
+                    code="outbox_preflight_contract_invalid",
+                )
 
         for index, call in enumerate(tool_calls):
             if ctx is not None:
@@ -124,6 +155,7 @@ class ToolCallRunner:
                 metadata={
                     **context.metadata,
                     _TOOL_DISPATCH_CALLBACK_METADATA_KEY: mark_started,
+                    "_vv_agent_checkpoint_plan": checkpoint_plan,
                 },
             )
             replay_result = checkpoint_plan.replay_result if checkpoint_plan is not None else None
@@ -195,7 +227,7 @@ class ToolCallRunner:
                 return final_result
 
             event_sink = ctx.event_handler if ctx is not None else None
-            result = self.tool_orchestrator.run_one(
+            raw_result = self.tool_orchestrator.run_one(
                 patched_call,
                 context=call_context,
                 allowed_tool_names=allowed_tool_names,
@@ -203,12 +235,38 @@ class ToolCallRunner:
                 _precomputed_result=precomputed_result,
                 _result_finalizer=finalize_result,
             )
+            outcome = raw_result if isinstance(raw_result, ToolCallOutcome) else ToolCallOutcome.Completed(raw_result)
             if isinstance(checkpoint_controller, CheckpointResumeController):
+                checkpointed_calls.append((patched_call, outcome))
+            if outcome.kind == "deferred":
+                deferred_outcomes.append((patched_call, outcome))
+                # A deferred invocation has no model-visible tool message;
+                # admission persists its handle and lifecycle event later.
+                continue
+            assert outcome.result is not None
+            result = outcome.result
+            if (
+                isinstance(checkpoint_controller, CheckpointResumeController)
+                and result.status_code not in {ToolResultStatus.SUCCESS, ToolResultStatus.ERROR}
+                and checkpoint_controller._find_tool_call(
+                    cycle_index=context.cycle_index,
+                    tool_call_id=patched_call.id,
+                )
+                is not None
+            ):
+                # WAIT_RESPONSE/RUNNING/PENDING_COMPRESS are not definitive
+                # deferred-resolution receipts.  They remain ordinary
+                # framework outcomes (for example ask_user) and must be
+                # finalized by the existing tool lifecycle rather than sent
+                # through admit_deferred_batch, which intentionally accepts
+                # only SUCCESS/ERROR completed receipts.
                 checkpoint_controller.finish_tool(
                     cycle_index=context.cycle_index,
                     call=patched_call,
                     result=result,
                 )
+            if not isinstance(checkpoint_controller, CheckpointResumeController):
+                pass
 
             cycle_record.tool_results.append(result)
             messages.append(self._tool_result_message(result))
@@ -269,11 +327,67 @@ class ToolCallRunner:
         if image_notifications:
             messages.extend(image_notifications)
 
+        if isinstance(
+            ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None, CheckpointResumeController
+        ):
+            assert ctx is not None
+            checkpoint_controller = ctx.metadata["_vv_agent_checkpoint_controller"]
+            admission_batch: list[tuple[ToolCall, ToolCallOutcome]] = []
+            for completed_call, completed_outcome in checkpointed_calls:
+                entry = checkpoint_controller._find_tool_call(
+                    cycle_index=context.cycle_index,
+                    tool_call_id=completed_call.id,
+                )
+                if completed_outcome.kind == "deferred":
+                    # A deferred result is valid only for a started durable
+                    # operation.  Admission performs the final exact-state
+                    # check and all-or-none CAS.
+                    admission_batch.append((completed_call, completed_outcome))
+                elif (
+                    entry is not None
+                    and entry.state is OperationState.STARTED
+                    and completed_outcome.result is not None
+                    and completed_outcome.result.status_code in {ToolResultStatus.SUCCESS, ToolResultStatus.ERROR}
+                ):
+                    admission_batch.append((completed_call, completed_outcome))
+                else:
+                    # Replay and pre-dispatch short-circuit results have no
+                    # external effect and therefore do not belong in the
+                    # started batch admission CAS.
+                    assert completed_outcome.result is not None
+                    checkpoint_controller.finish_tool(
+                        cycle_index=context.cycle_index,
+                        call=completed_call,
+                        result=completed_outcome.result,
+                    )
+            if admission_batch:
+                admitted = checkpoint_controller.store.admit_deferred_batch(
+                    checkpoint_controller._require_checkpoint(),
+                    outcomes=admission_batch,
+                    claim_token=checkpoint_controller._require_checkpoint().claim_token or "",
+                    expected_revision=checkpoint_controller._require_checkpoint().revision,
+                    claimed_cycle=checkpoint_controller._require_checkpoint().claimed_cycle or context.cycle_index,
+                )
+                if not admitted:
+                    raise RuntimeError("checkpoint_store_conflict: deferred batch admission failed")
+                refreshed = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+                if refreshed is None:
+                    raise RuntimeError("checkpoint_store_conflict: deferred batch disappeared after admission")
+                checkpoint_controller.checkpoint = refreshed
+                checkpoint_controller._owned_claim_token = None
+                checkpoint_controller._active_claim_mode = None
+                checkpoint_controller._stop_heartbeat()
+                # Admission owns the durable lifecycle event write; the
+                # controller still owns delivery to the configured event sink
+                # and records delivery cursors in a follow-up CAS.
+                checkpoint_controller._deliver_pending_outbox()
+
         return ToolRunOutcome(
             directive_result=latest_directive_result,
             completion_reason=completion_reason,
             completion_tool_name=completion_tool_name,
             interruption_messages=interruption_messages,
+            deferred_outcomes=deferred_outcomes,
         )
 
     @staticmethod

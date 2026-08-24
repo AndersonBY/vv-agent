@@ -1,8 +1,9 @@
 PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v5'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v7'),
     run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v5'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,
@@ -28,6 +29,8 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     lease_expires_at_ms INTEGER,
     terminal_result TEXT,
     terminal_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (terminal_acknowledged IN (0, 1)),
+    CHECK (status <> 'deferred' OR (claim_token IS NULL AND claimed_cycle IS NULL AND lease_expires_at_ms IS NULL)),
+    CHECK (status <> 'deferred' OR tool_journal <> '[]'),
     CHECK (
         (claim_token IS NULL AND claimed_cycle IS NULL AND lease_expires_at_ms IS NULL)
         OR
@@ -39,3 +42,18 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 
 CREATE INDEX IF NOT EXISTS checkpoints_status_idx
     ON checkpoints(status);
+
+CREATE TABLE IF NOT EXISTS deferred_resolution_receipts (
+    handle_key TEXT PRIMARY KEY,
+    checkpoint_key TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    result TEXT NOT NULL,
+    result_digest TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_payload_digest TEXT NOT NULL,
+    receipt_status TEXT NOT NULL CHECK (receipt_status IN ('succeeded', 'failed')),
+    FOREIGN KEY (checkpoint_key) REFERENCES checkpoints(checkpoint_key) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS deferred_receipts_checkpoint_idx
+    ON deferred_resolution_receipts(checkpoint_key);

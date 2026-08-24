@@ -18,6 +18,7 @@ from vv_agent.events import (
     RunFailedEvent,
     RunStartedEvent,
     ToolCallCompletedEvent,
+    ToolCallDeferredEvent,
     ToolCallPlannedEvent,
     ToolCallStartedEvent,
 )
@@ -163,6 +164,11 @@ def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProje
             payload=payload,
         )
         return _projection(item, "item/completed")
+    if isinstance(event, ToolCallDeferredEvent):
+        # Admission/resolution lifecycle is durable framework state; it is
+        # deliberately not a model-visible tool result or a completed App
+        # Server tool item.  The existing started item remains replayable.
+        return ItemProjection()
     if isinstance(event, ApprovalRequestedEvent):
         item = _item(
             event,

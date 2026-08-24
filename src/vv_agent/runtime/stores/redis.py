@@ -12,6 +12,7 @@ from dataclasses import replace
 from typing import Any
 
 from vv_agent.checkpoint import EventCursor, canonical_json_bytes
+from vv_agent.deferred import DeferredResolutionReceipt, DeferredResolveDecision, DeferredToolHandle
 from vv_agent.runtime.checkpoint_codec import (
     _strict_json_loads,
     checkpoint_from_dict,
@@ -34,6 +35,8 @@ from vv_agent.runtime.state import (
 from vv_agent.types import AgentStatus
 
 _KEY_PREFIX = "vv-agent:checkpoint:"
+_DEFERRED_RECEIPT_PREFIX = "vv-agent:deferred-receipt:"
+_DEFERRED_RECEIPT_SET_PREFIX = "vv-agent:deferred-receipts-by-checkpoint:"
 _IO_TIMEOUT_SECONDS = 1.0
 _TRANSACTION_MAX_ATTEMPTS = 8
 
@@ -56,7 +59,7 @@ class RedisCheckpointStore:
 
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
         if checkpoint.revision != 0 or checkpoint.resume_attempt != 1 or checkpoint.claim_token is not None:
-            raise ValueError("new checkpoint v5 records must be unclaimed at revision zero")
+            raise ValueError("new checkpoint v7 records must be unclaimed at revision zero")
         data_key, _lease_key = self._keys(checkpoint.checkpoint_key)
         payload, _lease = _checkpoint_to_storage(checkpoint)
         return bool(self._client.set(data_key, payload, nx=True))
@@ -70,7 +73,7 @@ class RedisCheckpointStore:
             lease = self._client.get(lease_key)
             if self._client.get(data_key) == raw and self._client.get(lease_key) == lease:
                 return _checkpoint_from_storage(raw, lease)
-        raise RuntimeError("redis checkpoint v5 load could not obtain a stable snapshot")
+        raise RuntimeError("redis checkpoint v7 load could not obtain a stable snapshot")
 
     def claim_checkpoint(
         self,
@@ -116,7 +119,7 @@ class RedisCheckpointStore:
                     return checkpoint
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v5 claim exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v7 claim exceeded transaction retry limit")
 
     def progress_checkpoint(
         self,
@@ -159,7 +162,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v5 progress exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v7 progress exceeded transaction retry limit")
 
     def suspend_checkpoint(
         self,
@@ -205,7 +208,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v5 suspend exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v7 suspend exceeded transaction retry limit")
 
     def commit_checkpoint(
         self,
@@ -260,7 +263,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v5 commit exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v7 commit exceeded transaction retry limit")
 
     def finalize_checkpoint(
         self,
@@ -269,7 +272,7 @@ class RedisCheckpointStore:
         expected_revision: int,
     ) -> bool:
         if checkpoint.terminal_result is None or checkpoint.claim_token is not None:
-            raise ValueError("finalized checkpoint v5 must be terminal and unclaimed")
+            raise ValueError("finalized checkpoint v7 must be terminal and unclaimed")
         data_key, lease_key = self._keys(checkpoint.checkpoint_key)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -298,7 +301,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v5 finalization exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v7 finalization exceeded transaction retry limit")
 
     def finalize_claimed_checkpoint(
         self,
@@ -334,7 +337,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis claimed checkpoint v5 finalization exceeded transaction retry limit")
+        raise RuntimeError("redis claimed checkpoint v7 finalization exceeded transaction retry limit")
 
     def record_event_delivery(
         self,
@@ -376,7 +379,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v5 event delivery exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v7 event delivery exceeded transaction retry limit")
 
     def renew_checkpoint_claim(
         self,
@@ -412,7 +415,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v5 renewal exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v7 renewal exceeded transaction retry limit")
 
     def acknowledge_terminal(self, checkpoint_key: str, *, expected_revision: int) -> bool:
         data_key, lease_key = self._keys(checkpoint_key)
@@ -443,10 +446,237 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v5 acknowledgement exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v7 acknowledgement exceeded transaction retry limit")
 
     def delete_checkpoint(self, checkpoint_key: str) -> None:
-        self._client.delete(*self._keys(checkpoint_key))
+        data_key, lease_key = self._keys(checkpoint_key)
+        receipt_set_key = self._receipt_set_key(checkpoint_key)
+        with self._client.pipeline() as pipe:
+            for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
+                try:
+                    # The reverse index is watched together with the
+                    # checkpoint. A resolver that inserts a new receipt (and
+                    # sadds its index) therefore retries instead of creating
+                    # an orphan tombstone after this SMEMBERS snapshot.
+                    pipe.watch(data_key, lease_key, receipt_set_key)
+                    smembers = getattr(pipe, "smembers", None)
+                    if callable(smembers):
+                        receipt_keys = tuple(smembers(receipt_set_key))
+                    else:
+                        client_smembers = getattr(self._client, "smembers", None)
+                        receipt_keys = tuple(client_smembers(receipt_set_key)) if callable(client_smembers) else ()
+                    if not receipt_keys:
+                        # Legacy/test doubles may not expose the reverse set.
+                        # Keep the scan under WATCH; a concurrent modern
+                        # resolver mutating the set invalidates this attempt.
+                        scan_iter = getattr(self._client, "scan_iter", None)
+                        if callable(scan_iter):
+                            for candidate in scan_iter(f"{_DEFERRED_RECEIPT_PREFIX}*"):
+                                raw = self._client.get(candidate)
+                                if raw is None:
+                                    continue
+                                try:
+                                    if _receipt_from_storage(raw).handle.checkpoint_key == checkpoint_key:
+                                        receipt_keys = (*receipt_keys, candidate)
+                                except (TypeError, ValueError):
+                                    continue
+                    pipe.multi()
+                    for key in (data_key, lease_key, receipt_set_key, *map(str, receipt_keys)):
+                        pipe.delete(key)
+                    pipe.execute()
+                    return
+                except self._watch_error:
+                    continue
+        raise RuntimeError("redis checkpoint v7 cleanup exceeded transaction retry limit")
+
+    def preflight_tool_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        tool_call_count: int,
+        expected_revision: int,
+        claim_token: str,
+        claimed_cycle: int,
+    ) -> bool:
+        if isinstance(tool_call_count, bool) or not isinstance(tool_call_count, int) or tool_call_count <= 0:
+            return False
+        data_key, lease_key = self._keys(checkpoint.checkpoint_key)
+        with self._client.pipeline() as pipe:
+            for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
+                try:
+                    pipe.watch(data_key, lease_key)
+                    raw = pipe.get(data_key)
+                    if raw is None:
+                        pipe.unwatch()
+                        return False
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    if (
+                        current.revision != expected_revision
+                        or checkpoint.revision != expected_revision
+                        or current.claim_token != claim_token
+                        or current.claimed_cycle != claimed_cycle
+                        or current.status is not AgentStatus.RUNNING
+                        or current.terminal_result is not None
+                    ):
+                        pipe.unwatch()
+                        return False
+                    # Same-value transaction is the Redis writeability proof;
+                    # the lifecycle outbox has no fixed cardinality/byte cap.
+                    payload, _lease = _checkpoint_to_storage(current)
+                    pipe.multi()
+                    pipe.set(data_key, payload)
+                    if current.lease_expires_at_ms is not None:
+                        pipe.set(lease_key, str(current.lease_expires_at_ms))
+                    pipe.execute()
+                    return True
+                except self._watch_error:
+                    continue
+        raise RuntimeError("redis checkpoint v7 outbox preflight exceeded transaction retry limit")
+
+    def admit_deferred_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        outcomes: list[Any],
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool:
+        """Atomically persist one mixed model-tool batch and its barrier.
+
+        The Python helper is only used to prepare a fully validated snapshot;
+        Redis WATCH/MULTI performs the authoritative compare-and-swap.  There
+        is deliberately no bounded outbox or receipt cardinality check here.
+        """
+        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+
+        data_key, lease_key = self._keys(checkpoint.checkpoint_key)
+        with self._client.pipeline() as pipe:
+            for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
+                try:
+                    pipe.watch(data_key, lease_key)
+                    raw = pipe.get(data_key)
+                    if raw is None:
+                        pipe.unwatch()
+                        return False
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    helper = InMemoryCheckpointStore()
+                    helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
+                    if not helper.admit_deferred_batch(
+                        current,
+                        outcomes=outcomes,
+                        claim_token=claim_token,
+                        expected_revision=expected_revision,
+                        claimed_cycle=claimed_cycle,
+                    ):
+                        pipe.unwatch()
+                        return False
+                    updated = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
+                    payload, _lease = _checkpoint_to_storage(updated)
+                    pipe.multi()
+                    pipe.set(data_key, payload)
+                    if updated.claim_token is None:
+                        pipe.delete(lease_key)
+                    else:
+                        pipe.set(lease_key, str(updated.lease_expires_at_ms))
+                    pipe.execute()
+                    return True
+                except self._watch_error:
+                    continue
+        raise RuntimeError("redis checkpoint v7 deferred admission exceeded transaction retry limit")
+
+    def resolve_deferred(self, handle: DeferredToolHandle, result: Any) -> DeferredResolveDecision:
+        """Resolve one handle with a receipt-first Redis WATCH/MULTI CAS."""
+        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+
+        data_key, lease_key = self._keys(handle.checkpoint_key)
+        receipt_key = self._receipt_key(handle.key)
+        receipt_set_key = self._receipt_set_key(handle.checkpoint_key)
+        with self._client.pipeline() as pipe:
+            for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
+                try:
+                    pipe.watch(data_key, lease_key, receipt_key, receipt_set_key)
+                    raw_receipt = pipe.get(receipt_key)
+                    helper = InMemoryCheckpointStore()
+                    if raw_receipt is not None:
+                        receipt = _receipt_from_storage(raw_receipt)
+                        helper._deferred_receipts[handle.key] = receipt  # type: ignore[attr-defined]
+                    raw = pipe.get(data_key)
+                    if raw is not None:
+                        current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                        helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
+                    decision = helper.resolve_deferred(handle, result)
+                    if decision.kind in {"replayed", "not_admitted", "reconciliation_required"}:
+                        pipe.unwatch()
+                        return decision
+                    updated = helper._store[handle.checkpoint_key]  # type: ignore[attr-defined]
+                    receipt = decision.receipt
+                    assert receipt is not None
+                    payload, _lease = _checkpoint_to_storage(updated)
+                    receipt_payload = _receipt_to_storage(receipt)
+                    pipe.multi()
+                    pipe.set(data_key, payload)
+                    if updated.claim_token is None:
+                        pipe.delete(lease_key)
+                    else:
+                        pipe.set(lease_key, str(updated.lease_expires_at_ms))
+                    pipe.set(receipt_key, receipt_payload)
+                    sadd = getattr(pipe, "sadd", None)
+                    if callable(sadd):
+                        sadd(receipt_set_key, receipt_key)
+                    pipe.execute()
+                    return decision
+                except self._watch_error:
+                    continue
+        raise RuntimeError("redis checkpoint v7 deferred resolution exceeded transaction retry limit")
+
+    def accept_deferred_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        decisions: list[Any],
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool:
+        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+
+        data_key, lease_key = self._keys(checkpoint.checkpoint_key)
+        with self._client.pipeline() as pipe:
+            for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
+                try:
+                    pipe.watch(data_key, lease_key)
+                    raw = pipe.get(data_key)
+                    if raw is None:
+                        pipe.unwatch()
+                        return False
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    helper = InMemoryCheckpointStore()
+                    helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
+                    if not helper.accept_deferred_batch(
+                        current,
+                        decisions=decisions,
+                        claim_token=claim_token,
+                        expected_revision=expected_revision,
+                        claimed_cycle=claimed_cycle,
+                    ):
+                        pipe.unwatch()
+                        return False
+                    updated = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
+                    # Exact repeat acceptance is a no-write replay and does
+                    # not require another active recovery claim.
+                    if updated.revision == current.revision:
+                        pipe.unwatch()
+                        return True
+                    payload, _lease = _checkpoint_to_storage(updated)
+                    pipe.multi()
+                    pipe.set(data_key, payload)
+                    pipe.delete(lease_key)
+                    pipe.execute()
+                    return True
+                except self._watch_error:
+                    continue
+        raise RuntimeError("redis checkpoint v7 deferred reconciliation exceeded transaction retry limit")
 
     @staticmethod
     def data_key(checkpoint_key: str) -> str:
@@ -458,20 +688,43 @@ class RedisCheckpointStore:
         data_key = cls.data_key(checkpoint_key)
         return data_key, f"{data_key}:lease"
 
+    @staticmethod
+    def _receipt_key(handle_key: str) -> str:
+        return f"{_DEFERRED_RECEIPT_PREFIX}{handle_key}"
+
+    @staticmethod
+    def _receipt_set_key(checkpoint_key: str) -> str:
+        digest = hashlib.sha256(checkpoint_key.encode("utf-8")).hexdigest()
+        return f"{_DEFERRED_RECEIPT_SET_PREFIX}{digest}"
+
 
 def _checkpoint_to_storage(checkpoint: Checkpoint) -> tuple[str, int | None]:
     payload = checkpoint_to_dict(checkpoint)
     lease = payload.pop("lease_expires_at_ms")
-    return canonical_json_bytes(payload, "redis checkpoint v5").decode("utf-8"), lease
+    return canonical_json_bytes(payload, "redis checkpoint v7").decode("utf-8"), lease
+
+
+def _receipt_to_storage(receipt: DeferredResolutionReceipt) -> str:
+    return canonical_json_bytes(receipt.to_dict(), "redis deferred resolution receipt").decode("utf-8")
+
+
+def _receipt_from_storage(raw: str | bytes) -> DeferredResolutionReceipt:
+    try:
+        payload = _strict_json_loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("redis deferred resolution receipt is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("redis deferred resolution receipt must be an object")
+    return DeferredResolutionReceipt.from_dict(payload)
 
 
 def _checkpoint_from_storage(raw: str | bytes, raw_lease: object | None) -> Checkpoint:
     try:
         payload = _strict_json_loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("redis checkpoint v5 payload is invalid") from exc
+        raise ValueError("redis checkpoint v7 payload is invalid") from exc
     if not isinstance(payload, dict):
-        raise ValueError("redis checkpoint v5 payload must be an object")
+        raise ValueError("redis checkpoint v7 payload must be an object")
     payload["lease_expires_at_ms"] = _lease_from_storage(raw_lease)
     return checkpoint_from_dict(payload)
 
@@ -480,11 +733,11 @@ def _lease_from_storage(raw_lease: object | None) -> int | None:
     if raw_lease is None:
         return None
     if isinstance(raw_lease, bool) or not isinstance(raw_lease, str | bytes | int):
-        raise ValueError("redis checkpoint v5 lease must be an integer")
+        raise ValueError("redis checkpoint v7 lease must be an integer")
     try:
         return int(raw_lease)
     except ValueError as exc:
-        raise ValueError("redis checkpoint v5 lease must be an integer") from exc
+        raise ValueError("redis checkpoint v7 lease must be an integer") from exc
 
 
 def _redis_server_now_ms(client: Any) -> int:

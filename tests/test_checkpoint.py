@@ -4,7 +4,7 @@ import base64
 import hashlib
 import os
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from copy import deepcopy
 from pathlib import Path
 from threading import Barrier, Lock, Thread
@@ -96,6 +96,9 @@ class _FakeRedisPipeline:
     def get(self, key: str) -> str | None:
         return self._client.get(key)
 
+    def smembers(self, key: str) -> Set[str]:
+        return self._client.smembers(key)
+
     def multi(self) -> None:
         self._transaction = True
 
@@ -104,6 +107,12 @@ class _FakeRedisPipeline:
             self._commands.append(("set", key, value))
         else:
             self._client.set(key, value)
+
+    def sadd(self, key: str, value: str) -> None:
+        if self._transaction:
+            self._commands.append(("sadd", key, value))
+        else:
+            self._client.sadd(key, value)
 
     def delete(self, key: str) -> None:
         if self._transaction:
@@ -117,6 +126,9 @@ class _FakeRedisPipeline:
             if command == "set":
                 assert value is not None
                 results.append(self._client.set(key, value))
+            elif command == "sadd":
+                assert value is not None
+                results.append(self._client.sadd(key, value))
             else:
                 results.append(self._client.delete(key))
         self._transaction = False
@@ -125,8 +137,15 @@ class _FakeRedisPipeline:
 
 
 class _FakeRedisClient:
+    injected: bool
+    second_receipt_key: str
+    second_receipt_payload: str
+    receipt_set_key: str
+    winner_applied: bool
+
     def __init__(self) -> None:
         self._values: dict[str, str] = {}
+        self._sets: dict[str, set[str]] = {}
         self.server_now_ms = 0
 
     def set(self, key: str, value: str, *, nx: bool = False) -> bool:
@@ -138,8 +157,21 @@ class _FakeRedisClient:
     def get(self, key: str) -> str | None:
         return self._values.get(key)
 
+    def sadd(self, key: str, value: str) -> int:
+        members = self._sets.setdefault(key, set())
+        before = len(members)
+        members.add(value)
+        return int(len(members) != before)
+
+    def smembers(self, key: str) -> Set[str]:
+        return set(self._sets.get(key, set()))
+
     def delete(self, *keys: str) -> int:
-        return sum(int(self._values.pop(key, None) is not None) for key in keys)
+        deleted = 0
+        for key in keys:
+            deleted += int(self._values.pop(key, None) is not None)
+            deleted += int(self._sets.pop(key, None) is not None)
+        return deleted
 
     def pipeline(self) -> _FakeRedisPipeline:
         return _FakeRedisPipeline(self)
@@ -192,6 +224,51 @@ def _store(store_kind: str, tmp_path: Path, name: str) -> Any:
     if store_kind == "sqlite":
         return SqliteCheckpointStore(tmp_path / f"{name}.sqlite3")
     return _redis_store()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_tool_batch_outbox_preflight_proves_writable_before_provider_effect(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"outbox-preflight-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"outbox-preflight-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="claim-preflight",
+        lease_expires_at_ms=10_000,
+        now_ms=1,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+
+    assert store.preflight_tool_batch(
+        claimed,
+        tool_call_count=2,
+        expected_revision=claimed.revision,
+        claim_token="claim-preflight",
+        claimed_cycle=1,
+    )
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_tool_batch_outbox_preflight_rejects_without_active_claim(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"outbox-preflight-negative-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"outbox-preflight-negative-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+
+    assert not store.preflight_tool_batch(
+        checkpoint,
+        tool_call_count=1,
+        expected_revision=checkpoint.revision,
+        claim_token="missing-claim",
+        claimed_cycle=1,
+    )
 
 
 def _journal_case(name: str) -> dict[str, Any]:
@@ -1484,6 +1561,171 @@ def test_redis_key_vectors_match_contract() -> None:
             vector["data_key"],
             vector["lease_key"],
         )
+
+
+def test_redis_cleanup_retries_when_resolution_adds_receipt_after_smembers() -> None:
+    from vv_agent.checkpoint import canonical_json_sha256
+    from vv_agent.deferred import DeferredResolutionReceipt, DeferredToolHandle
+    from vv_agent.runtime.stores.redis import _receipt_to_storage
+    from vv_agent.types import ToolExecutionResult, ToolResultStatus
+
+    class RacingPipeline(_FakeRedisPipeline):
+        def execute(self) -> list[object]:
+            if not self._client.injected:
+                self._client.injected = True
+                self._client._values[self._client.second_receipt_key] = self._client.second_receipt_payload
+                self._client.sadd(self._client.receipt_set_key, self._client.second_receipt_key)
+                raise _FakeWatchError()
+            return super().execute()
+
+    class RacingClient(_FakeRedisClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.injected = False
+            self.second_receipt_key = ""
+            self.second_receipt_payload = ""
+            self.receipt_set_key = ""
+
+        def pipeline(self) -> RacingPipeline:
+            return RacingPipeline(self)
+
+    def receipt(operation_id: str) -> tuple[str, str, DeferredToolHandle]:
+        handle = DeferredToolHandle(
+            checkpoint_key="redis-cleanup-race",
+            operation_id=operation_id,
+            attempt=1,
+            request_digest=(operation_id.encode("ascii").hex() + "0" * 64)[:64],
+        )
+        result = ToolExecutionResult(
+            tool_call_id=operation_id,
+            content="accepted",
+            status_code=ToolResultStatus.SUCCESS,
+        )
+        value = DeferredResolutionReceipt(
+            handle=handle,
+            result=result,
+            result_digest=canonical_json_sha256(result.to_dict(), "deferred result"),
+            event_id=f"evt_{operation_id}",
+            event_payload_digest="a" * 64,
+            receipt_status="succeeded",
+        )
+        key = RedisCheckpointStore._receipt_key(handle.key)
+        return key, _receipt_to_storage(value), handle
+
+    client = RacingClient()
+    store = RedisCheckpointStore.__new__(RedisCheckpointStore)
+    store._watch_error = _FakeWatchError
+    store._client = client
+    first_key, first_payload, first_handle = receipt("op_first")
+    second_key, second_payload, _second_handle = receipt("op_second")
+    receipt_set_key = RedisCheckpointStore._receipt_set_key("redis-cleanup-race")
+    client._values[first_key] = first_payload
+    client.sadd(receipt_set_key, first_key)
+    client.second_receipt_key = second_key
+    client.second_receipt_payload = second_payload
+    client.receipt_set_key = receipt_set_key
+
+    store.delete_checkpoint("redis-cleanup-race")
+
+    assert first_key not in client._values
+    assert second_key not in client._values
+    assert receipt_set_key not in client._sets
+    assert first_handle.checkpoint_key == "redis-cleanup-race"
+
+
+def test_redis_resolution_retries_to_receipt_replay_after_concurrent_winner() -> None:
+    from vv_agent.deferred import DeferredToolHandle, ToolCallOutcome
+    from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+    from vv_agent.types import ToolCall, ToolExecutionResult, ToolResultStatus
+
+    handle = DeferredToolHandle(
+        checkpoint_key="redis-resolve-race",
+        operation_id="op_tool_cycle_1_call_resolve",
+        attempt=1,
+        request_digest="c" * 64,
+    )
+    memory = InMemoryCheckpointStore()
+    checkpoint = _minimal_checkpoint(key=handle.checkpoint_key)
+    assert memory.create_checkpoint(checkpoint)
+    claimed = memory.claim_checkpoint(
+        handle.checkpoint_key,
+        1,
+        claim_token="claim-resolve",
+        lease_expires_at_ms=10_000,
+        now_ms=1,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    claimed.tool_journal.append(
+        OperationJournalEntry(
+            kind=OperationKind.TOOL,
+            operation_id=handle.operation_id,
+            cycle_index=1,
+            attempt=1,
+            state=OperationState.STARTED,
+            request_digest=handle.request_digest,
+            tool_call_id="call-resolve",
+            tool_name="remote_write",
+            arguments={},
+            idempotency_key="idem-resolve",
+            idempotency_support=ToolIdempotency.SUPPORTED,
+        )
+    )
+    assert memory.progress_checkpoint(claimed, claim_token="claim-resolve", expected_revision=claimed.revision)
+    claimed.revision += 1
+    assert memory.admit_deferred_batch(
+        claimed,
+        outcomes=[
+            (
+                ToolCall(id="call-resolve", name="remote_write", arguments={}),
+                ToolCallOutcome.Deferred(handle),
+            )
+        ],
+        claim_token="claim-resolve",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    admitted = memory.load_checkpoint(handle.checkpoint_key)
+    assert admitted is not None
+
+    class RacingPipeline(_FakeRedisPipeline):
+        def execute(self) -> list[object]:
+            result = super().execute()
+            if not self._client.winner_applied:
+                self._client.winner_applied = True
+                raise _FakeWatchError()
+            return result
+
+    class RacingClient(_FakeRedisClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.winner_applied = False
+
+        def pipeline(self) -> RacingPipeline:
+            return RacingPipeline(self)
+
+    store = RedisCheckpointStore.__new__(RedisCheckpointStore)
+    store._watch_error = _FakeWatchError
+    store._client = RacingClient()
+    from vv_agent.runtime.stores.redis import _checkpoint_to_storage
+
+    raw, lease = _checkpoint_to_storage(admitted)
+    data_key, lease_key = store._keys(handle.checkpoint_key)
+    store._client.set(data_key, raw)
+    if lease is not None:
+        store._client.set(lease_key, str(lease))
+    result = ToolExecutionResult(
+        tool_call_id="call-resolve",
+        content="accepted",
+        status_code=ToolResultStatus.SUCCESS,
+    )
+
+    decision = store.resolve_deferred(handle, result)
+
+    assert decision.kind == "replayed"
+    assert decision.receipt is not None
+    assert store._client.winner_applied is True
+    assert store._client.smembers(store._receipt_set_key(handle.checkpoint_key)) == {store._receipt_key(handle.key)}
 
 
 def test_cross_runtime_sqlite_probe_from_environment() -> None:

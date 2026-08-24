@@ -336,12 +336,18 @@ class RunAdapter:
                 "runId": result.run_id,
                 "status": status,
             }
-            if result.status is not AgentStatus.RECONCILIATION_REQUIRED:
+            if result.status not in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED}:
                 payload["tokenUsage"] = task_token_usage_to_wire(result.token_usage)
-            if result.budget_usage is not None and result.status is not AgentStatus.RECONCILIATION_REQUIRED:
+            if result.budget_usage is not None and result.status not in {
+                AgentStatus.RECONCILIATION_REQUIRED,
+                AgentStatus.DEFERRED,
+            }:
                 budget_usage = result.budget_usage.to_dict()
                 payload["budgetUsage"] = budget_usage
-            if result.budget_exhaustion is not None and result.status is not AgentStatus.RECONCILIATION_REQUIRED:
+            if result.budget_exhaustion is not None and result.status not in {
+                AgentStatus.RECONCILIATION_REQUIRED,
+                AgentStatus.DEFERRED,
+            }:
                 budget_exhaustion = result.budget_exhaustion.to_dict()
                 payload["budgetExhaustion"] = budget_exhaustion
             if result.completion_reason is not None:
@@ -350,6 +356,10 @@ class RunAdapter:
                 payload["completionToolName"] = result.completion_tool_name
             if result.partial_output is not None:
                 payload["partialOutput"] = result.partial_output
+            if result.status is AgentStatus.DEFERRED:
+                payload["waitReason"] = result.wait_reason or "deferred_pending"
+            elif result.wait_reason is not None:
+                payload["waitReason"] = result.wait_reason
             if result.final_output is not None:
                 payload["finalOutput"] = result.final_output
             checkpoint = self._load_result_checkpoint(started, result)
@@ -405,7 +415,7 @@ class RunAdapter:
     def _turn_status(status: AgentStatus) -> str:
         if status is AgentStatus.COMPLETED:
             return "completed"
-        if status in {AgentStatus.WAIT_USER, AgentStatus.RECONCILIATION_REQUIRED}:
+        if status in {AgentStatus.WAIT_USER, AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED}:
             return "interrupted"
         return "failed"
 
@@ -479,6 +489,9 @@ class RunAdapter:
             completion_reason=(result.completion_reason.value if result.completion_reason is not None else None),
             completion_tool_name=result.completion_tool_name,
             partial_output=result.partial_output,
+            wait_reason=(
+                (result.wait_reason or "deferred_pending") if result.status is AgentStatus.DEFERRED else result.wait_reason
+            ),
             checkpoint=self._checkpoint_summary(checkpoint),
             interruption=(
                 self._interruption_summary(result.resume_observation) if result.resume_observation is not None else None

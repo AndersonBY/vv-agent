@@ -1,13 +1,33 @@
 {
   "contract": "checkpoint_store",
-  "version": 5,
-  "checkpoint_schema": "vv-agent.checkpoint.v5",
+  "version": 7,
+  "checkpoint_schema": "vv-agent.checkpoint.v7",
   "run_definition_schema": "vv-agent.run-definition.v5",
+  "deferred_contract": "deferred_tool.json",
+  "deferred_receipt_index": {
+    "independent": true,
+    "key": "sha256_rfc8785_canonical_exact_deferred_handle",
+    "required": true,
+    "bounded": false,
+    "lifecycle_bounded": true,
+    "bound_kind": "checkpoint_and_retained_terminal_lifecycle",
+    "fixed_cardinality_or_bytes_cap": false,
+    "arbitrary_cardinality": true,
+    "retained_with_checkpoint_and_terminal": true,
+    "deleted_with_explicit_checkpoint_cleanup": true,
+    "entry_shape_source": "deferred_tool.json#resolution.receipt_index.tombstone_entry",
+    "sqlite_table": "deferred_resolution_receipts",
+    "redis_key_prefix": "vv-agent:deferred-receipt:"
+  },
   "run_definition_storage": "credential_redacted_object_embedded_and_immutable_beside_matching_digest",
   "namespaces": {
     "sqlite_table": "checkpoints",
     "redis_key_prefix": "vv-agent:checkpoint:",
-    "redis_key_suffix": "lowercase_sha256_of_checkpoint_key"
+    "redis_key_suffix": "lowercase_sha256_of_checkpoint_key",
+    "deferred_receipt_sqlite_table": "deferred_resolution_receipts",
+    "deferred_receipt_redis_key_prefix": "vv-agent:deferred-receipt:",
+    "deferred_receipt_redis_key_suffix": "lowercase_sha256_of_rfc8785_exact_handle",
+    "deferred_receipt_checkpoint_set_prefix": "vv-agent:deferred-receipts-by-checkpoint:"
   },
   "redis_key_vectors": [
     {
@@ -21,6 +41,13 @@
       "checkpoint_key_utf8_sha256": "e6b1a2e6f36de6d5273e0ea9b2617ed36e49d0663668dd4cd30ea1091b0d974c",
       "data_key": "vv-agent:checkpoint:e6b1a2e6f36de6d5273e0ea9b2617ed36e49d0663668dd4cd30ea1091b0d974c",
       "lease_key": "vv-agent:checkpoint:e6b1a2e6f36de6d5273e0ea9b2617ed36e49d0663668dd4cd30ea1091b0d974c:lease"
+    }
+  ],
+  "deferred_receipt_key_vectors": [
+    {
+      "handle_key": "5be3ae2193b49698a007a5a0d332ea5481f38475ac97ec36efc0e017e5aee82a",
+      "data_key": "vv-agent:deferred-receipt:5be3ae2193b49698a007a5a0d332ea5481f38475ac97ec36efc0e017e5aee82a",
+      "checkpoint_set_key": "vv-agent:deferred-receipts-by-checkpoint:900c4d195b6e2d16f4ac0725d2306d5b9685397249d4581e107769f38cb068c7"
     }
   ],
   "operations": [
@@ -43,6 +70,18 @@
     {
       "name": "progress",
       "atomic": "compare_revision_and_claim_token_then_update_payload_and_revision_preserving_claim"
+    },
+    {
+      "name": "admit_deferred_batch",
+      "atomic": "compare revision claim and complete ordered batch outcomes then persist all journals events barrier and release claim once"
+    },
+    {
+      "name": "accept_deferred_batch",
+      "atomic": "CAS expected_revision plus active recovery claim token/cycle and exact current-batch decisions; persist every accepted journal entry, reconciliation audit, tool_call_deferred outbox event, barrier/status, and one claim release or write nothing"
+    },
+    {
+      "name": "resolve_deferred",
+      "atomic": "receipt-index-first internal revision CAS loop atomically persists journal index tombstone event barrier status and revision without claim"
     },
     {
       "name": "suspend",
@@ -70,7 +109,7 @@
     },
     {
       "name": "delete",
-      "atomic": "explicit_host_retention_cleanup"
+      "atomic": "explicit_host_retention_cleanup_deletes_checkpoint_and_all_handle_receipt_index_rows_together"
     }
   ],
   "revision_rules": {
@@ -87,6 +126,20 @@
     "heartbeat_requires_revision": false,
     "heartbeat_requires_claim_token": true,
     "progress_preserves_claim": true,
+    "admit_deferred_batch_releases_claim_atomically": true,
+    "admit_deferred_batch_requires_started_journal": true,
+    "resolve_deferred_requires_exact_handle": true,
+    "resolve_deferred_requires_definitive_result": true,
+    "resolve_deferred_same_replay_is_idempotent": true,
+    "resolve_deferred_early_started_is_retryable_not_admitted": true,
+    "resolve_deferred_early_started_writes_nothing": true,
+    "resolve_deferred_ambiguous_uses_reconciliation": true,
+    "resolve_deferred_conflict_error": "deferred_resolution_conflict",
+    "resolve_deferred_stale_error": "deferred_resolution_stale",
+    "resolve_deferred_claimed_error": "deferred_checkpoint_claimed",
+    "resolve_deferred_not_admitted_error": "deferred_resolution_not_admitted",
+    "resolve_deferred_does_not_claim_or_invoke_tool": true,
+    "deferred_batch_barrier_blocks_cycle_commit_and_model_call": true,
     "claim_modes": [
       "continue",
       "recovery"
@@ -104,6 +157,9 @@
     "claimed_finalize_clears_claim_atomically": true,
     "event_delivery_preserves_claim_and_terminal": true,
     "outbox_event_ids_unique": true,
+    "outbox_bounded_by_lifecycle_not_fixed_cardinality_or_bytes": true,
+    "outbox_preflight_before_first_external_tool_effect": true,
+    "outbox_no_post_effect_capacity_failure": true,
     "identical_event_enqueue_reuses_existing_entry": true,
     "conflicting_event_enqueue_error": "event_identity_conflict",
     "terminal_model_progress_atomically_updates_journal_ledger_budget_and_outbox": true,
@@ -115,15 +171,462 @@
     "receipt_replay_does_not_append_model_call_or_budget": true,
     "cycle_commit_preserves_model_call_ledger": true,
     "run_definition_and_digest_immutable_after_create": true,
-    "operator_abort_finalize_preserves_ambiguous_journal": true
+    "operator_abort_finalize_preserves_ambiguous_journal": true,
+    "admit_deferred_batch_all_or_none": true,
+    "admit_deferred_batch_one_revision_increment": true,
+    "admit_deferred_batch_one_claim_release": true,
+    "mixed_completed_and_deferred_batch_is_atomic": true,
+    "deferred_receipt_index_independent_from_checkpoint": true,
+    "deferred_receipt_index_unbounded_by_contract": true,
+    "deferred_receipt_index_retained_after_terminal": true,
+    "deferred_receipt_index_cleanup_shares_checkpoint_lifetime": true,
+    "deferred_receipt_index_write_is_same_transaction_as_resolution": true,
+    "resolve_deferred_internal_revision_retry": true,
+    "resolve_deferred_caller_does_not_pass_expected_revision": true,
+    "resolve_deferred_success_transition": [
+      "deferred",
+      "succeeded"
+    ],
+    "resolve_deferred_failed_transition": [
+      "deferred",
+      "failed"
+    ],
+    "deferred_status_not_claimable": true,
+    "claim_rejects_deferred_before_claim_token": true,
+    "accept_deferred_batch_requires_recovery_claim": true,
+    "accept_deferred_batch_all_or_none": true,
+    "accept_deferred_batch_one_revision_increment": true,
+    "accept_deferred_batch_one_claim_release": true
   },
+  "deferred_cases": [
+    {
+      "name": "admit_deferred_batch_mixed_outcomes_releases_claim_once",
+      "scenario_id": "deferred_batch_mixed_call_a_b_c.v1",
+      "source": "fixtures/deferred_tool.json#batch.example",
+      "operation": {
+        "kind": "admit_deferred_batch",
+        "expected_revision": 3,
+        "claim_token": "owner-b",
+        "operation_id": "op_tool_cycle_2_call_1",
+        "attempt": 1,
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "batch_tool_call_ids": [
+          "call_a",
+          "call_b",
+          "call_c"
+        ],
+        "outcomes": [
+          "deferred",
+          "completed",
+          "deferred"
+        ],
+        "completed_status_code": "SUCCESS"
+      },
+      "expected": {
+        "updated": true,
+        "revision": 4,
+        "status": "deferred",
+        "journal_state": "deferred",
+        "claim_token": null,
+        "claimed_cycle": null,
+        "lease_expires_at_ms": null,
+        "outbox_event_types": [
+          "tool_call_deferred",
+          "tool_call_completed",
+          "tool_call_deferred"
+        ],
+        "completed_journal_state": "succeeded",
+        "deferred_journal_count": 2,
+        "claim_release_count": 1,
+        "all_or_none": true
+      }
+    },
+    {
+      "name": "admit_deferred_batch_mixed_error_marks_failed_journal",
+      "scenario_id": "deferred_batch_mixed_error_call_a_b_c.v1",
+      "source": "fixtures/deferred_tool.json#batch.error_completed_batch",
+      "operation": {
+        "kind": "admit_deferred_batch",
+        "expected_revision": 3,
+        "claim_token": "owner-b",
+        "batch_tool_call_ids": [
+          "call_a",
+          "call_b",
+          "call_c"
+        ],
+        "outcomes": [
+          "deferred",
+          "completed(ERROR)",
+          "deferred"
+        ],
+        "completed_result": {
+          "tool_call_id": "call_b",
+          "content": "provider rejected",
+          "status_code": "ERROR",
+          "directive": "continue",
+          "error_code": "provider_rejected"
+        }
+      },
+      "expected": {
+        "updated": true,
+        "revision": 4,
+        "status": "deferred",
+        "completed_journal_state": "failed",
+        "completed_error_code": "provider_rejected",
+        "deferred_journal_count": 2,
+        "outbox_event_types": [
+          "tool_call_deferred",
+          "tool_call_completed",
+          "tool_call_deferred"
+        ],
+        "claim_release_count": 1,
+        "all_or_none": true
+      }
+    },
+    {
+      "name": "admit_deferred_stale_revision_rejected",
+      "operation": {
+        "kind": "admit_deferred_batch",
+        "expected_revision": 2,
+        "claim_token": "owner-b"
+      },
+      "expected": {
+        "updated": false,
+        "error": "checkpoint_revision_conflict",
+        "claim_released": false
+      }
+    },
+    {
+      "name": "resolve_deferred_call_b_first",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution",
+      "operation": {
+        "kind": "resolve_deferred",
+        "handle": {
+          "schema_version": "vv-agent.deferred-tool-handle.v2",
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_b",
+          "attempt": 1,
+          "request_digest": "16374bf58171146de4976fef70473c735f6f80fc62a9f512e6211822190fa92a"
+        },
+        "result": {
+          "tool_call_id": "call_b",
+          "content": "completed",
+          "status_code": "SUCCESS",
+          "directive": "continue"
+        }
+      },
+      "expected": {
+        "expected_revision": 5,
+        "revision": 6,
+        "status": "deferred",
+        "journal_state": "succeeded",
+        "barrier_remaining": [
+          "call_a"
+        ],
+        "claim_token": null,
+        "decision_kind": "applied_waiting",
+        "cycle_commit_before_all_resolved": false,
+        "next_model_call_before_all_resolved": false
+      }
+    },
+    {
+      "name": "resolve_deferred_call_a_last",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution",
+      "operation": {
+        "kind": "resolve_deferred",
+        "handle": {
+          "schema_version": "vv-agent.deferred-tool-handle.v2",
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_a",
+          "attempt": 1,
+          "request_digest": "c119e094e29e5fce8d38fb54e445ef059db6b5f440197095c9260bf1052b4bb0"
+        },
+        "result": {
+          "tool_call_id": "call_a",
+          "content": "accepted",
+          "status_code": "SUCCESS",
+          "directive": "continue"
+        }
+      },
+      "expected": {
+        "expected_revision": 6,
+        "revision": 7,
+        "status": "running",
+        "journal_state": "succeeded",
+        "barrier_remaining": [],
+        "claim_token": null,
+        "decision_kind": "applied_ready",
+        "merged_tool_result_order": [
+          "call_a",
+          "call_b"
+        ]
+      }
+    },
+    {
+      "name": "resolve_deferred_concurrent_loser_reloads_receipt",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution.concurrent_resolution",
+      "operation": {
+        "kind": "resolve_deferred",
+        "handle_ref": "call_a",
+        "result": "same canonical SUCCESS result",
+        "first_writer_revision": 7,
+        "loser_expected_revision": 6
+      },
+      "expected": {
+        "cas_winner": "call_a_last",
+        "loser_action": "reload_receipt_index_and_replay",
+        "decision_kind": "replayed",
+        "revision_increment": 0,
+        "checkpoint_unchanged": true,
+        "external_invocations": 0
+      }
+    },
+    {
+      "name": "resolve_deferred_started_before_batch_admission_is_not_admitted",
+      "scenario_id": "deferred_resolution_early_callback.v1",
+      "source": "fixtures/deferred_tool.json#resolution.early_callback",
+      "operation": {
+        "kind": "resolve_deferred",
+        "active_journal_state": "started",
+        "handle_ref": "exact_matching_handle",
+        "result": "definitive SUCCESS"
+      },
+      "expected": {
+        "updated": false,
+        "decision_kind": "not_admitted",
+        "retryable_error": "deferred_resolution_not_admitted",
+        "retryable": true,
+        "writes": [],
+        "host_must_durably_retain_and_retry": true
+      }
+    },
+    {
+      "name": "resolve_deferred_ambiguous_requires_reconciliation",
+      "scenario_id": "deferred_resolution_early_callback.v1",
+      "source": "fixtures/deferred_tool.json#resolution.early_callback",
+      "operation": {
+        "kind": "resolve_deferred",
+        "active_journal_state": "ambiguous",
+        "handle_ref": "exact_matching_handle",
+        "result": "definitive SUCCESS"
+      },
+      "expected": {
+        "updated": false,
+        "decision_kind": "reconciliation_required",
+        "writes": [],
+        "stale": false
+      }
+    },
+    {
+      "name": "resolve_deferred_claimed_checkpoint_is_typed_error",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution.cas.claimed_checkpoint",
+      "operation": {
+        "kind": "resolve_deferred",
+        "active_journal_state": "deferred",
+        "checkpoint_claim_token": "owner-b",
+        "handle_ref": "exact_matching_handle",
+        "result": "definitive SUCCESS"
+      },
+      "expected": {
+        "updated": false,
+        "error": "deferred_checkpoint_claimed",
+        "writes": [],
+        "decision_variant": false
+      }
+    },
+    {
+      "name": "resolve_deferred_true_mismatch_is_stale",
+      "scenario_id": "deferred_resolution_early_callback.v1",
+      "source": "fixtures/deferred_tool.json#resolution.early_callback",
+      "operation": {
+        "kind": "resolve_deferred",
+        "active_journal_state": "absent",
+        "handle_ref": "mismatched_handle",
+        "result": "definitive SUCCESS"
+      },
+      "expected": {
+        "updated": false,
+        "error": "deferred_resolution_stale",
+        "condition": "no_retained_receipt_and_no_active_matching_journal"
+      }
+    },
+    {
+      "name": "resolve_deferred_same_receipt_is_idempotent",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution.same_replay",
+      "expected": {
+        "first_revision_increment": 1,
+        "same_replay_revision_increment": 0,
+        "external_invocations": 0,
+        "status": "running",
+        "receipt_index": "unchanged_on_identical_replay"
+      }
+    },
+    {
+      "name": "resolve_deferred_conflict_and_stale_are_rejected",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution.concurrent_resolution",
+      "expected": {
+        "conflict_error": "deferred_resolution_conflict",
+        "stale_error": "deferred_resolution_stale",
+        "checkpoint_unchanged": true,
+        "receipt_checked_before_active_journal": true,
+        "stale_requires_no_retained_receipt_and_no_matching_active_journal": true
+      }
+    },
+    {
+      "name": "terminal_checkpoint_replays_retained_deferred_receipt",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution.receipt_index",
+      "initial": {
+        "revision": 12,
+        "status": "completed",
+        "claim_token": null,
+        "terminal_acknowledged": true,
+        "receipt_index": {
+          "namespace": "deferred_resolution_receipts",
+          "entries": [
+            {
+              "handle": {
+                "schema_version": "vv-agent.deferred-tool-handle.v2",
+                "checkpoint_key": "tenant-7/run-42",
+                "operation_id": "op_tool_cycle_2_call_a",
+                "attempt": 1,
+                "request_digest": "c119e094e29e5fce8d38fb54e445ef059db6b5f440197095c9260bf1052b4bb0"
+              },
+              "result": {
+                "tool_call_id": "call_a",
+                "content": "accepted",
+                "status_code": "SUCCESS",
+                "directive": "continue"
+              },
+              "result_digest": "e1d3c7718358362eb4c604562f9fa25a49b1c95e03e79602ca2a967d60e131c8",
+              "event_id": "evt_deferred_call_a_completed",
+              "event_payload_digest": "1e6ea40f88bd8a6c61d032f289202e3f1648347e553cab24ef8411de0424fbaf",
+              "receipt_status": "succeeded",
+              "handle_key": "5be3ae2193b49698a007a5a0d332ea5481f38475ac97ec36efc0e017e5aee82a"
+            }
+          ]
+        }
+      },
+      "operation": {
+        "kind": "resolve_deferred",
+        "handle": {
+          "schema_version": "vv-agent.deferred-tool-handle.v2",
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_a",
+          "attempt": 1,
+          "request_digest": "c119e094e29e5fce8d38fb54e445ef059db6b5f440197095c9260bf1052b4bb0"
+        },
+        "result": {
+          "tool_call_id": "call_a",
+          "content": "accepted",
+          "status_code": "SUCCESS",
+          "directive": "continue"
+        }
+      },
+      "expected": {
+        "updated": false,
+        "decision_kind": "replayed",
+        "receipt_present": true,
+        "revision_increment": 0,
+        "terminal_unchanged": true,
+        "external_invocations": 0
+      }
+    },
+    {
+      "name": "deferred_status_cannot_be_recovery_claimed",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#barrier",
+      "operation": {
+        "kind": "claim",
+        "status": "deferred"
+      },
+      "expected": {
+        "updated": false,
+        "error": "checkpoint_not_claimable"
+      }
+    },
+    {
+      "name": "accept_deferred_batch_requires_active_recovery_claim",
+      "scenario_id": "deferred_reconciliation_accept_call_a_call_c.v1",
+      "source": "fixtures/deferred_tool.json#reconciliation",
+      "operation": {
+        "kind": "accept_deferred_batch",
+        "claim_mode": "continue"
+      },
+      "expected": {
+        "updated": false,
+        "error": "reconciliation_required",
+        "external_invocations": 0
+      }
+    },
+    {
+      "name": "accept_deferred_batch_adopts_exact_handles_once",
+      "scenario_id": "deferred_reconciliation_accept_call_a_call_c.v1",
+      "source": "fixtures/deferred_tool.json#reconciliation",
+      "operation": {
+        "kind": "accept_deferred_batch",
+        "claim_mode": "recovery",
+        "expected_revision": 5,
+        "claim_token": "recovery-owner",
+        "claimed_cycle": 2,
+        "batch_tool_call_ids": [
+          "call_a",
+          "call_c"
+        ],
+        "decisions": [
+          {
+            "schema_version": "vv-agent.reconciliation-decision.v1",
+            "kind": "accept_deferred",
+            "handle": {
+              "schema_version": "vv-agent.deferred-tool-handle.v2",
+              "checkpoint_key": "tenant-7/run-42",
+              "operation_id": "op_tool_cycle_2_call_a",
+              "attempt": 1,
+              "request_digest": "c119e094e29e5fce8d38fb54e445ef059db6b5f440197095c9260bf1052b4bb0"
+            }
+          },
+          {
+            "schema_version": "vv-agent.reconciliation-decision.v1",
+            "kind": "accept_deferred",
+            "handle": {
+              "schema_version": "vv-agent.deferred-tool-handle.v2",
+              "checkpoint_key": "tenant-7/run-42",
+              "operation_id": "op_tool_cycle_2_call_c",
+              "attempt": 1,
+              "request_digest": "be3173e02fda4237aff0be569c6cfe76711b26a43571cebee2c5143af45cef6e"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "updated": true,
+        "revision_increment": 1,
+        "claim_release_count": 1,
+        "external_invocations": 0,
+        "event_types": [
+          "reconciliation_resolved",
+          "tool_call_deferred",
+          "reconciliation_resolved",
+          "tool_call_deferred"
+        ],
+        "status": "deferred",
+        "repeat_same_decision": "idempotent"
+      }
+    }
+  ],
   "event_payload_digest": {
     "canonicalization": "RFC 8785 JSON Canonicalization Scheme over the complete event object followed by lowercase SHA-256",
     "golden_cases": [
       {
         "name": "checkpoint_created_current_run_event",
         "event": {
-          "version": "v2",
+          "version": "v4",
           "type": "checkpoint_created",
           "event_id": "evt-1",
           "run_id": "run-1",
@@ -133,9 +636,9 @@
           "checkpoint_key": "checkpoint-1",
           "resume_attempt": 1
         },
-        "canonical_json_base64": "eyJjaGVja3BvaW50X2tleSI6ImNoZWNrcG9pbnQtMSIsImNyZWF0ZWRfYXQiOjEyMy40NTY3ODksImN5Y2xlX2luZGV4IjowLCJldmVudF9pZCI6ImV2dC0xIiwicmVzdW1lX2F0dGVtcHQiOjEsInJ1bl9pZCI6InJ1bi0xIiwidHJhY2VfaWQiOiJ0cmFjZS0xIiwidHlwZSI6ImNoZWNrcG9pbnRfY3JlYXRlZCIsInZlcnNpb24iOiJ2MiJ9",
+        "canonical_json_base64": "eyJjaGVja3BvaW50X2tleSI6ImNoZWNrcG9pbnQtMSIsImNyZWF0ZWRfYXQiOjEyMy40NTY3ODksImN5Y2xlX2luZGV4IjowLCJldmVudF9pZCI6ImV2dC0xIiwicmVzdW1lX2F0dGVtcHQiOjEsInJ1bl9pZCI6InJ1bi0xIiwidHJhY2VfaWQiOiJ0cmFjZS0xIiwidHlwZSI6ImNoZWNrcG9pbnRfY3JlYXRlZCIsInZlcnNpb24iOiJ2NCJ9",
         "canonical_json_utf8_bytes": 192,
-        "sha256": "a96e644b0d82bfa5afb6ec75dbd18f34486affdbc3f270cdb5efe25369b6bf22"
+        "sha256": "7336ffa4c280f7dab34297b1d3ac410ede79f360f537b117c6ee0777c43cb440"
       }
     ]
   },
@@ -833,7 +1336,7 @@
         "event_id": "evt-1",
         "payload_digest": "7c7fb5303556f5d2d0fa927a6c1e91a63c17384ad5426d2b8e9ad7dbdce2cd6d",
         "event": {
-          "version": "v2",
+          "version": "v4",
           "type": "checkpoint_created",
           "event_id": "evt-1",
           "run_id": "run-1",
@@ -864,7 +1367,7 @@
         "event_id": "evt-1",
         "payload_digest": "7c7fb5303556f5d2d0fa927a6c1e91a63c17384ad5426d2b8e9ad7dbdce2cd6d",
         "event": {
-          "version": "v2",
+          "version": "v4",
           "type": "checkpoint_created",
           "event_id": "evt-1",
           "run_id": "run-1",
@@ -896,7 +1399,7 @@
         "event_id": "evt-1",
         "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "event": {
-          "version": "v2",
+          "version": "v4",
           "type": "checkpoint_created",
           "event_id": "evt-1",
           "run_id": "run-1",

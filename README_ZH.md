@@ -7,7 +7,7 @@
 ## 安装
 
 当前包版本为 `0.11.0`。仓库 `HEAD` 和 Rust `vv-agent` crate 都锁定语言无关的
-Contract `6.1.0`，两边能力一致，只保留符合各自语言习惯的 API 写法。
+Contract `7.0.1`，两边能力一致，只保留符合各自语言习惯的 API 写法。
 
 ```bash
 python -m pip install "vv-agent==0.11.0"
@@ -50,10 +50,10 @@ python -m pip install "vv-agent==0.11.0"
   长度。内建工具与自定义工具的旧结果默认都可归档；只有完整内容已经写入不可变 artifact，
   且模型仍能调用 `read_file` 时，runtime 才会把旧结果替换为精简标记。模型只看到短预览和
   恢复路径，大小与哈希等完整性信息只保留在宿主侧。
-- 持久化执行统一使用 `vv-agent.checkpoint.v5`、
+- 持久化执行统一使用 `vv-agent.checkpoint.v7`、
   `vv-agent.run-definition.v5`、`vv-agent.distributed-run.v5` 和
   `vv-agent.distributed-worker-response.v3`，严格限定恢复与分布式 controller
-  边界。`RunEvent` 使用 wire version `v2`，SQLite session store 使用
+  边界。`RunEvent` 使用 wire version `v4`，SQLite session store 使用
   `PRAGMA user_version=2`。
 
 详细规则见[输出校验](docs/output-validation.md)和
@@ -193,7 +193,7 @@ runtime 事件入口只有强类型 `RunEvent`；任务无关的内部观测统�
 审批短路和未知工具只发出 planned 与 completed，不发 started。completed 事件包含
 `directive`、可空的
 `error_code`、`execution_started` 和可空的单调时钟 `duration_ms`。取消或进程退出可能
-留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v5 operation journal
+留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v7 operation journal
 为准。
 
 需要直接控制 cycle loop 的后端集成仍可使用底层 `AgentRuntime` API。

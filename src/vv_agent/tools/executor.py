@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
+from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.argument_validation import (
     assert_valid_tool_schema,
     close_object_schemas,
@@ -50,7 +51,7 @@ class ToolExecutor(Protocol):
 
     def openai_schema(self, context: ToolContext | None = None) -> dict[str, Any]: ...
 
-    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult: ...
+    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome: ...
 
     def requires_approval(self, context: ToolContext, arguments: dict[str, Any]) -> bool: ...
 
@@ -106,7 +107,7 @@ class FunctionToolExecutor:
     def spec(self, context: ToolContext | None = None) -> ToolSpec:
         del context
 
-        def handler(tool_context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
+        def handler(tool_context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult | ToolCallOutcome:
             call = ToolCall(id=tool_context.tool_call_id, name=self.name, arguments=dict(arguments))
             return self.execute(call, tool_context)
 
@@ -120,7 +121,7 @@ class FunctionToolExecutor:
         del context
         return self.tool.to_openai_schema()
 
-    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
+    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome:
         invalid_result = invalid_tool_arguments_result(
             tool_call_id=call.id,
             schema=self.params_json_schema,
@@ -141,7 +142,7 @@ class FunctionToolExecutor:
 @dataclass(slots=True)
 class RegistryToolExecutor:
     name: str
-    handler: Callable[[ToolContext, dict[str, Any]], ToolExecutionResult]
+    handler: Callable[[ToolContext, dict[str, Any]], ToolExecutionResult | ToolCallOutcome]
     schema: dict[str, Any] | None = None
     description: str = ""
     exposure: ToolExposure = ToolExposure.DIRECT
@@ -202,7 +203,7 @@ class RegistryToolExecutor:
             },
         }
 
-    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
+    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome:
         invalid_result = invalid_tool_arguments_result(
             tool_call_id=call.id,
             schema=self.params_json_schema,

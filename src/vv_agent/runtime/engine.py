@@ -642,7 +642,10 @@ class AgentRuntime:
                 result.status == AgentStatus.FAILED
                 and result.completion_reason not in {CompletionReason.BUDGET_EXHAUSTED, CompletionReason.CANCELLED}
             )
-            if budget_controller.exhaustion is None and result.status is not AgentStatus.RECONCILIATION_REQUIRED:
+            if budget_controller.exhaustion is None and result.status not in {
+                AgentStatus.RECONCILIATION_REQUIRED,
+                AgentStatus.DEFERRED,
+            }:
                 exhaustion = budget_controller.terminal(
                     suppress_exhaustion=cancelled or operation_failed,
                 )
@@ -814,6 +817,19 @@ class AgentRuntime:
                     exhaustion=exc.exhaustion,
                 )
             except Exception as exc:
+                checkpoint_controller = (
+                    ctx.metadata.get("_vv_agent_checkpoint_controller") if isinstance(ctx, ExecutionContext) else None
+                )
+                if isinstance(checkpoint_controller, CheckpointResumeController):
+                    deferred_result = checkpoint_controller.deferred_pending_result(
+                        messages=messages,
+                        cycles=cycles,
+                        shared_state=shared,
+                        token_usage=self._task_token_usage(ctx),
+                        budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
+                    )
+                    if deferred_result is not None:
+                        return deferred_result
                 cancelled = isinstance(exc, CancelledError) or bool(
                     ctx is not None and ctx.cancellation_token is not None and ctx.cancellation_token.cancelled
                 )
@@ -960,6 +976,23 @@ class AgentRuntime:
                 tool_result = tool_outcome.directive_result
                 cycles.append(cycle_record)
                 cancelled = is_cancelled()
+                if tool_outcome.deferred_outcomes:
+                    checkpoint_key = None
+                    if isinstance(ctx, ExecutionContext):
+                        controller = ctx.metadata.get("_vv_agent_checkpoint_controller")
+                        checkpoint_key = getattr(controller, "checkpoint_key", None)
+                    return AgentResult(
+                        status=AgentStatus.DEFERRED,
+                        completion_reason=None,
+                        partial_output=_last_assistant_output(cycles),
+                        messages=messages,
+                        cycles=cycles,
+                        wait_reason="deferred_pending",
+                        shared_state=shared,
+                        token_usage=self._task_token_usage(ctx),
+                        budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
+                        checkpoint_key=checkpoint_key,
+                    )
                 if budget_controller is not None:
                     exhaustion = budget_controller.tool_batch_complete(
                         cycle_index,

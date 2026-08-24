@@ -1,7 +1,7 @@
 {
   "contract": "run_events_invalid",
   "rules": {
-    "version": "v2",
+    "version": "v4",
     "unknown_top_level_fields": "reject",
     "unknown_event_types": "reject",
     "completion_fields": {
@@ -111,6 +111,7 @@
       "event_types": [
         "tool_call_planned",
         "tool_call_started",
+        "tool_call_deferred",
         "tool_call_completed"
       ],
       "tool_call_id": "non_empty_string",
@@ -132,6 +133,14 @@
       "completed_error_code": "string_or_null",
       "completed_execution_started": "boolean",
       "completed_duration_ms": "non_negative_json_safe_integer_or_null",
+      "deferred_fields": [
+        "handle",
+        "operation_id",
+        "attempt",
+        "execution_started",
+        "duration_ms"
+      ],
+      "deferred_has_no_tool_result": true,
       "missing_required_completed_fields": "reject"
     }
   },
@@ -150,7 +159,7 @@
     {
       "id": "stale_version",
       "input": {
-        "version": "v1",
+        "version": "v3",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -162,7 +171,7 @@
     {
       "id": "unknown_version",
       "input": {
-        "version": "v3",
+        "version": "v5",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -174,7 +183,7 @@
     {
       "id": "unknown_event_type",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "mystery",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -183,9 +192,21 @@
       }
     },
     {
+      "id": "future_version",
+      "input": {
+        "version": "v5",
+        "type": "run_started",
+        "event_id": "evt_invalid_future",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "input": "hello"
+      }
+    },
+    {
       "id": "legacy_llm_started_is_rejected",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "llm_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -199,7 +220,7 @@
     {
       "id": "unknown_top_level_field",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -212,7 +233,7 @@
     {
       "id": "missing_event_id",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_started",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -223,7 +244,7 @@
     {
       "id": "empty_event_id",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_started",
         "event_id": "",
         "run_id": "run_invalid",
@@ -235,7 +256,7 @@
     {
       "id": "non_string_run_id",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": 7,
@@ -247,7 +268,7 @@
     {
       "id": "empty_trace_id",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -259,7 +280,7 @@
     {
       "id": "missing_created_at",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -270,7 +291,7 @@
     {
       "id": "negative_created_at",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -282,7 +303,7 @@
     {
       "id": "boolean_cycle_index",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "cycle_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -294,7 +315,7 @@
     {
       "id": "negative_cycle_index",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "cycle_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -306,7 +327,7 @@
     {
       "id": "metadata_is_not_an_object",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -319,7 +340,7 @@
     {
       "id": "tool_arguments_are_not_an_object",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_started",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -333,7 +354,7 @@
     {
       "id": "approval_approved_field_is_rejected",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "approval_resolved",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -349,7 +370,7 @@
     {
       "id": "approval_preview_field_is_rejected",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "approval_requested",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -365,7 +386,7 @@
     {
       "id": "approval_action_is_missing",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "approval_resolved",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -379,7 +400,7 @@
     {
       "id": "approval_action_is_unknown",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "approval_resolved",
         "event_id": "evt_invalid",
         "run_id": "run_invalid",
@@ -394,7 +415,7 @@
     {
       "id": "unknown_completion_reason",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_completed",
         "event_id": "evt_invalid_completion_reason",
         "run_id": "run_invalid",
@@ -408,7 +429,7 @@
     {
       "id": "completion_reason_is_not_a_string_or_null",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_completed",
         "event_id": "evt_invalid_completion_reason_type",
         "run_id": "run_invalid",
@@ -422,7 +443,7 @@
     {
       "id": "completion_tool_name_is_not_a_string_or_null",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_completed",
         "event_id": "evt_invalid_completion_tool_name_type",
         "run_id": "run_invalid",
@@ -436,7 +457,7 @@
     {
       "id": "partial_output_is_not_a_string_or_null",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_completed",
         "event_id": "evt_invalid_partial_output_type",
         "run_id": "run_invalid",
@@ -452,7 +473,7 @@
     {
       "id": "budget_usage_is_not_an_object_or_null",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "run_failed",
         "event_id": "evt_invalid_budget_usage",
         "run_id": "run_invalid",
@@ -465,7 +486,7 @@
     {
       "id": "budget_exhaustion_unknown_dimension",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "budget_exhausted",
         "event_id": "evt_invalid_budget_dimension",
         "run_id": "run_invalid",
@@ -500,7 +521,7 @@
     {
       "id": "checkpoint_key_is_not_a_string",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "event_id": "evt_invalid_resume",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -515,7 +536,7 @@
     {
       "id": "resume_attempt_is_not_positive",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "event_id": "evt_invalid_resume",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -530,7 +551,7 @@
     {
       "id": "unknown_operation_kind",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "event_id": "evt_invalid_resume",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -546,7 +567,7 @@
     {
       "id": "invalid_resume_observation_state",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "event_id": "evt_invalid_resume",
         "run_id": "run_invalid",
         "trace_id": "trace_invalid",
@@ -569,7 +590,7 @@
     {
       "id": "planned_arguments_are_not_an_object",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_planned",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -583,7 +604,7 @@
     {
       "id": "planned_tool_name_is_empty",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_planned",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -597,7 +618,7 @@
     {
       "id": "tool_metadata_has_unknown_field",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_started",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -614,7 +635,7 @@
     {
       "id": "tool_completed_status_is_unknown",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -632,7 +653,7 @@
     {
       "id": "tool_completed_directive_is_unknown",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -650,7 +671,7 @@
     {
       "id": "tool_completed_execution_started_is_not_boolean",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -668,7 +689,7 @@
     {
       "id": "tool_completed_duration_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -686,7 +707,7 @@
     {
       "id": "tool_completed_not_started_cannot_have_duration",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -704,7 +725,7 @@
     {
       "id": "tool_completed_error_code_is_not_string_or_null",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_tool",
         "run_id": "run_invalid",
@@ -722,7 +743,7 @@
     {
       "id": "reasoning_delta_is_not_a_string",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "reasoning_delta",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -734,7 +755,7 @@
     {
       "id": "model_tool_call_id_is_empty",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "model_tool_call_started",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -747,7 +768,7 @@
     {
       "id": "model_tool_name_is_empty",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "model_tool_call_progress",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -760,7 +781,7 @@
     {
       "id": "stream_counter_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "model_tool_call_progress",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -774,7 +795,7 @@
     {
       "id": "stream_counter_exceeds_json_safe_maximum",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "assistant_delta",
         "event_id": "evt_invalid_stream",
         "run_id": "run_invalid",
@@ -787,7 +808,7 @@
     {
       "id": "diagnostic_level_is_unknown",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "diagnostic",
         "event_id": "evt_invalid_diagnostic",
         "run_id": "run_invalid",
@@ -801,7 +822,7 @@
     {
       "id": "diagnostic_code_is_empty",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "diagnostic",
         "event_id": "evt_invalid_diagnostic",
         "run_id": "run_invalid",
@@ -815,7 +836,7 @@
     {
       "id": "diagnostic_details_is_not_an_object",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "diagnostic",
         "event_id": "evt_invalid_diagnostic",
         "run_id": "run_invalid",
@@ -829,7 +850,7 @@
     {
       "id": "memory_compact_trigger_is_unknown",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -842,7 +863,7 @@
     {
       "id": "memory_compact_capacity_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -855,7 +876,7 @@
     {
       "id": "memory_compact_reserved_output_source_is_unknown",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -868,7 +889,7 @@
     {
       "id": "memory_compact_mode_is_unknown",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -882,7 +903,7 @@
     {
       "id": "memory_compact_changed_is_not_boolean",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -896,7 +917,7 @@
     {
       "id": "memory_compact_target_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -921,7 +942,7 @@
     {
       "id": "memory_compact_candidate_count_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -946,7 +967,7 @@
     {
       "id": "memory_compact_estimated_reclaimable_tokens_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -971,7 +992,7 @@
     {
       "id": "memory_compact_archived_count_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -990,7 +1011,7 @@
     {
       "id": "memory_compact_reclaimed_tokens_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -1009,7 +1030,7 @@
     {
       "id": "memory_compact_artifact_failure_count_is_negative",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -1028,7 +1049,7 @@
     {
       "id": "memory_compact_started_missing_plan_counter",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -1052,7 +1073,7 @@
     {
       "id": "memory_compact_completed_missing_result_counter",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory",
         "run_id": "run_invalid",
@@ -1070,7 +1091,7 @@
     {
       "id": "model_call_operation_is_unknown",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "model_call_started",
         "event_id": "evt_invalid_model",
         "run_id": "run_invalid",
@@ -1088,7 +1109,7 @@
     {
       "id": "model_call_attempt_is_zero",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "model_call_started",
         "event_id": "evt_invalid_model",
         "run_id": "run_invalid",
@@ -1106,7 +1127,7 @@
     {
       "id": "model_call_failed_missing_usage",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "model_call_failed",
         "event_id": "evt_invalid_model",
         "run_id": "run_invalid",
@@ -1126,7 +1147,7 @@
     {
       "id": "model_call_event_contains_prompt",
       "input": {
-        "version": "v2",
+        "version": "v4",
         "type": "model_call_started",
         "event_id": "evt_invalid_model",
         "run_id": "run_invalid",
@@ -1140,6 +1161,126 @@
         "backend": "test",
         "model": "test-model",
         "prompt": "forbidden"
+      }
+    },
+    {
+      "id": "deferred_event_missing_handle",
+      "input": {
+        "version": "v4",
+        "type": "tool_call_deferred",
+        "event_id": "evt_invalid_deferred",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": 2,
+        "tool_call_id": "call_deferred",
+        "tool_name": "remote_write",
+        "operation_id": "op_tool_cycle_2_call_deferred",
+        "attempt": 1
+      }
+    },
+    {
+      "id": "deferred_event_contains_tool_result",
+      "input": {
+        "version": "v4",
+        "type": "tool_call_deferred",
+        "event_id": "evt_invalid_deferred",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": 2,
+        "tool_call_id": "call_deferred",
+        "tool_name": "remote_write",
+        "operation_id": "op_tool_cycle_2_call_deferred",
+        "attempt": 1,
+        "handle": {
+          "schema_version": "vv-agent.deferred-tool-handle.v2",
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_deferred",
+          "attempt": 1,
+          "request_digest": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978"
+        },
+        "result": {
+          "tool_call_id": "call_deferred",
+          "content": "forbidden",
+          "status_code": "SUCCESS",
+          "directive": "continue"
+        }
+      }
+    },
+    {
+      "id": "deferred_event_handle_missing_discriminator",
+      "input": {
+        "version": "v4",
+        "type": "tool_call_deferred",
+        "event_id": "evt_invalid_deferred_schema",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": 2,
+        "tool_call_id": "call_deferred",
+        "tool_name": "remote_write",
+        "operation_id": "op_tool_cycle_2_call_deferred",
+        "attempt": 1,
+        "handle": {
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_deferred",
+          "attempt": 1,
+          "request_digest": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978"
+        },
+        "execution_started": true,
+        "duration_ms": null
+      }
+    },
+    {
+      "id": "deferred_event_handle_unknown_field",
+      "input": {
+        "version": "v4",
+        "type": "tool_call_deferred",
+        "event_id": "evt_invalid_deferred_unknown",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": 2,
+        "tool_call_id": "call_deferred",
+        "tool_name": "remote_write",
+        "operation_id": "op_tool_cycle_2_call_deferred",
+        "attempt": 1,
+        "handle": {
+          "schema_version": "vv-agent.deferred-tool-handle.v2",
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_deferred",
+          "attempt": 1,
+          "request_digest": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978",
+          "provider_id": "forbidden"
+        },
+        "execution_started": true,
+        "duration_ms": null
+      }
+    },
+    {
+      "id": "deferred_event_cross_process_duration_must_be_null",
+      "input": {
+        "version": "v4",
+        "type": "tool_call_deferred",
+        "event_id": "evt_invalid_deferred_duration",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": 2,
+        "tool_call_id": "call_deferred",
+        "tool_name": "remote_write",
+        "operation_id": "op_tool_cycle_2_call_deferred",
+        "attempt": 1,
+        "handle": {
+          "schema_version": "vv-agent.deferred-tool-handle.v2",
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_deferred",
+          "attempt": 1,
+          "request_digest": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978"
+        },
+        "execution_started": true,
+        "duration_ms": 4
       }
     }
   ]

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "jsonRpc": {
     "version": "2.0",
     "validRequestIds": [
@@ -147,6 +147,17 @@
         "errorField": "omitted",
         "checkpointField": "present",
         "interruptionField": "present"
+      },
+      {
+        "name": "deferred_pending_is_interrupted_and_resumable",
+        "agentStatus": "deferred",
+        "turnStatus": "interrupted",
+        "completionReason": null,
+        "errorField": "omitted",
+        "waitReason": "deferred_pending",
+        "checkpointField": "present",
+        "interruptionField": "omitted",
+        "terminal": false
       }
     ],
     "tokenUsageProjection": {
@@ -573,6 +584,9 @@
     "newInputAllowed": false,
     "approvalResumeIsSeparate": true,
     "reconciliationRequiredTurnStatus": "interrupted",
+    "deferredPendingTurnStatus": "interrupted",
+    "deferredPendingIsTerminal": false,
+    "deferredPendingWaitReason": "deferred_pending",
     "checkpointSummary": {
       "statusDomain": "AgentStatus persisted in checkpoint.status; it is not the App Server TurnStatus",
       "fields": [
@@ -617,6 +631,7 @@
       "completionReason",
       "completionToolName",
       "partialOutput",
+      "waitReason",
       "checkpoint",
       "interruption",
       "error"
@@ -703,6 +718,77 @@
           "thread/status/changed:idle",
           "turn/completed:interrupted"
         ]
+      },
+      {
+        "name": "deferred_pending_resume_is_interrupted_not_terminal",
+        "request": {
+          "jsonrpc": "2.0",
+          "id": "resume-deferred",
+          "method": "turn/resume",
+          "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-deferred",
+            "checkpointKey": "tenant-7/run-42"
+          }
+        },
+        "response": {
+          "jsonrpc": "2.0",
+          "id": "resume-deferred",
+          "result": {
+            "threadId": "thread-1",
+            "turnId": "turn-deferred",
+            "runId": "run-deferred",
+            "status": "running"
+          }
+        },
+        "notifications": [
+          {
+            "jsonrpc": "2.0",
+            "method": "thread/status/changed",
+            "params": {"threadId": "thread-1", "status": "running"}
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": {
+              "threadId": "thread-1",
+              "turnId": "turn-deferred",
+              "runId": "run-deferred",
+              "status": "running"
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "thread/status/changed",
+            "params": {"threadId": "thread-1", "status": "idle"}
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {
+              "threadId": "thread-1",
+              "turnId": "turn-deferred",
+              "runId": "run-deferred",
+              "status": "interrupted",
+              "waitReason": "deferred_pending",
+              "checkpoint": {
+                "key": "tenant-7/run-42",
+                "resumeAttempt": 2,
+                "cycleIndex": 2,
+                "status": "deferred",
+                "terminalAcknowledged": false
+              }
+            }
+          }
+        ],
+        "notificationOrder": [
+          "thread/status/changed:running",
+          "turn/started",
+          "thread/status/changed:idle",
+          "turn/completed:interrupted"
+        ],
+        "terminal": false,
+        "externalCalls": 0
       },
       {
         "name": "live_claim_keeps_existing_owner",
@@ -796,6 +882,22 @@
           "risk": "unknown_tool_side_effect",
           "idempotencySupport": "unknown"
         }
+      },
+      {
+        "name": "deferred_pending",
+        "turnStatus": "interrupted",
+        "completionReasonField": "omitted",
+        "errorField": "omitted",
+        "waitReason": "deferred_pending",
+        "checkpoint": {
+          "key": "tenant-7/run-42",
+          "resumeAttempt": 2,
+          "cycleIndex": 2,
+          "status": "deferred",
+          "terminalAcknowledged": false
+        },
+        "resumeMethod": "turn/resume",
+        "terminal": false
       },
       {
         "name": "live_claim",

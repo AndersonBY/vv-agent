@@ -1,5 +1,5 @@
 {
-  "schema_version": "vv-agent.distributed-run-driver.v1",
+  "schema_version": "vv-agent.distributed-run-driver.v2",
   "handle": {
     "fields": [
       "checkpoint_key",
@@ -67,6 +67,7 @@
     "active_claim",
     "reconciliation_required",
     "host_interaction",
+    "deferred_pending",
     "superseded_delivery"
   ],
   "rules": {
@@ -84,7 +85,15 @@
     "transport_tasks_acknowledge_late": true,
     "transport_tasks_reject_on_worker_loss": true,
     "lost_callback_recovered_by_late_ack_or_reconciler": true,
-    "running_checkpoint_reconciler_required": true
+    "running_checkpoint_reconciler_required": true,
+    "deferred_admission_reuses_pending_worker_response": true,
+    "pending_means_no_cycle_commit_or_response_result": true,
+    "deferred_pending_wait_is_not_host_interaction": true,
+    "deferred_batch_barrier_blocks_dispatch": true,
+    "deferred_status_is_not_claimable": true,
+    "last_resolution_returns_unclaimed_running": true,
+    "resolution_ready_reuses_retained_observation": true,
+    "resolution_ready_does_not_poll_worker": true
   },
   "transition_cases": [
     {
@@ -146,6 +155,27 @@
       "checkpoint": "reconciliation_required",
       "decision": "wait",
       "reason": "reconciliation_required"
+    },
+    {
+      "name": "deferred_pending",
+      "observation": "pending",
+      "checkpoint": "deferred_with_unresolved_journal",
+      "decision": "wait",
+      "reason": "deferred_pending"
+    },
+    {
+      "name": "deferred_batch_ready",
+      "observation": "pending",
+      "checkpoint": "deferred_all_journals_resolved",
+      "decision": "dispatch",
+      "claim_mode": "recovery",
+      "resolve_decision": "applied_ready",
+      "dispatch_input": {
+        "previous_envelope": "retained_from_pending_delivery",
+        "pending_observation": "retained_worker_response"
+      },
+      "driver_operation": "advance",
+      "polls": false
     }
   ]
 }

@@ -211,6 +211,21 @@ class CeleryBackend:
                 result=deepcopy(checkpoint.terminal_result),
             )
 
+        # ``pending`` is the existing worker response for a successfully
+        # admitted deferred batch.  The authoritative checkpoint barrier is
+        # the observation; never claim it or dispatch another cycle here.
+        if checkpoint.status is AgentStatus.DEFERRED:
+            if checkpoint.claim_token is not None:
+                raise CheckpointError(
+                    "deferred checkpoint must be unclaimed",
+                    code="checkpoint_store_conflict",
+                )
+            return DistributedAdvanceDecision(
+                action="wait",
+                handle=handle,
+                reason=DistributedWaitReason.DEFERRED_PENDING,
+            )
+
         if response is not None and response.response_type == "terminal_replay":
             raise CheckpointError(
                 "distributed terminal replay has no matching durable terminal",
@@ -414,16 +429,34 @@ class CeleryBackend:
                 )
 
             deadline_unix_ms = time.time_ns() // 1_000_000 + int(self.dispatch_timeout_seconds * 1000)
-            response, cancellation_reason = self._dispatch_cycle(
-                task=distributed_task,
-                recipe=recipe,
-                cycle_index=cycle_index,
-                deadline_unix_ms=deadline_unix_ms,
-                claim_mode=(first_claim_mode if cycle_index == start_cycle else "continue"),
-                budget_limits=budget_limits,
-                checkpoint_controller=checkpoint_controller,
-                ctx=ctx,
-            )
+            # A worker ``pending`` response is terminal only when the durable
+            # checkpoint already carries the deferred barrier.  A transport
+            # layer may also report pending before the worker ran at all; in
+            # that case redispatch this same cycle once under recovery mode.
+            # Keep this retry in the caller so the worker itself never polls,
+            # sleeps, or invents another response variant.
+            while True:
+                response, cancellation_reason = self._dispatch_cycle(
+                    task=distributed_task,
+                    recipe=recipe,
+                    cycle_index=cycle_index,
+                    deadline_unix_ms=deadline_unix_ms,
+                    claim_mode=(first_claim_mode if cycle_index == start_cycle else "continue"),
+                    budget_limits=budget_limits,
+                    checkpoint_controller=checkpoint_controller,
+                    ctx=ctx,
+                )
+                if cancellation_reason is not None or response is None or response.response_type != "pending":
+                    break
+                checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+                if checkpoint is None:
+                    raise CheckpointError(
+                        "checkpoint disappeared after deferred worker admission",
+                        code="checkpoint_not_found",
+                    )
+                if checkpoint.status is AgentStatus.DEFERRED:
+                    break
+                first_claim_mode = "recovery"
             if cancellation_reason is not None:
                 current = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
                 if current is not None and current.claim_token is not None:
@@ -443,6 +476,36 @@ class CeleryBackend:
                     budget_usage=(current.budget_usage if current is not None else None),
                 )
             assert response is not None
+            if response.response_type == "pending":
+                checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+                if checkpoint is None:
+                    raise CheckpointError(
+                        "checkpoint disappeared after deferred worker admission",
+                        code="checkpoint_not_found",
+                    )
+                if checkpoint.status is AgentStatus.DEFERRED:
+                    if checkpoint.claim_token is not None:
+                        raise CheckpointError(
+                            "deferred checkpoint must be unclaimed",
+                            code="checkpoint_store_conflict",
+                        )
+                    return AgentResult(
+                        status=AgentStatus.DEFERRED,
+                        messages=deepcopy(checkpoint.messages),
+                        cycles=deepcopy(checkpoint.cycles),
+                        shared_state=deepcopy(checkpoint.shared_state),
+                        token_usage=summarize_task_token_usage(checkpoint.model_calls),
+                        budget_usage=deepcopy(checkpoint.budget_usage),
+                        wait_reason="deferred_pending",
+                        checkpoint_key=checkpoint.checkpoint_key,
+                    )
+                # The transport-pending case is retried by the inner dispatch
+                # loop above; reaching here means the durable state changed
+                # between the observation and this read.
+                raise CheckpointError(
+                    "distributed pending response did not establish a durable barrier",
+                    code="checkpoint_store_conflict",
+                )
             if response.is_terminal:
                 return self._handle_terminal_response(
                     response=response,
@@ -600,14 +663,6 @@ class CeleryBackend:
                         f"distributed dispatcher returned an invalid worker response: {exc}",
                         code="checkpoint_store_conflict",
                     ) from exc
-                if response.response_type == "pending":
-                    last_error = CheckpointError(
-                        "distributed worker reported pending delivery without committed state",
-                        code="checkpoint_store_conflict",
-                    )
-                    effective_claim_mode = "recovery"
-                    time.sleep(0.001)
-                    continue
                 return response, None
             if not self._is_retryable_dispatch_error(dispatch_error):
                 raise dispatch_error

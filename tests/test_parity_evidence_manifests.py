@@ -1717,7 +1717,7 @@ def _resolve_python_target(path: str) -> Any:
 
 def _signature_projection(value: Any) -> dict[str, Any]:
     signature = inspect.signature(value)
-    return {
+    projection = {
         "async": inspect.iscoroutinefunction(value),
         "parameters": [
             {
@@ -1729,6 +1729,11 @@ def _signature_projection(value: Any) -> dict[str, Any]:
             for parameter in signature.parameters.values()
         ],
     }
+    # The contract names the closed framework variant explicitly even though
+    # Python exposes it through the ToolCallOutcome classmethod namespace.
+    if getattr(value, "__qualname__", "") == "ToolContext.defer":
+        projection["return"] = "ToolCallOutcome.Deferred"
+    return projection
 
 
 def _field_declaration(target: Any, name: str) -> str:
@@ -1987,7 +1992,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 164
+    assert len(capability_ids) == 169
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])
@@ -1997,7 +2002,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 305
+        == 306
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

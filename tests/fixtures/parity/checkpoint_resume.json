@@ -1,7 +1,7 @@
 {
   "contract": "checkpoint_resume",
-  "version": 4,
-  "checkpoint_schema": "vv-agent.checkpoint.v5",
+  "version": 7,
+  "checkpoint_schema": "vv-agent.checkpoint.v7",
   "run_definition_schema": "vv-agent.run-definition.v5",
   "public_entrypoints": {
     "run": "Runner.run with RunConfig.checkpoint_config",
@@ -10,6 +10,17 @@
     "approval_resume_is_separate": true,
     "new_input_on_durable_resume": false
   },
+  "checkpoint_states": [
+    "pending",
+    "running",
+    "deferred",
+    "reconciliation_required",
+    "wait_user",
+    "completed",
+    "failed",
+    "max_cycles"
+  ],
+  "deferred_pending_semantics": "no cycle commit and no response result were returned by this delivery attempt",
   "runner_cases": [
     {
       "name": "disabled_uses_non_durable_flow",
@@ -744,6 +755,225 @@
       }
     }
   ],
+  "deferred_cases": [
+    {
+      "name": "started_crash_before_deferred_admission_remains_reconciliation",
+      "scenario_id": "deferred_recovery_pre_admission.v1",
+      "source": "fixtures/deferred_tool.json#reconciliation",
+      "initial_journal_state": "started",
+      "crash_boundary": "before_admit_deferred_cas",
+      "expected": {
+        "journal_state": "ambiguous",
+        "status": "reconciliation_required",
+        "completion_reason": null,
+        "claim_released": true,
+        "silent_deferred_assumption": false
+      }
+    },
+    {
+      "name": "accept_deferred_adopts_authoritative_decision",
+      "scenario_id": "deferred_reconciliation_accept_call_a_call_c.v1",
+      "source": "fixtures/deferred_tool.json#reconciliation",
+      "reconciliation_decision": "accept_deferred",
+      "expected": {
+        "journal_state": "deferred",
+        "status": "deferred",
+        "external_invocations": 0,
+        "same_handle": true
+      }
+    },
+    {
+      "name": "deferred_admission_crash_replays_handle",
+      "scenario_id": "deferred_batch_mixed_call_a_b_c.v1",
+      "source": "fixtures/deferred_tool.json#batch.example",
+      "crash_boundary": "after_admit_deferred_cas",
+      "expected": {
+        "journal_state": "deferred",
+        "status": "deferred",
+        "tool_calls": 0,
+        "same_handle": true
+      }
+    },
+    {
+      "name": "all_deferred_resolved_releases_batch_barrier",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution",
+      "expected": {
+        "status_before_last_resolution": "deferred",
+        "cycle_commit_before_last_resolution": false,
+        "next_model_call_before_last_resolution": false,
+        "status_after_last_resolution": "running",
+        "claim_token_after_last_resolution": null,
+        "resolution_receipts_retained": true,
+        "merged_result_order": [
+          "call_a",
+          "call_b"
+        ]
+      },
+      "operations": [
+        {
+          "kind": "resolve_deferred",
+          "handle_ref": "call_b",
+          "revision_before": 5,
+          "result_status": "SUCCESS",
+          "expected": {
+            "revision": 6,
+            "status": "deferred",
+            "barrier_remaining": [
+              "call_a"
+            ],
+            "decision_kind": "applied_waiting"
+          }
+        },
+        {
+          "kind": "resolve_deferred",
+          "handle_ref": "call_a",
+          "revision_before": 6,
+          "result_status": "SUCCESS",
+          "expected": {
+            "revision": 7,
+            "status": "running",
+            "barrier_remaining": [],
+            "claim_token": null,
+            "decision_kind": "applied_ready"
+          }
+        }
+      ],
+      "resolve_order": [
+        "call_b",
+        "call_a"
+      ]
+    },
+    {
+      "name": "early_callback_before_admission_is_retryable_not_admitted",
+      "active_journal_state": "started",
+      "operation": "resolve_deferred",
+      "expected": {
+        "decision_kind": "not_admitted",
+        "retryable_error": "deferred_resolution_not_admitted",
+        "retryable": true,
+        "checkpoint_revision_changed": false,
+        "journal_transition": null,
+        "receipt_index_write": false,
+        "host_durably_retains_result_and_retries_after_admission": true
+      }
+    },
+    {
+      "name": "ambiguous_callback_stays_reconciliation_required",
+      "active_journal_state": "ambiguous",
+      "operation": "resolve_deferred",
+      "expected": {
+        "decision_kind": "reconciliation_required",
+        "checkpoint_revision_changed": false,
+        "receipt_index_write": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "out_of_order_resolution_concurrent_loser_replays_receipt",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution.concurrent_resolution",
+      "operations": [
+        "resolve_deferred(call_b)",
+        "resolve_deferred(call_a)"
+      ],
+      "cas": {
+        "winner": "call_a_last",
+        "loser": "reload_receipt_index_and_replay"
+      },
+      "expected": {
+        "loser_decision": "replayed",
+        "loser_revision_increment": 0,
+        "external_invocations": 0
+      }
+    },
+    {
+      "name": "last_resolution_ready_dispatches_without_worker_polling",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#resolution.ready_dispatch",
+      "resolve_decision": "applied_ready",
+      "expected": {
+        "status": "running",
+        "claim_token": null,
+        "driver_operation": "advance",
+        "previous_envelope_reused": true,
+        "pending_observation_reused": true,
+        "polls": false,
+        "resolver_creates_terminal": false
+      }
+    },
+    {
+      "name": "deferred_resolution_error_is_definitive",
+      "scenario_id": "deferred_resolution_error_call_error.v1",
+      "source": "fixtures/deferred_tool.json#resolution",
+      "resolution_status": "ERROR",
+      "expected": {
+        "journal_transition": [
+          "deferred",
+          "failed"
+        ],
+        "barrier_item_released": true,
+        "tool_call_completed_emitted": true,
+        "resolver_creates_terminal": false
+      }
+    },
+    {
+      "name": "deferred_resolution_directive_waits_for_normal_cycle_processing",
+      "scenario_id": "deferred_resolution_directive.v1",
+      "source": "fixtures/deferred_tool.json#resolution",
+      "resolution_directives": [
+        "finish",
+        "wait_user"
+      ],
+      "expected": {
+        "receipt_persisted_before_directive_processing": true,
+        "tool_call_completed_emitted": true,
+        "resolver_creates_terminal": false,
+        "resumed_cycle_owns_finish_or_wait_user_directive": true
+      }
+    },
+    {
+      "name": "deferred_status_is_not_recovery_claimable",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#barrier",
+      "claim_mode": "recovery",
+      "status": "deferred",
+      "expected": {
+        "claim": false,
+        "error": "checkpoint_not_claimable"
+      }
+    },
+    {
+      "name": "running_with_unresolved_deferred_barrier_is_invalid",
+      "scenario_id": "deferred_resolution_call_b_then_call_a.v1",
+      "source": "fixtures/deferred_tool.json#barrier",
+      "checkpoint": {
+        "status": "running",
+        "claim_token": null,
+        "barrier_remaining": [
+          "call_a"
+        ],
+        "tool_journal_states": [
+          "deferred"
+        ]
+      },
+      "expected": {
+        "valid": false,
+        "error": "checkpoint_status_invalid",
+        "claim": false,
+        "next_model_call": false
+      }
+    },
+    {
+      "name": "receipt_replay_conflict_and_stale_are_ordered",
+      "expected": {
+        "same_handle_same_result": "existing_receipt",
+        "same_handle_different_result": "deferred_resolution_conflict",
+        "different_or_active_non_deferred_handle": "deferred_resolution_stale_only_if_no_retained_receipt_and_no_active_matching_journal",
+        "receipt_lookup_precedes_active_journal": true
+      }
+    }
+  ],
   "session_persistence": {
     "schema_version": "vv-agent.session-commit.v1",
     "checkpoint_with_session_requires_add_items_once": true,
@@ -818,7 +1048,7 @@
     },
     {
       "id": "F4",
-      "point": "after_model_receipt_ledger_budget_and_event_before_cycle_commit",
+      "point": "after_model_receipt_accounting_budget_and_event_before_cycle_commit",
       "durable_state": "model_succeeded_and_accounted",
       "resume": "replay_receipt_without_usage_or_budget_increment",
       "ambiguity": false

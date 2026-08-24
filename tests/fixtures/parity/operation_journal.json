@@ -1,6 +1,8 @@
 {
   "contract": "operation_journal",
-  "version": 2,
+  "schema_version": "vv-agent.operation-journal.v4",
+  "version": 4,
+  "deferred_contract": "deferred_tool.json",
   "enums": {
     "kinds": [
       "model",
@@ -14,6 +16,7 @@
     "states": [
       "planned",
       "started",
+      "deferred",
       "succeeded",
       "failed",
       "ambiguous"
@@ -28,7 +31,8 @@
       "retry",
       "replay_success",
       "record_failure",
-      "abort"
+      "abort",
+      "accept_deferred"
     ]
   },
   "request_digest": {
@@ -115,6 +119,120 @@
         "sha256": "6b05beb10de1bae7a2989e39294d4a1f02f4f4b357437bc198f47b6b7be85b49"
       },
       {
+        "name": "deferred_call_a",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call_a",
+            "tool_name": "remote_write",
+            "arguments": {
+              "record_id": "42",
+              "value": "accepted"
+            },
+            "idempotency_key": "deferred-idem-call-a"
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJhY2NlcHRlZCJ9LCJpZGVtcG90ZW5jeV9rZXkiOiJkZWZlcnJlZC1pZGVtLWNhbGwtYSIsInRvb2xfY2FsbF9pZCI6ImNhbGxfYSIsInRvb2xfbmFtZSI6InJlbW90ZV93cml0ZSJ9LCJzY2hlbWFfdmVyc2lvbiI6InZ2LWFnZW50Lm9wZXJhdGlvbi1yZXF1ZXN0LnYxIn0=",
+        "canonical_json_utf8_bytes": 218,
+        "sha256": "c119e094e29e5fce8d38fb54e445ef059db6b5f440197095c9260bf1052b4bb0"
+      },
+      {
+        "name": "deferred_call_b",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call_b",
+            "tool_name": "remote_write",
+            "arguments": {
+              "record_id": "42",
+              "value": "completed"
+            },
+            "idempotency_key": "deferred-idem-call-b"
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJjb21wbGV0ZWQifSwiaWRlbXBvdGVuY3lfa2V5IjoiZGVmZXJyZWQtaWRlbS1jYWxsLWIiLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2IiLCJ0b29sX25hbWUiOiJyZW1vdGVfd3JpdGUifSwic2NoZW1hX3ZlcnNpb24iOiJ2di1hZ2VudC5vcGVyYXRpb24tcmVxdWVzdC52MSJ9",
+        "canonical_json_utf8_bytes": 219,
+        "sha256": "16374bf58171146de4976fef70473c735f6f80fc62a9f512e6211822190fa92a"
+      },
+      {
+        "name": "deferred_call_c",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call_c",
+            "tool_name": "remote_write",
+            "arguments": {
+              "record_id": "42",
+              "value": "rejected"
+            },
+            "idempotency_key": "deferred-idem-call-c"
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJyZWplY3RlZCJ9LCJpZGVtcG90ZW5jeV9rZXkiOiJkZWZlcnJlZC1pZGVtLWNhbGwtYyIsInRvb2xfY2FsbF9pZCI6ImNhbGxfYyIsInRvb2xfbmFtZSI6InJlbW90ZV93cml0ZSJ9LCJzY2hlbWFfdmVyc2lvbiI6InZ2LWFnZW50Lm9wZXJhdGlvbi1yZXF1ZXN0LnYxIn0=",
+        "canonical_json_utf8_bytes": 218,
+        "sha256": "be3173e02fda4237aff0be569c6cfe76711b26a43571cebee2c5143af45cef6e"
+      },
+      {
+        "name": "deferred_call_deferred",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call_deferred",
+            "tool_name": "remote_write",
+            "arguments": {
+              "record_id": "42",
+              "value": "accepted"
+            },
+            "idempotency_key": "deferred-idem-call-deferred"
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJhY2NlcHRlZCJ9LCJpZGVtcG90ZW5jeV9rZXkiOiJkZWZlcnJlZC1pZGVtLWNhbGwtZGVmZXJyZWQiLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2RlZmVycmVkIiwidG9vbF9uYW1lIjoicmVtb3RlX3dyaXRlIn0sInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQub3BlcmF0aW9uLXJlcXVlc3QudjEifQ==",
+        "canonical_json_utf8_bytes": 232,
+        "sha256": "ba0cefd88d9c971b57608e5d3defb147117eec2875872f9ff093aef016ced978"
+      },
+      {
+        "name": "deferred_call_error",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call_error",
+            "tool_name": "remote_write",
+            "arguments": {
+              "record_id": "42",
+              "value": "rejected"
+            },
+            "idempotency_key": "deferred-idem-call-error"
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJyZWplY3RlZCJ9LCJpZGVtcG90ZW5jeV9rZXkiOiJkZWZlcnJlZC1pZGVtLWNhbGwtZXJyb3IiLCJ0b29sX2NhbGxfaWQiOiJjYWxsX2Vycm9yIiwidG9vbF9uYW1lIjoicmVtb3RlX3dyaXRlIn0sInNjaGVtYV92ZXJzaW9uIjoidnYtYWdlbnQub3BlcmF0aW9uLXJlcXVlc3QudjEifQ==",
+        "canonical_json_utf8_bytes": 226,
+        "sha256": "198f8657724a6fdbbdd0b56b1ab437ff5d47b14fa7b8843dbe430bd14c9229c0"
+      },
+      {
+        "name": "deferred_call_accept",
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "tool",
+          "request": {
+            "tool_call_id": "call_accept",
+            "tool_name": "remote_write",
+            "arguments": {
+              "record_id": "42",
+              "value": "accepted"
+            },
+            "idempotency_key": "deferred-idem-call-accept"
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoidG9vbCIsInJlcXVlc3QiOnsiYXJndW1lbnRzIjp7InJlY29yZF9pZCI6IjQyIiwidmFsdWUiOiJhY2NlcHRlZCJ9LCJpZGVtcG90ZW5jeV9rZXkiOiJkZWZlcnJlZC1pZGVtLWNhbGwtYWNjZXB0IiwidG9vbF9jYWxsX2lkIjoiY2FsbF9hY2NlcHQiLCJ0b29sX25hbWUiOiJyZW1vdGVfd3JpdGUifSwic2NoZW1hX3ZlcnNpb24iOiJ2di1hZ2VudC5vcGVyYXRpb24tcmVxdWVzdC52MSJ9",
+        "canonical_json_utf8_bytes": 228,
+        "sha256": "6857fde75df61d521f73acde335dc5aa1eb2ab17b1a1d67af08b496e7f24be6a"
+      },
+      {
         "name": "tool_bash_large_output",
         "request": {
           "schema_version": "vv-agent.operation-request.v1",
@@ -157,6 +275,10 @@
         "ambiguous"
       ],
       [
+        "started",
+        "deferred"
+      ],
+      [
         "ambiguous",
         "planned"
       ],
@@ -166,6 +288,18 @@
       ],
       [
         "ambiguous",
+        "failed"
+      ],
+      [
+        "ambiguous",
+        "deferred"
+      ],
+      [
+        "deferred",
+        "succeeded"
+      ],
+      [
+        "deferred",
         "failed"
       ]
     ],
@@ -178,6 +312,71 @@
     "request_digest_mismatch": "checkpoint_journal_integrity_mismatch_before_claim_without_state_transition",
     "retry_attempt": "previous_plus_one",
     "same_logical_retry_reuses_operation_id_and_idempotency_key": true
+  },
+  "deferred_rules": {
+    "state_requires_handle": true,
+    "state_has_no_result_or_error": true,
+    "admission_transition_is_atomic_with_claim_release": true,
+    "resolution_operation": "resolve_deferred",
+    "resolution_requires_definitive_tool_result": true,
+    "same_replay_is_idempotent": true,
+    "receipt_index": {
+      "namespace": "deferred_resolution_receipts",
+      "checkpoint_field": null,
+      "independent": true,
+      "required": true,
+      "bounded": false,
+      "arbitrary_cardinality": true,
+      "retained_across_cycle_and_terminal": true,
+      "cleanup_with_checkpoint": true,
+      "same_store_atomicity": true,
+      "entry_fields": [
+        "handle_key",
+        "handle",
+        "result",
+        "result_digest",
+        "event_id",
+        "event_payload_digest",
+        "receipt_status"
+      ],
+      "success_transition": [
+        "deferred",
+        "succeeded"
+      ],
+      "error_transition": [
+        "deferred",
+        "failed"
+      ]
+    },
+    "receipt_lookup_precedes_active_journal": true,
+    "early_callback_rules": {
+      "matching_started": {
+        "decision_kind": "not_admitted",
+        "retryable_error": "deferred_resolution_not_admitted",
+        "retryable": true,
+        "writes": []
+      },
+      "matching_ambiguous": {
+        "decision_kind": "reconciliation_required",
+        "writes": []
+      },
+      "host_retains_result_until_admission": true
+    },
+    "internal_revision_cas_retry": true,
+    "caller_does_not_pass_revision_argument": true,
+    "conflicting_replay_error": "deferred_resolution_conflict",
+    "stale_resolution_error": "deferred_resolution_stale",
+    "claimed_checkpoint_error": "deferred_checkpoint_claimed",
+    "stale_only_when": [
+      "no_retained_receipt",
+      "no_active_matching_journal"
+    ],
+    "last_resolution_decisions": {
+      "barrier_empty": "applied_ready",
+      "barrier_nonempty": "applied_waiting",
+      "ready_dispatch": "reuse_retained_previous_envelope_with_existing_driver_advance_or_running_reconciler_dispatch",
+      "polling": false
+    }
   },
   "outcome_classification": {
     "failed_requires_definitive_external_outcome": true,
@@ -730,6 +929,35 @@
         "result": null,
         "error": null
       }
+    },
+    {
+      "name": "tool_deferred",
+      "request_golden_case": "tool_write_record",
+      "entry": {
+        "kind": "tool",
+        "operation_id": "op_tool_cycle_2_call_1",
+        "cycle_index": 2,
+        "attempt": 1,
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "tool_call_id": "call_1",
+        "tool_name": "write_record",
+        "arguments": {
+          "record_id": "42",
+          "value": "approved"
+        },
+        "idempotency_key": "idem_7f5ca6d5",
+        "idempotency_support": "supported",
+        "state": "deferred",
+        "deferred_handle": {
+          "schema_version": "vv-agent.deferred-tool-handle.v2",
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_1",
+          "attempt": 1,
+          "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf"
+        },
+        "result": null,
+        "error": null
+      }
     }
   ],
   "recovery_cases": [
@@ -833,6 +1061,31 @@
         "persisted_state": "ambiguous",
         "status": "reconciliation_required",
         "tool_calls": 0
+      }
+    },
+    {
+      "name": "admitted_deferred_receipt_is_replayed_without_tool_call",
+      "entry": "tool_deferred",
+      "policy": "require_reconciliation",
+      "expected": {
+        "persisted_state": "deferred",
+        "status": "deferred",
+        "decision": "replay",
+        "tool_calls": 0,
+        "same_handle": true
+      }
+    },
+    {
+      "name": "started_acceptance_without_receipt_uses_accept_deferred",
+      "entry": "tool_started",
+      "policy": "require_reconciliation",
+      "decision": "accept_deferred",
+      "expected": {
+        "persisted_state": "deferred",
+        "status": "deferred",
+        "tool_calls": 0,
+        "same_handle": true,
+        "external_invocations": 0
       }
     },
     {
@@ -973,6 +1226,27 @@
         "agent_status": "failed",
         "completion_reason": "failed",
         "terminal_error_code": "operator_abort_with_unknown_outcome"
+      }
+    },
+    {
+      "name": "accept_deferred_adopts_proven_admission",
+      "operation_kind": "tool",
+      "decision": {
+        "kind": "accept_deferred",
+        "handle": {
+          "schema_version": "vv-agent.deferred-tool-handle.v2",
+          "checkpoint_key": "tenant-7/run-42",
+          "operation_id": "op_tool_cycle_2_call_1",
+          "attempt": 1,
+          "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf"
+        }
+      },
+      "expected": {
+        "state": "deferred",
+        "status": "deferred",
+        "tool_calls": 0,
+        "external_invocations": 0,
+        "claim_released": true
       }
     }
   ],

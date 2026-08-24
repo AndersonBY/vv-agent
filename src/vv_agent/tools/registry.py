@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.argument_validation import assert_valid_tool_schema, close_object_schemas
 from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
 from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, ToolExposure
@@ -151,5 +152,5 @@ class ToolRegistry:
         )
         self._planner_extra_tool_names.add(name)
 
-    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
+    def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome:
         return self.get_executor(call.name).execute(call, context)

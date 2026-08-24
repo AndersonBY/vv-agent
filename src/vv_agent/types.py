@@ -48,6 +48,7 @@ def _trim_portable_whitespace(value: str) -> str:
 class AgentStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    DEFERRED = "deferred"
     RECONCILIATION_REQUIRED = "reconciliation_required"
     WAIT_USER = "wait_user"
     COMPLETED = "completed"

@@ -723,6 +723,15 @@ def _run_single_cycle(
                 "checkpoint disappeared before returning the terminal candidate",
                 code="checkpoint_not_found",
             )
+        if result.status is AgentStatus.DEFERRED:
+            if current.status is not AgentStatus.DEFERRED or current.claim_token is not None:
+                raise CheckpointError(
+                    "deferred result does not match durable checkpoint state",
+                    code="checkpoint_store_conflict",
+                )
+            # The worker response wire remains ``pending``.  The nonblocking
+            # driver observes the authoritative deferred barrier separately.
+            return DistributedWorkerResponse.pending()
         if result.status is AgentStatus.RECONCILIATION_REQUIRED:
             if current.status is not AgentStatus.RECONCILIATION_REQUIRED or current.claim_token is not None:
                 raise CheckpointError(

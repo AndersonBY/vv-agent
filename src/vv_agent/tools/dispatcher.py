@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.registry import ToolNotFoundError, ToolRegistry
 from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
@@ -63,7 +64,7 @@ def dispatch_tool_call(
     registry: ToolRegistry,
     context: ToolContext,
     call: ToolCall,
-) -> ToolExecutionResult:
+) -> ToolExecutionResult | ToolCallOutcome:
     arguments, parse_error = _parse_arguments(call.id, call.arguments)
     if parse_error is not None:
         return parse_error
@@ -76,6 +77,12 @@ def dispatch_tool_call(
         return _error_result(call.id, f"Unknown tool: {call.name}", error_code="tool_not_found")
     except Exception as exc:
         return _error_result(call.id, f"Tool execution failed ({call.name}): {exc}", error_code="tool_execution_failed")
+
+    if isinstance(result, ToolCallOutcome):
+        if result.kind == "completed" and isinstance(result.result, ToolExecutionResult):
+            result = result.result
+        else:
+            return result
 
     if _needs_tool_call_id(result.tool_call_id):
         result.tool_call_id = call.id

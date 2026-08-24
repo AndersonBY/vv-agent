@@ -10,6 +10,7 @@ from pathlib import Path
 from types import NoneType
 from typing import TYPE_CHECKING, Any, Protocol, Union, get_args, get_origin, get_type_hints, overload
 
+from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.argument_validation import assert_valid_tool_schema, close_object_schemas
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.executor import ToolExposure, normalize_tool_exposure
@@ -33,7 +34,9 @@ class Tool(Protocol):
     needs_approval: bool | ApprovalPredicate
     tool_metadata: ToolMetadata | None
 
-    def invoke(self, context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput: ...
+    def invoke(
+        self, context: ToolContext | None, arguments: dict[str, Any]
+    ) -> ToolOutput | ToolExecutionResult | ToolCallOutcome: ...
 
 
 @dataclass(slots=True)
@@ -41,7 +44,10 @@ class FunctionTool:
     name: str
     description: str
     params_json_schema: dict[str, Any]
-    on_invoke: Callable[[ToolContext | None, dict[str, Any]], ToolOutput]
+    on_invoke: Callable[
+        [ToolContext | None, dict[str, Any]],
+        ToolOutput | ToolExecutionResult | ToolCallOutcome,
+    ]
     is_enabled: bool | Callable[[Any, Any], bool] = True
     needs_approval: bool | ApprovalPredicate = False
     strict_json_schema: bool = True
@@ -70,7 +76,9 @@ class FunctionTool:
             },
         }
 
-    def invoke(self, context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput:
+    def invoke(
+        self, context: ToolContext | None, arguments: dict[str, Any]
+    ) -> ToolOutput | ToolExecutionResult | ToolCallOutcome:
         try:
             if self.timeout_seconds is None:
                 return self.on_invoke(context, arguments)
@@ -104,10 +112,16 @@ class FunctionTool:
 
     def to_tool_execution_result(
         self,
-        output: ToolOutput,
+        output: ToolOutput | ToolExecutionResult | ToolCallOutcome,
         *,
         tool_call_id: str = "",
-    ) -> ToolExecutionResult:
+    ) -> ToolExecutionResult | ToolCallOutcome:
+        if isinstance(output, ToolCallOutcome):
+            return output
+        if isinstance(output, ToolExecutionResult):
+            if not output.tool_call_id:
+                output.tool_call_id = tool_call_id
+            return output
         if isinstance(output, ToolOutputText):
             return ToolExecutionResult(tool_call_id=tool_call_id, content=output.text, metadata=dict(output.metadata))
         if isinstance(output, ToolOutputJson):
@@ -227,7 +241,10 @@ def function_tool(
             localns=localns,
         )
 
-        def invoke(context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput:
+        def invoke(
+            context: ToolContext | None,
+            arguments: dict[str, Any],
+        ) -> ToolOutput | ToolExecutionResult | ToolCallOutcome:
             positional, keyword = argument_builder(arguments)
             result = target(context, *positional, **keyword) if pass_context else target(*positional, **keyword)
             return _coerce_tool_output(result)
@@ -286,7 +303,10 @@ def adapt_tool(tool: Tool) -> FunctionTool:
     if not isinstance(metadata, dict):
         raise TypeError("Tool protocol attribute 'metadata' must be a dict when provided")
 
-    def on_invoke(context: ToolContext | None, arguments: dict[str, Any]) -> ToolOutput:
+    def on_invoke(
+        context: ToolContext | None,
+        arguments: dict[str, Any],
+    ) -> ToolOutput | ToolExecutionResult | ToolCallOutcome:
         return _coerce_tool_output(invoke(context, arguments))
 
     return FunctionTool(
@@ -369,7 +389,14 @@ def _schema_and_argument_builder(
     return schema, build, pass_context
 
 
-def _coerce_tool_output(value: Any) -> ToolOutput:
+def _coerce_tool_output(value: Any) -> ToolOutput | ToolExecutionResult | ToolCallOutcome:
+    # Framework-owned deferred execution is a closed outcome, not a tool
+    # result.  Preserve it through the FunctionTool adapter so the runner can
+    # admit the opaque handle atomically with the started operation batch.
+    if isinstance(value, ToolCallOutcome):
+        return value
+    if isinstance(value, ToolExecutionResult):
+        return value
     if isinstance(value, ToolOutputText | ToolOutputJson | ToolOutputImage | ToolOutputFile | ToolOutputError):
         return value
     if isinstance(value, str):

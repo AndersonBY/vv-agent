@@ -7,7 +7,7 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 ## Install
 
 The current package release is `0.11.0`. Repository `HEAD` locks
-language-neutral Contract `6.1.0` with the Rust `vv-agent` crate while keeping
+language-neutral Contract `7.0.1` with the Rust `vv-agent` crate while keeping
 a Python-idiomatic API.
 
 ```bash
@@ -58,10 +58,10 @@ accept only the current strict public and wire shapes.
   complete immutable artifact is available and only when `read_file` remains
   model-visible. The compact marker keeps a short excerpt and recovery path
   while integrity metadata stays host-only.
-- Durable execution uses `vv-agent.checkpoint.v5`,
+- Durable execution uses `vv-agent.checkpoint.v7`,
   `vv-agent.run-definition.v5`, `vv-agent.distributed-run.v5`, and
   `vv-agent.distributed-worker-response.v3` for strict recovery and
-  distributed-controller boundaries. `RunEvent` uses wire version `v2`, and
+  distributed-controller boundaries. `RunEvent` uses wire version `v4`, and
   SQLite session stores use `PRAGMA user_version=2`.
 
 See [output validation](docs/output-validation.md) and
@@ -210,7 +210,7 @@ Argument parse failures emit none of these events. Schema validation, policy,
 approval, and unknown-tool short-circuits emit planned plus completed without
 started; completed events report `directive`, nullable `error_code`,
 `execution_started`, and nullable monotonic `duration_ms`. A started event may
-remain unmatched after cancellation or process loss, so checkpoint v5's
+remain unmatched after cancellation or process loss, so checkpoint v7's
 operation journal remains the recovery authority.
 
 The lower-level `AgentRuntime` API remains available for backend integrations

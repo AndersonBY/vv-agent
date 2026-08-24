@@ -154,6 +154,7 @@ class OperationKind(StrEnum):
 class OperationState(StrEnum):
     PLANNED = "planned"
     STARTED = "started"
+    DEFERRED = "deferred"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     AMBIGUOUS = "ambiguous"
@@ -165,6 +166,7 @@ class ReconciliationDecisionKind(StrEnum):
     REPLAY_SUCCESS = "replay_success"
     RECORD_FAILURE = "record_failure"
     ABORT = "abort"
+    ACCEPT_DEFERRED = "accept_deferred"
 
 
 class CheckpointError(ValueError):
@@ -316,6 +318,7 @@ class ReconciliationDecision:
     response: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
     error: ReconciliationError | None = None
+    handle: Any | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, ReconciliationDecisionKind):
@@ -333,6 +336,25 @@ class ReconciliationDecision:
                 raise ValueError(f"{self.kind.value} requires a typed error")
         elif self.error is not None:
             raise ValueError(f"{self.kind.value} does not accept an error")
+        if self.kind is ReconciliationDecisionKind.ACCEPT_DEFERRED:
+            from vv_agent.deferred import DeferredToolHandle
+
+            if not isinstance(self.handle, DeferredToolHandle):
+                raise ValueError("accept_deferred requires an exact DeferredToolHandle")
+        elif self.handle is not None:
+            raise ValueError(f"{self.kind.value} does not accept a deferred handle")
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"kind": self.kind.value}
+        if self.response is not None:
+            payload["response"] = self.response
+        if self.result is not None:
+            payload["result"] = self.result
+        if self.error is not None:
+            payload["error"] = self.error.to_dict()
+        if self.handle is not None:
+            payload.update({"schema_version": "vv-agent.reconciliation-decision.v1", "handle": self.handle.to_dict()})
+        return payload
 
 
 @runtime_checkable

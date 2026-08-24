@@ -223,7 +223,9 @@ def _normalize_sub_event(event: SubRunStartedEvent | SubRunCompletedEvent) -> di
 
 def test_configured_sub_agent_shared_fixtures_use_one_current_version() -> None:
     assert _contract()["version"] == "v2"
-    assert all(event["version"] == _contract()["version"] for event in _event_contract())
+    # The configured-sub-agent wire has its own v2 schema; emitted RunEvent
+    # payloads follow the current shared event v4 discriminator.
+    assert all(event["version"] == "v4" for event in _event_contract())
 
 
 def test_portable_workspace_regex_cases_match_shared_contract() -> None:

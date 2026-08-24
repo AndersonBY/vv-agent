@@ -9,6 +9,7 @@ import pytest
 
 from vv_agent import (
     Agent,
+    CheckpointConfig,
     FunctionTool,
     RunConfig,
     Runner,
@@ -18,7 +19,9 @@ from vv_agent import (
     ToolPolicy,
     function_tool,
 )
+from vv_agent.checkpoint import ResumePolicy
 from vv_agent.model import ScriptedModelProvider
+from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import LLMResponse, ToolCall, ToolDirective, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
@@ -246,9 +249,10 @@ def test_telemetry_contract_matches_public_status_and_directive_values() -> None
     assert telemetry["event_types"] == [
         "tool_call_planned",
         "tool_call_started",
+        "tool_call_deferred",
         "tool_call_completed",
     ]
-    assert telemetry["tool_status_values"] == [status.value.lower() for status in ToolResultStatus]
+    assert telemetry["completed_status_values"] == [status.value.lower() for status in ToolResultStatus]
     assert set(telemetry["directive_values"]) == {directive.value for directive in ToolDirective}
     assert telemetry["parse_failure_before_planning_has_no_tool_lifecycle"] is True
     assert telemetry["missing_metadata_field"] == "omit"
@@ -272,6 +276,52 @@ def test_real_orchestrator_consumes_canonical_producer_cases(
     tool_call_id = str(first_expected["tool_call_id"] if first_expected else f"call_{case['name']}")
     arguments = deepcopy(first_expected["arguments"] if first_expected else {})
     invocations: list[dict[str, Any]] = []
+
+    if case["name"] == "deferred_admission_has_no_completed_result_or_model_message":
+
+        def deferred_implementation(context: ToolContext) -> Any:
+            invocations.append({})
+            return context.defer()
+
+        tool = function_tool(
+            deferred_implementation,
+            name=tool_name,
+            description="Canonical deferred telemetry producer.",
+            params_json_schema={"type": "object", "properties": {}, "required": []},
+            tool_metadata=deepcopy(case["tool_metadata"]),
+        )
+        store = InMemoryCheckpointStore()
+        agent = Agent(
+            name="deferred-telemetry-agent",
+            instructions="Admit one deferred operation.",
+            model="fixture-model",
+            tools=[tool],
+        )
+        model_provider = ScriptedModelProvider.from_steps(
+            "test",
+            "fixture-model",
+            [LLMResponse(content="", tool_calls=[ToolCall(id=tool_call_id, name=tool_name, arguments=arguments)])],
+        )
+        result = Runner.run_sync(
+            agent,
+            "defer the operation",
+            run_config=RunConfig(
+                workspace=tmp_path,
+                model_provider=model_provider,
+                max_cycles=1,
+                checkpoint_config=CheckpointConfig(
+                    key="deferred-telemetry",
+                    resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    store=store,
+                    capability_refs={"workspace": {"id": "test-workspace", "version": "1"}},
+                ),
+            ),
+        )
+        assert [event.type for event in result.events if event.type.startswith("tool_call_")] == case["expected_event_types"]
+        assert invocations == [arguments]
+        assert result.raw_result.status.value == "deferred"
+        assert all(message.tool_call_id != tool_call_id for message in result.raw_result.messages)
+        return
 
     def implementation(path: str = "") -> str:
         invocations.append({"path": path} if path else {})

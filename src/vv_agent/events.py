@@ -25,7 +25,7 @@ from vv_agent.types import CompletionReason, ModelCallOperation, TokenUsage
 if TYPE_CHECKING:
     from vv_agent.tools.metadata import ToolMetadata
 
-RUN_EVENT_VERSION = "v2"
+RUN_EVENT_VERSION = "v4"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
 MemoryCompactTrigger = Literal["micro_threshold", "full_threshold", "prompt_too_long"]
 MemoryCompactMode = Literal["none", "micro", "structural", "summary", "emergency"]
@@ -137,6 +137,22 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
             "execution_started",
             "duration_ms",
             "tool_metadata",
+            "operation_id",
+            "attempt",
+            "checkpoint_key",
+        }
+    ),
+    "tool_call_deferred": frozenset(
+        {
+            "tool_call_id",
+            "tool_name",
+            "operation_id",
+            "attempt",
+            "handle",
+            "execution_started",
+            "duration_ms",
+            "checkpoint_key",
+            "operation_kind",
         }
     ),
     "approval_requested": frozenset({"request_id", "tool_name", "tool_call_id", "message"}),
@@ -197,7 +213,7 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
         {"checkpoint_key", "operation_id", "operation_kind", "interruption_reason", "resume_observation"}
     ),
     "model_retry_duplicate_risk": frozenset({"checkpoint_key", "operation_id", "operation_kind", "risk"}),
-    "reconciliation_resolved": frozenset({"checkpoint_key", "operation_id", "operation_kind", "decision"}),
+    "reconciliation_resolved": frozenset({"checkpoint_key", "operation_id", "operation_kind", "decision", "claim_mode"}),
 }
 _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "run_started": frozenset({"input"}),
@@ -226,7 +242,26 @@ _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "tool_call_planned": frozenset({"tool_name", "tool_call_id", "arguments"}),
     "tool_call_started": frozenset({"tool_name", "tool_call_id", "arguments"}),
     "tool_call_completed": frozenset(
-        {"tool_name", "tool_call_id", "status", "directive", "error_code", "execution_started", "duration_ms"}
+        {
+            "tool_name",
+            "tool_call_id",
+            "status",
+            "directive",
+            "error_code",
+            "execution_started",
+            "duration_ms",
+        }
+    ),
+    "tool_call_deferred": frozenset(
+        {
+            "tool_call_id",
+            "tool_name",
+            "operation_id",
+            "attempt",
+            "handle",
+            "execution_started",
+            "duration_ms",
+        }
     ),
     "approval_requested": frozenset({"request_id", "tool_name", "tool_call_id", "message"}),
     "approval_resolved": frozenset({"request_id", "tool_name", "tool_call_id", "action"}),
@@ -1452,6 +1487,9 @@ class ToolCallCompletedEvent(RunEvent):
     error_code: str | None = None
     execution_started: bool = False
     duration_ms: int | None = None
+    operation_id: str | None = None
+    attempt: int | None = None
+    checkpoint_key: str | None = None
     tool_metadata: ToolMetadata | None = None
 
     def __init__(
@@ -1466,6 +1504,9 @@ class ToolCallCompletedEvent(RunEvent):
         error_code: str | None,
         execution_started: bool,
         duration_ms: int | None,
+        operation_id: str | None = None,
+        attempt: int | None = None,
+        checkpoint_key: str | None = None,
         tool_metadata: ToolMetadata | dict[str, Any] | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
@@ -1503,19 +1544,160 @@ class ToolCallCompletedEvent(RunEvent):
         object.__setattr__(self, "error_code", error_code_value)
         object.__setattr__(self, "execution_started", execution_started_value)
         object.__setattr__(self, "duration_ms", duration_ms_value)
+        # Keep the optional v4 identity fields present on every concrete
+        # instance so ``to_dict`` is total for both legacy-shaped callers and
+        # current operation-aware events.
+        object.__setattr__(self, "operation_id", None)
+        object.__setattr__(self, "attempt", None)
+        if operation_id is not None:
+            object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
+        if attempt is not None:
+            object.__setattr__(self, "attempt", _positive_event_integer(attempt, "attempt"))
+        if checkpoint_key is not None:
+            object.__setattr__(self, "checkpoint_key", _required_event_text(checkpoint_key, "checkpoint_key"))
+        else:
+            object.__setattr__(self, "checkpoint_key", None)
         object.__setattr__(self, "tool_metadata", _event_tool_metadata(tool_metadata))
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
-        payload["tool_name"] = self.tool_name
-        payload["tool_call_id"] = self.tool_call_id
-        payload["status"] = self.status
-        payload["directive"] = self.directive
-        payload["error_code"] = self.error_code
-        payload["execution_started"] = self.execution_started
-        payload["duration_ms"] = self.duration_ms
+        if self.operation_id is not None:
+            # v4 operation-aware tool events use the contract's identity
+            # fields before the terminal result fields.  Keep the v3-shaped
+            # order for ordinary tool completions so existing canonical
+            # stream fixtures remain byte-stable.
+            payload["tool_call_id"] = self.tool_call_id
+            payload["tool_name"] = self.tool_name
+            payload["operation_id"] = self.operation_id
+            if self.attempt is not None:
+                payload["attempt"] = self.attempt
+            payload["status"] = self.status
+            payload["directive"] = self.directive
+            payload["error_code"] = self.error_code
+            payload["execution_started"] = self.execution_started
+            payload["duration_ms"] = self.duration_ms
+        else:
+            payload["tool_name"] = self.tool_name
+            payload["tool_call_id"] = self.tool_call_id
+            payload["status"] = self.status
+            payload["directive"] = self.directive
+            payload["error_code"] = self.error_code
+            payload["execution_started"] = self.execution_started
+            payload["duration_ms"] = self.duration_ms
+        if self.checkpoint_key is not None:
+            payload["checkpoint_key"] = self.checkpoint_key
         if self.tool_metadata is not None:
             payload["tool_metadata"] = self.tool_metadata.to_dict()
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallDeferredEvent(RunEvent):
+    """Lifecycle event for an admitted deferred tool call.
+
+    It intentionally contains the framework handle only and never a provider
+    job id, callback, or business payload.
+    """
+
+    tool_call_id: str = ""
+    tool_name: str = ""
+    operation_id: str = ""
+    attempt: int = 1
+    handle: Any = None
+    execution_started: bool = True
+    duration_ms: int | None = None
+    checkpoint_key: str | None = None
+    operation_kind: OperationKind | None = None
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        operation_id: str,
+        attempt: int,
+        handle: Any,
+        execution_started: bool,
+        duration_ms: int | None,
+        checkpoint_key: str | None = None,
+        operation_kind: OperationKind | str | None = None,
+        cycle_index: int | None = None,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        from vv_agent.deferred import DeferredToolHandle
+
+        _set_run_event_fields(
+            self,
+            type="tool_call_deferred",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "tool_call_id", _required_event_text(tool_call_id, "tool_call_id"))
+        object.__setattr__(self, "tool_name", _required_event_text(tool_name, "tool_name"))
+        object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
+        object.__setattr__(self, "attempt", _positive_event_integer(attempt, "attempt"))
+        if not isinstance(handle, DeferredToolHandle):
+            raise ValueError("Run event deferred handle must be a DeferredToolHandle")
+        if handle.operation_id != operation_id or handle.attempt != attempt:
+            raise ValueError("Run event deferred operation identity does not match handle")
+        object.__setattr__(self, "handle", handle)
+        if not isinstance(execution_started, bool):
+            raise ValueError("Run event execution_started must be a boolean")
+        object.__setattr__(self, "execution_started", execution_started)
+        object.__setattr__(self, "duration_ms", _tool_duration_ms(duration_ms))
+        if duration_ms is not None:
+            raise ValueError("Run event deferred duration_ms must be null")
+        if checkpoint_key is not None:
+            normalized_checkpoint_key = _required_event_text(checkpoint_key, "checkpoint_key")
+            if handle.checkpoint_key != normalized_checkpoint_key:
+                raise ValueError("Run event deferred checkpoint_key does not match handle")
+            object.__setattr__(self, "checkpoint_key", normalized_checkpoint_key)
+        else:
+            object.__setattr__(self, "checkpoint_key", None)
+        if operation_kind is not None:
+            try:
+                normalized_operation_kind = OperationKind(operation_kind)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("deferred operation_kind must be tool") from exc
+            if normalized_operation_kind is not OperationKind.TOOL:
+                raise ValueError("deferred operation_kind must be tool")
+            object.__setattr__(self, "operation_kind", normalized_operation_kind)
+        else:
+            object.__setattr__(self, "operation_kind", None)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload.update(
+            {
+                "tool_call_id": self.tool_call_id,
+                "tool_name": self.tool_name,
+                "operation_id": self.operation_id,
+                "attempt": self.attempt,
+                "handle": self.handle.to_dict(),
+                "execution_started": self.execution_started,
+                "duration_ms": self.duration_ms,
+            }
+        )
+        if self.checkpoint_key is not None:
+            payload["checkpoint_key"] = self.checkpoint_key
+        if self.operation_kind is not None:
+            payload["operation_kind"] = self.operation_kind.value
         return payload
 
 
@@ -2550,6 +2732,7 @@ class ReconciliationResolvedEvent(RunEvent):
     operation_id: str = ""
     operation_kind: OperationKind = OperationKind.MODEL
     decision: ReconciliationDecisionKind = ReconciliationDecisionKind.DEFER
+    claim_mode: str | None = None
 
     def __init__(
         self,
@@ -2560,6 +2743,7 @@ class ReconciliationResolvedEvent(RunEvent):
         operation_id: str,
         operation_kind: OperationKind | str,
         decision: ReconciliationDecisionKind | str,
+        claim_mode: str | None = None,
         cycle_index: int | None = None,
         agent_name: str | None = None,
         session_id: str | None = None,
@@ -2587,6 +2771,9 @@ class ReconciliationResolvedEvent(RunEvent):
         object.__setattr__(self, "operation_id", _required_event_text(operation_id, "operation_id"))
         object.__setattr__(self, "operation_kind", OperationKind(operation_kind))
         object.__setattr__(self, "decision", ReconciliationDecisionKind(decision))
+        if claim_mode is not None and claim_mode not in {"continue", "recovery"}:
+            raise ValueError("Run event claim_mode must be 'continue' or 'recovery'")
+        object.__setattr__(self, "claim_mode", claim_mode)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
@@ -2596,6 +2783,8 @@ class ReconciliationResolvedEvent(RunEvent):
             operation_kind=self.operation_kind.value,
             decision=self.decision.value,
         )
+        if self.claim_mode is not None:
+            payload["claim_mode"] = self.claim_mode
         return payload
 
 
@@ -2705,10 +2894,12 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
             if payload.get("outcome") not in _MODEL_CALL_OUTCOME_VALUES:
                 raise ValueError(f"Unsupported model call outcome: {payload.get('outcome')!r}")
             _required_event_text(payload.get("error_code"), "error_code")
-    tool_lifecycle_types = {"tool_call_planned", "tool_call_started", "tool_call_completed"}
+    tool_lifecycle_types = {"tool_call_planned", "tool_call_started", "tool_call_completed", "tool_call_deferred"}
     if payload["type"] in tool_lifecycle_types:
         _required_event_text(payload.get("tool_call_id"), "tool_call_id")
         _required_event_text(payload.get("tool_name"), "tool_name")
+        if "checkpoint_key" in payload:
+            _required_event_text(payload.get("checkpoint_key"), "checkpoint_key")
         if "tool_metadata" in payload:
             if not isinstance(payload["tool_metadata"], dict):
                 raise ValueError("Run event tool_metadata must be an object")
@@ -2723,6 +2914,44 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         _tool_duration_ms(payload["duration_ms"])
         if payload.get("execution_started") is False and payload.get("duration_ms") is not None:
             raise ValueError("Run event duration_ms must be null when execution_started is false")
+        if "operation_id" in payload:
+            _required_event_text(payload.get("operation_id"), "operation_id")
+        if "attempt" in payload:
+            _positive_event_integer(payload.get("attempt"), "attempt")
+    if payload["type"] == "tool_call_deferred":
+        _required_event_text(payload.get("operation_id"), "operation_id")
+        _positive_event_integer(payload.get("attempt"), "attempt")
+        from vv_agent.deferred import DeferredToolHandle
+
+        try:
+            handle_payload = payload.get("handle")
+            if not isinstance(handle_payload, dict):
+                raise ValueError("deferred handle must be an object")
+            handle = DeferredToolHandle.from_dict(handle_payload)
+            if handle.operation_id != payload["operation_id"] or handle.attempt != payload["attempt"]:
+                raise ValueError("deferred event operation identity does not match handle")
+            if "checkpoint_key" in payload and handle.checkpoint_key != payload["checkpoint_key"]:
+                raise ValueError("deferred event checkpoint_key does not match handle")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Run event deferred handle is invalid") from exc
+        _tool_execution_started(payload.get("execution_started"))
+        _tool_duration_ms(payload.get("duration_ms"))
+        if payload.get("duration_ms") is not None:
+            raise ValueError("Run event deferred duration_ms must be null")
+        if "operation_kind" in payload:
+            try:
+                if OperationKind(payload["operation_kind"]) is not OperationKind.TOOL:
+                    raise ValueError("deferred operation_kind must be tool")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("deferred operation_kind must be tool") from exc
+        if payload.get("execution_started") is False and payload.get("duration_ms") is not None:
+            raise ValueError("Run event duration_ms must be null when execution_started is false")
+    if (
+        payload["type"] == "reconciliation_resolved"
+        and "claim_mode" in payload
+        and payload["claim_mode"] not in {"continue", "recovery"}
+    ):
+        raise ValueError("Run event claim_mode must be 'continue' or 'recovery'")
     if payload["type"] in {"approval_requested", "approval_resolved"}:
         _required_event_text(payload.get("request_id"), "request_id")
         _required_event_text(payload.get("tool_call_id"), "tool_call_id")
@@ -2979,7 +3208,25 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             error_code=payload["error_code"],
             execution_started=payload["execution_started"],
             duration_ms=payload["duration_ms"],
+            operation_id=payload.get("operation_id"),
+            attempt=payload.get("attempt"),
+            checkpoint_key=payload.get("checkpoint_key"),
             tool_metadata=payload.get("tool_metadata"),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "tool_call_deferred":
+        from vv_agent.deferred import DeferredToolHandle
+
+        return ToolCallDeferredEvent(
+            tool_name=payload["tool_name"],
+            tool_call_id=payload["tool_call_id"],
+            operation_id=payload["operation_id"],
+            attempt=payload["attempt"],
+            handle=DeferredToolHandle.from_dict(payload["handle"]),
+            execution_started=payload["execution_started"],
+            duration_ms=payload["duration_ms"],
+            checkpoint_key=payload.get("checkpoint_key"),
+            operation_kind=payload.get("operation_kind"),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "approval_requested":
@@ -3160,6 +3407,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             operation_id=payload["operation_id"],
             operation_kind=payload["operation_kind"],
             decision=payload["decision"],
+            claim_mode=payload.get("claim_mode"),
             **_with_cycle_and_agent(payload, common),
         )
 

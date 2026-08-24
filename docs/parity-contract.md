@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `6.1.0` at revision
-`4efeb24ca0c05d56068314fe75b0c6e5cf78fdc4`. Its immutable release artifact has
-SHA-256 `1ac62903ffa9d5b204dfb14fa538ea33796dc8346c304cf4695b9d158f48d56c`.
+`contract.lock.json` selects contract `7.0.1` at revision
+`fd3352a1c3a17dd5d7ff01e5e9dcceee9e038a19`. Its immutable release artifact has
+SHA-256 `4358b9dbae6b51c476677b0c4d48fd02d7acd2fffc5bb1170276654e1f2bb6a5`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,8 +44,8 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-6.1.0.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v6.1.0/vv-agent-contract-6.1.0.zip
+  --artifact /path/to/vv-agent-contract-7.0.1.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v7.0.1/vv-agent-contract-7.0.1.zip
 ```
 
 ## Python Producer Map
@@ -60,6 +60,7 @@ python3 scripts/contract_snapshot.py sync \
 | Tool execution lifecycle | `src/vv_agent/tools/orchestrator.py`, `src/vv_agent/runtime/tool_call_runner.py`, `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py` |
 | Agent, Runner, result, and live control | `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `src/vv_agent/run_handle.py`, `src/vv_agent/result.py` |
 | Typed events | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `tests/test_events_contract.py`, `tests/test_event_validation.py`, `tests/test_runner_events_producer_parity.py` |
+| Durable deferred tools and claimed-checkpoint producer evidence | `src/vv_agent/deferred.py`, `src/vv_agent/runtime/tool_call_runner.py`, `src/vv_agent/runtime/stores/`; `tests/test_deferred_tools.py`, `tests/test_checkpoint_resume_events.py` |
 | LLM stream projection | `src/vv_agent/llm/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_llm_interface.py`, `tests/test_runner_events_producer_parity.py` |
 | Configured children | `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/sub_task_manager.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_sub_agent_runtime.py` |
 | Sessions | `src/vv_agent/sessions/`, `src/vv_agent/interactive.py`, `tests/test_session_store_parity.py`, `tests/test_interactive_lifecycle_contract.py` |
@@ -92,7 +93,7 @@ diagnostic cannot replace lifecycle, approval, budget, cancellation, tool, or
 terminal state. Child event forwarding preserves the original event identity
 and parent/run/trace/session relationships.
 
-RunEvent `v2` is a strict current discriminator. Readers reject missing, stale,
+RunEvent `v4` is a strict current discriminator. Readers reject missing, stale,
 unknown, and malformed fields; there is no alternate event decoder.
 
 ### Model Capacity
@@ -160,7 +161,7 @@ own ambiguity and replay decisions.
 
 ### Persistence
 
-Checkpoint records require `vv-agent.checkpoint.v5`; run definitions require
+Checkpoint records require `vv-agent.checkpoint.v7`; run definitions require
 `vv-agent.run-definition.v5`; distributed envelopes require
 `vv-agent.distributed-run.v5`. The frozen definition stores `prompt_bundle`,
 not a second independently editable flattened system prompt. Readers reject every other shape before claim or

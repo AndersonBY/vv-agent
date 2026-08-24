@@ -88,7 +88,8 @@ producers create lifecycle events directly, and LLM adapters project only valid
 assistant/reasoning deltas and model tool-call start/progress events before the
 payload leaves the adapter boundary. Model tool generation uses
 `model_tool_call_*`; actual tool execution uses `tool_call_planned`,
-`tool_call_started`, and `tool_call_completed`. Unknown or malformed provider
+`tool_call_started`, and `tool_call_completed`, with `tool_call_deferred` for
+admitted durable external work. Unknown or malformed provider
 payloads are dropped. Reasoning remains private telemetry and is not rendered
 as App Server answer text.
 
@@ -280,7 +281,7 @@ no tool lifecycle. Unknown tools, policy denials, and approval short-circuits
 have planned plus completed but no started event. Completed events add the
 result directive, nullable error code, `execution_started`, nullable monotonic
 `duration_ms`, and the optional declaration. Cancellation or process loss may
-leave a started event without completion; checkpoint v5's operation journal,
+leave a started event without completion; checkpoint v7's operation journal,
 not telemetry, owns ambiguity and recovery.
 
 When no typed declaration exists, metadata-denial fields do not match that

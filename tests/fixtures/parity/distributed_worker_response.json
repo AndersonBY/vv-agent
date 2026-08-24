@@ -30,6 +30,8 @@
     "scheduler_must_verify_authoritative_checkpoint": true,
     "transport_failure_is_response_variant": false,
     "legacy_boolean_wire_is_rejected": true,
+    "pending_semantics": "no cycle commit and no response result were returned by this delivery attempt",
+    "deferred_is_non_terminal_checkpoint_state": true,
     "mutation_case_encoding": {
       "base_valid_case": "name in valid_cases",
       "operation": [
@@ -98,7 +100,8 @@
       "type": "terminal_candidate",
       "statuses": [
         "pending",
-        "running"
+        "running",
+        "deferred"
       ]
     },
     {
@@ -106,7 +109,8 @@
       "statuses": [
         "pending",
         "running",
-        "reconciliation_required"
+        "reconciliation_required",
+        "deferred"
       ]
     }
   ],

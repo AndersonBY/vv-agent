@@ -7,7 +7,7 @@ to the Python implementation and shows the supported public entry point.
 ## Opt In
 
 Durable execution is disabled unless a `CheckpointConfig` is attached to the
-run. Enabled records require `schema_version=vv-agent.checkpoint.v5` and
+run. Enabled records require `schema_version=vv-agent.checkpoint.v7` and
 `run_definition_schema=vv-agent.run-definition.v5`; no other record shape is
 read or repaired.
 
@@ -76,8 +76,8 @@ stored definition.
 ## Operation Journal
 
 Every model request and executable tool call has a stable operation identity.
-The durable states are `planned`, `started`, `succeeded`, `failed`, and
-`ambiguous`.
+The durable states are `planned`, `started`, `deferred`, `succeeded`, `failed`,
+and `ambiguous`.
 
 - A durable model response or tool receipt is replayed without another external
   call.
@@ -102,6 +102,42 @@ run output guardrails, append session messages, or emit a business terminal.
 A host can provide a `ReconciliationProvider` to defer, retry, replay a receipt,
 record a definitive failure, or abort while retaining the unknown-outcome
 evidence.
+
+## Deferred Tool Operations
+
+An external tool that has been accepted by a provider can return
+`ToolContext.defer()` before crossing its provider-effect boundary. The
+framework creates an opaque `DeferredToolHandle` and returns the closed
+`ToolCallOutcome.Deferred` variant; provider job IDs and callback details stay
+outside the checkpoint contract. Without a durable checkpoint the factory
+fails closed with an ordinary `ToolExecutionResult(ERROR)` using
+`error_code="deferred_requires_checkpoint"` before provider work.
+
+The runner collects one model-tool batch while holding its claim, then calls
+`admit_deferred_batch` once. The compare-and-swap persists all completed
+receipts, deferred handles, lifecycle events, and the deferred barrier before
+releasing the claim. A deferred call contributes no model-visible tool result
+message or `ToolExecutionResult` status. Mixed completed/deferred batches are
+all-or-none; completed `SUCCESS` and `ERROR` outcomes become `succeeded` and
+`failed` journal entries respectively.
+
+The public callback is deliberately revision-free:
+
+```python
+decision = store.resolve_deferred(handle, definitive_result)
+# decision.kind is applied_ready, applied_waiting, replayed,
+# not_admitted, or reconciliation_required
+```
+
+Only `SUCCESS` and `ERROR` results resolve a handle. Resolution is receipt-first
+and idempotent: the same handle/result replays the retained receipt, while a
+different result raises `deferred_resolution_conflict`. A callback observed
+while the exact operation is still `started` returns `not_admitted` without a
+write; an `ambiguous` operation returns `reconciliation_required`. The final
+resolution leaves an unclaimed `running` checkpoint for the existing scheduler
+advance path. `accept_deferred_batch` is reserved for trusted active recovery
+claims and adopts an all-or-none batch of exact handles without invoking the
+external tool.
 
 ## Model Call Ledger
 
@@ -182,14 +218,14 @@ worker; durable cross-process approval continuation remains a separate protocol.
 
 ## Scope And Limits
 
-Checkpoint v5 provides durable resume with explicit ambiguity. It does not make
+Checkpoint v7 provides durable resume, deferred barriers, and explicit ambiguity. It does not make
 an arbitrary external API exactly-once, recover a provider response that was
 never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,
 encryption, retention, and checkpoint redaction remain host responsibilities.
 
 Leaving durable execution disabled uses the ordinary non-checkpoint runtime.
-There is no alternate checkpoint decoder or distributed envelope reader.
+There is no alternate checkpoint decoder, deferred-tool reader, or distributed envelope reader.
 
 Checkpoint-enabled roots currently reject handoffs. Agent-as-tool and
 background children do not inherit the parent checkpoint config, key,
@@ -209,6 +245,7 @@ uv run pytest tests/test_checkpoint_runner.py
 uv run pytest tests/test_checkpoint_fault_matrix.py
 uv run pytest tests/test_checkpoint_resume_events.py
 uv run pytest tests/test_run_definition_producer.py tests/test_distributed_checkpoint.py
+uv run pytest tests/test_event_validation.py tests/test_events_contract.py
 ```
 
 The fault suite covers F1-F8 deterministic persistence boundaries and a real

@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v3",
+  "contract": "vv-agent-public-api-v4",
   "domains": [
     {
       "capabilities": [
@@ -464,6 +464,11 @@
           "rust": "vv_agent::ToolContext"
         },
         {
+          "id": "tools.context_defer",
+          "python": "vv_agent.ToolContext.defer",
+          "rust": "vv_agent::ToolContext::defer"
+        },
+        {
           "id": "tools.orchestrator",
           "python": "vv_agent.tools.ToolOrchestrator",
           "rust": "vv_agent::ToolOrchestrator"
@@ -482,6 +487,29 @@
           "id": "tools.execution_result",
           "python": "vv_agent.ToolExecutionResult",
           "rust": "vv_agent::ToolExecutionResult"
+        },
+        {
+          "id": "tools.result_status",
+          "python": "vv_agent.ToolResultStatus",
+          "rust": "vv_agent::ToolResultStatus",
+          "values": [
+            "SUCCESS",
+            "ERROR",
+            "WAIT_RESPONSE",
+            "RUNNING",
+            "PENDING_COMPRESS"
+          ],
+          "deferred_representation": "ToolCallOutcome.Deferred(handle)"
+        },
+        {
+          "id": "tools.deferred_handle",
+          "python": "vv_agent.DeferredToolHandle",
+          "rust": "vv_agent::DeferredToolHandle"
+        },
+        {
+          "id": "tools.tool_call_outcome",
+          "python": "vv_agent.ToolCallOutcome",
+          "rust": "vv_agent::ToolCallOutcome"
         },
         {
           "id": "tools.message",
@@ -902,12 +930,54 @@
           "id": "runtime_backend.operation_journal",
           "python": "vv_agent.runtime.OperationJournalEntry",
           "rust": "vv_agent::OperationJournalEntry"
+        },
+        {
+          "id": "runtime_backend.resolve_deferred",
+          "python": "vv_agent.runtime.CheckpointStore.resolve_deferred",
+          "rust": "vv_agent::CheckpointStore::resolve_deferred",
+          "signature": "resolve_deferred(handle, result)",
+          "return": "DeferredResolveDecision",
+          "closed_return_variants": {
+            "discriminator": "kind",
+            "unknown_fields": "reject",
+            "variants": {
+              "applied_ready": {
+                "required": ["kind", "receipt"]
+              },
+              "applied_waiting": {
+                "required": ["kind", "receipt"]
+              },
+              "replayed": {
+                "required": ["kind", "receipt"]
+              },
+              "not_admitted": {
+                "required": ["kind", "retryable_error"],
+                "forbidden": ["receipt"]
+              },
+              "reconciliation_required": {
+                "required": ["kind"],
+                "forbidden": ["receipt"]
+              }
+            }
+          },
+          "errors": [
+            "deferred_resolution_conflict",
+            "deferred_resolution_stale",
+            "deferred_resolution_result_invalid",
+            "deferred_checkpoint_claimed"
+          ],
+          "decision_error_codes": [
+            "deferred_resolution_not_admitted"
+          ],
+          "retryable_decision_error_codes": [
+            "deferred_resolution_not_admitted"
+          ]
         }
       ],
       "id": "runtime_backend"
     }
   ],
-  "schema_version": 3,
+  "schema_version": 4,
   "surfaces": [
     {
       "id": "agent",
@@ -4695,6 +4765,46 @@
       ],
       "python_target": "vv_agent.FunctionTool",
       "rust_target": "vv_agent::Tool"
+    },
+    {
+      "id": "tool_context",
+      "members": [
+        {
+          "id": "defer",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "defer",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "self",
+                  "required": true
+                }
+              ],
+              "return": "ToolCallOutcome.Deferred"
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "defer",
+            "return": "ToolCallOutcome::Deferred"
+          },
+          "construction": "framework-owned handle/outcome factory before external acceptance",
+          "requires_durable_checkpoint": true,
+          "without_checkpoint": {
+            "error": "deferred_requires_checkpoint",
+            "before_external_side_effect": true,
+            "result": "Completed(ERROR)"
+          },
+          "ordinary_outcome_without_checkpoint": "normal local tools continue to return Completed outcomes; only defer requires durable checkpointing",
+          "errors": ["deferred_requires_checkpoint"]
+        }
+      ],
+      "python_target": "vv_agent.ToolContext",
+      "rust_target": "vv_agent::ToolContext"
     },
     {
       "id": "tool_policy",

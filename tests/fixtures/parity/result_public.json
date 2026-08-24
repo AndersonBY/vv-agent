@@ -1,6 +1,6 @@
 {
   "contract": "result_public",
-  "version": 3,
+  "version": 5,
   "agent_result_wire": {
     "required_fields": [
       "status",
@@ -34,12 +34,22 @@
     "statuses": [
       "pending",
       "running",
+      "deferred",
       "reconciliation_required",
       "wait_user",
       "completed",
       "failed",
       "max_cycles"
-    ]
+    ],
+    "deferred_status_semantics": {
+      "status": "deferred",
+      "non_terminal": true,
+      "wait_reason": "deferred_pending",
+      "turn_status": "interrupted",
+      "resume_method": "turn/resume",
+      "completion_reason": null,
+      "error": null
+    }
   },
   "agent_result": {
     "status": "wait_user",
@@ -239,6 +249,24 @@
       "state": "ambiguous",
       "risk": "unknown_tool_side_effect",
       "idempotency_support": "unknown"
+    }
+  },
+  "deferred_pending_result": {
+    "status": "deferred",
+    "completion_reason": null,
+    "completion_tool_name": null,
+    "partial_output": "last committed assistant output",
+    "final_answer": null,
+    "wait_reason": "deferred_pending",
+    "error": null,
+    "checkpoint_key": "tenant-7/run-42",
+    "resume_observation": null,
+    "turn_projection": {
+      "status": "interrupted",
+      "terminal": false,
+      "completion_reason": null,
+      "error": null,
+      "resume_method": "turn/resume"
     }
   }
 }

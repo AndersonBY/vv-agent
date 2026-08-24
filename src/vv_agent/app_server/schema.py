@@ -100,6 +100,7 @@ def _definitions() -> dict[str, dict[str, Any]]:
                 "type": "string",
                 "enum": [
                     "running",
+                    "deferred",
                     "reconciliation_required",
                     "wait_user",
                     "completed",
@@ -317,6 +318,7 @@ def _definitions() -> dict[str, dict[str, Any]]:
                 "completionReason": {"type": "string"},
                 "completionToolName": {"type": "string"},
                 "partialOutput": {"type": "string"},
+                "waitReason": {"type": "string"},
                 "tokenUsage": JSON_OBJECT,
                 "budgetUsage": JSON_OBJECT,
                 "budgetExhaustion": JSON_OBJECT,
@@ -405,6 +407,7 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
                 "completionReason": {"type": "string"},
                 "completionToolName": {"type": "string"},
                 "partialOutput": {"type": "string"},
+                "waitReason": {"type": "string"},
                 "checkpoint": {"$ref": "#/$defs/CheckpointSummary"},
                 "interruption": {"$ref": "#/$defs/InterruptionSummary"},
                 "error": {"type": "string"},
@@ -647,7 +650,9 @@ export type JsonObject = { [key: string]: JsonValue };
 export type ApprovalDecision = "allow" | "allow_session" | "deny" | "timeout";
 export type ThreadStatus = "idle" | "running" | "archived" | "closed";
 export type TurnStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
-export type CheckpointStatus = "running" | "reconciliation_required" | "wait_user" | "completed" | "failed" | "max_cycles";
+export type CheckpointStatus =
+  | "running" | "deferred" | "reconciliation_required" | "wait_user"
+  | "completed" | "failed" | "max_cycles";
 export type AppItemStatus = "started" | "inProgress" | "completed" | "failed";
 
 export interface ClientInfo { name: string; title?: string; version?: string; }
@@ -717,7 +722,7 @@ export interface InterruptionSummary {
 }
 export interface TurnResumeResponse {
   threadId: string; turnId: string; runId: string; status: TurnStatus; finalOutput?: JsonValue;
-  completionReason?: string; completionToolName?: string; partialOutput?: string;
+  completionReason?: string; completionToolName?: string; partialOutput?: string; waitReason?: string;
   checkpoint?: CheckpointSummary; interruption?: InterruptionSummary; error?: string;
 }
 export interface TurnQueueResponse { threadId: string; turnId: string; queued: boolean; }
@@ -727,7 +732,7 @@ export interface ThreadClosedParams { threadId: string; }
 export interface TurnStartedParams { threadId: string; turnId: string; runId?: string; status?: TurnStatus; }
 export interface TurnCompletedParams {
   threadId: string; turnId: string; runId?: string; status: TurnStatus; finalOutput?: JsonValue;
-  completionReason?: string; completionToolName?: string; partialOutput?: string;
+  completionReason?: string; completionToolName?: string; partialOutput?: string; waitReason?: string;
   tokenUsage?: JsonObject; budgetUsage?: JsonObject; budgetExhaustion?: JsonObject;
   checkpoint?: CheckpointSummary; interruption?: InterruptionSummary; error?: string;
 }

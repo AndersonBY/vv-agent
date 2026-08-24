@@ -27,11 +27,19 @@ def main() -> None:
     schema_processor = MessageProcessor(router=schema_router)
     schema_processor.process_message(
         "schema-client",
-        {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "schema-example"}}},
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "schema-example"}},
+        },
     )
     print(json.dumps(schema_transport.receive_outbound(timeout=1), ensure_ascii=False, separators=(",", ":")))
-    schema_processor.process_message("schema-client", {"method": "initialized"})
-    schema_processor.process_message("schema-client", {"id": 1, "method": "schema/export", "params": {}})
+    schema_processor.process_message("schema-client", {"jsonrpc": "2.0", "method": "initialized"})
+    schema_processor.process_message(
+        "schema-client",
+        {"jsonrpc": "2.0", "id": 1, "method": "schema/export", "params": {}},
+    )
     exported = schema_transport.receive_outbound(timeout=1)["result"]
     print("schema/export:", sorted(exported))
 
@@ -46,11 +54,19 @@ def main() -> None:
     router = OutgoingRouter()
     router.register_transport(transport)
     processor = MessageProcessor(router=router, serialization_queues=RequestSerializationQueues(max_queued_per_scope=0))
-    processor.process_message("conn_1", {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "overload-example"}}})
+    processor.process_message(
+        "conn_1",
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "overload-example"}},
+        },
+    )
     print(json.dumps(transport.receive_outbound(timeout=1), ensure_ascii=False, separators=(",", ":")))
-    processor.process_message("conn_1", {"method": "initialized"})
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "method": "initialized"})
 
-    processor.process_message("conn_1", {"id": 1, "method": "model/list", "params": {}})
+    processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 1, "method": "model/list", "params": {}})
     response = transport.receive_outbound(timeout=1)
     print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
     assert response["error"]["code"] == AppServerErrorCode.SERVER_OVERLOADED

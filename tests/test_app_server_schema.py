@@ -168,6 +168,9 @@ def test_schema_export_request_returns_json_and_typescript_bundles() -> None:
     assert "export type ClientRequest" in result["typescript"]["ClientRequest.ts"]
     assert len(result["jsonSchema"]) == 19
     assert len(result["typescript"]) == 18
+    checkpoint_schema = json.loads(result["jsonSchema"]["ThreadResumeResponse"])
+    assert "deferred" in checkpoint_schema["$defs"]["CheckpointSummary"]["properties"]["status"]["enum"]
+    assert '"deferred"' in result["typescript"]["ThreadResumeResponse.ts"]
 
     processor.process_message(
         "conn_1",

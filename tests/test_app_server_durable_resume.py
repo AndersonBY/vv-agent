@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 from support import FixedModelProvider
 
-from vv_agent import Agent, CheckpointConfig, RunConfig, function_tool
+from vv_agent import Agent, CheckpointConfig, RunConfig, ToolContext, function_tool
 from vv_agent.app_server import (
     AppServer,
     AppServerErrorCode,
@@ -202,7 +202,9 @@ def test_terminal_checkpoint_replay_is_response_only_on_original_turn() -> None:
     _send(server, _resume_request(request_id=3, thread_id=thread_id, turn_id=turn_id))
     response = transport.receive_outbound(timeout=5)
 
-    expected = _contract()["durableResume"]["protocolCases"][2]
+    expected = next(
+        case for case in _contract()["durableResume"]["protocolCases"] if case["name"] == "terminal_replay_is_response_only"
+    )
     assert expected["name"] == "terminal_replay_is_response_only"
     assert response["id"] == 3
     assert response["result"]["threadId"] == thread_id
@@ -234,7 +236,9 @@ def test_live_claim_returns_existing_owner_without_notifications_or_execution() 
     _send(server, _resume_request(request_id=3, thread_id=thread_id, turn_id=turn_id))
     response = transport.receive_outbound(timeout=1)
 
-    expected = _contract()["durableResume"]["protocolCases"][1]
+    expected = next(
+        case for case in _contract()["durableResume"]["protocolCases"] if case["name"] == "live_claim_keeps_existing_owner"
+    )
     assert expected["name"] == "live_claim_keeps_existing_owner"
     assert response["result"]["runId"] == checkpoint.root_run_id
     assert response["result"]["status"] == "running"
@@ -401,6 +405,49 @@ def test_reconciliation_resume_emits_canonical_interrupted_sequence() -> None:
     assert len(snapshot.turns) == 1
     assert snapshot.turns[0].turn_id == turn_id
     assert snapshot.turns[0].input == TURN_INPUT
+    _assert_safe_projection({"messages": messages})
+
+
+def test_deferred_pending_producer_projects_interrupted_without_completion_or_error() -> None:
+    store = InMemoryCheckpointStore()
+
+    @function_tool(name="defer_remote", tool_metadata={"idempotency": "supported"})
+    def defer_remote(context: ToolContext):
+        return context.defer()
+
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="call-deferred", name="defer_remote", arguments={})],
+            )
+        ]
+    )
+    server, transport = _server(
+        store=store,
+        agent=Agent(
+            name="assistant",
+            instructions="Wait for the remote operation.",
+            model="test-model",
+            tools=[defer_remote],
+        ),
+        model_provider=FixedModelProvider(llm, _resolved_model()),
+    )
+
+    thread_id, turn_id, messages = _start_thread_and_turn(server, transport)
+    response = next(message for message in messages if message.get("id") == 2)
+    completed = next(message for message in messages if message.get("method") == "turn/completed")
+
+    assert response["result"]["status"] == "running"
+    assert completed["params"]["status"] == "interrupted"
+    assert completed["params"]["waitReason"] == "deferred_pending"
+    assert "completionReason" not in completed["params"]
+    assert "error" not in completed["params"]
+    assert completed["params"]["threadId"] == thread_id
+    assert completed["params"]["turnId"] == turn_id
+    checkpoint = store.load_checkpoint(CHECKPOINT_KEY)
+    assert checkpoint is not None
+    assert checkpoint.status.value == "deferred"
     _assert_safe_projection({"messages": messages})
 
 

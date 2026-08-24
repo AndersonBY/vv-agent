@@ -20,6 +20,7 @@ from vv_agent.checkpoint import (
     validate_extension_namespace,
     validate_sha256,
 )
+from vv_agent.deferred import DeferredResolveDecision, DeferredToolHandle
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -31,7 +32,7 @@ from vv_agent.types import (
     ToolExecutionResult,
 )
 
-CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v5"
+CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v7"
 MAX_WIRE_INTEGER = (1 << 53) - 1
 ClaimMode = Literal["continue", "recovery"]
 
@@ -121,6 +122,7 @@ class OperationJournalEntry:
     backend: str | None = None
     model: str | None = None
     call_id: str | None = None
+    deferred_handle: DeferredToolHandle | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, OperationKind):
@@ -238,6 +240,22 @@ class OperationJournalEntry:
                     "tool journal entry cannot contain a model response",
                     code="operation_kind_fields_invalid",
                 )
+            if self.deferred_handle is not None and not isinstance(self.deferred_handle, DeferredToolHandle):
+                raise CheckpointError(
+                    "deferred_handle must be a DeferredToolHandle",
+                    code="deferred_handle_invalid",
+                )
+            if self.state is OperationState.DEFERRED:
+                if self.deferred_handle is None or self.result is not None or self.error is not None:
+                    raise CheckpointError(
+                        "deferred operation requires an exact handle and no receipt",
+                        code="operation_deferred_fields_invalid",
+                    )
+            elif self.deferred_handle is not None:
+                raise CheckpointError(
+                    "only deferred operation entries may contain deferred_handle",
+                    code="operation_deferred_fields_invalid",
+                )
         if self.state is OperationState.SUCCEEDED:
             receipt = self.response if self.kind is OperationKind.MODEL else self.result
             if receipt is None or self.error is not None:
@@ -264,6 +282,14 @@ class OperationJournalEntry:
                 raise CheckpointError(
                     "failed operation requires exactly one typed error",
                     code="operation_error_required",
+                )
+        elif self.state is OperationState.DEFERRED:
+            # The tool-specific branch above enforces the closed deferred
+            # shape; model entries can never be deferred.
+            if self.kind is OperationKind.MODEL:
+                raise CheckpointError(
+                    "model operation entries cannot be deferred",
+                    code="operation_deferred_fields_invalid",
                 )
         elif self.response is not None or self.result is not None or self.error is not None:
             raise CheckpointError(
@@ -305,6 +331,8 @@ class OperationJournalEntry:
                     "result": self.result,
                 }
             )
+            if self.deferred_handle is not None:
+                payload["deferred_handle"] = self.deferred_handle.to_dict()
         payload["error"] = self.error.to_dict() if self.error is not None else None
         return payload
 
@@ -366,6 +394,8 @@ class OperationJournalEntry:
             "result",
             "error",
         }
+        if state is OperationState.DEFERRED:
+            tool_fields.add("deferred_handle")
         if kind is OperationKind.MODEL and not {
             "model_operation",
             "backend",
@@ -401,6 +431,7 @@ class OperationJournalEntry:
             backend=(payload.get("backend") if kind is OperationKind.MODEL else None),
             model=(payload.get("model") if kind is OperationKind.MODEL else None),
             call_id=(payload.get("call_id") if kind is OperationKind.MODEL else None),
+            deferred_handle=(DeferredToolHandle.from_dict(payload["deferred_handle"]) if "deferred_handle" in payload else None),
         )
 
 
@@ -626,6 +657,38 @@ class CheckpointStore(Protocol):
 
     def delete_checkpoint(self, checkpoint_key: str) -> None: ...
 
+    def preflight_tool_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        tool_call_count: int,
+        expected_revision: int,
+        claim_token: str,
+        claimed_cycle: int,
+    ) -> bool: ...
+
+    def admit_deferred_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        outcomes: list[Any],
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool: ...
+
+    def resolve_deferred(self, handle: DeferredToolHandle, result: ToolExecutionResult) -> DeferredResolveDecision: ...
+
+    def accept_deferred_batch(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        decisions: list[Any],
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool: ...
+
 
 def validate_checkpoint(checkpoint: Checkpoint) -> None:
     if not isinstance(checkpoint, Checkpoint):
@@ -761,6 +824,7 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         )
     if checkpoint.terminal_result is None and checkpoint.status not in {
         AgentStatus.RUNNING,
+        AgentStatus.DEFERRED,
         AgentStatus.RECONCILIATION_REQUIRED,
     }:
         raise CheckpointError(
@@ -785,15 +849,27 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 code="operation_kind_fields_invalid",
             )
     ambiguous = [entry for entry in journals if entry.state is OperationState.AMBIGUOUS]
-    if checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED:
+    deferred_entries = [entry for entry in checkpoint.tool_journal if entry.state is OperationState.DEFERRED]
+    if checkpoint.status is AgentStatus.DEFERRED:
+        if checkpoint.claim_token is not None or not deferred_entries or checkpoint.terminal_result is not None:
+            raise CheckpointError(
+                "deferred status requires deferred journal entries and no claim",
+                code="checkpoint_status_invalid",
+            )
+        if any(entry.cycle_index != active_cycle for entry in deferred_entries):
+            raise CheckpointError(
+                "deferred journal cycle is not active",
+                code="checkpoint_journal_cycle_invalid",
+            )
+    elif checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED:
         if checkpoint.claim_token is not None or not ambiguous or checkpoint.terminal_result is not None:
             raise CheckpointError(
                 "reconciliation_required requires ambiguity and no claim or terminal result",
                 code="checkpoint_status_invalid",
             )
-    elif checkpoint.status is AgentStatus.RUNNING and ambiguous and checkpoint.claim_token is None:
+    elif checkpoint.status is AgentStatus.RUNNING and (ambiguous or deferred_entries) and checkpoint.claim_token is None:
         raise CheckpointError(
-            "running checkpoint ambiguity requires an active recovery claim",
+            "running checkpoint ambiguity or deferred barrier requires an active claim",
             code="checkpoint_status_invalid",
         )
     if checkpoint.terminal_result is not None:
@@ -981,8 +1057,8 @@ def check_claim(
         AgentStatus.RECONCILIATION_REQUIRED,
     }:
         raise CheckpointError(
-            "checkpoint is not resumable",
-            code="checkpoint_status_invalid",
+            "checkpoint is not claimable",
+            code="checkpoint_not_claimable" if checkpoint.status is AgentStatus.DEFERRED else "checkpoint_status_invalid",
         )
     if checkpoint.cycle_index != cycle_index - 1:
         raise CheckpointError(

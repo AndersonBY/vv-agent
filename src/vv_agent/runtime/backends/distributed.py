@@ -1024,6 +1024,7 @@ class DistributedDeliveryOutcome:
 
 class DistributedWaitReason(StrEnum):
     ACTIVE_CLAIM = "active_claim"
+    DEFERRED_PENDING = "deferred_pending"
     RECONCILIATION_REQUIRED = "reconciliation_required"
     HOST_INTERACTION = "host_interaction"
     SUPERSEDED_DELIVERY = "superseded_delivery"

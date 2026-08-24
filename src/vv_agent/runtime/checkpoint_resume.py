@@ -27,6 +27,7 @@ from vv_agent.checkpoint import (
     compute_operation_request_digest,
     compute_run_definition_digest,
 )
+from vv_agent.deferred import AcceptDeferredDecision
 from vv_agent.event_store import IdempotentRunEventStore, RunEventStore
 from vv_agent.events import (
     CheckpointCreatedEvent,
@@ -89,6 +90,7 @@ class ToolOperationPlan:
     operation_id: str
     request_digest: str
     idempotency_support: ToolIdempotency
+    attempt: int = 1
     replay_result: ToolExecutionResult | None = None
 
 
@@ -153,6 +155,7 @@ class CheckpointResumeController:
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_error: CheckpointError | None = None
         self._owned_claim_token: str | None = None
+        self._active_claim_mode: ClaimMode | None = None
         self._model_accounting: ModelCallCoordinator | None = None
 
     @property
@@ -337,6 +340,60 @@ class CheckpointResumeController:
     def close(self) -> None:
         self._stop_heartbeat()
 
+    def resolve_deferred(self, handle: Any, result: ToolExecutionResult) -> Any:
+        """Forward a callback through the store's receipt-first public API.
+
+        Resolution intentionally has no expected-revision argument.  Refresh
+        the controller snapshot after an applied decision so a subsequent
+        scheduler advance observes the released barrier.
+        """
+        decision = self.store.resolve_deferred(handle, result)
+        refreshed = self.store.load_checkpoint(self.checkpoint_key)
+        if refreshed is not None:
+            self.checkpoint = refreshed
+            self._deliver_pending_outbox()
+        return decision
+
+    def accept_deferred_batch(
+        self,
+        decisions: list[Any],
+        *,
+        claim_token: str | None = None,
+        expected_revision: int | None = None,
+        claimed_cycle: int | None = None,
+    ) -> bool:
+        """Adopt an ambiguous current batch under an active recovery claim."""
+        checkpoint = self._require_checkpoint()
+        token = claim_token or checkpoint.claim_token
+        revision = checkpoint.revision if expected_revision is None else expected_revision
+        cycle = checkpoint.claimed_cycle if claimed_cycle is None else claimed_cycle
+        if token is None or cycle is None:
+            raise CheckpointError(
+                "accept_deferred_batch requires an active recovery claim",
+                code="checkpoint_claim_active",
+            )
+        if self._active_claim_mode != "recovery":
+            raise CheckpointError(
+                "accept_deferred_batch requires an active recovery claim",
+                code="checkpoint_claim_active",
+            )
+        accepted = self.store.accept_deferred_batch(
+            checkpoint,
+            decisions=decisions,
+            claim_token=token,
+            expected_revision=revision,
+            claimed_cycle=cycle,
+        )
+        if accepted:
+            refreshed = self.store.load_checkpoint(self.checkpoint_key)
+            if refreshed is not None:
+                self.checkpoint = refreshed
+                self._deliver_pending_outbox()
+            self._owned_claim_token = None
+            self._active_claim_mode = None
+            self._stop_heartbeat()
+        return accepted
+
     def bind_runtime_state(
         self,
         *,
@@ -358,6 +415,31 @@ class CheckpointResumeController:
         if self._model_accounting is not None:
             self._model_accounting.ledger.replace(checkpoint.model_calls)
         return messages, cycles, shared_state, checkpoint.cycle_index + 1
+
+    def deferred_pending_result(
+        self,
+        *,
+        messages: list[Message],
+        cycles: list[CycleRecord],
+        shared_state: dict[str, Any],
+        token_usage: TaskTokenUsage,
+        budget_usage: BudgetUsageSnapshot | None = None,
+    ) -> AgentResult | None:
+        """Return the non-terminal wait result when the durable barrier is set."""
+        checkpoint = self._require_checkpoint()
+        if checkpoint.status is not AgentStatus.DEFERRED:
+            return None
+        return AgentResult(
+            status=AgentStatus.DEFERRED,
+            completion_reason=None,
+            messages=messages,
+            cycles=cycles,
+            wait_reason="deferred_pending",
+            shared_state=shared_state,
+            token_usage=token_usage,
+            budget_usage=deepcopy(budget_usage if budget_usage is not None else checkpoint.budget_usage),
+            checkpoint_key=checkpoint.checkpoint_key,
+        )
 
     def complete_model(
         self,
@@ -388,6 +470,11 @@ class CheckpointResumeController:
         )
         operation_id = initial_identity.operation_id
         self._ensure_claim(cycle_index)
+        if self._require_checkpoint().status is AgentStatus.DEFERRED:
+            raise CheckpointError(
+                "deferred checkpoint cannot dispatch a model operation",
+                code="checkpoint_not_claimable",
+            )
         entry = self._find_operation(OperationKind.MODEL, operation_id=operation_id)
         if entry is not None and entry.request_digest != digest:
             raise CheckpointError(
@@ -575,6 +662,7 @@ class CheckpointResumeController:
                 operation_id=entry.operation_id,
                 request_digest=entry.request_digest,
                 idempotency_support=idempotency_support,
+                attempt=entry.attempt,
                 replay_result=ToolExecutionResult.from_dict(entry.result),
             )
         if entry is not None and entry.state is OperationState.FAILED:
@@ -588,6 +676,7 @@ class CheckpointResumeController:
                 operation_id=entry.operation_id,
                 request_digest=entry.request_digest,
                 idempotency_support=idempotency_support,
+                attempt=entry.attempt,
                 replay_result=ToolExecutionResult(
                     tool_call_id=call.id,
                     content=error.message,
@@ -621,6 +710,7 @@ class CheckpointResumeController:
             operation_id=entry.operation_id,
             request_digest=entry.request_digest,
             idempotency_support=idempotency_support,
+            attempt=entry.attempt,
         )
 
     def tool_started(self, *, cycle_index: int, call: ToolCall) -> None:
@@ -716,10 +806,11 @@ class CheckpointResumeController:
         checkpoint.tool_journal = []
         self._first_claim_is_recovery = False
         self._owned_claim_token = None
+        self._active_claim_mode = None
         self._stop_heartbeat()
 
     def finalize(self, result: AgentResult, *, terminal_event: RunEvent | None = None) -> AgentResult:
-        if result.status is AgentStatus.RECONCILIATION_REQUIRED:
+        if result.status in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED}:
             result.checkpoint_key = self.checkpoint_key
             return result
         checkpoint = self.store.load_checkpoint(self.checkpoint_key)
@@ -903,6 +994,7 @@ class CheckpointResumeController:
             )
         self.checkpoint = claimed
         self._owned_claim_token = claim_token
+        self._active_claim_mode = claim_mode
         self._start_heartbeat()
         if claim_mode == "recovery":
             self._emit(
@@ -943,12 +1035,44 @@ class CheckpointResumeController:
                 self._commit_model_terminal(entry, terminal, accounting=accounting)
             else:
                 self._progress()
+        pending: list[tuple[OperationJournalEntry, ResumeObservation, ReconciliationDecision]] = []
         for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]:
             if entry.state is not OperationState.AMBIGUOUS:
                 continue
             observation = self._observation(entry)
             self._emit_ambiguous(entry, observation)
             decision = self._reconciliation_decision(entry, observation)
+            pending.append((entry, observation, decision))
+
+        accepting = [item for item in pending if item[2].kind is ReconciliationDecisionKind.ACCEPT_DEFERRED]
+        if accepting:
+            # Acceptance is a batch boundary.  A provider may not partially
+            # adopt a current model-tool batch: every ambiguous entry in the
+            # batch must be a tool with an exact handle, otherwise the whole
+            # recovery remains reconciliation_required and no journal write is
+            # attempted.
+            if len(accepting) != len(pending) or any(entry.kind is not OperationKind.TOOL for entry, _, _ in pending):
+                entry, observation, _decision = accepting[0]
+                self._suspend_for(
+                    entry,
+                    observation=observation,
+                    ambiguity_emitted=True,
+                )
+            decisions = [
+                AcceptDeferredDecision(handle=decision.handle)
+                for _entry, _observation, decision in accepting
+                if decision.handle is not None
+            ]
+            if len(decisions) != len(accepting) or not self.accept_deferred_batch(decisions):
+                entry, observation, _decision = accepting[0]
+                self._suspend_for(
+                    entry,
+                    observation=observation,
+                    ambiguity_emitted=True,
+                )
+            return
+
+        for entry, observation, decision in pending:
             if decision.kind is ReconciliationDecisionKind.DEFER:
                 self._suspend_for(
                     entry,
@@ -1083,6 +1207,7 @@ class CheckpointResumeController:
         checkpoint.claimed_cycle = None
         checkpoint.lease_expires_at_ms = None
         self._owned_claim_token = None
+        self._active_claim_mode = None
         self._stop_heartbeat()
         result = AgentResult(
             status=AgentStatus.RECONCILIATION_REQUIRED,

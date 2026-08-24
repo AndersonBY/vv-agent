@@ -1,3 +1,4 @@
+from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
 from vv_agent.tools.dispatcher import dispatch_tool_call
 from vv_agent.tools.executor import FunctionToolExecutor, RegistryToolExecutor, ToolExecutor, ToolExposure
@@ -26,6 +27,7 @@ __all__ = [
     "FunctionToolExecutor",
     "RegistryToolExecutor",
     "Tool",
+    "ToolCallOutcome",
     "ToolContext",
     "ToolExecutor",
     "ToolExposure",

@@ -15,6 +15,7 @@ from vv_agent.background_task import BackgroundAgentTask
 from vv_agent.budget import BudgetEnforcementBoundary, BudgetEvaluator, BudgetUsageSnapshot
 from vv_agent.checkpoint import CheckpointError, ResumePolicy, ToolIdempotency
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.deferred import ToolCallOutcome
 from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
@@ -1779,8 +1780,13 @@ class Runner:
                 except CheckpointReconciliationRequired as interruption:
                     raw_result = interruption.result
 
-            final_output = raw_result.final_answer or raw_result.wait_reason or raw_result.error
+            final_output = (
+                None
+                if raw_result.status in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED}
+                else raw_result.final_answer or raw_result.wait_reason or raw_result.error
+            )
             reconciliation_required = raw_result.status is AgentStatus.RECONCILIATION_REQUIRED
+            deferred_waiting = raw_result.status is AgentStatus.DEFERRED
             operator_abort = bool(
                 raw_result.status is AgentStatus.FAILED
                 and raw_result.error == "operator_abort_with_unknown_outcome"
@@ -1796,7 +1802,7 @@ class Runner:
                         )
                     except Exception as exc:
                         output_coercion_error = ValueError(f"failed to validate final output: {exc}")
-            elif reconciliation_required or operator_abort:
+            elif reconciliation_required or deferred_waiting or operator_abort:
                 new_items = []
             else:
                 final_output, output_coercion_error = cls._postprocess_output(
@@ -1818,7 +1824,7 @@ class Runner:
                     result=raw_result,
                 )
 
-            if not terminal_replayed and not reconciliation_required:
+            if not terminal_replayed and not reconciliation_required and not deferred_waiting:
                 if run_config.session is not None and not operator_abort:
                     session_items = cls._session_items_for_persistence(new_items, raw_result)
                     session_event = SessionPersistedEvent(
@@ -2263,7 +2269,12 @@ class Runner:
                 )
                 continue
 
-            def handler(context: ToolContext, arguments: dict[str, Any], *, _tool: FunctionTool = tool) -> ToolExecutionResult:
+            def handler(
+                context: ToolContext,
+                arguments: dict[str, Any],
+                *,
+                _tool: FunctionTool = tool,
+            ) -> ToolExecutionResult | ToolCallOutcome:
                 return cls._execute_function_tool(_tool, context=context, arguments=arguments, run_config=run_config)
 
             is_model_visible = tool.exposure == ToolExposure.DIRECT
@@ -2369,7 +2380,7 @@ class Runner:
         context: ToolContext,
         arguments: dict[str, Any],
         run_config: RunConfig,
-    ) -> ToolExecutionResult:
+    ) -> ToolExecutionResult | ToolCallOutcome:
         run_config = cls._tool_run_config_from_context(context=context, fallback=run_config)
         denied_result = cls._policy_denial_result(
             tool,
@@ -2400,7 +2411,7 @@ class Runner:
         context: ToolContext,
         arguments: dict[str, Any],
         run_config: RunConfig,
-    ) -> ToolExecutionResult:
+    ) -> ToolExecutionResult | ToolCallOutcome:
         if isinstance(tool, BackgroundAgentTask):
             handle = tool.start(
                 cls,

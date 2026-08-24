@@ -79,6 +79,7 @@ class TurnResumeResponse:
     completion_reason: str | None = None
     completion_tool_name: str | None = None
     partial_output: str | None = None
+    wait_reason: str | None = None
     checkpoint: CheckpointSummary | None = None
     interruption: InterruptionSummary | None = None
     error: str | None = None
@@ -95,6 +96,7 @@ class TurnResumeResponse:
             "completionReason": self.completion_reason,
             "completionToolName": self.completion_tool_name,
             "partialOutput": self.partial_output,
+            "waitReason": self.wait_reason,
             "error": self.error,
         }
         payload.update({name: value for name, value in optional_fields.items() if value is not None})

@@ -1,5 +1,5 @@
 {
-  "schema_version": "vv-agent.tool-metadata.v2",
+  "schema_version": "vv-agent.tool-metadata.v3",
   "limits": {
     "maximum_capability_tags": 32,
     "maximum_cost_dimensions": 32,
@@ -433,12 +433,14 @@
     "event_types": [
       "tool_call_planned",
       "tool_call_started",
+      "tool_call_deferred",
       "tool_call_completed"
     ],
     "event_order": [
       "tool_call_planned",
       "approval_if_required",
       "tool_call_started_if_execution_begins",
+      "tool_call_deferred_when_admission_is_durable",
       "tool_call_completed_when_a_result_exists"
     ],
     "planned_boundary": "after tool name and arguments normalize and before policy approval or executor dispatch",
@@ -467,13 +469,17 @@
       "duration_ms",
       "tool_metadata"
     ],
-    "tool_status_values": [
+    "completed_status_values": [
       "success",
       "error",
       "wait_response",
       "running",
       "pending_compress"
     ],
+    "deferred_representation": "tool_call_deferred event with ToolCallOutcome.Deferred(handle)",
+    "completed_never_accepts_deferred": true,
+    "cross_process_deferred_duration_ms": null,
+    "cross_process_deferred_execution_started": true,
     "directive_values": [
       "continue",
       "finish",
@@ -607,6 +613,30 @@
         "error_code": "tool_not_allowed",
         "execution_started": false,
         "duration_ms": null
+      }
+    },
+    {
+      "name": "deferred_admission_has_no_completed_result_or_model_message",
+      "tool_metadata": {
+        "side_effect": "write",
+        "idempotency": "supported",
+        "terminal": false,
+        "result_retention": "archive",
+        "capability_tags": [
+          "record.write"
+        ],
+        "cost_dimensions": []
+      },
+      "expected_event_types": [
+        "tool_call_planned",
+        "tool_call_started",
+        "tool_call_deferred"
+      ],
+      "expected_deferred": {
+        "outcome": "deferred",
+        "execution_started": true,
+        "duration_ms": null,
+        "model_visible_tool_result": false
       }
     },
     {
