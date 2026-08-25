@@ -92,6 +92,9 @@ def test_typescript_generation_is_self_contained(tmp_path) -> None:
     assert "export type ClientRequest" in source
     assert "export interface TurnStartParams" in source
     assert 'export type ApprovalDecision = "allow" | "allow_session" | "deny" | "timeout";' in source
+    assert 'export type ThreadStatus = "idle" | "running" | "interrupted" | "archived" | "closed";' in source
+    assert '"host_interaction"' in source
+    assert '"suspended"' in source
     assert "import " not in source
 
 

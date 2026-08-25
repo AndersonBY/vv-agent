@@ -8,11 +8,13 @@ from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    HostInteractionRequestedEvent,
     ModelToolCallProgressEvent,
     ReasoningDeltaEvent,
     RunCompletedEvent,
     RunFailedEvent,
     RunStartedEvent,
+    RunStateChangedEvent,
     ToolCallCompletedEvent,
     ToolCallPlannedEvent,
     ToolCallStartedEvent,
@@ -246,6 +248,47 @@ def test_reasoning_delta_is_not_projected_as_visible_assistant_output() -> None:
     assert projection.item is None
     assert projection.notification_method is None
     assert projection.notification_params == {}
+
+
+def test_host_interaction_and_suspended_state_map_to_status_notifications_without_prompt() -> None:
+    requested = HostInteractionRequestedEvent(
+        run_id="run_1",
+        trace_id="trace_1",
+        checkpoint_key="checkpoint-1",
+        resume_attempt=1,
+        interaction_id="interaction-1",
+        logical_cycle=1,
+        operation_id="operation-1",
+        tool_call_id="tool-1",
+        request_digest="a" * 64,
+        prompt="Choose.",
+        cycle_index=0,
+        event_id="evt-host-requested",
+    )
+    suspended = RunStateChangedEvent(
+        run_id="run_1",
+        trace_id="trace_1",
+        state="suspended",
+        cycle_index=0,
+        event_id="evt-suspended",
+    )
+
+    requested_projection = map_run_event(requested, thread_id="thread_1", turn_id="turn_1")
+    suspended_projection = map_run_event(suspended, thread_id="thread_1", turn_id="turn_1")
+
+    assert requested_projection.item is None
+    assert requested_projection.notification_method == "thread/status/changed"
+    assert requested_projection.notification_params == {
+        "threadId": "thread_1",
+        "status": "interrupted",
+        "waitReason": "host_interaction",
+    }
+    assert "prompt" not in requested_projection.notification_params
+    assert suspended_projection.notification_params == {
+        "threadId": "thread_1",
+        "status": "interrupted",
+        "waitReason": "suspended",
+    }
 
 
 def test_approval_events_map_to_approval_items() -> None:

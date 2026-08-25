@@ -41,6 +41,14 @@ class ThreadReadParams:
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadStatusParams:
+    thread_id: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"threadId": self.thread_id}
+
+
+@dataclass(frozen=True, slots=True)
 class ThreadListParams:
     include_archived: bool = False
     archived: bool | None = None

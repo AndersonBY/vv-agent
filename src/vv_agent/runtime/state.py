@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from vv_agent.budget import BudgetUsageSnapshot
 from vv_agent.checkpoint import (
@@ -14,6 +14,7 @@ from vv_agent.checkpoint import (
     OperationState,
     ToolIdempotency,
     canonical_json_bytes,
+    canonical_json_sha256,
     compute_event_payload_digest,
     compute_operation_request_digest,
     compute_run_definition_digest,
@@ -32,7 +33,23 @@ from vv_agent.types import (
     ToolExecutionResult,
 )
 
-CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v7"
+if TYPE_CHECKING:
+    from vv_agent.runtime.controller import HostInteractionAdmissionContext
+
+CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v8"
+HOST_INTERACTION_REQUEST_SCHEMA = "vv-agent.host-interaction-request.v1"
+_HOST_INTERACTION_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "interaction_id",
+        "logical_cycle",
+        "operation_id",
+        "tool_call_id",
+        "request_digest",
+        "prompt",
+    }
+)
+_SUSPENDED_ORIGIN_FIELDS = frozenset({"status", "active_host_interaction"})
 MAX_WIRE_INTEGER = (1 << 53) - 1
 ClaimMode = Literal["continue", "recovery"]
 
@@ -559,6 +576,8 @@ class Checkpoint:
     status: AgentStatus
     messages: list[Message]
     cycles: list[CycleRecord]
+    active_host_interaction: dict[str, Any] | None = None
+    suspended_origin: dict[str, Any] | None = None
     model_calls: list[ModelCallRecord] = field(default_factory=list)
     shared_state: dict[str, Any] = field(default_factory=dict)
     budget_usage: BudgetUsageSnapshot | None = None
@@ -689,6 +708,94 @@ class CheckpointStore(Protocol):
         claimed_cycle: int,
     ) -> bool: ...
 
+    def admit_controller_command(self, command: Any) -> Any: ...
+
+    def get_controller_command_receipt(self, command_id: str) -> Any: ...
+
+    def get_controller_command(self, command_id: str) -> Any: ...
+
+    def resolve_controller_command(self, command: Any) -> Any: ...
+
+    def claim_controller_command_wake(
+        self,
+        *,
+        command_id: str,
+        command_digest: str,
+        claim_token: str,
+        lease_expires_at_ms: int,
+        now_ms: int,
+    ) -> Any: ...
+
+    def complete_controller_command_wake(
+        self,
+        *,
+        command_id: str,
+        command_digest: str,
+        claim_token: str,
+        attempt: int,
+        outcome: str,
+        now_ms: int,
+        error: str | None = None,
+    ) -> Any: ...
+
+    def reconcile_controller_command_wake(
+        self,
+        *,
+        command_id: str,
+        command_digest: str,
+        outcome: str,
+        now_ms: int,
+    ) -> Any: ...
+
+    def reap_controller_command_wake(self, *, command_id: str, now_ms: int) -> Any: ...
+
+    def reap_controller_command_wakes(self, *, now_ms: int) -> list[Any]: ...
+
+    def produce_host_interaction(
+        self,
+        request: Any,
+        *,
+        admission_context: HostInteractionAdmissionContext,
+    ) -> Any: ...
+
+    def claim_and_consume_host_interaction_response(self, envelope: Any) -> Any: ...
+
+    def reap_host_interaction_record(self, *, record_id: str, checkpoint_key: str, now_ms: int) -> Any: ...
+
+    def get_host_interaction_notification(self, notification_id: str) -> dict[str, Any] | None: ...
+
+    def claim_host_interaction_notification(
+        self,
+        *,
+        notification_id: str,
+        payload_digest: str,
+        claim_token: str,
+        lease_expires_at_ms: int,
+        now_ms: int,
+    ) -> Any: ...
+
+    def complete_host_interaction_notification(
+        self,
+        *,
+        notification_id: str,
+        payload_digest: str,
+        claim_token: str,
+        attempt: int,
+        outcome: str,
+        now_ms: int,
+        error: str | None = None,
+    ) -> Any: ...
+
+    def reconcile_host_interaction_notification(
+        self,
+        *,
+        notification_id: str,
+        payload_digest: str,
+        outcome: str,
+        now_ms: int,
+        abort_reason: str | None = None,
+    ) -> Any: ...
+
 
 def validate_checkpoint(checkpoint: Checkpoint) -> None:
     if not isinstance(checkpoint, Checkpoint):
@@ -743,6 +850,25 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         raise CheckpointError(str(exc), code="checkpoint_revision_invalid") from exc
     if not isinstance(checkpoint.status, AgentStatus):
         raise TypeError("checkpoint status must be an AgentStatus")
+    _validate_host_interaction_request(checkpoint.active_host_interaction, "active_host_interaction")
+    _validate_suspended_origin(checkpoint.suspended_origin)
+    if checkpoint.status is AgentStatus.HOST_INTERACTION:
+        if checkpoint.active_host_interaction is None or checkpoint.suspended_origin is not None:
+            raise CheckpointError(
+                "host_interaction status requires active_host_interaction and no suspended_origin",
+                code="checkpoint_status_invalid",
+            )
+    elif checkpoint.status is AgentStatus.SUSPENDED:
+        if checkpoint.active_host_interaction is not None or checkpoint.suspended_origin is None:
+            raise CheckpointError(
+                "suspended status requires suspended_origin and no active_host_interaction",
+                code="checkpoint_status_invalid",
+            )
+    elif checkpoint.active_host_interaction is not None or checkpoint.suspended_origin is not None:
+        raise CheckpointError(
+            "active_host_interaction and suspended_origin are only valid for waiting statuses",
+            code="checkpoint_status_invalid",
+        )
     if not isinstance(checkpoint.messages, list) or not all(isinstance(item, Message) for item in checkpoint.messages):
         raise TypeError("checkpoint messages must contain Message values")
     if not isinstance(checkpoint.cycles, list) or not all(isinstance(item, CycleRecord) for item in checkpoint.cycles):
@@ -824,6 +950,8 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         )
     if checkpoint.terminal_result is None and checkpoint.status not in {
         AgentStatus.RUNNING,
+        AgentStatus.HOST_INTERACTION,
+        AgentStatus.SUSPENDED,
         AgentStatus.DEFERRED,
         AgentStatus.RECONCILIATION_REQUIRED,
     }:
@@ -901,6 +1029,86 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 str(exc),
                 code="checkpoint_extension_namespace_invalid",
             ) from exc
+
+
+def _validate_host_interaction_request(value: Any, field_name: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != _HOST_INTERACTION_REQUEST_FIELDS:
+        raise CheckpointError(
+            f"{field_name} must be a closed HostInteractionRequest object",
+            code="host_interaction_fields_invalid",
+        )
+    if value.get("schema_version") != HOST_INTERACTION_REQUEST_SCHEMA:
+        raise CheckpointError(
+            f"{field_name} schema_version is unsupported",
+            code="host_interaction_fields_invalid",
+        )
+    for key in ("interaction_id", "operation_id", "tool_call_id"):
+        text = value.get(key)
+        if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 512:
+            raise CheckpointError(
+                f"{field_name}.{key} is invalid",
+                code="host_interaction_fields_invalid",
+            )
+    logical_cycle = value.get("logical_cycle")
+    if isinstance(logical_cycle, bool) or not isinstance(logical_cycle, int) or logical_cycle < 1:
+        raise CheckpointError(
+            f"{field_name}.logical_cycle is invalid",
+            code="host_interaction_fields_invalid",
+        )
+    prompt = value.get("prompt")
+    if not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > 65_536:
+        raise CheckpointError(
+            f"{field_name}.prompt is invalid",
+            code="host_interaction_content_too_large" if isinstance(prompt, str) else "host_interaction_fields_invalid",
+        )
+    request_digest = value.get("request_digest")
+    if not isinstance(request_digest, str) or len(request_digest.encode("utf-8")) != 64:
+        raise CheckpointError(
+            f"{field_name}.request_digest is invalid",
+            code="host_interaction_fields_invalid",
+        )
+    try:
+        validate_sha256(request_digest, f"{field_name}.request_digest")
+        expected = canonical_json_sha256(
+            {key: value[key] for key in sorted(_HOST_INTERACTION_REQUEST_FIELDS - {"request_digest"})},
+            f"{field_name} request",
+        )
+    except (TypeError, ValueError) as exc:
+        raise CheckpointError(str(exc), code="host_interaction_fields_invalid") from exc
+    if request_digest != expected:
+        raise CheckpointError(
+            f"{field_name}.request_digest does not match request",
+            code="host_interaction_request_digest_invalid",
+        )
+
+
+def _validate_suspended_origin(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != _SUSPENDED_ORIGIN_FIELDS:
+        raise CheckpointError(
+            "suspended_origin must be a closed object",
+            code="checkpoint_status_invalid",
+        )
+    status = value.get("status")
+    if status not in {AgentStatus.RUNNING.value, AgentStatus.HOST_INTERACTION.value}:
+        raise CheckpointError(
+            "suspended_origin.status is invalid",
+            code="checkpoint_status_invalid",
+        )
+    _validate_host_interaction_request(value.get("active_host_interaction"), "suspended_origin.active_host_interaction")
+    if status == AgentStatus.RUNNING.value and value.get("active_host_interaction") is not None:
+        raise CheckpointError(
+            "running suspended_origin cannot contain active_host_interaction",
+            code="checkpoint_status_invalid",
+        )
+    if status == AgentStatus.HOST_INTERACTION.value and value.get("active_host_interaction") is None:
+        raise CheckpointError(
+            "host_interaction suspended_origin requires active_host_interaction",
+            code="checkpoint_status_invalid",
+        )
 
 
 def validate_model_journal_accounting(checkpoint: Checkpoint) -> None:
@@ -1199,7 +1407,8 @@ def _is_operator_abort_terminal(
     return bool(
         terminal is not None
         and checkpoint.status is AgentStatus.FAILED
-        and terminal.error == "operator_abort_with_unknown_outcome"
+        and terminal.error == "failed"
+        and terminal.error_code == "operator_abort_with_unknown_outcome"
         and observation is not None
         and ambiguous
         and len(ambiguous) == len(journals)

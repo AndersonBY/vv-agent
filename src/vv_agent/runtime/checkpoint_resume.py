@@ -41,6 +41,7 @@ from vv_agent.events import (
     event_from_dict,
 )
 from vv_agent.llm.base import LlmRequest
+from vv_agent.runtime.controller import HostInteractionAdmissionContext
 from vv_agent.runtime.model_calls import (
     ModelCallCoordinator,
     ModelCallDispatchResult,
@@ -255,6 +256,56 @@ class CheckpointResumeController:
 
     def assert_heartbeat_healthy(self) -> None:
         self._assert_heartbeat()
+
+    def host_interaction_admission_context(self) -> HostInteractionAdmissionContext:
+        """Return the current active claim fence for a typed host producer.
+
+        The runner/engine owns this binding.  It is intentionally separate
+        from the host request wire and fails closed when a cycle has not yet
+        acquired a live execution claim.
+        """
+        self._assert_heartbeat()
+        local = self._require_checkpoint()
+        authoritative = self.store.load_checkpoint(local.checkpoint_key)
+        if authoritative is None:
+            raise CheckpointError(
+                "host interaction producer checkpoint is unavailable",
+                code="host_interaction_claim_required",
+            )
+        if (
+            authoritative.task_id != self.task_id
+            or authoritative.root_run_id != self.run_id
+            or authoritative.trace_id != self.trace_id
+            or authoritative.run_definition_digest != self.run_definition_digest
+        ):
+            raise CheckpointError(
+                "host interaction producer checkpoint binding is stale",
+                code="host_interaction_stale",
+            )
+        # The store load is the authoritative CAS snapshot.  Do not let a
+        # producer carry a pre-heartbeat/local lease into the side-effect
+        # boundary when another renewal has already advanced the fence.
+        self.checkpoint = checkpoint = authoritative
+        now_ms = self._now_ms()
+        if (
+            checkpoint.status is not AgentStatus.RUNNING
+            or checkpoint.claim_token is None
+            or checkpoint.claimed_cycle is None
+            or checkpoint.lease_expires_at_ms is None
+            or checkpoint.lease_expires_at_ms <= now_ms
+        ):
+            raise CheckpointError(
+                "host interaction producer requires an active execution claim",
+                code="host_interaction_claim_required",
+            )
+        return HostInteractionAdmissionContext(
+            checkpoint_key=checkpoint.checkpoint_key,
+            expected_revision=checkpoint.revision,
+            claim_token=checkpoint.claim_token,
+            claimed_cycle=checkpoint.claimed_cycle,
+            now_ms=now_ms,
+            lease_expires_at_ms=checkpoint.lease_expires_at_ms,
+        )
 
     @staticmethod
     def preload(config: CheckpointConfig | None) -> Checkpoint | None:
@@ -938,7 +989,8 @@ class CheckpointResumeController:
     def _is_operator_abort_result(result: AgentResult) -> bool:
         return bool(
             result.status is AgentStatus.FAILED
-            and result.error == "operator_abort_with_unknown_outcome"
+            and result.error == "failed"
+            and result.error_code == "operator_abort_with_unknown_outcome"
             and result.resume_observation is not None
         )
 
@@ -1232,7 +1284,8 @@ class CheckpointResumeController:
             status=AgentStatus.FAILED,
             messages=deepcopy(checkpoint.messages),
             cycles=deepcopy(checkpoint.cycles),
-            error="operator_abort_with_unknown_outcome",
+            error="failed",
+            error_code="operator_abort_with_unknown_outcome",
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
@@ -1685,6 +1738,16 @@ class CheckpointResumeController:
                         code="checkpoint_lease_lost",
                     )
                     return
+                # ``renew_checkpoint_claim`` is the authoritative CAS.  Keep
+                # the in-memory snapshot used by the typed host producer in
+                # lockstep with that successful lease write; otherwise a
+                # long-running heartbeat could leave the next producer call
+                # carrying an expired admission fence.
+                renewed_lease = now_ms + self.lease_duration_ms
+                checkpoint.lease_expires_at_ms = renewed_lease
+                current = self.checkpoint
+                if current is not None and current.checkpoint_key == checkpoint.checkpoint_key:
+                    current.lease_expires_at_ms = renewed_lease
 
         self._heartbeat_thread = threading.Thread(
             target=heartbeat,

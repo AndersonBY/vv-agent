@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from vv_agent.app_server.host import AgentResolutionRequest, AppServerApprovalProvider, AppServerHost, RunConfigResolutionRequest
-from vv_agent.app_server.item_mapper import map_run_event
+from vv_agent.app_server.item_mapper import ItemProjection, map_run_event
 from vv_agent.app_server.outgoing import OutgoingRouter
 from vv_agent.app_server.protocol import (
     CheckpointSummary,
@@ -18,10 +18,21 @@ from vv_agent.app_server.protocol import (
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore, TurnRecord
 from vv_agent.app_server.usage_projection import task_token_usage_to_wire
-from vv_agent.checkpoint import CheckpointError, ResumeObservation, ResumePolicy
+from vv_agent.checkpoint import CheckpointError, ResumeObservation, ResumePolicy, canonical_json_sha256
+from vv_agent.events import HostInteractionRequestedEvent
 from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
 from vv_agent.runner import Runner
+from vv_agent.runtime.backends.distributed import DistributedRunHandle
+from vv_agent.runtime.controller import (
+    ControllerCommand,
+    DistributedBackend,
+    HostInteractionRequest,
+    derive_controller_command_id,
+    derive_host_interaction_notification_id,
+    derive_host_interaction_record_id,
+    sanitize_host_prompt,
+)
 from vv_agent.runtime.state import Checkpoint
 from vv_agent.types import AgentStatus, Message
 
@@ -53,6 +64,8 @@ class RunAdapter:
         self._store = store
         self._state_manager = state_manager
         self._router = router
+        self._active_checkpoint_stores: dict[tuple[str, str], Any] = {}
+        self._active_checkpoint_keys: dict[tuple[str, str], str] = {}
 
     def start_turn(
         self,
@@ -99,6 +112,9 @@ class RunAdapter:
             handle=handle,
             checkpoint_key=checkpoint_config.key if checkpoint_config is not None else None,
         )
+        if checkpoint_config is not None and checkpoint_config.store is not None and checkpoint_config.key is not None:
+            self._active_checkpoint_stores[(thread.thread_id, turn.turn_id)] = checkpoint_config.store
+            self._active_checkpoint_keys[(thread.thread_id, turn.turn_id)] = checkpoint_config.key
         self._state_manager.set_status(thread.thread_id, "running")
         started = StartedTurn(
             thread=thread,
@@ -131,6 +147,276 @@ class RunAdapter:
         )
         threading.Thread(target=self._pump_events, args=(connection_id, started), daemon=True).start()
         return started
+
+    def controller_action(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        action_id: str,
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Admit one narrow App Server action through the durable controller."""
+        self._validate_public_controller_action_identity(thread_id, "threadId")
+        self._validate_public_controller_action_identity(turn_id, "turnId")
+        self._validate_public_controller_action_identity(action_id, "actionId")
+        self._validate_public_controller_action(action)
+        active = self._state_manager.active_turn(thread_id)
+        if active is not None and active.turn_id != turn_id:
+            raise TurnResumeError("Thread has a different active turn")
+        binding = self._durable_binding(thread_id, turn_id)
+        if binding is None:
+            raise TurnResumeError("turn/action requires a retained durable checkpoint")
+        store, checkpoint_key = binding
+        checkpoint = store.load_checkpoint(checkpoint_key)
+        if checkpoint is None:
+            raise TurnResumeError("Checkpoint does not exist")
+        command_id = derive_controller_command_id(thread_id, turn_id, action_id)
+        existing_getter = getattr(store, "get_controller_command_receipt", None)
+        existing = existing_getter(command_id) if callable(existing_getter) else None
+        if existing is not None:
+            command_getter = getattr(store, "get_controller_command", None)
+            existing_command = command_getter(command_id) if callable(command_getter) else None
+            if existing_command is None:
+                raise TurnResumeError("Controller action replay cannot be verified")
+            if self._public_controller_action_digest(action) != self._stored_controller_action_digest(existing_command):
+                raise TurnResumeError("actionId was reused with a different action payload")
+            status, wait_reason = self._controller_public_status(checkpoint)
+            return {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "actionId": action_id,
+                "accepted": True,
+                "status": status,
+                **({"waitReason": wait_reason} if wait_reason is not None else {}),
+            }
+        handle = DistributedRunHandle(
+            checkpoint_key=checkpoint.checkpoint_key,
+            run_id=checkpoint.root_run_id,
+            trace_id=checkpoint.trace_id,
+        )
+        command_payload = dict(action)
+        if command_payload.get("kind") == "respond":
+            host_request = checkpoint.active_host_interaction
+            if (
+                checkpoint.status is AgentStatus.SUSPENDED
+                and isinstance(checkpoint.suspended_origin, dict)
+                and checkpoint.suspended_origin.get("status") == AgentStatus.HOST_INTERACTION.value
+            ):
+                host_request = checkpoint.suspended_origin.get("active_host_interaction")
+            if not isinstance(host_request, dict) or checkpoint.status not in {
+                AgentStatus.HOST_INTERACTION,
+                AgentStatus.SUSPENDED,
+            }:
+                raise TurnResumeError("respond requires a pending host interaction")
+            command_payload = {
+                "kind": "host_interaction_response",
+                "interaction_id": host_request["interaction_id"],
+                "logical_cycle": host_request["logical_cycle"],
+                "operation_id": host_request["operation_id"],
+                "tool_call_id": host_request["tool_call_id"],
+                "request_digest": host_request["request_digest"],
+                "response": command_payload["message"],
+            }
+        command = ControllerCommand(
+            command_id=command_id,
+            handle=handle,
+            resume_attempt=checkpoint.resume_attempt,
+            expected_revision=checkpoint.revision,
+            command=command_payload,
+        )
+        resolution = DistributedBackend(store).resolve_controller_command(command)
+        if resolution.kind == "rejected" or resolution.receipt is None:
+            raise TurnResumeError(resolution.error or "controller action was rejected")
+        updated = store.load_checkpoint(checkpoint.checkpoint_key)
+        if updated is None:
+            raise TurnResumeError("Checkpoint disappeared after controller admission")
+        status, wait_reason = self._controller_public_status(updated)
+        return {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "actionId": action_id,
+            "accepted": True,
+            "status": status,
+            **({"waitReason": wait_reason} if wait_reason is not None else {}),
+        }
+
+    @staticmethod
+    def _public_controller_action_digest(action: dict[str, Any]) -> str:
+        RunAdapter._validate_public_controller_action(action)
+        kind = action.get("kind")
+        if kind == "respond":
+            message = action["message"]
+            assert isinstance(message, dict)
+            payload = {
+                "kind": "respond",
+                "message": {
+                    "role": "user",
+                    "content": sanitize_host_prompt(message["content"]),
+                },
+            }
+        else:
+            payload = {"kind": kind}
+        return canonical_json_sha256(payload, "app_server_turn_action")
+
+    @staticmethod
+    def _validate_public_controller_action_identity(value: str, field_name: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise TurnResumeError(f"{field_name} must be a non-empty string")
+        if len(value.encode("utf-8")) > 512:
+            raise TurnResumeError(f"{field_name} exceeds the UTF-8 byte limit")
+
+    @staticmethod
+    def _validate_public_controller_action(action: Any) -> None:
+        if not isinstance(action, dict):
+            raise TurnResumeError("action must be an object")
+        kind = action.get("kind")
+        if kind not in {"respond", "suspend", "resume", "cancel", "abort"}:
+            raise TurnResumeError("action kind is unsupported")
+        expected = {"kind", "message"} if kind == "respond" else {"kind"}
+        actual = set(action)
+        if actual != expected:
+            missing = expected - actual
+            unknown = actual - expected
+            raise TurnResumeError(
+                f"action fields do not match the public schema: missing={sorted(missing)}, unknown={sorted(unknown)}"
+            )
+        if kind != "respond":
+            return
+        message = action["message"]
+        if not isinstance(message, dict) or set(message) != {"role", "content"}:
+            raise TurnResumeError("respond message must contain exactly role and content")
+        if message["role"] != "user":
+            raise TurnResumeError("respond message role must be user")
+        content = message["content"]
+        if not isinstance(content, str) or not content.strip():
+            raise TurnResumeError("respond message content must be a non-empty string")
+        if len(content.encode("utf-8")) > 65536:
+            raise TurnResumeError("respond message content exceeds the UTF-8 byte limit")
+
+    @classmethod
+    def _stored_controller_action_digest(cls, command: ControllerCommand) -> str:
+        if command.kind == "host_interaction_response":
+            action = {"kind": "respond", "message": command.command["response"]}
+        else:
+            action = {"kind": command.kind}
+        return cls._public_controller_action_digest(action)
+
+    def public_thread_status(self, thread_id: str) -> dict[str, Any]:
+        active = self._state_manager.active_turn(thread_id)
+        turn_id = (
+            active.turn_id
+            if active is not None
+            else next(
+                (
+                    candidate_turn_id
+                    for candidate_thread_id, candidate_turn_id in self._active_checkpoint_stores
+                    if candidate_thread_id == thread_id
+                ),
+                None,
+            )
+        )
+        if turn_id is None:
+            snapshot = self._store.read_thread(thread_id)
+            turn_id = next(
+                (
+                    candidate.turn_id
+                    for candidate in snapshot.turns
+                    if candidate.status == "interrupted"
+                    and isinstance(candidate.result.get("checkpoint"), dict)
+                    and isinstance(candidate.result["checkpoint"].get("key"), str)
+                ),
+                None,
+            )
+        if turn_id is None:
+            return {"threadId": thread_id, "status": self._state_manager.status(thread_id)}
+        binding = self._durable_binding(thread_id, turn_id)
+        if binding is None:
+            return {"threadId": thread_id, "status": self._state_manager.status(thread_id)}
+        store, checkpoint_key = binding
+        checkpoint = store.load_checkpoint(checkpoint_key)
+        if checkpoint is None:
+            return {"threadId": thread_id, "status": self._state_manager.status(thread_id)}
+        status, wait_reason = self._controller_public_status(checkpoint)
+        payload: dict[str, Any] = {"threadId": thread_id, "status": status}
+        if wait_reason is not None:
+            payload["waitReason"] = wait_reason
+        if wait_reason == "host_interaction" and isinstance(checkpoint.active_host_interaction, dict):
+            prompt: str | None = None
+            request = HostInteractionRequest.from_dict(checkpoint.active_host_interaction)
+            record_id = derive_host_interaction_record_id(checkpoint.checkpoint_key, request)
+            notification_id = derive_host_interaction_notification_id(record_id)
+            notification_getter = getattr(store, "get_host_interaction_notification", None)
+            if callable(notification_getter):
+                row = notification_getter(notification_id)
+                if isinstance(row, dict) and isinstance(row.get("payload"), dict):
+                    prompt_value = row["payload"].get("prompt")
+                    if isinstance(prompt_value, str):
+                        sanitized_prompt = sanitize_host_prompt(prompt_value)
+                        # A strict store should already have persisted the
+                        # sanitized projection.  Fail closed if a custom or
+                        # tampered adapter returns a raw prompt instead of
+                        # creating a second public normalization path.
+                        if sanitized_prompt == prompt_value:
+                            prompt = sanitized_prompt
+            if isinstance(prompt, str):
+                # The notification outbox is the sole public prompt source.
+                # The checkpoint request is authoritative framework state, not
+                # a UI projection, so never fall back to it when delivery has
+                # not yet materialized.
+                payload["prompt"] = prompt
+        return payload
+
+    def _durable_binding(self, thread_id: str, turn_id: str) -> tuple[Any, str] | None:
+        key = (thread_id, turn_id)
+        store = self._active_checkpoint_stores.get(key)
+        checkpoint_key = self._active_checkpoint_keys.get(key)
+        active = self._state_manager.active_turn(thread_id)
+        if active is not None and active.turn_id == turn_id and active.checkpoint_key is not None:
+            checkpoint_key = active.checkpoint_key
+        if store is not None and checkpoint_key is not None:
+            return store, checkpoint_key
+        try:
+            snapshot = self._store.read_thread(thread_id)
+        except KeyError:
+            return None
+        turn = next((candidate for candidate in snapshot.turns if candidate.turn_id == turn_id), None)
+        if turn is None or not isinstance(turn.result.get("checkpoint"), dict):
+            return None
+        checkpoint_summary = turn.result["checkpoint"]
+        checkpoint_key = checkpoint_summary.get("key")
+        if not isinstance(checkpoint_key, str):
+            return None
+        run_config = self._host.build_run_config(
+            RunConfigResolutionRequest(
+                thread_id=thread_id,
+                agent_key=snapshot.thread.agent_key,
+                cwd=snapshot.thread.cwd,
+                metadata=dict(snapshot.thread.metadata),
+            )
+        )
+        checkpoint_config = run_config.checkpoint_config
+        if checkpoint_config is None or checkpoint_config.store is None:
+            return None
+        self._active_checkpoint_stores[key] = checkpoint_config.store
+        self._active_checkpoint_keys[key] = checkpoint_key
+        return checkpoint_config.store, checkpoint_key
+
+    @staticmethod
+    def _controller_public_status(checkpoint: Checkpoint) -> tuple[str, str | None]:
+        if checkpoint.status is AgentStatus.HOST_INTERACTION:
+            return "interrupted", "host_interaction"
+        if checkpoint.status is AgentStatus.SUSPENDED:
+            return "interrupted", "suspended"
+        if checkpoint.status is AgentStatus.DEFERRED:
+            return "interrupted", "deferred_pending"
+        if checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED:
+            return "interrupted", "reconciliation_required"
+        if checkpoint.status is AgentStatus.COMPLETED:
+            return "completed", None
+        if checkpoint.status is AgentStatus.FAILED:
+            return "failed", None
+        return "running", None
 
     def resume_turn(
         self,
@@ -246,6 +532,8 @@ class RunAdapter:
 
         resumed_turn = self._store.resume_turn(turn_id, run_id=checkpoint.root_run_id)
         handle = Runner.start(agent, prompt, run_config=run_config)
+        self._active_checkpoint_stores[(thread_id, turn_id)] = checkpoint_config.store
+        self._active_checkpoint_keys[(thread_id, turn_id)] = checkpoint_key
         self._state_manager.set_active_turn(
             thread_id=thread_id,
             turn_id=turn_id,
@@ -299,6 +587,7 @@ class RunAdapter:
                 if started.is_durable_resume and event.type == "run_started":
                     continue
                 projection = map_run_event(event, thread_id=started.thread.thread_id, turn_id=started.turn.turn_id)
+                projection = self._hydrate_host_interaction_projection(started, event, projection)
                 should_notify = True
                 if projection.item is not None:
                     should_notify = self._store.append_item(
@@ -319,6 +608,53 @@ class RunAdapter:
             error = exc
         finally:
             self._complete_turn(connection_id, started, result=result, error=error)
+
+    def _hydrate_host_interaction_projection(
+        self,
+        started: StartedTurn,
+        event: Any,
+        projection: ItemProjection,
+    ) -> ItemProjection:
+        """Add a public host prompt only from the notification outbox.
+
+        ``HostInteractionRequestedEvent`` is an execution fact and is safe to
+        replay without exposing its prompt.  The independent notification row
+        is the only source for the App Server prompt projection; suspended
+        state-change events intentionally remain prompt-free.
+        """
+        if not isinstance(event, HostInteractionRequestedEvent):
+            return projection
+        if projection.notification_method != "thread/status/changed":
+            return projection
+        store = started.checkpoint_store
+        if store is None:
+            store = self._active_checkpoint_stores.get((started.thread.thread_id, started.turn.turn_id))
+        getter = getattr(store, "get_host_interaction_notification", None) if store is not None else None
+        if not callable(getter):
+            return projection
+        request = HostInteractionRequest(
+            interaction_id=event.interaction_id,
+            logical_cycle=event.logical_cycle,
+            operation_id=event.operation_id,
+            tool_call_id=event.tool_call_id,
+            prompt=event.prompt,
+            request_digest=event.request_digest,
+        )
+        notification_id = derive_host_interaction_notification_id(
+            derive_host_interaction_record_id(event.checkpoint_key, request)
+        )
+        row = getter(notification_id)
+        if not isinstance(row, dict) or not isinstance(row.get("payload"), dict):
+            return projection
+        prompt = row["payload"].get("prompt")
+        if not isinstance(prompt, str):
+            return projection
+        sanitized_prompt = sanitize_host_prompt(prompt)
+        if sanitized_prompt != prompt:
+            return projection
+        params = dict(projection.notification_params)
+        params["prompt"] = sanitized_prompt
+        return replace(projection, notification_params=params)
 
     def _complete_turn(
         self,
@@ -400,6 +736,9 @@ class RunAdapter:
                 ).to_dict(),
             )
         self._state_manager.clear_active_turn(started.thread.thread_id, started.turn.turn_id)
+        if status != "interrupted":
+            self._active_checkpoint_stores.pop((started.thread.thread_id, started.turn.turn_id), None)
+            self._active_checkpoint_keys.pop((started.thread.thread_id, started.turn.turn_id), None)
         self._state_manager.set_status(started.thread.thread_id, "idle")
         self._notify_subscribers(
             started.thread.thread_id,
@@ -415,7 +754,13 @@ class RunAdapter:
     def _turn_status(status: AgentStatus) -> str:
         if status is AgentStatus.COMPLETED:
             return "completed"
-        if status in {AgentStatus.WAIT_USER, AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED}:
+        if status in {
+            AgentStatus.HOST_INTERACTION,
+            AgentStatus.SUSPENDED,
+            AgentStatus.WAIT_USER,
+            AgentStatus.RECONCILIATION_REQUIRED,
+            AgentStatus.DEFERRED,
+        }:
             return "interrupted"
         return "failed"
 

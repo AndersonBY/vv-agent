@@ -19,6 +19,7 @@ from vv_agent.app_server.protocol import (
     JsonRpcResponse,
     ModelListRequest,
     RequestId,
+    TurnActionParams,
 )
 from vv_agent.app_server.request_serialization import (
     RequestAccess,
@@ -39,6 +40,7 @@ CLIENT_METHODS: tuple[str, ...] = (
     "thread/start",
     "thread/resume",
     "thread/read",
+    "thread/status",
     "thread/list",
     "thread/archive",
     "thread/unsubscribe",
@@ -47,6 +49,7 @@ CLIENT_METHODS: tuple[str, ...] = (
     "turn/steer",
     "turn/followUp",
     "turn/interrupt",
+    "turn/action",
     "approval/resolve",
     "schema/export",
 )
@@ -75,6 +78,7 @@ SERVER_CAPABILITIES: dict[str, object] = {
     "notificationOptOut": True,
     "schemaExport": True,
     "approvalResolve": True,
+    "controllerAdmission": True,
 }
 
 
@@ -161,6 +165,9 @@ class MessageProcessor:
         if request.method == "thread/read":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_read(connection_id, request))
             return
+        if request.method == "thread/status":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_thread_status(connection_id, request))
+            return
         if request.method == "thread/resume":
             self._serialize_or_run(connection_id, request, lambda: self._handle_thread_resume(connection_id, request))
             return
@@ -187,6 +194,9 @@ class MessageProcessor:
             return
         if request.method == "turn/interrupt":
             self._serialize_or_run(connection_id, request, lambda: self._handle_turn_interrupt(connection_id, request))
+            return
+        if request.method == "turn/action":
+            self._serialize_or_run(connection_id, request, lambda: self._handle_turn_action(connection_id, request))
             return
         if request.method == "approval/resolve":
             self._serialize_or_run(connection_id, request, lambda: self._handle_approval_resolve(connection_id, request))
@@ -224,7 +234,7 @@ class MessageProcessor:
         return RequestScope.thread(thread_id or "missing-thread")
 
     def _request_access(self, method: str) -> RequestAccess:
-        if method in {"model/list", "schema/export", "thread/list", "thread/read"}:
+        if method in {"model/list", "schema/export", "thread/list", "thread/read", "thread/status"}:
             return "shared_read"
         return "exclusive"
 
@@ -380,6 +390,26 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
         self._router.send_response(connection_id, request.id, snapshot)
+
+    def _handle_thread_status(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = self._params_object(connection_id, request)
+        if params is None:
+            return
+        if set(params) != {"threadId"}:
+            self._router.send_error(
+                connection_id, request.id, AppServerError.invalid_params("thread/status requires exactly threadId")
+            )
+            return
+        thread_id = self._required_string_param(connection_id, request, params, "threadId")
+        if not thread_id:
+            return
+        try:
+            self._store.read_thread(thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        payload = self._run_adapter.public_thread_status(thread_id)
+        self._router.send_response(connection_id, request.id, payload)
 
     def _handle_thread_resume(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request)
@@ -620,6 +650,54 @@ class MessageProcessor:
             for subscriber in self._state_manager.subscribers(thread_id):
                 self._router.send_notification(subscriber, "approval/resolved", params)
         self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "cancelled": cancelled})
+
+    def _handle_turn_action(self, connection_id: str, request: JsonRpcRequest) -> None:
+        params = self._params_object(connection_id, request)
+        if params is None:
+            return
+        try:
+            action = TurnActionParams.from_dict(params)
+        except (TypeError, ValueError) as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+            return
+        try:
+            snapshot = self._store.read_thread(action.thread_id)
+        except KeyError:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
+            return
+        if snapshot.thread.archived_at is not None:
+            self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
+            return
+        if not any(candidate.turn_id == action.turn_id for candidate in snapshot.turns):
+            self._router.send_error(
+                connection_id, request.id, AppServerError.invalid_params("Turn does not belong to the requested thread")
+            )
+            return
+        try:
+            payload = self._run_adapter.controller_action(
+                thread_id=action.thread_id,
+                turn_id=action.turn_id,
+                action_id=action.action_id,
+                action=action.action,
+            )
+        except TurnResumeError as exc:
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params(str(exc)))
+            return
+        except CheckpointError as exc:
+            self._router.send_error(
+                connection_id,
+                request.id,
+                AppServerError.invalid_params("Controller action rejected", data={"checkpointErrorCode": exc.code}),
+            )
+            return
+        self._router.send_response(connection_id, request.id, payload)
+        status_payload = {
+            "threadId": action.thread_id,
+            "status": "running" if payload["status"] == "running" else payload["status"],
+            **({"waitReason": payload["waitReason"]} if "waitReason" in payload else {}),
+        }
+        for subscriber in self._state_manager.subscribers(action.thread_id):
+            self._router.send_notification(subscriber, "thread/status/changed", status_payload)
 
     def _handle_approval_resolve(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request)

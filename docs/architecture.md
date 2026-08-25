@@ -139,8 +139,9 @@ cache total only when every included cycle reports that metric.
   `RuntimeRecipe`, a declared checkpoint-store capability, and a shared
   `CheckpointStore` resolved by each worker.
 
-`CeleryBackend.execute()` remains the synchronous controller path for hosts that
-intentionally wait outside a Celery worker. Event-driven hosts use
+`CeleryBackend.execute_local()` is a local-only synchronous controller path for
+hosts that intentionally wait outside a Celery worker; the generic
+`CeleryBackend.execute()` seam rejects direct use. Event-driven hosts use
 `Runner.start_distributed()` plus `CeleryBackend.start()` and `advance()`.
 `start()` admits the checkpoint, enqueues at most Cycle 1, and returns a passive
 `DistributedRunHandle`; `advance()` performs one authoritative checkpoint read,
@@ -281,7 +282,7 @@ no tool lifecycle. Unknown tools, policy denials, and approval short-circuits
 have planned plus completed but no started event. Completed events add the
 result directive, nullable error code, `execution_started`, nullable monotonic
 `duration_ms`, and the optional declaration. Cancellation or process loss may
-leave a started event without completion; checkpoint v7's operation journal,
+leave a started event without completion; checkpoint v8's operation journal,
 not telemetry, owns ambiguity and recovery.
 
 When no typed declaration exists, metadata-denial fields do not match that

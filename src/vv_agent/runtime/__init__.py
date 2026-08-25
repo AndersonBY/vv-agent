@@ -1,6 +1,21 @@
 from vv_agent.runtime.backends import ExecutionBackend, InlineBackend
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.controller import (
+    ControllerCommand,
+    ControllerCommandReceipt,
+    ControllerCommandResolution,
+    ControllerWake,
+    DistributedBackend,
+    HostInteractionAdmissionContext,
+    HostInteractionOutcome,
+    HostInteractionRecoveryEnvelope,
+    HostInteractionRecoveryResult,
+    HostInteractionRequest,
+    HostInteractionResponse,
+    derive_controller_command_id,
+    derive_controller_receipt_outbox_id,
+)
 from vv_agent.runtime.engine import (
     AgentRuntime,
     get_sub_agent_session,
@@ -49,8 +64,19 @@ __all__ = [
     "CancelledError",
     "Checkpoint",
     "CheckpointStore",
+    "ControllerCommand",
+    "ControllerCommandReceipt",
+    "ControllerCommandResolution",
+    "ControllerWake",
+    "DistributedBackend",
     "ExecutionBackend",
     "ExecutionContext",
+    "HostInteractionAdmissionContext",
+    "HostInteractionOutcome",
+    "HostInteractionRecoveryEnvelope",
+    "HostInteractionRecoveryResult",
+    "HostInteractionRequest",
+    "HostInteractionResponse",
     "InMemoryCheckpointStore",
     "InlineBackend",
     "ManagedSubTask",
@@ -61,6 +87,8 @@ __all__ = [
     "RuntimeHookManager",
     "SubTaskManager",
     "ToolCallRunner",
+    "derive_controller_command_id",
+    "derive_controller_receipt_outbox_id",
     "get_sub_agent_session",
     "subscribe_sub_agent_session",
 ]

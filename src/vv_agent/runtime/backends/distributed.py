@@ -1027,6 +1027,7 @@ class DistributedWaitReason(StrEnum):
     DEFERRED_PENDING = "deferred_pending"
     RECONCILIATION_REQUIRED = "reconciliation_required"
     HOST_INTERACTION = "host_interaction"
+    SUSPENDED = "suspended"
     SUPERSEDED_DELIVERY = "superseded_delivery"
 
 

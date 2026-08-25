@@ -15,7 +15,9 @@ from vv_agent.app_server.protocol import (
     ThreadReadParams,
     ThreadResumeParams,
     ThreadStartParams,
+    ThreadStatusParams,
     ThreadUnsubscribeParams,
+    TurnActionParams,
     TurnFollowUpParams,
     TurnInterruptParams,
     TurnResumeParams,
@@ -76,6 +78,9 @@ class AppServerClient:
     def read_thread(self, params: ThreadReadParams) -> dict[str, Any]:
         return self._send_request("thread/read", params.to_dict())
 
+    def thread_status(self, params: ThreadStatusParams) -> dict[str, Any]:
+        return self._send_request("thread/status", params.to_dict())
+
     def list_threads(self, params: ThreadListParams | None = None) -> dict[str, Any]:
         return self._send_request("thread/list", (params or ThreadListParams()).to_dict())
 
@@ -93,6 +98,9 @@ class AppServerClient:
 
     def interrupt_turn(self, params: TurnInterruptParams) -> dict[str, Any]:
         return self._send_request("turn/interrupt", params.to_dict())
+
+    def action_turn(self, params: TurnActionParams) -> dict[str, Any]:
+        return self._send_request("turn/action", params.to_dict())
 
     def steer_turn(self, params: TurnSteerParams) -> dict[str, Any]:
         return self._send_request("turn/steer", params.to_dict())

@@ -51,6 +51,7 @@ from vv_agent.runtime.backends.distributed import (
     toolset_schema_digest,
 )
 from vv_agent.runtime.backends.inline import InlineBackend
+from vv_agent.runtime.controller import ControllerCommand, HostInteractionAdmissionContext, HostInteractionRequest
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.tools import (
     FunctionTool,
@@ -644,6 +645,21 @@ def test_celery_projects_effective_metadata_policy_into_envelope(
     }
 
 
+def test_celery_generic_execute_is_guarded_and_local_path_is_explicit() -> None:
+    backend = object.__new__(CeleryBackend)
+    task = _strict_envelope().task
+    with pytest.raises(DistributedContractError, match="execute_local"):
+        backend.execute(
+            task=task,
+            initial_messages=[],
+            shared_state={},
+            cycle_executor=lambda *_args: None,
+            ctx=None,
+            max_cycles=1,
+        )
+    assert callable(backend.execute_local)
+
+
 def test_nonblocking_celery_start_and_terminal_finalize_never_wait_for_result(tmp_path: Path) -> None:
     store = InMemoryCheckpointStore()
     checkpoint_ref = CapabilityRef("checkpoint.nonblocking-terminal", "1")
@@ -774,6 +790,95 @@ def test_nonblocking_distributed_start_requires_explicit_checkpoint_key() -> Non
     assert exc_info.value.code == "checkpoint_key_required"
 
 
+def test_nonblocking_celery_advance_waits_for_host_interaction_and_suspended_state(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.nonblocking-wait", "1")
+    llm_ref = CapabilityRef("llm.nonblocking-wait", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[LLMResponse(content="unused")]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=recipe,
+        capability_registry=registry,
+    )
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=1,
+        checkpoint_config=CheckpointConfig(
+            key="nonblocking-wait",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+        ),
+    )
+    agent = Agent(name="nonblocking-wait-agent", instructions="Wait.", model="test-model")
+    Runner.start_distributed(agent, "work", run_config=run_config)
+    envelope = app.envelopes[0]
+    claimed = store.claim_checkpoint(
+        "nonblocking-wait",
+        1,
+        claim_token="host-producer",
+        lease_expires_at_ms=10_000,
+        now_ms=1,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    request = HostInteractionRequest(
+        interaction_id="wait-interaction",
+        logical_cycle=1,
+        operation_id="wait-operation",
+        tool_call_id="wait-tool",
+        prompt="Choose.",
+    )
+    store.produce_host_interaction(
+        request,
+        admission_context=HostInteractionAdmissionContext(
+            checkpoint_key="nonblocking-wait",
+            claim_token="host-producer",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+            now_ms=1,
+            lease_expires_at_ms=10_000,
+        ),
+    )
+    host_wait = backend.advance(
+        previous_envelope=envelope,
+        outcome=DistributedWorkerResponse.pending(),
+    )
+    assert host_wait.action == "wait"
+    assert host_wait.reason == "host_interaction"
+    assert len(app.envelopes) == 1
+    current = store.load_checkpoint("nonblocking-wait")
+    assert current is not None
+    suspend = ControllerCommand(
+        command_id="suspend-wait",
+        handle=DistributedRunHandle("nonblocking-wait", current.root_run_id, current.trace_id),
+        resume_attempt=current.resume_attempt,
+        expected_revision=current.revision,
+        command={"kind": "suspend"},
+    )
+    assert store.resolve_controller_command(suspend).kind == "applied"
+    suspended_wait = backend.advance(
+        previous_envelope=envelope,
+        outcome=DistributedWorkerResponse.pending(),
+    )
+    assert suspended_wait.action == "wait"
+    assert suspended_wait.reason == "suspended"
+    assert len(app.envelopes) == 1
+
+
 def test_nonblocking_celery_advance_enqueues_one_cycle_per_committed_callback(tmp_path: Path) -> None:
     store = InMemoryCheckpointStore()
     checkpoint_ref = CapabilityRef("checkpoint.nonblocking-chain", "1")
@@ -878,6 +983,7 @@ def test_nonblocking_celery_duplicate_and_out_of_order_callbacks_do_not_skip_cyc
         runtime_recipe=recipe,
         capability_registry=registry,
         dispatch_timeout_seconds=5,
+        dispatch_outbox_store=store,
     )
     run_config = RunConfig(
         model_provider=_provider(lambda: ScriptedLLM(steps=[])),
@@ -898,6 +1004,16 @@ def test_nonblocking_celery_duplicate_and_out_of_order_callbacks_do_not_skip_cyc
 
     first_envelope = app.envelopes[0]
     first_response = run_single_cycle(envelope_dict=first_envelope, capability_registry=registry)
+    checkpoint_after_first_delivery = store.load_checkpoint(first_envelope["checkpoint_config"]["key"])
+    assert checkpoint_after_first_delivery is not None
+    journal_count_after_first_delivery = len(checkpoint_after_first_delivery.model_call_journal)
+    duplicate_worker_response = DistributedWorkerResponse.from_dict(
+        run_single_cycle(envelope_dict=first_envelope, capability_registry=registry)
+    )
+    checkpoint_after_duplicate_delivery = store.load_checkpoint(first_envelope["checkpoint_config"]["key"])
+    assert duplicate_worker_response.response_type == "committed"
+    assert checkpoint_after_duplicate_delivery is not None
+    assert len(checkpoint_after_duplicate_delivery.model_call_journal) == journal_count_after_first_delivery
     first = backend.advance(previous_envelope=first_envelope, outcome=first_response)
     duplicate = backend.advance(previous_envelope=first_envelope, outcome=first_response)
 
@@ -906,6 +1022,7 @@ def test_nonblocking_celery_duplicate_and_out_of_order_callbacks_do_not_skip_cyc
     assert first.envelope.job_id == duplicate.envelope.job_id
     assert first.envelope.idempotency_key == duplicate.envelope.idempotency_key
     assert first.envelope.cycle_index == 2
+    assert len(app.envelopes) == 2
 
     second_envelope = app.envelopes[1]
     second_response = run_single_cycle(envelope_dict=second_envelope, capability_registry=registry)

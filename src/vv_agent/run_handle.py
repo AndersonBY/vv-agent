@@ -17,6 +17,8 @@ ApprovalInput = ApprovalDecision | str
 RunHandleStatus = Literal[
     "pending",
     "running",
+    "host_interaction",
+    "suspended",
     "deferred",
     "reconciliation_required",
     "wait_user",

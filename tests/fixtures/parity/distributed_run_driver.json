@@ -1,5 +1,5 @@
 {
-  "schema_version": "vv-agent.distributed-run-driver.v2",
+  "schema_version": "vv-agent.distributed-run-driver.v3",
   "handle": {
     "fields": [
       "checkpoint_key",
@@ -22,6 +22,36 @@
       "sleeps": false,
       "waits_for_completion": false
     },
+    "resolve_controller_command": {
+      "public_method": "DistributedBackend.resolve_controller_command",
+      "public_signature": "resolve_controller_command(command)",
+      "store_method": "CheckpointStore.admit_controller_command(command)",
+      "handle_source": "command.handle; handle is not a duplicate parameter",
+      "authoritative_checkpoint_reads": 1,
+      "maximum_envelopes_enqueued": 1,
+      "returns": "ControllerCommandResolution",
+      "polls": false,
+      "sleeps": false,
+      "waits_for_completion": false
+    },
+    "claim_and_consume_host_interaction_response": {
+      "public_method": "DistributedBackend.claim_and_consume_host_interaction_response",
+      "public_signature": "claim_and_consume_host_interaction_response(envelope)",
+      "store_method": "CheckpointStore.claim_and_consume_host_interaction_response(envelope)",
+      "handle_source": "envelope identities; no duplicate handle parameter",
+      "authoritative_checkpoint_and_record_locks": 1,
+      "combined_cas": true,
+      "record_only_claim_forbidden": true,
+      "claim_mode": "recovery",
+      "resume_attempt": "envelope carries the authoritative value before the combined claim; success increments it once and propagates the new value",
+      "record_claim_released_after_commit": true,
+      "checkpoint_execution_claim_retained_after_commit": true,
+      "model_or_tool_before_commit": false,
+      "maximum_envelopes_enqueued": 0,
+      "polls": false,
+      "sleeps": false,
+      "waits_for_completion": false
+    },
     "finalize": {
       "consumes_decision": "finalize_required",
       "framework_owned": true,
@@ -33,6 +63,7 @@
   },
   "decisions": [
     "dispatch",
+    "wake_after_controller_command",
     "retry_at",
     "wait",
     "finalize_required",
@@ -42,6 +73,14 @@
     "dispatch": [
       "handle",
       "envelope"
+    ],
+    "wake_after_controller_command": [
+      "handle",
+      "receipt",
+      "logical_cycle",
+      "claim_mode",
+      "resume_attempt",
+      "wake_action"
     ],
     "retry_at": [
       "handle",
@@ -67,6 +106,7 @@
     "active_claim",
     "reconciliation_required",
     "host_interaction",
+    "suspended",
     "deferred_pending",
     "superseded_delivery"
   ],
@@ -93,7 +133,43 @@
     "deferred_status_is_not_claimable": true,
     "last_resolution_returns_unclaimed_running": true,
     "resolution_ready_reuses_retained_observation": true,
-    "resolution_ready_does_not_poll_worker": true
+    "resolution_ready_does_not_poll_worker": true,
+    "host_interaction_wait_is_non_terminal": true,
+    "suspended_wait_is_non_terminal": true,
+    "controller_command_recovery_is_same_logical_cycle": true
+    ,"pending_is_uncommitted_observation_only": true
+    ,"controller_response_and_resume_wake_only": true
+    ,"controller_suspend_cancel_abort_never_wake": true
+    ,"resolve_controller_command_replay_has_no_second_wake": true
+    ,"driver_reads_authoritative_checkpoint_before_decision": true
+    ,"host_interaction_response_injection_reads_full_record": true
+    ,"host_interaction_response_consumed_once": true
+    ,"host_response_revision_semantics": {
+      "numbers_are_examples": true,
+      "admission_revision": "expected_revision + 1",
+      "example_expected_revision": 8,
+      "example_admission_revision": 9,
+      "consume_revision": "admission_revision + 1",
+      "example_consume_revision": 10,
+      "recovery_claim_mode": "recovery",
+      "resume_attempt_before": 2,
+      "resume_attempt_after_successful_claim": 3,
+      "consumed_event_resume_attempt": 3,
+      "next_envelope_resume_attempt": 3,
+      "failed_or_stale_claim_preserves_resume_attempt": true
+    }
+    ,"host_response_admission_state": "resolved_pending"
+    ,"host_response_admission_does_not_append_consumed_event": true
+    ,"host_response_recovery_operation": "claim_and_consume_host_interaction_response"
+    ,"host_response_recovery_claim_mode": "recovery"
+    ,"host_response_recovery_resume_attempt": "successful combined recovery claim increments the authoritative value exactly once; stale, failed, and replay paths preserve it"
+    ,"host_response_recovery_combined_checkpoint_record_cas": true
+    ,"host_response_recovery_before_model_or_tool": true
+    ,"host_response_recovery_appends_consumed_event": true
+    ,"host_response_record_only_claim_forbidden": true
+    ,"producer_notification_never_dispatches_worker": true
+    ,"suspended_host_origin_resume_without_response_waits": true
+    ,"suspended_host_origin_resume_with_response_dispatches": true
   },
   "transition_cases": [
     {
@@ -176,6 +252,51 @@
       },
       "driver_operation": "advance",
       "polls": false
+    },
+    {
+      "name": "host_interaction_pending",
+      "observation": "pending",
+      "checkpoint": "host_interaction",
+      "decision": "wait",
+      "reason": "host_interaction",
+      "cycle_commit": false
+    },
+    {
+      "name": "suspended_pending",
+      "observation": "pending",
+      "checkpoint": "suspended",
+      "decision": "wait",
+      "reason": "suspended",
+      "cycle_commit": false
+    },
+    {
+      "name": "controller_command_resolution_wakes_same_logical_cycle",
+      "operation": "resolve_controller_command",
+      "observation": "controller_command_receipt_applied",
+      "checkpoint": "running_unclaimed",
+      "decision": "wake_after_controller_command",
+      "claim_mode": "recovery",
+      "resume_attempt": 2,
+      "cycle_index": 3,
+      "cycle_index_before": 3,
+      "logical_cycle": 4,
+      "same_logical_cycle": true,
+      "wake_action": "recovery_dispatch",
+      "polls": false,
+      "revision_semantics": {
+        "numbers_are_examples": true,
+        "admission_revision": "expected_revision + 1",
+        "example_admission_revision": 9,
+        "consume_revision": "admission_revision + 1",
+        "example_consume_revision": 10,
+        "claim_mode": "recovery",
+        "resume_attempt_before": 2,
+        "resume_attempt_after": 3,
+        "consumed_event_resume_attempt": 3,
+        "next_envelope_resume_attempt": 3
+      },
+      "recovery_operation": "claim_and_consume_host_interaction_response",
+      "model_or_tool_starts_after_consume_commit": true
     }
   ]
 }

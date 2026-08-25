@@ -297,6 +297,7 @@ def test_client_facade_covers_stable_method_inventory() -> None:
         "thread/start": "start_thread",
         "thread/resume": "resume_thread",
         "thread/read": "read_thread",
+        "thread/status": "thread_status",
         "thread/list": "list_threads",
         "thread/archive": "archive_thread",
         "thread/unsubscribe": "unsubscribe_thread",
@@ -305,11 +306,12 @@ def test_client_facade_covers_stable_method_inventory() -> None:
         "turn/steer": "steer_turn",
         "turn/followUp": "follow_up_turn",
         "turn/interrupt": "interrupt_turn",
+        "turn/action": "action_turn",
         "approval/resolve": "resolve_approval_request",
         "schema/export": "export_schema",
     }
 
-    assert len(CLIENT_METHOD_SPECS) == 16
+    assert len(CLIENT_METHOD_SPECS) == 18
     assert set(facade_methods) == set(CLIENT_METHOD_SPECS)
     assert all(callable(getattr(AppServerClient, method)) for method in facade_methods.values())
     assert callable(AppServerClient.send_response)
