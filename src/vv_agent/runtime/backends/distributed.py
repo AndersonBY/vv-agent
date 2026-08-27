@@ -1748,17 +1748,6 @@ def toolset_schema_digest(registry: ToolRegistry, *, task: AgentTask | None = No
     return _canonical_tool_schema_digest(schemas)
 
 
-def toolset_schema_digest_for_task(registry: ToolRegistry, task: AgentTask | None = None) -> str:
-    """Return the digest of the schemas planned for one task.
-
-    With a task, this includes task-level exposure and dynamic schema
-    adjustments (for example the runtime shell hint on ``bash``).  Without a
-    task, it retains the static digest for an unscoped registry.
-    """
-
-    return toolset_schema_digest(registry, task=task)
-
-
 def _canonical_tool_schema_digest(schemas: list[dict[str, Any]]) -> str:
     canonical = json.dumps(
         schemas,

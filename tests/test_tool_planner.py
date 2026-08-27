@@ -14,7 +14,7 @@ from vv_agent.constants import (
     WORKSPACE_TOOLS,
 )
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.backends.distributed import toolset_schema_digest, toolset_schema_digest_for_task
+from vv_agent.runtime.backends.distributed import toolset_schema_digest
 from vv_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, SubAgentConfig
@@ -195,7 +195,7 @@ def test_plan_tool_schemas_freezes_runtime_shell_hint_across_cycles(monkeypatch)
     assert call_count["value"] == 1
 
 
-def test_toolset_schema_digest_for_task_matches_planned_schemas(monkeypatch) -> None:
+def test_toolset_schema_digest_matches_planned_schemas(monkeypatch) -> None:
     registry = build_default_registry()
     task = _task(agent_type="computer")
 
@@ -206,7 +206,7 @@ def test_toolset_schema_digest_for_task_matches_planned_schemas(monkeypatch) -> 
     monkeypatch.setattr(tool_planner_module, "resolve_shell_invocation", fake_resolve)
 
     planned = plan_tool_schemas(registry=registry, task=task)
-    expected = toolset_schema_digest_for_task(registry, task)
+    expected = toolset_schema_digest(registry, task=task)
 
     import hashlib
     import json
@@ -214,4 +214,4 @@ def test_toolset_schema_digest_for_task_matches_planned_schemas(monkeypatch) -> 
     canonical = json.dumps(planned, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
     assert expected == hashlib.sha256(canonical.encode()).hexdigest()
     assert expected != toolset_schema_digest(registry)
-    assert toolset_schema_digest_for_task(registry) == toolset_schema_digest(registry)
+    assert toolset_schema_digest(registry) == toolset_schema_digest(registry, task=None)
