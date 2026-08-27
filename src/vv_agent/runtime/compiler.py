@@ -8,7 +8,7 @@ from typing import Any, cast
 from vv_agent.agent import Agent, RunContext
 from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
-from vv_agent.constants import WORKSPACE_TOOLS
+from vv_agent.constants import WORKSPACE_TOOLS, get_default_tool_schemas
 from vv_agent.context_providers import (
     ContextFragment,
     ContextRequest,
@@ -295,14 +295,16 @@ class AgentCompiler:
         _apply_tool_policy_metadata(metadata, run_config.tool_policy)
 
         initial_messages = [Message.from_dict(item) for item in definition["initial_messages"]]
-        stored_tool_names = {
+        stored_tool_names = [
             str(function["name"])
             for item in definition["tools"]
             if isinstance(item, dict)
             and isinstance(item.get("schema"), dict)
             and isinstance((function := item["schema"].get("function")), dict)
             and isinstance(function.get("name"), str)
-        }
+        ]
+        canonical_tool_names = set(get_default_tool_schemas())
+        stored_extra_tool_names = list(dict.fromkeys(name for name in stored_tool_names if name not in canonical_tool_names))
         handoff_tool_names = [transfer.tool_name for transfer in agent.handoffs if transfer.tool_name]
         return AgentTask(
             task_id=str(checkpoint.task_id),
@@ -315,14 +317,23 @@ class AgentCompiler:
             microcompaction_policy=microcompaction_policy,
             no_tool_policy=cast(NoToolPolicy, controls["no_tool_policy"]),
             allow_interruption=bool(controls["allow_interruption"]),
-            use_workspace=bool(stored_tool_names.intersection(WORKSPACE_TOOLS)),
+            use_workspace=any(name in WORKSPACE_TOOLS for name in stored_tool_names),
             sub_agents=deepcopy(agent.sub_agents),
             agent_type=agent_definition.get("type"),
             native_multimodal=bool(controls["native_multimodal"]),
-            extra_tool_names=[
-                *[tool.name for tool in agent.tools if isinstance(tool, FunctionTool) and tool.exposure == ToolExposure.DIRECT],
-                *handoff_tool_names,
-            ],
+            extra_tool_names=list(
+                dict.fromkeys(
+                    [
+                        *stored_extra_tool_names,
+                        *[
+                            tool.name
+                            for tool in agent.tools
+                            if isinstance(tool, FunctionTool) and tool.exposure == ToolExposure.DIRECT
+                        ],
+                        *handoff_tool_names,
+                    ]
+                )
+            ),
             model_settings=run_config.model_settings,
             initial_messages=initial_messages,
             initial_shared_state=deepcopy(definition["initial_shared_state"]),
