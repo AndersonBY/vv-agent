@@ -263,6 +263,44 @@ class Runner:
         continuation: Any | None = None,
     ) -> DistributedRunHandle:
         """Prepare a durable run, enqueue cycle 1, and return without waiting."""
+        return cls._start_distributed(
+            agent,
+            input,
+            run_config=run_config,
+            continuation=continuation,
+        )
+
+    @classmethod
+    def start_distributed_compiled(
+        cls,
+        agent: Agent,
+        task: AgentTask,
+        *,
+        run_config: RunConfig,
+        continuation: Any | None = None,
+    ) -> DistributedRunHandle:
+        """Start a distributed run from an already compiled runtime task."""
+        if not isinstance(task, AgentTask):
+            raise TypeError("compiled distributed start requires an AgentTask")
+        input = task.user_prompt
+        return cls._start_distributed(
+            agent,
+            input,
+            run_config=run_config,
+            continuation=continuation,
+            compiled_invocation=_CompiledTaskInvocation(task=task),
+        )
+
+    @classmethod
+    def _start_distributed(
+        cls,
+        agent: Agent,
+        input: str,
+        *,
+        run_config: RunConfig,
+        continuation: Any | None = None,
+        compiled_invocation: _CompiledTaskInvocation | None = None,
+    ) -> DistributedRunHandle:
         if run_config.checkpoint_config is None:
             raise CheckpointError(
                 "nonblocking distributed start requires checkpoint configuration",
@@ -284,6 +322,7 @@ class Runner:
             run_config=effective_config,
             _distributed_start=True,
             _distributed_continuation=continuation,
+            _compiled_invocation=compiled_invocation,
         )
         if not isinstance(result, DistributedRunHandle):
             raise RuntimeError("distributed start did not return a durable run handle")

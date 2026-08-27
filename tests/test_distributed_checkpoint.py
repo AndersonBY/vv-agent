@@ -30,6 +30,7 @@ from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.backends.celery import CeleryBackend, register_cycle_task
 from vv_agent.runtime.backends.celery_tasks import run_single_cycle
+from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.backends.distributed import (
     DISTRIBUTED_RUN_SCHEMA_VERSION,
     DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION,
@@ -349,6 +350,21 @@ class _EnqueueOnlyApp:
 class _StartProbeBackend(InlineBackend):
     def start(self, **_kwargs: Any) -> None:
         return None
+
+
+class _CompiledStartProbeBackend(InlineBackend):
+    def __init__(self) -> None:
+        self.task: AgentTask | None = None
+
+    def start(self, *, task: AgentTask, checkpoint_controller: Any, **_kwargs: Any) -> DistributedRunHandle:
+        self.task = task
+        checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+        assert checkpoint is not None
+        return DistributedRunHandle(
+            checkpoint_key=checkpoint.checkpoint_key,
+            run_id=checkpoint.root_run_id,
+            trace_id=checkpoint.trace_id,
+        )
 
 
 def test_distributed_current_writer_and_reader_round_trip_strict_nested_wire() -> None:
@@ -788,6 +804,43 @@ def test_nonblocking_distributed_start_requires_explicit_checkpoint_key() -> Non
         )
 
     assert exc_info.value.code == "checkpoint_key_required"
+
+
+def test_nonblocking_distributed_start_compiled_task_skips_compiler(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = Agent(name="compiled-start", instructions="Original instructions.", model="test-model")
+    task = AgentCompiler().compile(
+        agent=agent,
+        input="compiled input",
+        run_config=RunConfig(max_cycles=1),
+        resolved=_resolved(),
+        trace_id="trace-compiled-start",
+    )
+    backend = _CompiledStartProbeBackend()
+    store = InMemoryCheckpointStore()
+
+    def fail_compile(*_args: Any, **_kwargs: Any) -> AgentTask:
+        raise AssertionError("compiled distributed start must not compile again")
+
+    monkeypatch.setattr(AgentCompiler, "compile", fail_compile)
+
+    handle = Runner.start_distributed_compiled(
+        agent,
+        task,
+        run_config=RunConfig(
+            model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+            execution_backend=backend,
+            max_cycles=1,
+            checkpoint_config=CheckpointConfig(
+                key="compiled-start",
+                resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                store=store,
+            ),
+        ),
+    )
+
+    assert isinstance(handle, DistributedRunHandle)
+    assert backend.task is not None
+    assert backend.task.to_dict() == task.to_dict()
 
 
 def test_nonblocking_celery_advance_waits_for_host_interaction_and_suspended_state(tmp_path: Path) -> None:
