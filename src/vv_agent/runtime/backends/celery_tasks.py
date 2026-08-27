@@ -208,7 +208,13 @@ def _validate_task_and_capabilities(
         refs=definition_refs,
     )
     if actual_tools != definition["tools"]:
-        raise _definition_mismatch("distributed tool schemas do not match the run definition")
+        actual_names = [item["schema"]["function"]["name"] for item in actual_tools]
+        expected_names = [item["schema"]["function"]["name"] for item in definition["tools"]]
+        raise _definition_mismatch(
+            "distributed tool schemas do not match the run definition "
+            f"(actual_len={len(actual_names)}, expected_len={len(expected_names)}, "
+            f"actual_names={actual_names}, expected_names={expected_names})"
+        )
 
     _validate_reference(
         slot="context",

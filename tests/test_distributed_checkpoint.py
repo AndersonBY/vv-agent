@@ -1489,6 +1489,12 @@ def test_celery_rejects_resolved_tool_metadata_drift_before_claim(
         )
 
     assert getattr(caught.value, "code", None) == "checkpoint_definition_mismatch"
+    error_message = str(caught.value)
+    assert "actual_len=10" in error_message
+    assert "expected_len=10" in error_message
+    assert "actual_names=" in error_message
+    assert "expected_names=" in error_message
+    assert "'inspect_source'" in error_message
     checkpoint = store.load_checkpoint("distributed-metadata-drift")
     assert checkpoint is not None
     assert checkpoint.claim_token is None
