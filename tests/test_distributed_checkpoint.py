@@ -1494,6 +1494,10 @@ def test_celery_rejects_resolved_tool_metadata_drift_before_claim(
     assert "expected_len=10" in error_message
     assert "actual_names=" in error_message
     assert "expected_names=" in error_message
+    assert "task_extra_tool_names=" in error_message
+    assert "task_exclude_tools=" in error_message
+    assert "registry_planner_extra_tool_names=" in error_message
+    assert "registry_tool_names=" in error_message
     assert "'inspect_source'" in error_message
     checkpoint = store.load_checkpoint("distributed-metadata-drift")
     assert checkpoint is not None

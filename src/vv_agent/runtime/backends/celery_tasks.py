@@ -213,7 +213,10 @@ def _validate_task_and_capabilities(
         raise _definition_mismatch(
             "distributed tool schemas do not match the run definition "
             f"(actual_len={len(actual_names)}, expected_len={len(expected_names)}, "
-            f"actual_names={actual_names}, expected_names={expected_names})"
+            f"actual_names={actual_names}, expected_names={expected_names}, "
+            f"task_extra_tool_names={task.extra_tool_names}, task_exclude_tools={task.exclude_tools}, "
+            f"registry_planner_extra_tool_names={tool_registry.list_planner_extra_tool_names()}, "
+            f"registry_tool_names={tool_registry.list_tool_names()})"
         )
 
     _validate_reference(
