@@ -41,6 +41,16 @@
       "failed",
       "max_cycles"
     ],
+    "checkpoint_only_statuses": [
+      "host_interaction",
+      "suspended"
+    ],
+    "checkpoint_only_status_semantics": {
+      "excluded_from_agent_result": true,
+      "excluded_from_terminal_result": true,
+      "projected_by": "App Server observable wait projection and distributed driver decision",
+      "wire_source": "fixtures/checkpoint_codec.json#host_interaction_persistence"
+    },
     "deferred_status_semantics": {
       "status": "deferred",
       "non_terminal": true,

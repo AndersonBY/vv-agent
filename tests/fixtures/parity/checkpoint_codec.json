@@ -1,8 +1,8 @@
 {
   "contract": "checkpoint_codec",
-  "version": 7,
+  "version": 8,
   "discriminator": {
-    "required_value": "vv-agent.checkpoint.v7",
+    "required_value": "vv-agent.checkpoint.v8",
     "missing_or_unknown_error": "checkpoint_schema_unsupported"
   },
   "message_wire": {
@@ -63,7 +63,7 @@
     ]
   },
   "canonical_checkpoint": {
-    "schema_version": "vv-agent.checkpoint.v7",
+    "schema_version": "vv-agent.checkpoint.v8",
     "run_definition_schema": "vv-agent.run-definition.v5",
     "run_definition": {
       "schema_version": "vv-agent.run-definition.v5",
@@ -144,6 +144,8 @@
     "resume_attempt": 2,
     "cycle_index": 1,
     "status": "running",
+    "active_host_interaction": null,
+    "suspended_origin": null,
     "messages": [
       {
         "role": "system",
@@ -377,9 +379,27 @@
     "claimed_cycle",
     "lease_expires_at_ms",
     "terminal_result",
-    "terminal_acknowledged"
+    "terminal_acknowledged",
+    "active_host_interaction",
+    "suspended_origin"
   ],
   "status_rules": {
+    "host_interaction_is_non_terminal": true,
+    "suspended_is_non_terminal": true,
+    "host_interaction_preserves_cycle_index_without_commit": true,
+    "suspended_preserves_cycle_index_without_commit": true,
+    "active_host_interaction_is_durable_checkpoint_state": true,
+    "active_host_interaction_logical_cycle_equals_claimed_cycle_before_release": true,
+    "active_host_interaction_requires_operation_tool_and_request_identity": true,
+    "active_host_interaction_and_request_outbox_share_one_cas": true,
+    "active_host_interaction_releases_claim_in_same_cas": true,
+    "suspended_persists_origin_and_previous_active_interaction": true,
+    "suspended_origin_is_restored_after_resume": true,
+    "host_interaction_and_suspended_have_no_live_claim": true,
+    "old_checkpoint_discriminator_is_rejected_without_reader_fallback": true,
+    "controller_command_does_not_rewrite_wait_user_terminal": true,
+    "controller_command_deferred_barrier_precedes_control": true,
+    "controller_command_ambiguity_precedes_cancel": true,
     "reconciliation_required_requires_ambiguous_journal": true,
     "reconciliation_required_has_no_claim": true,
     "deferred_requires_at_least_one_deferred_journal": true,
@@ -432,7 +452,250 @@
     "deferred_last_resolution_sets_unclaimed_running": true,
     "deferred_not_claimable": true
   },
+  "host_interaction_persistence": {
+    "active_host_interaction": {
+      "closed": true,
+      "required_fields": [
+        "schema_version",
+        "interaction_id",
+        "logical_cycle",
+        "operation_id",
+        "tool_call_id",
+        "request_digest",
+        "prompt"
+      ],
+      "unknown_fields": "reject",
+      "schema_version": "vv-agent.host-interaction-request.v1",
+      "prompt": "persist the complete credential-redacted strict request; digest-only persistence is invalid",
+      "prompt_max_utf8_bytes": 65536,
+      "content_policy": {
+        "credential_redacted": true,
+        "external_locator_forbidden": true,
+        "transport_metadata_forbidden": true,
+        "strict_codec_before_checkpoint_cas": true
+      },
+      "logical_cycle": "must_equal_claimed_cycle_and_cycle_index_plus_one_at_producer_admission",
+      "request_digest": "lowercase_sha256_of_canonical_host_interaction_request"
+    },
+    "suspended_origin": {
+      "closed": true,
+      "required_fields": [
+        "status",
+        "active_host_interaction"
+      ],
+      "status_values": ["running", "host_interaction"],
+      "active_host_interaction": "same_closed_shape_or_null",
+      "unknown_fields": "reject"
+    },
+    "state_constraints": [
+      "status=host_interaction requires active_host_interaction and suspended_origin=null",
+      "status=suspended requires active_host_interaction=null and suspended_origin!=null",
+      "all_other_statuses require active_host_interaction=null and suspended_origin=null",
+      "host_interaction and suspended checkpoints have no live claim",
+      "a crash after the producer CAS reloads both fields and the interaction record before any scheduler wake"
+    ],
+    "producer_event_outbox_is_notification_only": true,
+    "notification_outbox": {
+      "schema": "vv-agent.host-interaction-notification.v1",
+      "independent_table": "host_interaction_notification_outbox",
+      "strict_sanitized_payload": true,
+      "payload_required_fields": ["schema_version", "notification_id", "record_id", "interaction_id", "logical_cycle", "status", "wait_reason", "prompt"],
+      "wait_reason": "host_interaction",
+      "states": ["pending", "claimed", "delivered", "ambiguous", "aborted"],
+      "claim_owner_attempt_lease_fenced": true,
+      "same_id_same_digest_replay_zero_write": true,
+      "same_id_different_digest_conflict_zero_write": true,
+      "delivery_semantics": "at_least_once",
+      "observer_deduplication_required": true,
+      "callback_crash_is_ambiguous": true,
+      "transaction_boundary": {
+        "producer_admission": {
+          "same_transaction": [
+            "checkpoint.active_host_interaction",
+            "host_interaction_records row",
+            "host_interaction_requested RunEvent v4 outbox row",
+            "host_interaction_notification_outbox row",
+            "active claim release",
+            "checkpoint revision"
+          ],
+          "excludes": [
+            "controller command receipt",
+            "controller recovery wake outbox",
+            "notification claim/deliver/reconcile lifecycle"
+          ]
+        },
+        "notification_claim_deliver_reconcile": {
+          "same_transaction": [
+            "notification row lifecycle state and owner-attempt CAS"
+          ],
+          "excludes": [
+            "checkpoint",
+            "host_interaction_record",
+            "controller command receipt",
+            "recovery wake outbox"
+          ]
+        },
+        "controller_response_admission": {
+          "same_transaction": [
+            "checkpoint revision and active/suspended state",
+            "host_interaction_record resolved_pending/full response when responding",
+            "controller command receipt",
+            "controller event outbox marker",
+            "recovery wake outbox marker"
+          ],
+          "excludes": [
+            "host_interaction_notification_outbox claim",
+            "host_interaction_notification_outbox delivery",
+            "host_interaction_notification_outbox reconcile"
+          ]
+        }
+      },
+      "ambiguous_resolution": {
+        "operation": "reconcile_host_interaction_notification(notification_id, payload_digest, outcome)",
+        "outcomes": ["delivered", "retry", "abort"],
+        "retry_reuses_identity_and_digest": true,
+        "abort_requires_reason": true,
+        "reaper_routes_ambiguous_to_reconciliation": true,
+        "reaper_never_blind_retries_ambiguous": true
+      },
+      "run_state_changed_after_suspend_is_separate_and_does_not_mutate_host_payload": true
+    },
+      "suspended_origin_running_resume_wakes": true,
+      "suspended_origin_host_interaction_resume_waits_without_response": true,
+      "suspended_origin_host_interaction_resume_wakes_when_response_pending": true,
+      "response_while_suspended_host_origin_keeps_suspended_until_resume": true,
+  "producer_cas": {
+      "requires_active_claim": true,
+    "writes_in_one_cas": [
+        "status=host_interaction",
+        "active_host_interaction (complete strict request)",
+        "host_interaction_record",
+        "request_digest",
+        "host_interaction_requested_event_outbox",
+        "host_interaction_notification_outbox",
+        "claim_token=null",
+        "claimed_cycle=null",
+        "lease_expires_at_ms=null",
+      "revision=revision+1"
+    ],
+    "transaction_boundary": {
+      "operation": "producer_admission",
+      "same_transaction": [
+        "checkpoint.active_host_interaction",
+        "host_interaction_records row",
+        "host_interaction_requested RunEvent v4 outbox row",
+        "host_interaction_notification_outbox row",
+        "active claim release",
+        "checkpoint revision"
+      ],
+      "excludes": [
+        "controller command receipt",
+        "controller recovery wake outbox",
+        "notification claim/deliver/reconcile lifecycle"
+      ]
+    },
+      "external_effect_inside_transaction": false,
+      "claim_release_is_atomic": true,
+      "replay_after_claim_release": "same identity and request digest is zero-write; a different binding or digest is conflict"
+    }
+  },
+  "host_interaction_record": {
+    "fixture_pointer": "fixtures/controller_command.json#host_interaction_record",
+    "full_request_required": true,
+    "full_resolved_response_required": true,
+    "response_digest_only_is_invalid": true,
+    "recovery_consumption": {
+      "hard_barrier_states": ["resolved_pending", "resolved_claimed"],
+      "ordinary_continue_or_claim": "reject or route to claim_and_consume_host_interaction_response",
+      "operation": "claim_and_consume_host_interaction_response(envelope)",
+      "state_transition": "resolved_pending -> resolved_claimed (transactional phase) -> consumed in the same checkpoint CAS",
+      "claim_fences": ["checkpoint execution claim token", "claimed_cycle=cycle_index+1", "record attempt", "lease_expires_at_ms"],
+      "record_only_claim_forbidden": true,
+      "revision_semantics": {
+        "numbers_are_examples": true,
+        "admission_revision": "expected_revision + 1",
+        "example_expected_revision": 8,
+        "example_admission_revision": 9,
+        "consume_revision": "admission_revision + 1",
+        "example_consume_revision": 10,
+        "recovery_claim_mode": "recovery",
+        "resume_attempt_before": 2,
+        "resume_attempt_after_successful_claim": 3,
+        "consumed_event_resume_attempt": 3,
+        "next_envelope_resume_attempt": 3,
+        "failed_or_stale_claim_preserves_resume_attempt": true
+      },
+      "admission_snapshot": {
+        "revision": "admission_revision",
+        "example_revision": 9,
+        "record_state": "resolved_pending",
+        "consumed_event": false,
+        "consumed_revision": null,
+        "model_or_tool_started": false
+      },
+      "consume_snapshot": {
+        "revision": "admission_revision + 1",
+        "example_revision": 10,
+        "record_state": "consumed",
+        "consumed_revision": "admission_revision + 1",
+        "checkpoint_execution_claim_obtained": true,
+        "checkpoint_execution_claim_retained": true,
+        "record_claim_released": true,
+        "consumed_event": "host_interaction_response_consumed",
+        "model_or_tool_started": false,
+        "injection_count": 1
+      },
+      "injection_is_exactly_once": true,
+      "crash_before_commit_rolls_back_both_claims": true,
+      "stale_envelope_writes_nothing": true,
+      "consumed_marker": ["host_interaction_response_consumed event", "consumed_revision"],
+      "cleanup": "retain consumed marker through next committed cycle or terminal acknowledgement; explicit checkpoint deletion cascades it"
+    }
+  },
   "status_cases": [
+    {
+      "name": "host_interaction_same_logical_cycle_is_valid_non_terminal",
+      "status": "host_interaction",
+      "terminal_result": null,
+      "active_host_interaction": {
+        "schema_version": "vv-agent.host-interaction-request.v1",
+        "interaction_id": "interaction-42",
+        "logical_cycle": 4,
+        "operation_id": "op_host_cycle_4",
+        "tool_call_id": "call_host_4",
+        "request_digest": "6eb7f7953c3aaa93c94dfe723ffa00aecb877505af29f2730b9950c20961c787",
+        "prompt": "Choose an approved option."
+      },
+      "suspended_origin": null,
+      "claim_token": null,
+      "cycle_commit": false,
+      "cycle_index": 3,
+      "claimed_cycle": null,
+      "controller_fixture": "controller_command.json"
+    },
+    {
+      "name": "suspended_same_logical_cycle_is_valid_non_terminal",
+      "status": "suspended",
+      "terminal_result": null,
+      "active_host_interaction": null,
+      "suspended_origin": {
+        "status": "host_interaction",
+        "active_host_interaction": {
+          "interaction_id": "interaction-42",
+          "schema_version": "vv-agent.host-interaction-request.v1",
+          "logical_cycle": 4,
+          "operation_id": "op_host_cycle_4",
+          "tool_call_id": "call_host_4",
+          "request_digest": "6eb7f7953c3aaa93c94dfe723ffa00aecb877505af29f2730b9950c20961c787",
+          "prompt": "Choose an approved option."
+        }
+      },
+      "claim_token": null,
+      "cycle_commit": false,
+      "cycle_index": 3,
+      "claimed_cycle": null,
+      "controller_fixture": "controller_command.json"
+    },
     {
       "name": "suspended_reconciliation_is_valid",
       "valid_case": "reconciliation_required_retains_ambiguous_journal",
@@ -705,7 +968,7 @@
     {
       "name": "minimal_running",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -786,6 +1049,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -807,7 +1072,7 @@
     {
       "name": "reconciliation_required_retains_ambiguous_journal",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -888,6 +1153,8 @@
         "resume_attempt": 2,
         "cycle_index": 1,
         "status": "reconciliation_required",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -928,7 +1195,7 @@
     {
       "name": "claimed_active_cycle",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1009,6 +1276,8 @@
         "resume_attempt": 2,
         "cycle_index": 1,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [
           {
             "role": "system",
@@ -1145,9 +1414,6 @@
         "lease_expires_at_ms": 2000000000000,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "vendor_future": {
-          "preserve": true
-        },
         "model_calls": [
           {
             "call_id": "op_model_cycle_1_main:attempt:1",
@@ -1186,7 +1452,7 @@
     {
       "name": "acknowledged_terminal_is_retained",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1267,6 +1533,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "completed",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -1321,7 +1589,7 @@
     {
       "name": "unknown_optional_extension_is_preserved",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1402,6 +1670,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -1431,6 +1701,18 @@
   ],
   "invalid_cases": [
     {
+      "name": "old_v7_schema_is_rejected_forward_only",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace": {
+          "schema_version": "vv-agent.checkpoint.v7"
+        }
+      },
+      "error": "checkpoint_schema_unsupported",
+      "reader_fallback": false,
+      "writes": []
+    },
+    {
       "name": "unknown_schema",
       "payload": {
         "schema_version": "vv-agent.checkpoint.v3",
@@ -1442,6 +1724,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -1464,7 +1748,7 @@
     {
       "name": "blank_checkpoint_key",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1545,6 +1829,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -1567,7 +1853,7 @@
     {
       "name": "bad_definition_digest",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1648,6 +1934,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -1670,7 +1958,7 @@
     {
       "name": "zero_resume_attempt",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1751,6 +2039,8 @@
         "resume_attempt": 0,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -1773,7 +2063,7 @@
     {
       "name": "partial_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1854,6 +2144,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -1876,7 +2168,7 @@
     {
       "name": "claimed_cycle_not_next",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1957,6 +2249,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -1979,7 +2273,7 @@
     {
       "name": "terminal_with_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2060,6 +2354,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "completed",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -2115,7 +2411,7 @@
     {
       "name": "journal_cycle_not_active",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2196,6 +2492,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -2234,7 +2532,7 @@
     {
       "name": "unknown_required_extension",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2315,6 +2613,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -2346,7 +2646,7 @@
     {
       "name": "invalid_extension_namespace",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2427,6 +2727,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -2455,7 +2757,7 @@
     {
       "name": "unknown_top_level_is_rejected",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v7",
+        "schema_version": "vv-agent.checkpoint.v8",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2536,6 +2838,8 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "active_host_interaction": null,
+        "suspended_origin": null,
         "messages": [],
         "cycles": [],
         "shared_state": {},
@@ -2692,6 +2996,28 @@
       }
     ]
   },
+  "host_interaction_invalid_cases": [
+    {
+      "name": "active_request_missing_prompt",
+      "base_valid_case": "host_interaction_same_logical_cycle_is_valid_non_terminal",
+      "mutation": "remove active_host_interaction.prompt",
+      "error_code": "host_interaction_fields_invalid",
+      "writes": []
+    },
+    {
+      "name": "active_request_prompt_over_utf8_limit",
+      "base_valid_case": "host_interaction_same_logical_cycle_is_valid_non_terminal",
+      "mutation": "prompt encodes to 65537 UTF-8 bytes",
+      "error_code": "host_interaction_content_too_large",
+      "writes": []
+    },
+    {
+      "name": "resolved_record_stores_digest_only",
+      "mutation": "replace full response with response_digest only",
+      "error_code": "host_interaction_response_missing",
+      "writes": []
+    }
+  ],
   "unknown_field_policy": {
     "top_level_whole_object_store": "reject",
     "extension_optional": "preserve_without_restore",

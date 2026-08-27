@@ -1,8 +1,19 @@
 {
   "contract": "checkpoint_resume",
-  "version": 7,
-  "checkpoint_schema": "vv-agent.checkpoint.v7",
+  "version": 8,
+  "checkpoint_schema": "vv-agent.checkpoint.v8",
   "run_definition_schema": "vv-agent.run-definition.v5",
+  "checkpoint_wire": {
+    "required_fields": [
+      "active_host_interaction",
+      "suspended_origin"
+    ],
+    "active_host_interaction": "complete closed vv-agent.host-interaction-request.v1 object including prompt or null; restored before wake after crash",
+    "suspended_origin": "closed {status, active_host_interaction} object or null",
+    "old_discriminator": "vv-agent.checkpoint.v7",
+    "old_discriminator_error": "checkpoint_schema_unsupported",
+    "forward_only_reader": true
+  },
   "public_entrypoints": {
     "run": "Runner.run with RunConfig.checkpoint_config",
     "start": "Runner.start with RunConfig.checkpoint_config",
@@ -13,6 +24,8 @@
   "checkpoint_states": [
     "pending",
     "running",
+    "host_interaction",
+    "suspended",
     "deferred",
     "reconciliation_required",
     "wait_user",
@@ -21,6 +34,59 @@
     "max_cycles"
   ],
   "deferred_pending_semantics": "no cycle commit and no response result were returned by this delivery attempt",
+  "controller_command_semantics": {
+    "request_fixture": "controller_command.json",
+    "host_interaction_and_suspended_are_non_terminal": true,
+    "host_interaction_identity_is_persisted": true,
+    "suspended_origin_is_persisted": true,
+    "producer_claim_release_and_interaction_cas_are_one_transaction": true,
+    "same_logical_cycle_recovery": true,
+    "cycle_index_is_last_committed": true,
+    "claimed_cycle_is_cycle_index_plus_one": true,
+    "active_host_interaction_and_suspended_origin_reload_before_wake": true,
+    "active_host_interaction_persists_complete_request": true,
+    "resolved_response_persists_complete_message_before_wake": true,
+    "response_consumed_exactly_once_with_marker": true,
+    "response_revision_semantics": {
+      "numbers_are_examples": true,
+      "admission_revision": "expected_revision + 1",
+      "example_expected_revision": 8,
+      "example_admission_revision": 9,
+      "consume_revision": "admission_revision + 1",
+      "example_consume_revision": 10
+    },
+    "response_recovery_operation": "claim_and_consume_host_interaction_response",
+    "response_recovery_claim_mode": "recovery",
+    "response_recovery_resume_attempt": {
+      "wire_value": "authoritative value before the combined recovery claim",
+      "successful_claim": "increment exactly once; consumed event and next envelope use the incremented value",
+      "example_before": 2,
+      "example_after": 3,
+      "failed_or_stale": "preserve 2",
+      "replay": "retain 3 without another increment"
+    },
+    "response_recovery_locks_checkpoint_and_record": true,
+    "response_recovery_retains_checkpoint_execution_claim": true,
+    "response_recovery_releases_record_claim": true,
+    "response_record_only_claim_forbidden": true,
+    "response_crash_before_commit_rolls_back": true,
+    "host_interaction_producer_notification_does_not_wake_worker": true,
+    "host_interaction_notification_wait_reason": "host_interaction",
+    "host_interaction_notification_delivery": "at_least_once_with_observer_deduplication",
+    "host_interaction_notification_ambiguity": {
+      "operation": "reconcile_host_interaction_notification(notification_id, payload_digest, outcome)",
+      "outcomes": ["delivered", "retry", "abort"],
+      "reaper": "retry pending or expired claimed; route ambiguous to explicit reconciliation; retain aborted as terminal audit",
+      "blind_retry_ambiguous": false
+    },
+    "suspended_state_change_notification": "separate_run_state_changed_event; host interaction notification immutable",
+    "suspended_running_origin_resume_wakes": true,
+    "suspended_host_origin_resume_without_response_waits": true,
+    "suspended_host_origin_resume_with_response_wakes": true,
+    "ask_user_wait_user_remains_terminal": true,
+    "deferred_resolution_is_independent": true,
+    "terminal_successor_is_independent": true
+  },
   "runner_cases": [
     {
       "name": "disabled_uses_non_durable_flow",
@@ -1087,6 +1153,55 @@
       "durable_state": "terminal_committed",
       "resume": "replay_terminal",
       "ambiguity": false
+    },
+    {
+      "id": "F10",
+      "point": "after_controller_command_receipt_and_checkpoint_cas_before_enqueue",
+      "durable_state": "controller_receipt_pending",
+      "resume": "reap_with_same_command_id",
+      "ambiguity": false
+    },
+    {
+      "id": "F11",
+      "point": "after_controller_enqueue_before_delivery_ack",
+      "durable_state": "controller_receipt_ambiguous",
+      "resume": "reconcile_stable_command_id_without_unsafe_duplicate",
+      "ambiguity": true
+    },
+    {
+      "id": "F12",
+      "point": "host_interaction_response_before_cycle_recovery_claim",
+      "durable_state": "running_unclaimed_same_logical_cycle",
+      "resume": "recovery_claim_same_logical_cycle",
+      "ambiguity": false
+    },
+    {
+      "id": "F13",
+      "point": "active_claim_host_interaction_producer_cas_before_commit",
+      "durable_state": "claimed_running",
+      "resume": "reload_host_interaction_or_rollback_without_partial_claim_release",
+      "ambiguity": false
+    },
+    {
+      "id": "F14",
+      "point": "deferred_resolution_races_cancel",
+      "durable_state": "deferred_barrier_or_terminal_cas_winner",
+      "resume": "deferred_barrier_precedence_without_double_wake",
+      "ambiguity": false
+    },
+    {
+      "id": "F15",
+      "point": "terminal_finalization_races_controller_command",
+      "durable_state": "one_revision_cas_winner",
+      "resume": "terminal_result_and_event_replay_without_mutation",
+      "ambiguity": false
+    },
+    {
+      "id": "F16",
+      "point": "controller_command_replay_after_revision_advance",
+      "durable_state": "retained_receipt_and_outbox_state",
+      "resume": "replay_without_second_revision_or_wake",
+      "ambiguity": false
     }
   ],
   "fault_test_requirements": {
@@ -1096,12 +1211,22 @@
     "sleep_only_fault_timing": false,
     "preserve_messages_cycles_model_call_ledger_budget": true,
     "event_dedupe_with_idempotent_store": true,
-    "cross_language_sqlite": true
+    "cross_language_sqlite": true,
+    "controller_command_receipt_replay": true,
+    "controller_command_conflict_zero_write": true,
+    "controller_command_stale_fence_zero_write": true,
+    "controller_command_ambiguity_precedes_cancel": true,
+    "controller_command_deferred_barrier_precedes_control": true
+    ,"host_interaction_claim_release_is_atomic": true
+    ,"controller_command_suspend_cancel_abort_do_not_wake": true
+    ,"controller_command_replay_after_revision_advance_is_idempotent": true
   },
   "terminal_precedence": [
     "committed_terminal",
     "live_claim",
     "unresolved_ambiguous_operation",
+    "unresolved_deferred_barrier",
+    "controller_command_state_rule",
     "cancellation",
     "budget_exhaustion",
     "business_terminal"
