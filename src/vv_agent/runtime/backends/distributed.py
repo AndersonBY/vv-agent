@@ -25,6 +25,7 @@ from vv_agent.checkpoint import (
 )
 from vv_agent.model_settings import ModelSettings
 from vv_agent.run_config import ToolPolicy
+from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools import ToolRegistry, build_default_registry
 from vv_agent.tools.metadata import (
     ToolSideEffect,
@@ -1738,9 +1739,29 @@ class DistributedRunEnvelope:
         return decoded
 
 
-def toolset_schema_digest(registry: ToolRegistry) -> str:
+def toolset_schema_digest(registry: ToolRegistry, *, task: AgentTask | None = None) -> str:
+    schemas = (
+        plan_tool_schemas(registry=registry, task=task)
+        if task is not None
+        else registry.list_openai_schemas()
+    )
+    return _canonical_tool_schema_digest(schemas)
+
+
+def toolset_schema_digest_for_task(registry: ToolRegistry, task: AgentTask | None = None) -> str:
+    """Return the digest of the schemas planned for one task.
+
+    With a task, this includes task-level exposure and dynamic schema
+    adjustments (for example the runtime shell hint on ``bash``).  Without a
+    task, it retains the static digest for an unscoped registry.
+    """
+
+    return toolset_schema_digest(registry, task=task)
+
+
+def _canonical_tool_schema_digest(schemas: list[dict[str, Any]]) -> str:
     canonical = json.dumps(
-        registry.list_openai_schemas(),
+        schemas,
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
