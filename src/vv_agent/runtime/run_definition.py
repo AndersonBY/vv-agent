@@ -154,7 +154,7 @@ def _tool_definitions(
     refs: dict[str, dict[str, str]],
 ) -> list[dict[str, Any]]:
     definitions: list[dict[str, Any]] = []
-    for schema in plan_tool_schemas(registry=registry, task=task):
+    for schema in plan_tool_schemas(registry=registry, task=task, include_dynamic_hints=False):
         function = schema.get("function")
         name = function.get("name") if isinstance(function, dict) else None
         if not isinstance(name, str) or not registry.has_executor(name):

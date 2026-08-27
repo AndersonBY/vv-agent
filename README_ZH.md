@@ -410,7 +410,7 @@ result = Runner.run_sync(
 - 在 Windows 上，`bash` 工具启动子进程时还会附带隐藏控制台窗口的启动参数，方便 GUI 宿主调用 `bash` / `powershell` 时不再闪出额外终端窗口。
 - `Runner.run_sync(...)` 与 `Runner.stream_sync(...)` 都会继承编译后的 shell 元数据。
 - `bash` 工具 schema 的 description 会注入运行时 shell 提示（解析后的 shell 类型与调用前缀），模型在调用前即可知道应使用哪种命令风格。
-- 该运行时 shell 提示会在单个 task/session-run 内固化，确保跨 cycles 的 tool schema 文本稳定，保护 LLM prompt cache 命中率。
+- 该运行时 shell 提示仅在本地 LLM request 的单个 task/session-run 内固化，确保跨 cycles 的 request schema 文本稳定并保护 prompt cache 命中率。分布式 run definition 保留 registry 的 canonical tool schema，因此宿主机相关的提示文本不会影响 toolset digest。
 - SDK/CLI 自动生成的任务会把一次解析完成的 `PromptBundle` 显式传给 `AgentTask`、每次
   `LlmRequest`、run definition、checkpoint 和分布式执行；通用 metadata 不再承担 prompt
   section 传输。Anthropic 可以按 canonical section 设置缓存断点，其他 provider 接收确定性

@@ -452,7 +452,7 @@ result = Runner.run_sync(
 - `Runner.run_sync(...)` and `Runner.stream_sync(...)` both inherit compiled
   shell metadata.
 - The `bash` tool schema description includes a runtime shell hint (resolved shell kind + invocation prefix), so the model sees which shell command style is expected before calling the tool.
-- The runtime shell hint is frozen per task/session-run to keep tool schemas stable across cycles and preserve LLM prompt cache efficiency.
+- The runtime shell hint is frozen per task/session-run for local LLM requests to keep those request schemas stable across cycles and preserve prompt-cache efficiency. Distributed run definitions retain the registry's canonical tool schemas, so host-specific hint text does not affect the toolset digest.
 - Runner/CLI-generated tasks carry one resolved `PromptBundle` explicitly
   through `AgentTask`, each `LlmRequest`, the run definition, checkpoints, and
   distributed execution. Generic metadata is not a prompt-section transport.

@@ -46,7 +46,7 @@ recovers it when present. `require_existing` refuses to create a new record;
 
 Before the first model or tool operation, Runner persists a credential-redacted
 RFC 8785 run definition. It includes the resolved `PromptBundle`, effective model
-settings, model-visible tools in request order, tool policies and idempotency,
+settings, canonical model-visible tool schemas in request order, tool policies and idempotency,
 budgets, output schema, metadata that changes behavior, and extension versions.
 Each frozen tool contains one `tool_metadata` field, either the normalized typed
 declaration or null. The effective policy freezes `denied_side_effects`,
@@ -72,6 +72,10 @@ denials with the stored definition before claim or external operations. Generic
 tool metadata is never promoted into the typed declaration. Missing or unknown
 fields fail before external work; resume never synthesizes defaults into a
 stored definition.
+
+Host-specific dynamic tool hints, such as the resolved shell invocation shown by
+the `bash` tool, are added only to local LLM requests. They are not persisted in
+the distributed run definition or included in the registry toolset digest.
 
 ## Operation Journal
 

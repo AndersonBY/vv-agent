@@ -195,7 +195,7 @@ def test_plan_tool_schemas_freezes_runtime_shell_hint_across_cycles(monkeypatch)
     assert call_count["value"] == 1
 
 
-def test_toolset_schema_digest_matches_planned_schemas(monkeypatch) -> None:
+def test_plan_tool_schemas_can_return_registry_canonical_schemas(monkeypatch) -> None:
     registry = build_default_registry()
     task = _task(agent_type="computer")
 
@@ -205,13 +205,47 @@ def test_toolset_schema_digest_matches_planned_schemas(monkeypatch) -> None:
 
     monkeypatch.setattr(tool_planner_module, "resolve_shell_invocation", fake_resolve)
 
-    planned = plan_tool_schemas(registry=registry, task=task)
-    expected = toolset_schema_digest(registry, task=task)
+    dynamic = plan_tool_schemas(registry=registry, task=task)
+    canonical = plan_tool_schemas(registry=registry, task=task, include_dynamic_hints=False)
+
+    assert any(
+        "Runtime shell hint" in schema["function"]["description"]
+        for schema in dynamic
+        if schema["function"]["name"] == BASH_TOOL_NAME
+    )
+    bash_schema = next(schema for schema in canonical if schema["function"]["name"] == BASH_TOOL_NAME)
+    assert "Runtime shell hint" not in bash_schema["function"]["description"]
+    assert canonical == registry.list_openai_schemas(tool_names=plan_tool_names(task))
+
+
+def test_toolset_schema_digest_uses_registry_canonical_schemas(monkeypatch) -> None:
+    registry = build_default_registry()
+    task = _task(agent_type="computer")
+
+    def fake_resolve(*, shell: str | None = None, windows_shell_priority: list[str] | None = None):
+        del shell, windows_shell_priority
+        return SimpleNamespace(kind="bash", prefix=["bash", "-lc"])
+
+    monkeypatch.setattr(tool_planner_module, "resolve_shell_invocation", fake_resolve)
 
     import hashlib
     import json
 
-    canonical = json.dumps(planned, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-    assert expected == hashlib.sha256(canonical.encode()).hexdigest()
-    assert expected != toolset_schema_digest(registry)
-    assert toolset_schema_digest(registry) == toolset_schema_digest(registry, task=None)
+    expected = json.dumps(
+        registry.list_openai_schemas(),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert toolset_schema_digest(registry) == hashlib.sha256(expected.encode()).hexdigest()
+    assert (
+        toolset_schema_digest(registry)
+        != hashlib.sha256(
+            json.dumps(
+                plan_tool_schemas(registry=registry, task=task),
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    )

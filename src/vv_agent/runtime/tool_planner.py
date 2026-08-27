@@ -165,6 +165,7 @@ def plan_tool_schemas(
     registry: ToolRegistry,
     task: AgentTask,
     memory_usage_percentage: int | None = None,
+    include_dynamic_hints: bool = True,
 ) -> list[dict[str, Any]]:
     tool_names = plan_tool_names(task, memory_usage_percentage=memory_usage_percentage)
     available_names = [
@@ -188,4 +189,6 @@ def plan_tool_schemas(
         is None
     ]
     schemas = registry.list_openai_schemas(tool_names=available_names)
+    if not include_dynamic_hints:
+        return schemas
     return _patch_dynamic_tool_schemas(task=task, tool_schemas=schemas)

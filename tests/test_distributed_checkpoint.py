@@ -30,7 +30,6 @@ from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.backends.celery import CeleryBackend, register_cycle_task
 from vv_agent.runtime.backends.celery_tasks import run_single_cycle
-from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.backends.distributed import (
     DISTRIBUTED_RUN_SCHEMA_VERSION,
     DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION,
@@ -52,6 +51,7 @@ from vv_agent.runtime.backends.distributed import (
     toolset_schema_digest,
 )
 from vv_agent.runtime.backends.inline import InlineBackend
+from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.controller import ControllerCommand, HostInteractionAdmissionContext, HostInteractionRequest
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.tools import (
@@ -787,6 +787,70 @@ def test_nonblocking_celery_start_and_terminal_finalize_never_wait_for_result(tm
     replayed_terminal = store.load_checkpoint(handle.checkpoint_key)
     assert replayed_terminal is not None
     assert replayed_terminal.revision == terminal.revision
+
+
+def test_nonblocking_computer_start_uses_canonical_tool_schemas(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.computer-schema", "1")
+    llm_ref = CapabilityRef("llm.computer-schema", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[LLMResponse(content="worker answer")]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _ImmediateApp(registry=registry, store=store)
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=recipe,
+        capability_registry=registry,
+        dispatch_timeout_seconds=5,
+    )
+    agent = Agent(
+        name="computer-schema-agent",
+        instructions="Return one answer.",
+        model="test-model",
+    )
+    task = AgentCompiler().compile(
+        agent=agent,
+        input="answer",
+        run_config=RunConfig(max_cycles=1, no_tool_policy="finish"),
+        resolved=_resolved(),
+        trace_id="trace-computer-schema",
+    )
+    task.agent_type = "computer"
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=1,
+        no_tool_policy="finish",
+        checkpoint_config=CheckpointConfig(
+            key="computer-schema",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+        ),
+    )
+
+    handle = Runner.start_distributed_compiled(agent, task, run_config=run_config)
+
+    assert isinstance(handle, DistributedRunHandle)
+    assert len(app.worker_responses) == 1
+    response = DistributedWorkerResponse.from_dict(app.worker_responses[0])
+    assert response.response_type == "terminal_candidate"
+    checkpoint = store.load_checkpoint(handle.checkpoint_key)
+    assert checkpoint is not None
+    assert checkpoint.run_definition["tools"]
+    bash_schema = next(
+        item["schema"] for item in checkpoint.run_definition["tools"] if item["schema"]["function"]["name"] == "bash"
+    )
+    assert "Runtime shell hint" not in bash_schema["function"]["description"]
 
 
 def test_nonblocking_distributed_start_requires_explicit_checkpoint_key() -> None:
