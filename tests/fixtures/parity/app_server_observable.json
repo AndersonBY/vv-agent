@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "jsonRpc": {
     "version": "2.0",
     "validRequestIds": [
@@ -943,5 +943,232 @@
       "thread/status/changed",
       "turn/started"
     ]
+  },
+  "controllerAdmission": {
+    "method": "turn/action",
+    "endpointKind": "narrow_public_action_adapter",
+    "requestFields": [
+      "threadId",
+      "turnId",
+      "actionId",
+      "action"
+    ],
+    "identityMaxUtf8Bytes": 512,
+    "identityFields": ["threadId", "turnId", "actionId"],
+    "actionVariants": ["respond", "suspend", "resume", "cancel", "abort"],
+    "actionPayloads": {
+      "respond": ["kind", "message"],
+      "suspend": ["kind"],
+      "resume": ["kind"],
+      "cancel": ["kind"],
+      "abort": ["kind"]
+    },
+  "actionId": {
+    "type": "non_empty_string",
+    "maxUtf8Bytes": 512,
+    "stable_scope": ["threadId", "turnId"],
+    "stable_across_client_retries": "within the exact threadId+turnId scope",
+    "idempotency_key": "scope-local input to the global command_id derivation",
+    "same_action_id_same_payload": "same derived command_id; return sanitized retained receipt without a second command or wake",
+    "same_action_id_different_payload": "same derived command_id; reject action_id_conflict/controller_command_conflict without a write",
+    "same_action_id_different_scope": "different derived command_id; admit an independent receipt"
+    },
+    "messageSchema": {
+      "closed": true,
+      "requiredFields": ["role", "content"],
+      "role": "user",
+      "contentType": "non_empty_utf8_string",
+      "contentMaxUtf8Bytes": 65536,
+      "unknownFields": "reject"
+    },
+    "publicActionSchemas": {
+      "respond": "{kind:'respond', message:{role:'user', content:string<=65536 UTF-8 bytes}}",
+      "suspend": "{kind:'suspend'}",
+      "resume": "{kind:'resume'}",
+      "cancel": "{kind:'cancel'}",
+      "abort": "{kind:'abort'}"
+    },
+  "serverDerivedCommand": {
+    "deterministic": true,
+    "commandId": "server derives command_id from (threadId, turnId, actionId) with the strict identity algorithm; client commandId is rejected",
+    "identityAlgorithm": "identity_derivation.algorithms.command_id: domain prefix + NUL + uint64_be(JCS UTF-8 byte length) + RFC8785 JCS UTF-8 payload, hashed with SHA-256",
+    "commandIdAlgorithm": "fixtures/controller_command.json#identity_derivation.algorithms.command_id",
+    "identityMaxUtf8Bytes": 512,
+    "internalFenceSource": "authoritative checkpoint, never public request",
+    "requestDigest": "RFC8785 over server-derived closed command",
+    "commandIdOutput": "64 lowercase ASCII hexadecimal bytes"
+  },
+  "commandIdCases": [
+    {
+      "name": "same_scope_replay",
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "actionId": "same-action",
+      "expectedCommandId": "48d6ee2d2a12b910a61370db73c06835bfe3946258bff4eff1cfd6739bd5be9a",
+      "payloadRelation": "same",
+      "outcome": "replayed_retained_receipt",
+      "writes": 0
+    },
+    {
+      "name": "same_scope_payload_conflict",
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "actionId": "same-action",
+      "expectedCommandId": "48d6ee2d2a12b910a61370db73c06835bfe3946258bff4eff1cfd6739bd5be9a",
+      "payloadRelation": "different_action_payload",
+      "outcome": "action_id_conflict_then_controller_command_conflict",
+      "writes": 0
+    },
+    {
+      "name": "different_thread_same_action",
+      "threadId": "thread-2",
+      "turnId": "turn-1",
+      "actionId": "same-action",
+      "expectedCommandId": "6756d671ff428cce142a8ad2878554f48e9f604ee383112786426e884257bb2b",
+      "payloadRelation": "different_scope",
+      "outcome": "independent_receipt",
+      "writes": 1
+    },
+    {
+      "name": "different_turn_same_action",
+      "threadId": "thread-1",
+      "turnId": "turn-2",
+      "actionId": "same-action",
+      "expectedCommandId": "01591a216491fe8148edb6a851bbac90be771ccd2b01c71c6ddc29d24690f270",
+      "payloadRelation": "different_scope",
+      "outcome": "independent_receipt",
+      "writes": 1
+    },
+    {
+      "name": "unicode_length_prefixed_vector",
+      "threadId": "thread/中文",
+      "turnId": "turn-😀",
+      "actionId": "same-action",
+      "expectedCommandId": "a8e2cd09beba02260172b94cfd8b2023b5e9f3182fa7bd25377d5c5e957411f5",
+      "payloadRelation": "different_scope",
+      "outcome": "independent_receipt",
+      "writes": 1
+    }
+  ],
+    "internalDerivations": [
+      "checkpointKey",
+      "runId",
+      "traceId",
+      "resumeAttempt",
+      "expectedRevision",
+      "commandId",
+      "commandDigest",
+      "logicalCycle",
+      "interactionId",
+      "operationId",
+      "toolCallId",
+      "requestDigest"
+    ],
+    "internalFieldsRejected": [
+      "checkpointKey",
+      "command",
+      "commandDigest",
+      "revision",
+      "runId",
+      "traceId"
+    ],
+    "controlIsAdmissionOnly": true,
+    "responseFields": [
+      "threadId",
+      "turnId",
+      "actionId",
+      "accepted",
+      "status",
+      "waitReason"
+    ],
+    "publicReceiptSanitized": true,
+    "publicReceiptFields": ["actionId", "accepted", "status", "waitReason"],
+    "receiptInternalFieldsNeverReturned": [
+      "commandId",
+      "commandDigest",
+      "handle",
+      "expectedRevision",
+      "resultingRevision",
+      "outboxState",
+      "leaseOwner",
+      "leaseExpiresAt"
+    ],
+    "hostInteractionProjection": {
+      "agentStatus": "host_interaction",
+      "turnStatus": "interrupted",
+      "waitReason": "host_interaction",
+      "completionReason": null,
+      "error": null
+    },
+    "hostPromptProjection": {
+      "fields": ["status", "waitReason", "prompt"],
+      "prompt": "sanitized credential-redacted display text only",
+      "readSurface": {
+        "method": "thread/status",
+        "notification": "thread/status/changed",
+        "source": "host_interaction_notification_outbox.payload",
+        "payloadFields": ["status", "waitReason", "prompt"],
+        "notificationId": "internal notification_id is not public; delivery is correlated by turnId",
+        "deliverySemantics": "at_least_once",
+        "observerDeduplicationKey": "notification_id plus payload_digest",
+        "ambiguousDelivery": "framework reconciles to delivered, retry, or abort; App Server exposes only sanitized projection",
+        "ambiguousReaper": "pending/expired claimed may retry; ambiguous is never blind-retried",
+        "suspendedStateChange": "a separate complete run_state_changed notification with waitReason=suspended; the host notification payload is immutable"
+      },
+      "neverProjects": [
+        "requestDigest",
+        "operationId",
+        "toolCallId",
+        "checkpointKey",
+        "runId",
+        "traceId",
+        "commandId",
+        "leaseOwner"
+      ],
+      "unknown_fields": "reject"
+    },
+    "credentialSanitizer": {
+      "schema": "vv-agent.host-prompt-sanitizer.v1",
+      "input": {
+        "prompt": "Approve token sk-test-123 at https://example.invalid/run?secret=abc"
+      },
+      "output": {
+        "prompt": "Approve [credential redacted] at [external locator redacted]"
+      },
+      "removes": ["credential", "external locator", "transport metadata"],
+      "maxUtf8Bytes": 65536,
+      "idempotent": true,
+      "strict_unknown_fields": "reject"
+    },
+    "frameworkReceipt": {
+      "type": "ControllerCommandReceipt",
+      "visibility": "framework_public",
+      "appServerProjection": "sanitized receipt fields only",
+      "appServerFields": ["actionId", "accepted", "status", "waitReason"]
+    },
+    "suspendedProjection": {
+      "agentStatus": "suspended",
+      "turnStatus": "interrupted",
+      "waitReason": "suspended",
+      "completionReason": null,
+      "error": null
+    },
+    "turnResumeNewInputAllowed": false,
+    "askUserTerminalSemanticsUnchanged": true,
+    "receiptInternalFieldsHidden": true,
+  "strictCases": {
+      "missing_action_id": "reject",
+      "action_id_over_utf8_limit": "reject_action_id_invalid",
+      "action_id_unknown_field": "reject",
+    "action_id_replay_same_payload": "return_sanitized_retained_receipt",
+    "action_id_replay_different_payload": "reject_action_id_conflict",
+    "action_id_replay_different_thread_or_turn": "derive_independent_command_id",
+      "message_unknown_field": "reject",
+      "message_content_over_utf8_limit": "reject",
+      "identity_over_utf8_limit": "reject",
+      "unknown_internal_request_field": "reject",
+      "unknown_action_variant": "reject",
+      "server_derived_fence_is_not_client_supplied": true
+    }
   }
 }

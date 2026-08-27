@@ -1,8 +1,14 @@
 {
   "contract": "checkpoint_store",
-  "version": 7,
-  "checkpoint_schema": "vv-agent.checkpoint.v7",
+  "version": 8,
+  "checkpoint_schema": "vv-agent.checkpoint.v8",
   "run_definition_schema": "vv-agent.run-definition.v5",
+  "checkpoint_state_columns": {
+    "active_host_interaction": "complete closed vv-agent.host-interaction-request.v1 JSON object (including prompt and schema_version) or null",
+    "suspended_origin": "closed JSON origin object or null",
+    "crash_reload": "load both fields and host_interaction_records before deciding whether to wake or wait",
+    "old_schema": "vv-agent.checkpoint.v7 is rejected; no fallback reader"
+  },
   "deferred_contract": "deferred_tool.json",
   "deferred_receipt_index": {
     "independent": true,
@@ -19,6 +25,137 @@
     "sqlite_table": "deferred_resolution_receipts",
     "redis_key_prefix": "vv-agent:deferred-receipt:"
   },
+  "controller_command_receipt_index": {
+    "independent": true,
+    "required": true,
+    "key": "command_id",
+    "bounded": false,
+    "lifecycle_bounded": true,
+    "retained_with_checkpoint": true,
+    "deleted_with_explicit_checkpoint_cleanup": true,
+    "sqlite_table": "controller_command_receipts",
+    "redis_key_prefix": "vv-agent:controller-command:",
+    "columns": [
+      "command_id",
+      "checkpoint_key",
+      "handle",
+      "command_digest",
+      "command",
+      "resume_attempt",
+      "expected_revision",
+      "receipt",
+      "resulting_status",
+      "resulting_revision",
+      "outbox_state",
+      "outbox_id",
+      "outbox_action",
+      "outbox_destination",
+      "attempt",
+      "claim_token",
+      "lease_expires_at_ms",
+      "delivered_at_ms",
+      "last_error"
+    ]
+  },
+  "host_interaction_record_index": {
+    "independent": true,
+    "required": true,
+    "key": "checkpoint_key plus interaction_id",
+    "unique_identity": true,
+    "sqlite_table": "host_interaction_records",
+    "redis_key_prefix": "vv-agent:host-interaction:",
+    "states": ["active", "resolved_pending", "resolved_claimed", "consumed"],
+    "hard_recovery_barrier_states": ["resolved_pending", "resolved_claimed"],
+    "ordinary_claim_or_continue": "reject or route to claim_and_consume_host_interaction_response",
+    "record_only_claim_forbidden": true,
+    "combined_recovery_operation": "claim_and_consume_host_interaction_response(envelope)",
+    "stores_full_request": true,
+    "stores_full_resolved_response": true,
+    "stores_digest_only": false,
+    "claim_fields": ["claim_token", "lease_expires_at_ms", "attempt"],
+    "replay": {
+      "same_identity_and_digest": "zero-write replay after claim release or producer crash",
+      "different_binding_or_digest": "host_interaction_conflict zero-write"
+    },
+    "cleanup": "retain consumed marker through next cycle commit or terminal acknowledgement; explicit checkpoint cleanup cascades rows"
+  },
+  "host_interaction_notification_outbox": {
+    "independent_from_controller_command_receipts": true,
+    "schema": "vv-agent.host-interaction-notification.v1",
+    "sqlite_table": "host_interaction_notification_outbox",
+    "redis_key_prefix": "vv-agent:host-interaction-notification:",
+    "checkpoint_set_prefix": "vv-agent:host-interaction-notifications-by-checkpoint:",
+    "states": ["pending", "claimed", "delivered", "ambiguous", "aborted"],
+    "stores_strict_sanitized_payload": true,
+    "stores_payload_digest": true,
+    "claim_fields": ["claim_token", "lease_expires_at_ms", "attempt"],
+    "replay": {
+      "same_id_same_digest": "zero-write replay",
+      "same_id_different_digest": "notification_conflict zero-write"
+    },
+    "delivery_semantics": "at_least_once",
+    "stable_delivery_key": "notification_id",
+    "observer_deduplication_required": true,
+    "transaction_boundary": {
+      "operations": {
+        "claim": {
+          "same_transaction": [
+            "notification row claim_token/lease/attempt CAS"
+          ],
+          "excludes": [
+            "checkpoint",
+            "host_interaction_record",
+            "controller command receipt",
+            "recovery wake outbox"
+          ]
+        },
+        "deliver": {
+          "same_transaction": [
+            "notification row owner-attempt CAS and delivered/ambiguous transition"
+          ],
+          "excludes": [
+            "checkpoint",
+            "host_interaction_record",
+            "controller command receipt",
+            "recovery wake outbox"
+          ]
+        },
+        "reconcile": {
+          "same_transaction": [
+            "notification row stable identity/digest and ambiguous transition"
+          ],
+          "excludes": [
+            "checkpoint",
+            "host_interaction_record",
+            "controller command receipt",
+            "recovery wake outbox"
+          ]
+        }
+      },
+      "delivery_lifecycle_is_not_controller_admission": true
+    },
+    "operations": {
+      "claim": "claim pending or expired claimed rows with notification_id, payload_digest, owner, and attempt CAS",
+      "complete": "owner-attempt CAS marks delivered or ambiguous; stale workers cannot complete",
+      "reconcile": {
+        "name": "reconcile_host_interaction_notification(notification_id, payload_digest, outcome)",
+        "outcomes": {
+          "delivered": "ambiguous -> delivered after observer confirmation",
+          "retry": "ambiguous -> pending with the same stable identity and digest",
+          "abort": "ambiguous -> aborted with an explicit abort_reason"
+        },
+        "same_identity_replay": "retained outcome with zero writes",
+        "different_digest": "notification_conflict with zero writes",
+        "stale_owner_or_attempt": "notification_stale with zero writes"
+      }
+    },
+    "reaper": {
+      "pending_or_expired_claimed": "claim and retry with owner-attempt CAS",
+      "ambiguous": "enqueue reconciliation work; never blind-retry an uncertain callback",
+      "aborted": "terminal until explicit checkpoint retention cleanup"
+    },
+    "public_surface": "thread/status read and thread/status/changed notification"
+  },
   "run_definition_storage": "credential_redacted_object_embedded_and_immutable_beside_matching_digest",
   "namespaces": {
     "sqlite_table": "checkpoints",
@@ -27,7 +164,11 @@
     "deferred_receipt_sqlite_table": "deferred_resolution_receipts",
     "deferred_receipt_redis_key_prefix": "vv-agent:deferred-receipt:",
     "deferred_receipt_redis_key_suffix": "lowercase_sha256_of_rfc8785_exact_handle",
-    "deferred_receipt_checkpoint_set_prefix": "vv-agent:deferred-receipts-by-checkpoint:"
+    "deferred_receipt_checkpoint_set_prefix": "vv-agent:deferred-receipts-by-checkpoint:",
+    "controller_command_receipt_redis_key_prefix": "vv-agent:controller-command:",
+    "controller_command_checkpoint_set_prefix": "vv-agent:controller-commands-by-checkpoint:",
+    "notification_redis_key_prefix": "vv-agent:host-interaction-notification:",
+    "notification_checkpoint_set_prefix": "vv-agent:host-interaction-notifications-by-checkpoint:"
   },
   "redis_key_vectors": [
     {
@@ -82,6 +223,42 @@
     {
       "name": "resolve_deferred",
       "atomic": "receipt-index-first internal revision CAS loop atomically persists journal index tombstone event barrier status and revision without claim"
+    },
+    {
+      "name": "admit_controller_command",
+      "atomic": "strict command digest and handle/resume-attempt/revision fences then one receipt/checkpoint/outbox CAS or write nothing"
+    },
+    {
+      "name": "produce_host_interaction",
+      "atomic": "require active claim then persist complete typed interaction request, record, host_interaction_requested event and UI notification outbox, release claim, and increment revision in one CAS; no worker wake"
+    },
+    {
+      "name": "resolve_controller_command",
+      "atomic": "admit command and return a durable wake-or-no-wake decision from the retained receipt; admission_revision=expected_revision+1 persists the full resolved_pending interaction record before return, while claim_and_consume_host_interaction_response commits consume_revision=admission_revision+1 before model/tool (8->9->10 is an example only)"
+    },
+    {
+      "name": "claim_and_consume_host_interaction_response",
+      "atomic": "lock checkpoint and matching host_interaction_record together; validate all fences; obtain checkpoint execution claim and claimed_cycle=cycle_index+1; perform the transient resolved_claimed phase, inject the exact response, append the complete consumed event, mark consumed, increment revision relative to admission, release the record claim while retaining the checkpoint execution claim for model/tool ownership, or write nothing"
+    },
+    {
+      "name": "reap_host_interaction_record",
+      "atomic": "reap only a matching checkpoint execution claim plus record claim; an open-transaction crash rolls back to resolved_pending, and no record-only claim is reaped"
+    },
+    {
+      "name": "claim_host_interaction_notification",
+      "atomic": "compare notification id, digest, state, owner, attempt, and lease; claim the independent UI notification outbox row"
+    },
+    {
+      "name": "complete_host_interaction_notification",
+      "atomic": "owner-attempt CAS marks the independent notification delivered or ambiguous; stale workers cannot complete it"
+    },
+    {
+      "name": "reconcile_host_interaction_notification",
+      "atomic": "compare stable notification id and payload digest, then CAS ambiguous to delivered, pending, or aborted; same outcome replays zero-write and a conflicting digest is rejected"
+    },
+    {
+      "name": "replay_controller_command",
+      "atomic": "same command_id and digest returns retained receipt without revision or second outbox increment"
     },
     {
       "name": "suspend",
@@ -139,6 +316,39 @@
     "resolve_deferred_claimed_error": "deferred_checkpoint_claimed",
     "resolve_deferred_not_admitted_error": "deferred_resolution_not_admitted",
     "resolve_deferred_does_not_claim_or_invoke_tool": true,
+    "host_interaction_response_persists_full_message_before_wake": true,
+    "host_interaction_response_consumed_exactly_once": true,
+    "host_interaction_response_revision_semantics": {
+      "numbers_are_examples": true,
+      "admission_revision": "expected_revision + 1",
+      "example_expected_revision": 8,
+      "example_admission_revision": 9,
+      "consume_revision": "admission_revision + 1",
+      "example_consume_revision": 10,
+      "claim_does_not_add_an_extra_revision": true,
+      "recovery_claim_mode": "recovery",
+      "recovery_resume_attempt": "successful combined host-response recovery claim increments the authoritative value once; consumed event and next envelope carry the new value"
+    },
+    "host_interaction_recovery_locks_checkpoint_and_record": true,
+    "host_interaction_recovery_claim_mode": "recovery",
+    "host_interaction_recovery_resume_attempt": {
+      "before": 2,
+      "after_successful_claim": 3,
+      "consumed_event": 3,
+      "next_envelope": 3,
+      "failed_or_stale": 2,
+      "replay": 3
+    },
+      "host_interaction_recovery_obtains_checkpoint_execution_claim": true,
+    "host_interaction_recovery_releases_record_claim_in_same_cas": true,
+    "host_interaction_recovery_retains_checkpoint_claim_after_consume": true,
+    "host_interaction_recovery_crash_before_commit_rolls_back": true,
+    "host_interaction_recovery_stale_envelope_writes_nothing": true,
+    "host_interaction_record_only_claim_forbidden": true,
+    "host_interaction_producer_notification_never_wakes_worker": true,
+    "resume_running_origin_wakes": true,
+    "resume_host_interaction_origin_without_response_does_not_wake": true,
+    "resume_host_interaction_origin_with_pending_response_wakes": true,
     "deferred_batch_barrier_blocks_cycle_commit_and_model_call": true,
     "claim_modes": [
       "continue",
@@ -181,6 +391,26 @@
     "deferred_receipt_index_retained_after_terminal": true,
     "deferred_receipt_index_cleanup_shares_checkpoint_lifetime": true,
     "deferred_receipt_index_write_is_same_transaction_as_resolution": true,
+    "controller_command_receipt_write_is_same_transaction_as_checkpoint_and_outbox": true,
+    "controller_command_digest_invalid_error": "controller_command_digest_invalid",
+    "controller_command_conflict_error": "controller_command_conflict",
+    "controller_command_stale_error": "controller_command_stale",
+    "controller_command_same_digest_replay_is_idempotent": true,
+    "controller_command_different_digest_conflicts_without_write": true,
+    "controller_command_stale_fence_writes_nothing": true,
+    "controller_command_active_claim_is_not_stolen": true,
+    "controller_command_deferred_barrier_precedes_control": true,
+    "controller_command_ambiguity_precedes_cancel": true,
+    "controller_command_pending_outbox_reaper_reuses_command_id": true,
+    "controller_command_outbox_claim_is_owner_and_attempt_fenced": true,
+    "controller_command_outbox_expired_claim_is_reaped_with_same_command_id": true,
+    "controller_command_resume_and_response_wake_only": true,
+    "controller_command_suspend_and_cancel_do_not_enqueue_wake": true,
+    "controller_command_checkpoint_event_and_wake_outbox_same_transaction": true,
+    "controller_command_replay_after_revision_advance_has_no_second_wake": true,
+    "host_interaction_producer_requires_active_claim": true,
+    "host_interaction_producer_releases_claim_in_same_cas": true,
+    "host_interaction_producer_never_calls_external_effect_inside_cas": true,
     "resolve_deferred_internal_revision_retry": true,
     "resolve_deferred_caller_does_not_pass_expected_revision": true,
     "resolve_deferred_success_transition": [
@@ -1424,6 +1654,62 @@
       }
     }
   ],
+  "controller_outbox_protocol": {
+    "receipt_checkpoint_event_wake_same_transaction": true,
+    "transaction_boundary": {
+      "operation": "controller_response_admission",
+      "same_transaction": [
+        "checkpoint revision and active/suspended state",
+        "host_interaction_record resolved_pending/full response when responding",
+        "controller command receipt",
+        "controller event outbox marker",
+        "recovery wake outbox marker"
+      ],
+      "excludes": [
+        "host_interaction_notification_outbox claim",
+        "host_interaction_notification_outbox delivery",
+        "host_interaction_notification_outbox reconcile"
+      ]
+    },
+    "columns": [
+      "outbox_id",
+      "outbox_action",
+      "outbox_destination",
+      "outbox_state",
+      "claim_token",
+      "lease_expires_at_ms",
+      "attempt",
+      "delivered_at_ms",
+      "last_error"
+    ],
+    "states": ["pending", "claimed", "delivered", "ambiguous"],
+    "actions": {
+      "recovery_dispatch": {
+        "destination": "distributed_advance",
+        "wake": true,
+        "stable_idempotency_key": "command_id"
+      },
+      "none": {
+        "destination": null,
+        "wake": false,
+        "state": "delivered"
+      }
+    },
+    "claim": {
+      "returns": ["claim_token", "attempt"],
+      "complete_requires_same_owner_and_attempt": true,
+      "expired_claim_can_be_reaped": true,
+      "callback_crash_does_not_create_second_command": true
+    },
+    "reaper": {
+      "admissible_states": ["pending", "claimed_expired"],
+      "ambiguous_is_reconciliation_only": true,
+      "batch_order": "canonical_command_id_order",
+      "resume_and_response_only": true,
+      "producer_notification_is_not_recovery_dispatch": true,
+      "suspend_cancel_abort_never_wake": true
+    }
+  },
   "redis_rules": {
     "representation": "hash_or_payload_plus_control_fields",
     "progress_atomicity": "lua_compare_revision_and_claim_then_replace_payload",
