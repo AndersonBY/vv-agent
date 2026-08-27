@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import vv_agent.runtime.tool_planner as tool_planner_module
 from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
@@ -14,7 +16,12 @@ from vv_agent.constants import (
     WORKSPACE_TOOLS,
 )
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.backends.distributed import toolset_schema_digest
+from vv_agent.runtime.backends.distributed import (
+    DistributedCapabilityError,
+    DistributedCapabilityRegistry,
+    ToolsetRef,
+    toolset_schema_digest,
+)
 from vv_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, SubAgentConfig
@@ -249,3 +256,18 @@ def test_toolset_schema_digest_uses_registry_canonical_schemas(monkeypatch) -> N
             ).encode()
         ).hexdigest()
     )
+
+
+def test_task_scoped_toolset_digest_requires_the_matching_task() -> None:
+    registry = build_default_registry()
+    task = _task(agent_type="computer")
+    full_digest = toolset_schema_digest(registry)
+    scoped_digest = toolset_schema_digest(registry, task=task)
+
+    assert full_digest != scoped_digest
+    scoped_reference = ToolsetRef(schema_digest=scoped_digest)
+    capability_registry = DistributedCapabilityRegistry()
+
+    assert capability_registry.resolve_toolset(scoped_reference, task=task) is not None
+    with pytest.raises(DistributedCapabilityError, match="schema digest mismatch"):
+        capability_registry.resolve_toolset(scoped_reference)

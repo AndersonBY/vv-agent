@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -29,6 +30,8 @@ from vv_agent.runtime.backends.distributed import (
     DistributedWaitReason,
     DistributedWorkerResponse,
     RuntimeRecipe,
+    ToolsetRef,
+    toolset_schema_digest,
 )
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
@@ -194,7 +197,7 @@ class CeleryBackend:
         """Enqueue the first cycle of an admitted run and return immediately."""
         self._validate_nonblocking_recipe()
         assert self.capability_registry is not None
-        self.capability_registry.validate(self.runtime_recipe.capabilities)
+        self.capability_registry.validate(self.runtime_recipe.capabilities, task=task)
         checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
         if checkpoint is None:
             raise CheckpointError("checkpoint disappeared before distributed start", code="checkpoint_not_found")
@@ -220,9 +223,27 @@ class CeleryBackend:
             )
         distributed_task = self._distributed_task(task, ctx)
         budget_limits = self._budget_limits(ctx)
+        tool_registry = self.capability_registry.resolve_toolset(
+            self.runtime_recipe.capabilities.toolset_ref,
+            task=distributed_task,
+        )
+        task_toolset_digest = toolset_schema_digest(tool_registry, task=distributed_task)
+        recipe = RuntimeRecipe.from_dict(self.runtime_recipe.to_dict())
+        if recipe.capabilities.toolset_ref.schema_digest != task_toolset_digest:
+            recipe = replace(
+                recipe,
+                capabilities=replace(
+                    recipe.capabilities,
+                    toolset_ref=ToolsetRef(
+                        id=recipe.capabilities.toolset_ref.id,
+                        version=recipe.capabilities.toolset_ref.version,
+                        schema_digest=task_toolset_digest,
+                    ),
+                ),
+            )
         envelope = self._envelope_from_checkpoint(
             task=distributed_task,
-            recipe=RuntimeRecipe.from_dict(self.runtime_recipe.to_dict()),
+            recipe=recipe,
             checkpoint=checkpoint,
             checkpoint_config=DistributedCheckpointConfig.from_checkpoint_config(checkpoint_controller.config),
             cycle_index=1,

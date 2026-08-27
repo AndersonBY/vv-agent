@@ -201,7 +201,7 @@ def _validate_task_and_capabilities(
         raise _definition_mismatch("distributed tool policy does not match the run definition")
 
     definition_refs = deepcopy(definition["capability_refs"])
-    tool_registry = registry.resolve_toolset(capabilities.toolset_ref)
+    tool_registry = registry.resolve_toolset(capabilities.toolset_ref, task=task)
     actual_tools = _tool_definitions(
         registry=tool_registry,
         task=task,
@@ -267,7 +267,12 @@ def _resolve_checkpoint_capabilities(
     registry: DistributedCapabilityRegistry,
 ) -> tuple[Any, Any | None, list[Any], Any | None, Any]:
     capabilities = envelope.recipe.capabilities
-    registry.validate(capabilities)
+    # The envelope carries the task-scoped ToolsetRef produced after the
+    # compiled AgentTask's planned schemas are known.  Resolve every
+    # capability with that same task before claiming the checkpoint; otherwise
+    # the worker compares the scoped digest with its full host registry and
+    # rejects an otherwise valid run.
+    registry.validate(capabilities, task=envelope.task)
     assert capabilities.checkpoint_store_ref is not None
     store = registry.resolve("checkpoint_store", capabilities.checkpoint_store_ref)
     config = envelope.checkpoint_config
@@ -336,7 +341,7 @@ def _rebuild_runtime(
 ) -> tuple[AgentRuntime, ExecutionContext, SubTaskManager, ToolPolicy, HostCostMeter | None]:
     """Reconstruct an AgentRuntime from a RuntimeRecipe on the worker."""
     capabilities = recipe.capabilities
-    capability_registry.validate(capabilities)
+    capability_registry.validate(capabilities, task=task)
     workspace = Path(recipe.workspace).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -351,7 +356,7 @@ def _rebuild_runtime(
         )
         resolved = model_provider.resolve(ModelRef.named(recipe.model))
         llm = model_provider.client(resolved)
-    tool_registry = capability_registry.resolve_toolset(capabilities.toolset_ref)
+    tool_registry = capability_registry.resolve_toolset(capabilities.toolset_ref, task=task)
     distributed_tool_policy = capabilities.tool_policy
     if task is not None:
         distributed_tool_policy = _policy_with_task_metadata_denials(distributed_tool_policy, task)

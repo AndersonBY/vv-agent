@@ -75,7 +75,8 @@ stored definition.
 
 Host-specific dynamic tool hints, such as the resolved shell invocation shown by
 the `bash` tool, are added only to local LLM requests. They are not persisted in
-the distributed run definition or included in the registry toolset digest.
+the distributed run definition or included in its task-scoped toolset digest;
+the digest covers the canonical schemas planned for that compiled task.
 
 ## Operation Journal
 
