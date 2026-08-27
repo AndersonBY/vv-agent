@@ -222,7 +222,9 @@ Tool definitions and behavior are intentionally split:
 - `tools/function.py`: public `FunctionTool` and `function_tool` decorator,
   including signature/dataclass/TypedDict/Pydantic schema inference.
 - `tools/outputs.py`: structured public tool output variants.
-- `tools/registry.py`: registration and lookup.
+- `tools/registry.py`: registration and lookup. Planner extra tools retain their
+  first registration order and are deduplicated, keeping per-task tool schema
+  serialization and digest computation deterministic.
 - `tools/orchestrator.py`: policy/approval gates and the planned, started, and
   completed executor lifecycle.
 - `tools/dispatcher.py`: argument normalization and handler dispatch.
