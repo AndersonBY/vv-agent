@@ -7,7 +7,7 @@ to the Python implementation and shows the supported public entry point.
 ## Opt In
 
 Durable execution is disabled unless a `CheckpointConfig` is attached to the
-run. Enabled records require `schema_version=vv-agent.checkpoint.v7` and
+run. Enabled records require `schema_version=vv-agent.checkpoint.v8` and
 `run_definition_schema=vv-agent.run-definition.v5`; no other record shape is
 read or repaired.
 
@@ -46,7 +46,7 @@ recovers it when present. `require_existing` refuses to create a new record;
 
 Before the first model or tool operation, Runner persists a credential-redacted
 RFC 8785 run definition. It includes the resolved `PromptBundle`, effective model
-settings, model-visible tools in request order, tool policies and idempotency,
+settings, canonical model-visible tool schemas in request order, tool policies and idempotency,
 budgets, output schema, metadata that changes behavior, and extension versions.
 Each frozen tool contains one `tool_metadata` field, either the normalized typed
 declaration or null. The effective policy freezes `denied_side_effects`,
@@ -72,6 +72,11 @@ denials with the stored definition before claim or external operations. Generic
 tool metadata is never promoted into the typed declaration. Missing or unknown
 fields fail before external work; resume never synthesizes defaults into a
 stored definition.
+
+Host-specific dynamic tool hints, such as the resolved shell invocation shown by
+the `bash` tool, are added only to local LLM requests. They are not persisted in
+the distributed run definition or included in its task-scoped toolset digest;
+the digest covers the canonical schemas planned for that compiled task.
 
 ## Operation Journal
 
@@ -218,7 +223,7 @@ worker; durable cross-process approval continuation remains a separate protocol.
 
 ## Scope And Limits
 
-Checkpoint v7 provides durable resume, deferred barriers, and explicit ambiguity. It does not make
+Checkpoint v8 provides durable resume, deferred barriers, host-interaction recovery, and explicit ambiguity. It does not make
 an arbitrary external API exactly-once, recover a provider response that was
 never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,

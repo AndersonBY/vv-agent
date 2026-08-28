@@ -4,6 +4,91 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _text(value: Any, field_name: str, *, max_bytes: int = 512) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    if len(value.encode("utf-8")) > max_bytes:
+        raise ValueError(f"{field_name} exceeds the UTF-8 byte limit")
+    return value
+
+
+def _message(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {"role", "content"}:
+        raise ValueError("turn/action message must contain exactly role and content")
+    if value.get("role") != "user":
+        raise ValueError("turn/action message role must be user")
+    content = _text(value.get("content"), "message.content", max_bytes=65536)
+    return {"role": "user", "content": content}
+
+
+@dataclass(frozen=True, slots=True)
+class TurnActionParams:
+    thread_id: str
+    turn_id: str
+    action_id: str
+    action: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "thread_id", _text(self.thread_id, "threadId"))
+        object.__setattr__(self, "turn_id", _text(self.turn_id, "turnId"))
+        object.__setattr__(self, "action_id", _text(self.action_id, "actionId"))
+        if not isinstance(self.action, dict):
+            raise ValueError("action must be an object")
+        kind = self.action.get("kind")
+        if kind == "respond":
+            if set(self.action) != {"kind", "message"}:
+                raise ValueError("respond action fields are invalid")
+            action = {"kind": kind, "message": _message(self.action["message"])}
+        elif kind in {"suspend", "resume", "cancel", "abort"}:
+            if set(self.action) != {"kind"}:
+                raise ValueError(f"{kind} action fields are invalid")
+            action = {"kind": kind}
+        else:
+            raise ValueError("unsupported turn/action kind")
+        object.__setattr__(self, "action", action)
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> TurnActionParams:
+        if not isinstance(payload, dict) or set(payload) != {"threadId", "turnId", "actionId", "action"}:
+            raise ValueError("turn/action requires exactly threadId, turnId, actionId, and action")
+        return cls(
+            thread_id=payload["threadId"],
+            turn_id=payload["turnId"],
+            action_id=payload["actionId"],
+            action=payload["action"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "threadId": self.thread_id,
+            "turnId": self.turn_id,
+            "actionId": self.action_id,
+            "action": dict(self.action),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TurnActionResponse:
+    thread_id: str
+    turn_id: str
+    action_id: str
+    accepted: bool
+    status: str
+    wait_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "threadId": self.thread_id,
+            "turnId": self.turn_id,
+            "actionId": self.action_id,
+            "accepted": self.accepted,
+            "status": self.status,
+        }
+        if self.wait_reason is not None:
+            payload["waitReason"] = self.wait_reason
+        return payload
+
+
 @dataclass(frozen=True, slots=True)
 class TurnStartParams:
     thread_id: str

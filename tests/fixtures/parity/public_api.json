@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v4",
+  "contract": "vv-agent-public-api-v5",
   "domains": [
     {
       "capabilities": [
@@ -932,6 +932,95 @@
           "rust": "vv_agent::OperationJournalEntry"
         },
         {
+          "id": "runtime_backend.controller_command",
+          "python": "vv_agent.runtime.ControllerCommand",
+          "rust": "vv_agent::ControllerCommand",
+          "signature": "CheckpointStore.admit_controller_command(command)",
+          "return": "ControllerCommandReceipt",
+          "wire": "fixtures/controller_command.json#request_wire",
+          "deferred_resolution_is_separate": true,
+          "terminal_successor_is_separate": true
+        },
+        {
+          "id": "runtime_backend.controller_command_receipt",
+          "python": "vv_agent.runtime.ControllerCommandReceipt",
+          "rust": "vv_agent::ControllerCommandReceipt",
+          "wire": "fixtures/controller_command.json#receipt_wire",
+          "visibility": "framework_public",
+          "app_server_projection": ["actionId", "accepted", "status", "waitReason"],
+          "internal_receipt_fields_not_app_server": ["handle", "commandDigest", "resultingRevision", "outboxState", "leaseOwner"]
+        },
+        {
+          "id": "runtime_backend.host_interaction_request",
+          "python": "vv_agent.runtime.HostInteractionRequest",
+          "rust": "vv_agent::HostInteractionRequest",
+          "wire": "fixtures/controller_command.json#host_interaction_producer.request_wire"
+        },
+        {
+          "id": "runtime_backend.host_interaction_outcome",
+          "python": "vv_agent.runtime.HostInteractionOutcome",
+          "rust": "vv_agent::HostInteractionOutcome",
+          "wire": "fixtures/controller_command.json#host_interaction_producer.outcome_wire"
+        },
+        {
+          "id": "runtime_backend.produce_host_interaction",
+          "python": "vv_agent.runtime.DistributedBackend.produce_host_interaction",
+          "rust": "vv_agent::DistributedBackend::produce_host_interaction",
+          "signature": "produce_host_interaction(request)",
+          "return": "HostInteractionOutcome",
+          "requires_active_claim": true,
+          "claim_release_same_cas": true,
+          "external_effect_inside_transaction": false
+        },
+        {
+          "id": "runtime_backend.resolve_controller_command",
+          "python": "vv_agent.runtime.DistributedBackend.resolve_controller_command",
+          "rust": "vv_agent::DistributedBackend::resolve_controller_command",
+          "signature": "resolve_controller_command(command)",
+          "return": "ControllerCommandResolution",
+          "wire": "fixtures/controller_command.json#resolution_wire",
+          "request": "fixtures/controller_command.json#request_wire",
+          "store_admission": "CheckpointStore.admit_controller_command(command)",
+          "handle_source": "command.handle; no duplicate handle parameter",
+          "response_record": "fixtures/controller_command.json#host_interaction_record",
+          "resolution_wire_pointer": "fixtures/controller_command.json#resolution_wire",
+          "wake_decision": "fixtures/distributed_run_driver.json#decision_fields.wake_after_controller_command"
+        },
+        {
+          "id": "runtime_backend.claim_and_consume_host_interaction_response",
+          "python": "vv_agent.runtime.DistributedBackend.claim_and_consume_host_interaction_response",
+          "rust": "vv_agent::DistributedBackend::claim_and_consume_host_interaction_response",
+          "signature": "claim_and_consume_host_interaction_response(envelope)",
+          "return": "HostInteractionRecoveryResult",
+          "wire": "fixtures/controller_command.json#host_interaction_recovery_wire",
+          "result_wire": "fixtures/controller_command.json#host_interaction_recovery_result",
+          "store_method": "CheckpointStore.claim_and_consume_host_interaction_response(envelope)",
+          "handle_source": "envelope identities; no duplicate handle parameter",
+          "response_record": "fixtures/controller_command.json#host_interaction_record",
+          "claim_mode": "recovery",
+          "resume_attempt": "successful combined recovery claim increments authoritative value once and propagates it to the consumed event and next envelope",
+          "requires_checkpoint_execution_claim": true,
+          "record_only_claim_forbidden": true,
+          "hard_recovery_barrier": ["resolved_pending", "resolved_claimed"],
+          "model_or_tool_allowed_after": "the combined CAS commits"
+        },
+        {
+          "id": "runtime_backend.controller_command_resolution",
+          "python": "vv_agent.runtime.ControllerCommandResolution",
+          "rust": "vv_agent::ControllerCommandResolution",
+          "closed": true,
+          "wire": "fixtures/controller_command.json#resolution_wire",
+          "closed_return_variants": {
+            "discriminator": "kind",
+            "unknown_fields": "reject",
+            "variants": {
+              "applied": {"required": ["kind", "receipt", "wake"]},
+              "replayed": {"required": ["kind", "receipt", "wake"]},
+              "rejected": {"required": ["kind", "error"], "forbidden": ["receipt", "wake"]}
+            }
+          }
+        },
+        {
           "id": "runtime_backend.resolve_deferred",
           "python": "vv_agent.runtime.CheckpointStore.resolve_deferred",
           "rust": "vv_agent::CheckpointStore::resolve_deferred",
@@ -977,7 +1066,7 @@
       "id": "runtime_backend"
     }
   ],
-  "schema_version": 4,
+  "schema_version": 5,
   "surfaces": [
     {
       "id": "agent",
@@ -1571,6 +1660,44 @@
           "rust": {
             "kind": "method",
             "name": "start_distributed"
+          }
+        },
+        {
+          "adaptation": "Both implementations accept an already-compiled AgentTask, preserve its prepared runtime fields, do not re-run compile-time producers, and return a passive handle without waiting; language-level calling conventions may differ.",
+          "id": "start_distributed_compiled",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "start_distributed_compiled",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "agent",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "task",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "run_config",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "continuation",
+                  "required": false
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "start_distributed_compiled"
           }
         },
         {

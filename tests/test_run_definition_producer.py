@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+import vv_agent.runtime.tool_planner as tool_planner_module
 from vv_agent import (
     AfterCycleDecision,
     AfterCycleSnapshot,
@@ -23,10 +24,12 @@ from vv_agent.checkpoint import (
     validate_run_definition,
 )
 from vv_agent.config import ResolvedModelConfig
+from vv_agent.constants import BASH_TOOL_NAME
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.checkpoint_codec import _strict_json_loads
 from vv_agent.runtime.run_definition import build_run_definition
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+from vv_agent.tools import build_default_registry
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import AgentTask, ToolExecutionResult
 
@@ -101,6 +104,34 @@ def test_minimal_run_definition_matches_canonical_golden_vector() -> None:
 
     assert definition == golden["definition"]
     assert digest == golden["sha256"]
+
+
+def test_computer_run_definition_uses_canonical_tool_schema_without_runtime_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, config, resolved, task = _minimal_inputs()
+    task.agent_type = "computer"
+    registry = build_default_registry()
+
+    def fail_resolve(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("run definitions must not resolve dynamic shell hints")
+
+    monkeypatch.setattr(tool_planner_module, "resolve_shell_invocation", fail_resolve)
+
+    definition, _digest = build_run_definition(
+        agent=agent,
+        root_input=task.user_prompt,
+        run_config=config,
+        resolved=resolved,
+        model_settings=_model_settings(),
+        task=task,
+        registry=registry,
+        initial_messages=[],
+    )
+
+    bash_schema = next(item["schema"] for item in definition["tools"] if item["schema"]["function"]["name"] == BASH_TOOL_NAME)
+    assert bash_schema == registry.get_schema(BASH_TOOL_NAME)
+    assert "Runtime shell hint" not in bash_schema["function"]["description"]
 
 
 @pytest.mark.parametrize(

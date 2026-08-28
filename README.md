@@ -6,17 +6,24 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current package release is `0.11.0`. Repository `HEAD` locks
-language-neutral Contract `7.0.1` with the Rust `vv-agent` crate while keeping
-a Python-idiomatic API.
+The current package release is `0.12.0`. This repository's `HEAD` locks
+language-neutral Contract `8.1.0`. The sibling Rust implementation's
+cross-repository adoption state and verified revisions live in the central
+support matrix; this repository keeps a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.11.0"
+python -m pip install "vv-agent==0.12.0"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
 integrations are needed. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
+
+### 0.12.0 Highlights
+
+- `Runner.start_distributed_compiled()` accepts an already compiled `AgentTask`,
+  preserves its prepared runtime fields, and returns the passive distributed
+  handle without compiling the task again.
 
 ### 0.11.0 Highlights
 
@@ -58,7 +65,7 @@ accept only the current strict public and wire shapes.
   complete immutable artifact is available and only when `read_file` remains
   model-visible. The compact marker keeps a short excerpt and recovery path
   while integrity metadata stays host-only.
-- Durable execution uses `vv-agent.checkpoint.v7`,
+- Durable execution uses `vv-agent.checkpoint.v8`,
   `vv-agent.run-definition.v5`, `vv-agent.distributed-run.v5`, and
   `vv-agent.distributed-worker-response.v3` for strict recovery and
   distributed-controller boundaries. `RunEvent` uses wire version `v4`, and
@@ -210,7 +217,7 @@ Argument parse failures emit none of these events. Schema validation, policy,
 approval, and unknown-tool short-circuits emit planned plus completed without
 started; completed events report `directive`, nullable `error_code`,
 `execution_started`, and nullable monotonic `duration_ms`. A started event may
-remain unmatched after cancellation or process loss, so checkpoint v7's
+remain unmatched after cancellation or process loss, so checkpoint v8's
 operation journal remains the recovery authority.
 
 The lower-level `AgentRuntime` API remains available for backend integrations
@@ -452,7 +459,7 @@ result = Runner.run_sync(
 - `Runner.run_sync(...)` and `Runner.stream_sync(...)` both inherit compiled
   shell metadata.
 - The `bash` tool schema description includes a runtime shell hint (resolved shell kind + invocation prefix), so the model sees which shell command style is expected before calling the tool.
-- The runtime shell hint is frozen per task/session-run to keep tool schemas stable across cycles and preserve LLM prompt cache efficiency.
+- The runtime shell hint is frozen per task/session-run for local LLM requests to keep those request schemas stable across cycles and preserve prompt-cache efficiency. Distributed run definitions retain the canonical schemas planned for the compiled task, so host-specific hint text does not affect the task-scoped toolset digest.
 - Runner/CLI-generated tasks carry one resolved `PromptBundle` explicitly
   through `AgentTask`, each `LlmRequest`, the run definition, checkpoints, and
   distributed execution. Generic metadata is not a prompt-section transport.
@@ -528,6 +535,12 @@ run_config = RunConfig(
     ),
 )
 ```
+
+`dispatch_outbox_store` is an optional Celery transport adapter. Inject it when
+the host needs durable enqueue receipts and schedule its lease reaper from the
+host. Without the adapter, Celery uses the stable cycle task id with
+at-least-once broker delivery; the worker checkpoint claim/CAS prevents a
+duplicate model or tool state transition.
 
 Install celery extras: `uv sync --extra celery`.
 

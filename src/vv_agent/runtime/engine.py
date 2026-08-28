@@ -51,6 +51,7 @@ from vv_agent.runtime.checkpoint_resume import (
     CheckpointResumeController,
 )
 from vv_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.controller import DistributedBackend, HostInteractionOutcome, HostInteractionRequest
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
 from vv_agent.runtime.lifecycle import (
@@ -616,7 +617,10 @@ class AgentRuntime:
         try:
             if result is None:
                 try:
-                    result = self.execution_backend.execute(
+                    execute = getattr(self.execution_backend, "execute_local", None)
+                    if not callable(execute):
+                        execute = self.execution_backend.execute
+                    result = execute(
                         task=task,
                         initial_messages=messages,
                         shared_state=shared,
@@ -691,6 +695,31 @@ class AgentRuntime:
             result.partial_output = result.partial_output or _last_assistant_output(result.cycles)
         return result
 
+    @staticmethod
+    def _bind_host_interaction_producer(ctx: ExecutionContext | None) -> None:
+        """Bind the framework producer to the current checkpoint claim.
+
+        Tool handlers receive this same execution context through
+        ``ToolContext.ctx``.  The admission context is reconstructed for each
+        call from the controller's live claim, so a released or stale claim
+        cannot be reused by a later tool invocation.
+        """
+        if ctx is None:
+            return
+        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller")
+        if not isinstance(checkpoint_controller, CheckpointResumeController):
+            return
+
+        def produce(request: HostInteractionRequest) -> HostInteractionOutcome:
+            admission_context = checkpoint_controller.host_interaction_admission_context()
+            backend = DistributedBackend(
+                checkpoint_controller.store,
+                admission_context=admission_context,
+            )
+            return backend.produce_host_interaction(request)
+
+        ctx.host_interaction_producer = produce
+
     def _build_cycle_executor(
         self,
         *,
@@ -715,6 +744,7 @@ class AgentRuntime:
 
             if ctx is not None:
                 ctx.metadata["_vv_agent_active_cycle_index"] = cycle_index
+                self._bind_host_interaction_producer(ctx)
 
             def cancellation_result(error: str | None = None) -> AgentResult:
                 reason = error

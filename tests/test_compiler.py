@@ -4,13 +4,14 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from vv_agent import Agent, RunConfig, ToolPolicy, function_tool, handoff
 from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.constants import BASH_TOOL_NAME, FIND_FILES_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.types import AgentTask, Message
@@ -166,6 +167,37 @@ def test_frozen_checkpoint_uses_current_threshold_and_metadata_without_rewriting
     assert task.metadata["reserved_output_tokens"] == 4_096
     assert definition == original_definition
     assert system_message.metadata == original_metadata
+
+
+def test_frozen_checkpoint_restores_computer_extra_tools_without_duplicate_builtins() -> None:
+    definition = _frozen_definition(run_metadata={})
+    cast(dict[str, object], definition["agent"])["type"] = "computer"
+    definition["tools"] = [
+        {"schema": {"function": {"name": TASK_FINISH_TOOL_NAME}}},
+        {"schema": {"function": {"name": BASH_TOOL_NAME}}},
+        {"schema": {"function": {"name": FIND_FILES_TOOL_NAME}}},
+        {"schema": {"function": {"name": "lookup"}}},
+    ]
+    checkpoint = SimpleNamespace(
+        run_definition=definition,
+        messages=[Message(role="system", content="Answer.")],
+        task_id="computer-extra-tool-task",
+    )
+
+    task = AgentCompiler().compile_frozen_checkpoint(
+        agent=Agent(name="assistant", instructions="Answer.", model="model-id"),
+        run_config=RunConfig(),
+        resolved=_resolved(),
+        checkpoint=checkpoint,
+        trace_id="trace-computer-extra-tool",
+    )
+
+    assert task.agent_type == "computer"
+    assert task.use_workspace
+    assert task.extra_tool_names == ["lookup"]
+    assert TASK_FINISH_TOOL_NAME not in task.extra_tool_names
+    assert BASH_TOOL_NAME not in task.extra_tool_names
+    assert FIND_FILES_TOOL_NAME not in task.extra_tool_names
 
 
 def test_frozen_checkpoint_restores_run_metadata_when_system_metadata_is_empty() -> None:

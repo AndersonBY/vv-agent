@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from threading import RLock
-from typing import Any
+from typing import Any, Literal, cast
 
-from vv_agent.checkpoint import EventCursor
+from vv_agent.checkpoint import CheckpointError, EventCursor
 from vv_agent.deferred import (
     DeferredCheckpointClaimed,
     DeferredResolutionConflict,
@@ -17,6 +18,14 @@ from vv_agent.deferred import (
 )
 from vv_agent.events import ToolCallCompletedEvent, ToolCallDeferredEvent
 from vv_agent.runtime.checkpoint_codec import clone_checkpoint
+from vv_agent.runtime.dispatch_outbox import (
+    DispatchOutboxClaim,
+    DispatchOutboxRecord,
+    claim_dispatch,
+    complete_dispatch,
+    reap_dispatch,
+    reconcile_dispatch,
+)
 from vv_agent.runtime.state import (
     Checkpoint,
     CheckpointConflictError,
@@ -32,16 +41,19 @@ from vv_agent.runtime.state import (
     prepare_event_delivery,
     validate_model_journal_accounting,
 )
+from vv_agent.runtime.stores.controller_store import ControllerStoreMixin
 from vv_agent.types import AgentStatus, ToolExecutionResult
 
 
-class InMemoryCheckpointStore:
+class InMemoryCheckpointStore(ControllerStoreMixin):
     """Thread-safe process-local checkpoint store."""
 
     def __init__(self) -> None:
         self._store: dict[str, Checkpoint] = {}
         self._deferred_receipts: dict[str, DeferredResolutionReceipt] = {}
         self._lock = RLock()
+        self._init_controller_indexes()
+        self._distributed_dispatch_outboxes: dict[str, DispatchOutboxRecord] = {}
 
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
         snapshot = clone_checkpoint(checkpoint)
@@ -294,6 +306,140 @@ class InMemoryCheckpointStore:
                 for key, receipt in self._deferred_receipts.items()
                 if receipt.handle.checkpoint_key != checkpoint_key
             }
+            self._host_interaction_records = {
+                key: record for key, record in self._host_interaction_records.items() if key[0] != checkpoint_key
+            }
+            self._controller_command_receipts = {
+                key: receipt
+                for key, receipt in self._controller_command_receipts.items()
+                if receipt.handle.checkpoint_key != checkpoint_key
+            }
+            self._controller_command_outboxes = {
+                key: row
+                for key, row in self._controller_command_outboxes.items()
+                if self._controller_command_receipts.get(key) is not None
+            }
+            self._host_interaction_notifications = {
+                key: row for key, row in self._host_interaction_notifications.items() if row["checkpoint_key"] != checkpoint_key
+            }
+            self._distributed_dispatch_outboxes = {
+                key: row for key, row in self._distributed_dispatch_outboxes.items() if row.checkpoint_key != checkpoint_key
+            }
+
+    def claim_distributed_dispatch(
+        self,
+        envelope: Mapping[str, Any],
+        *,
+        claim_token: str,
+        lease_expires_at_ms: int,
+        now_ms: int,
+    ) -> DispatchOutboxClaim:
+        candidate = DispatchOutboxRecord.pending(envelope)
+        with self._lock:
+            if candidate.checkpoint_key not in self._store:
+                raise CheckpointError("dispatch checkpoint was not found", code="checkpoint_not_found")
+            current = self._distributed_dispatch_outboxes.get(candidate.dispatch_id)
+            if current is None:
+                current = candidate
+            elif current.envelope_digest != candidate.envelope_digest:
+                raise CheckpointError(
+                    "dispatch id was reused with a different immutable envelope",
+                    code="dispatch_outbox_conflict",
+                )
+            claim = claim_dispatch(
+                current,
+                claim_token=claim_token,
+                lease_expires_at_ms=lease_expires_at_ms,
+                now_ms=now_ms,
+            )
+            if claim.record != current:
+                self._distributed_dispatch_outboxes[candidate.dispatch_id] = claim.record
+            return claim
+
+    def complete_distributed_dispatch(
+        self,
+        *,
+        dispatch_id: str,
+        envelope_digest: str,
+        claim_token: str,
+        attempt: int,
+        outcome: str,
+        now_ms: int,
+        error: str | None = None,
+    ) -> DispatchOutboxRecord | None:
+        with self._lock:
+            current = self._distributed_dispatch_outboxes.get(dispatch_id)
+            if current is None:
+                return None
+            if current.envelope_digest != envelope_digest:
+                raise CheckpointError("dispatch envelope digest conflicts", code="dispatch_outbox_conflict")
+            if outcome not in {"delivered", "ambiguous"}:
+                raise ValueError("dispatch completion outcome must be delivered or ambiguous")
+            typed_outcome = cast(Literal["delivered", "ambiguous"], outcome)
+            if current.state == typed_outcome:
+                return current
+            updated = complete_dispatch(
+                current,
+                claim_token=claim_token,
+                attempt=attempt,
+                outcome=typed_outcome,
+                now_ms=now_ms,
+                error=error,
+            )
+            self._distributed_dispatch_outboxes[dispatch_id] = updated
+            return updated
+
+    def reconcile_distributed_dispatch(
+        self,
+        *,
+        dispatch_id: str,
+        envelope_digest: str,
+        outcome: str,
+        now_ms: int,
+        error: str | None = None,
+    ) -> DispatchOutboxRecord | None:
+        with self._lock:
+            current = self._distributed_dispatch_outboxes.get(dispatch_id)
+            if current is None:
+                return None
+            if current.envelope_digest != envelope_digest:
+                raise CheckpointError("dispatch envelope digest conflicts", code="dispatch_outbox_conflict")
+            if outcome not in {"retry", "delivered"}:
+                raise ValueError("dispatch reconciliation outcome must be retry or delivered")
+            typed_outcome = cast(Literal["retry", "delivered"], outcome)
+            if (typed_outcome == "retry" and current.state == "pending") or (
+                typed_outcome == "delivered" and current.state == "delivered"
+            ):
+                return current
+            updated = reconcile_dispatch(
+                current,
+                outcome=typed_outcome,
+                now_ms=now_ms,
+                error=error,
+            )
+            self._distributed_dispatch_outboxes[dispatch_id] = updated
+            return updated
+
+    def get_distributed_dispatch(self, dispatch_id: str) -> DispatchOutboxRecord | None:
+        with self._lock:
+            return self._distributed_dispatch_outboxes.get(dispatch_id)
+
+    def reap_distributed_dispatches(
+        self,
+        *,
+        checkpoint_key: str | None = None,
+        now_ms: int,
+    ) -> list[DispatchOutboxRecord]:
+        with self._lock:
+            rows: list[DispatchOutboxRecord] = []
+            for dispatch_id, current in tuple(self._distributed_dispatch_outboxes.items()):
+                if checkpoint_key is not None and current.checkpoint_key != checkpoint_key:
+                    continue
+                updated = reap_dispatch(current, now_ms=now_ms)
+                if updated is not None:
+                    self._distributed_dispatch_outboxes[dispatch_id] = updated
+                    rows.append(updated)
+            return rows
 
     def preflight_tool_batch(
         self,

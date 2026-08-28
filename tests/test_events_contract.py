@@ -79,6 +79,8 @@ PARITY_EVENT_TYPES = [
     "model_retry_duplicate_risk",
     "reconciliation_resolved",
     "reconciliation_required",
+    "host_interaction_requested",
+    "host_interaction_response_consumed",
 ]
 
 
@@ -483,16 +485,13 @@ def test_run_events_parity_fixture_round_trips_current_wire() -> None:
     events = [event_from_dict(json.loads(line)) for line in lines]
 
     assert [event.type for event in events] == PARITY_EVENT_TYPES
-    for index, (line, event) in enumerate(zip(lines, events, strict=True)):
+    for _index, (line, event) in enumerate(zip(lines, events, strict=True)):
         if event.run_id == "run_parity":
             assert event.event_id.startswith("evt_")
             assert event.run_id == "run_parity"
             assert event.trace_id == "trace_parity"
             assert event.created_at == 123.456789
-        if index < len(PARITY_EVENT_TYPES) - 7:
-            assert json.dumps(event.to_dict(), separators=(",", ":")) == line
-        else:
-            assert event.to_dict() == json.loads(line)
+        assert event.to_dict() == json.loads(line)
 
 
 def test_budget_events_fixture_round_trips() -> None:

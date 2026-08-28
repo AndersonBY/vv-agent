@@ -7,7 +7,9 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
+from uuid import uuid4
 
 from vv_agent.budget import RunBudgetLimits
 from vv_agent.checkpoint import CheckpointError
@@ -28,10 +30,24 @@ from vv_agent.runtime.backends.distributed import (
     DistributedWaitReason,
     DistributedWorkerResponse,
     RuntimeRecipe,
+    ToolsetRef,
+    toolset_schema_digest,
 )
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.controller import (
+    ControllerCommand,
+    ControllerCommandResolution,
+    DistributedBackend,
+    HostInteractionRecoveryResult,
+)
+from vv_agent.runtime.dispatch_outbox import (
+    DispatchOutboxClaim,
+    DispatchOutboxRecord,
+    DispatchOutboxStore,
+    dispatch_envelope_digest,
+)
 from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.types import (
     AgentResult,
@@ -59,6 +75,11 @@ class CeleryBackend:
         its capability references.
     cycle_task_name:
         The registered Celery task name for single-cycle execution on workers.
+    dispatch_outbox_store:
+        Optional transport-owned receipt store. When omitted, enqueue uses a
+        stable Celery task id and relies on the worker checkpoint claim/CAS
+        boundary for duplicate-delivery safety; the core ``CheckpointStore``
+        is never inspected for dispatch receipts.
     """
 
     def __init__(
@@ -70,6 +91,7 @@ class CeleryBackend:
         dispatch_timeout_seconds: float = 10 * 60,
         lease_duration_ms: int = DEFAULT_LEASE_DURATION_MS,
         capability_registry: DistributedCapabilityRegistry | None = None,
+        dispatch_outbox_store: DispatchOutboxStore | None = None,
     ) -> None:
         if not _CELERY_AVAILABLE:
             raise ImportError("celery is required for CeleryBackend. Install with: pip install celery")
@@ -84,13 +106,66 @@ class CeleryBackend:
             raise ValueError("dispatch_timeout_seconds must be positive")
         if isinstance(lease_duration_ms, bool) or not isinstance(lease_duration_ms, int) or lease_duration_ms <= 0:
             raise ValueError("lease_duration_ms must be a positive integer")
+        if dispatch_outbox_store is not None and not isinstance(dispatch_outbox_store, DispatchOutboxStore):
+            raise TypeError("dispatch_outbox_store must implement the transport receipt protocol")
         self.dispatch_timeout_seconds = float(dispatch_timeout_seconds)
         self.lease_duration_ms = lease_duration_ms
         self.capability_registry = capability_registry
+        self.dispatch_outbox_store = dispatch_outbox_store
 
     @property
     def manages_run_budget(self) -> bool:
         return True
+
+    def controller_backend(self) -> DistributedBackend:
+        """Return the public v8 controller seam backed by the recipe store."""
+        self._validate_nonblocking_recipe()
+        assert self.capability_registry is not None
+        self.capability_registry.validate(self.runtime_recipe.capabilities)
+        store_ref = self.runtime_recipe.capabilities.checkpoint_store_ref
+        assert store_ref is not None
+        return DistributedBackend(self.capability_registry.resolve("checkpoint_store", store_ref))
+
+    def resolve_controller_command(
+        self,
+        command: ControllerCommand,
+    ) -> ControllerCommandResolution:
+        return self.controller_backend().resolve_controller_command(command)
+
+    def claim_and_consume_host_interaction_response(
+        self,
+        envelope: Mapping[str, Any],
+    ) -> HostInteractionRecoveryResult:
+        return self.controller_backend().claim_and_consume_host_interaction_response(envelope)
+
+    def execute_local(
+        self,
+        *,
+        task: AgentTask,
+        initial_messages: list[Message],
+        shared_state: dict[str, Any],
+        cycle_executor: CycleExecutor,
+        ctx: ExecutionContext | None,
+        max_cycles: int,
+    ) -> AgentResult:
+        """Run the synchronous controller loop for local hosts only.
+
+        Distributed production callers must use :meth:`start` and
+        :meth:`advance`; this method is selected only by ``AgentRuntime.run``
+        for a deliberately local, synchronous caller.
+        """
+        del cycle_executor
+        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
+        if not isinstance(checkpoint_controller, CheckpointResumeController):
+            raise DistributedContractError("CeleryBackend requires RunConfig.checkpoint_config with a current checkpoint store")
+        return self._execute_local(
+            task=task,
+            initial_messages=initial_messages,
+            shared_state=shared_state,
+            ctx=ctx,
+            max_cycles=max_cycles,
+            checkpoint_controller=checkpoint_controller,
+        )
 
     def execute(
         self,
@@ -102,18 +177,14 @@ class CeleryBackend:
         ctx: ExecutionContext | None,
         max_cycles: int,
     ) -> AgentResult:
-        del cycle_executor
-        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller") if ctx is not None else None
-        if not isinstance(checkpoint_controller, CheckpointResumeController):
-            raise DistributedContractError("CeleryBackend requires RunConfig.checkpoint_config with a current checkpoint store")
-        return self._execute_distributed(
-            task=task,
-            initial_messages=initial_messages,
-            shared_state=shared_state,
-            ctx=ctx,
-            max_cycles=max_cycles,
-            checkpoint_controller=checkpoint_controller,
-        )
+        """Reject the generic backend seam; local use is explicitly named.
+
+        ``ExecutionBackend`` retains ``execute`` for Inline/Thread backends.
+        Celery's synchronous loop is intentionally behind ``execute_local``
+        so distributed scheduling cannot accidentally enter its polling path.
+        """
+        del task, initial_messages, shared_state, cycle_executor, ctx, max_cycles
+        raise DistributedContractError("CeleryBackend.execute is unavailable; use the local-only execute_local path")
 
     def start(
         self,
@@ -126,7 +197,7 @@ class CeleryBackend:
         """Enqueue the first cycle of an admitted run and return immediately."""
         self._validate_nonblocking_recipe()
         assert self.capability_registry is not None
-        self.capability_registry.validate(self.runtime_recipe.capabilities)
+        self.capability_registry.validate(self.runtime_recipe.capabilities, task=task)
         checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
         if checkpoint is None:
             raise CheckpointError("checkpoint disappeared before distributed start", code="checkpoint_not_found")
@@ -152,9 +223,27 @@ class CeleryBackend:
             )
         distributed_task = self._distributed_task(task, ctx)
         budget_limits = self._budget_limits(ctx)
+        tool_registry = self.capability_registry.resolve_toolset(
+            self.runtime_recipe.capabilities.toolset_ref,
+            task=distributed_task,
+        )
+        task_toolset_digest = toolset_schema_digest(tool_registry, task=distributed_task)
+        recipe = RuntimeRecipe.from_dict(self.runtime_recipe.to_dict())
+        if recipe.capabilities.toolset_ref.schema_digest != task_toolset_digest:
+            recipe = replace(
+                recipe,
+                capabilities=replace(
+                    recipe.capabilities,
+                    toolset_ref=ToolsetRef(
+                        id=recipe.capabilities.toolset_ref.id,
+                        version=recipe.capabilities.toolset_ref.version,
+                        schema_digest=task_toolset_digest,
+                    ),
+                ),
+            )
         envelope = self._envelope_from_checkpoint(
             task=distributed_task,
-            recipe=RuntimeRecipe.from_dict(self.runtime_recipe.to_dict()),
+            recipe=recipe,
             checkpoint=checkpoint,
             checkpoint_config=DistributedCheckpointConfig.from_checkpoint_config(checkpoint_controller.config),
             cycle_index=1,
@@ -226,6 +315,30 @@ class CeleryBackend:
                 reason=DistributedWaitReason.DEFERRED_PENDING,
             )
 
+        if checkpoint.status is AgentStatus.HOST_INTERACTION:
+            if checkpoint.claim_token is not None:
+                raise CheckpointError(
+                    "host interaction checkpoint must not retain a worker claim",
+                    code="checkpoint_store_conflict",
+                )
+            return DistributedAdvanceDecision(
+                action="wait",
+                handle=handle,
+                reason=DistributedWaitReason.HOST_INTERACTION,
+            )
+
+        if checkpoint.status is AgentStatus.SUSPENDED:
+            if checkpoint.claim_token is not None:
+                raise CheckpointError(
+                    "suspended checkpoint must not retain a worker claim",
+                    code="checkpoint_store_conflict",
+                )
+            return DistributedAdvanceDecision(
+                action="wait",
+                handle=handle,
+                reason=DistributedWaitReason.SUSPENDED,
+            )
+
         if response is not None and response.response_type == "terminal_replay":
             raise CheckpointError(
                 "distributed terminal replay has no matching durable terminal",
@@ -273,6 +386,13 @@ class CeleryBackend:
                 action="wait",
                 handle=handle,
                 reason=DistributedWaitReason.RECONCILIATION_REQUIRED,
+            )
+        if delivery.transport_error is not None:
+            self._requeue_dispatched(envelope, error=delivery.transport_error)
+        elif response is not None and response.response_type == "pending":
+            self._requeue_dispatched(
+                envelope,
+                error="worker returned pending before a durable checkpoint barrier",
             )
         if response is not None and response.response_type == "committed":
             assert response.committed_cycle is not None
@@ -377,7 +497,7 @@ class CeleryBackend:
     # Distributed mode: each cycle → independent Celery task
     # ------------------------------------------------------------------
 
-    def _execute_distributed(
+    def _execute_local(
         self,
         *,
         task: AgentTask,
@@ -635,6 +755,13 @@ class CeleryBackend:
                 lease_duration_ms=self.lease_duration_ms,
                 budget_limits=budget_limits,
             )
+            dispatch_claim = self._claim_dispatch(envelope)
+            if dispatch_claim is not None and not dispatch_claim.should_enqueue:
+                # A previous delivery already completed (or this caller is
+                # replaying its own claim).  The authoritative checkpoint
+                # read at the top of the loop decides whether another cycle
+                # is needed; never call the broker twice.
+                continue
             try:
                 async_result = self.celery_app.send_task(
                     self.cycle_task_name,
@@ -644,16 +771,28 @@ class CeleryBackend:
                 )
                 remaining_seconds = envelope.remaining_seconds()
                 assert remaining_seconds is not None
-                result, cancellation_reason, dispatch_error = self._wait_for_dispatch(
+                result, cancellation_reason, dispatch_error = self._wait_for_local_dispatch(
                     async_result,
                     ctx=ctx,
                     timeout=remaining_seconds,
                 )
             except Exception as exc:
+                self._complete_dispatch(
+                    envelope,
+                    dispatch_claim,
+                    outcome="ambiguous",
+                    error=str(exc),
+                )
                 result = None
                 cancellation_reason = None
                 dispatch_error = exc
             if cancellation_reason is not None:
+                self._complete_dispatch(
+                    envelope,
+                    dispatch_claim,
+                    outcome="ambiguous",
+                    error=cancellation_reason,
+                )
                 return None, cancellation_reason
             if dispatch_error is None:
                 try:
@@ -663,9 +802,47 @@ class CeleryBackend:
                         f"distributed dispatcher returned an invalid worker response: {exc}",
                         code="checkpoint_store_conflict",
                     ) from exc
+                if response.response_type == "pending":
+                    barrier = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+                    if (
+                        barrier is not None
+                        and barrier.status
+                        in {
+                            AgentStatus.DEFERRED,
+                            AgentStatus.HOST_INTERACTION,
+                            AgentStatus.SUSPENDED,
+                        }
+                        and barrier.claim_token is None
+                    ):
+                        self._complete_dispatch(
+                            envelope,
+                            dispatch_claim,
+                            outcome="delivered",
+                        )
+                        return response, None
+                    self._complete_dispatch(
+                        envelope,
+                        dispatch_claim,
+                        outcome="ambiguous",
+                        error="worker returned pending before a durable checkpoint barrier",
+                    )
+                    self._reconcile_dispatch(
+                        envelope,
+                        outcome="retry",
+                        error="pending worker response",
+                    )
+                    last_error = RuntimeError("worker returned pending before a durable checkpoint barrier")
+                    effective_claim_mode = "recovery"
+                    continue
+                self._complete_dispatch(envelope, dispatch_claim, outcome="delivered")
                 return response, None
             if not self._is_retryable_dispatch_error(dispatch_error):
                 raise dispatch_error
+            self._reconcile_dispatch(
+                envelope,
+                outcome="retry",
+                error=str(dispatch_error),
+            )
             last_error = dispatch_error
 
     @staticmethod
@@ -749,16 +926,15 @@ class CeleryBackend:
             )
         return result
 
-    def _wait_for_dispatch(
+    def _wait_for_local_dispatch(
         self,
         async_result: Any,
         *,
         ctx: ExecutionContext | None,
         timeout: float,
     ) -> tuple[Any | None, str | None, Exception | None]:
-        from celery.exceptions import TimeoutError as CeleryTimeoutError
-
         deadline = time.monotonic() + timeout
+        ready = getattr(async_result, "ready", None)
         while True:
             cancellation_reason = self._cancellation_reason(ctx)
             if cancellation_reason is not None:
@@ -768,12 +944,29 @@ class CeleryBackend:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None, None, TimeoutError(f"dispatch timed out after {timeout:g} seconds")
-            try:
-                return async_result.get(timeout=min(_DISPATCH_POLL_SECONDS, remaining)), None, None
-            except CeleryTimeoutError:
-                continue
-            except Exception as exc:
-                return None, None, exc
+            if callable(ready):
+                try:
+                    if not ready():
+                        time.sleep(min(_DISPATCH_POLL_SECONDS, remaining))
+                        continue
+                    successful = getattr(async_result, "successful", None)
+                    if callable(successful) and not successful():
+                        failure = getattr(async_result, "result", None)
+                        if isinstance(failure, BaseException):
+                            return None, None, failure
+                        return None, None, RuntimeError(str(failure) or "Celery dispatch failed")
+                    value = getattr(async_result, "result", None)
+                    if callable(value):
+                        value = value()
+                    return value, None, None
+                except Exception as exc:
+                    return None, None, exc
+            # Small in-process test doubles may expose an already-computed
+            # value without Celery's AsyncResult polling surface.  They are
+            # still nonblocking and never require the synchronous result API.
+            if hasattr(async_result, "value"):
+                return async_result.value, None, None
+            return None, None, DistributedContractError("Celery result lacks the nonblocking ready/result surface")
 
     @staticmethod
     def _revoke_dispatch(async_result: Any) -> None:
@@ -898,20 +1091,103 @@ class CeleryBackend:
         continuation: Callable[[DistributedRunHandle, DistributedRunEnvelope], Any] | Any | None,
         not_before_unix_ms: int | None = None,
     ) -> Any:
+        dispatch_claim = self._claim_dispatch(envelope)
+        if dispatch_claim is not None and not dispatch_claim.should_enqueue:
+            return None
         options: dict[str, Any] = {
             "serializer": "json",
             "task_id": envelope.job_id,
         }
-        if continuation is not None:
-            options["link"] = continuation(handle, envelope) if callable(continuation) else continuation
-        if not_before_unix_ms is not None:
-            now_ms = time.time_ns() // 1_000_000
-            options["countdown"] = max(0.0, (not_before_unix_ms - now_ms) / 1000)
-        return self.celery_app.send_task(
-            self.cycle_task_name,
-            kwargs={"envelope_dict": envelope.to_dict()},
-            **options,
+        try:
+            if continuation is not None:
+                options["link"] = continuation(handle, envelope) if callable(continuation) else continuation
+            if not_before_unix_ms is not None:
+                now_ms = time.time_ns() // 1_000_000
+                options["countdown"] = max(0.0, (not_before_unix_ms - now_ms) / 1000)
+            result = self.celery_app.send_task(
+                self.cycle_task_name,
+                kwargs={"envelope_dict": envelope.to_dict()},
+                **options,
+            )
+        except BaseException as exc:
+            if dispatch_claim is not None:
+                self._complete_dispatch(envelope, dispatch_claim, outcome="ambiguous", error=str(exc))
+            raise
+        # Completion is deliberately outside the broker exception handler.
+        # If an injected transport receipt is used, a process death after
+        # send_task returns but before this CAS leaves a claimed receipt for
+        # host-owned reaping. Without that adapter there is intentionally no
+        # receipt to complete: the stable task id and worker checkpoint CAS
+        # provide the at-least-once fallback boundary.
+        if dispatch_claim is not None:
+            self._complete_dispatch(envelope, dispatch_claim, outcome="delivered")
+        return result
+
+    def _claim_dispatch(self, envelope: DistributedRunEnvelope) -> DispatchOutboxClaim | None:
+        store = self.dispatch_outbox_store
+        if store is None:
+            return None
+        now_ms = time.time_ns() // 1_000_000
+        lease_expires_at_ms = now_ms + max(self.lease_duration_ms, 1_000)
+        claim = store.claim_distributed_dispatch(
+            envelope.to_dict(),
+            claim_token=uuid4().hex,
+            lease_expires_at_ms=lease_expires_at_ms,
+            now_ms=now_ms,
         )
+        if not isinstance(claim, DispatchOutboxClaim):
+            raise DistributedContractError("dispatch outbox store returned an invalid dispatch claim")
+        return claim
+
+    def _complete_dispatch(
+        self,
+        envelope: DistributedRunEnvelope,
+        claim: DispatchOutboxClaim | None,
+        *,
+        outcome: str,
+        error: str | None = None,
+    ) -> DispatchOutboxRecord | None:
+        if claim is None:
+            return None
+        store = self.dispatch_outbox_store
+        if store is None:
+            raise DistributedContractError("dispatch completion requires the injected dispatch outbox store")
+        record = store.complete_distributed_dispatch(
+            dispatch_id=envelope.job_id,
+            envelope_digest=dispatch_envelope_digest(envelope.to_dict()),
+            claim_token=claim.record.claim_token or "",
+            attempt=claim.record.attempt,
+            outcome=outcome,
+            now_ms=time.time_ns() // 1_000_000,
+            error=error,
+        )
+        if not isinstance(record, DispatchOutboxRecord):
+            raise DistributedContractError("dispatch outbox store returned an invalid dispatch record")
+        return record
+
+    def _reconcile_dispatch(
+        self,
+        envelope: DistributedRunEnvelope,
+        *,
+        outcome: str,
+        error: str | None = None,
+    ) -> DispatchOutboxRecord | None:
+        store = self.dispatch_outbox_store
+        if store is None:
+            return None
+        record = store.reconcile_distributed_dispatch(
+            dispatch_id=envelope.job_id,
+            envelope_digest=dispatch_envelope_digest(envelope.to_dict()),
+            outcome=outcome,
+            now_ms=time.time_ns() // 1_000_000,
+            error=error,
+        )
+        if not isinstance(record, DispatchOutboxRecord):
+            raise DistributedContractError("dispatch outbox store returned an invalid dispatch record")
+        return record
+
+    def _requeue_dispatched(self, envelope: DistributedRunEnvelope, *, error: str) -> DispatchOutboxRecord | None:
+        return self._reconcile_dispatch(envelope, outcome="retry", error=error)
 
     def parallel_map(
         self,
@@ -932,7 +1208,7 @@ class CeleryBackend:
 
             job = group(signature(item) for item in items)
             result = job.apply_async()
-            return result.get(timeout=timeout)
+            return result.join(timeout=timeout)
         return [fn(item) for item in items]
 
 

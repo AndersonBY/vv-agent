@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import vv_agent.runtime.tool_planner as tool_planner_module
 from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
@@ -14,6 +16,12 @@ from vv_agent.constants import (
     WORKSPACE_TOOLS,
 )
 from vv_agent.prompt import build_raw_system_prompt_bundle
+from vv_agent.runtime.backends.distributed import (
+    DistributedCapabilityError,
+    DistributedCapabilityRegistry,
+    ToolsetRef,
+    toolset_schema_digest,
+)
 from vv_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, SubAgentConfig
@@ -192,3 +200,74 @@ def test_plan_tool_schemas_freezes_runtime_shell_hint_across_cycles(monkeypatch)
     assert first_description == second_description
     assert "shell-1" in first_description
     assert call_count["value"] == 1
+
+
+def test_plan_tool_schemas_can_return_registry_canonical_schemas(monkeypatch) -> None:
+    registry = build_default_registry()
+    task = _task(agent_type="computer")
+
+    def fake_resolve(*, shell: str | None = None, windows_shell_priority: list[str] | None = None):
+        del shell, windows_shell_priority
+        return SimpleNamespace(kind="bash", prefix=["bash", "-lc"])
+
+    monkeypatch.setattr(tool_planner_module, "resolve_shell_invocation", fake_resolve)
+
+    dynamic = plan_tool_schemas(registry=registry, task=task)
+    canonical = plan_tool_schemas(registry=registry, task=task, include_dynamic_hints=False)
+
+    assert any(
+        "Runtime shell hint" in schema["function"]["description"]
+        for schema in dynamic
+        if schema["function"]["name"] == BASH_TOOL_NAME
+    )
+    bash_schema = next(schema for schema in canonical if schema["function"]["name"] == BASH_TOOL_NAME)
+    assert "Runtime shell hint" not in bash_schema["function"]["description"]
+    assert canonical == registry.list_openai_schemas(tool_names=plan_tool_names(task))
+
+
+def test_toolset_schema_digest_uses_registry_canonical_schemas(monkeypatch) -> None:
+    registry = build_default_registry()
+    task = _task(agent_type="computer")
+
+    def fake_resolve(*, shell: str | None = None, windows_shell_priority: list[str] | None = None):
+        del shell, windows_shell_priority
+        return SimpleNamespace(kind="bash", prefix=["bash", "-lc"])
+
+    monkeypatch.setattr(tool_planner_module, "resolve_shell_invocation", fake_resolve)
+
+    import hashlib
+    import json
+
+    expected = json.dumps(
+        registry.list_openai_schemas(),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert toolset_schema_digest(registry) == hashlib.sha256(expected.encode()).hexdigest()
+    assert (
+        toolset_schema_digest(registry)
+        != hashlib.sha256(
+            json.dumps(
+                plan_tool_schemas(registry=registry, task=task),
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    )
+
+
+def test_task_scoped_toolset_digest_requires_the_matching_task() -> None:
+    registry = build_default_registry()
+    task = _task(agent_type="computer")
+    full_digest = toolset_schema_digest(registry)
+    scoped_digest = toolset_schema_digest(registry, task=task)
+
+    assert full_digest != scoped_digest
+    scoped_reference = ToolsetRef(schema_digest=scoped_digest)
+    capability_registry = DistributedCapabilityRegistry()
+
+    assert capability_registry.resolve_toolset(scoped_reference, task=task) is not None
+    with pytest.raises(DistributedCapabilityError, match="schema digest mismatch"):
+        capability_registry.resolve_toolset(scoped_reference)

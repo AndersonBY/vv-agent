@@ -19,6 +19,7 @@ from vv_agent.checkpoint import (
     ReconciliationDecisionKind,
     ResumeObservation,
     ToolIdempotency,
+    canonical_json_sha256,
 )
 from vv_agent.types import CompletionReason, ModelCallOperation, TokenUsage
 
@@ -110,6 +111,32 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "run_state_changed": frozenset({"state"}),
+    "host_interaction_requested": frozenset(
+        {
+            "checkpoint_key",
+            "resume_attempt",
+            "interaction_id",
+            "logical_cycle",
+            "operation_id",
+            "tool_call_id",
+            "request_digest",
+            "prompt",
+        }
+    ),
+    "host_interaction_response_consumed": frozenset(
+        {
+            "checkpoint_key",
+            "resume_attempt",
+            "interaction_id",
+            "logical_cycle",
+            "operation_id",
+            "tool_call_id",
+            "request_digest",
+            "command_id",
+            "response_digest",
+            "consumed_revision",
+        }
+    ),
     "diagnostic": frozenset({"level", "code", "details"}),
     "memory_compact_started": frozenset(
         {
@@ -272,6 +299,34 @@ _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "handoff_started": frozenset({"source_agent", "target_agent", "tool_call_id", "status"}),
     "handoff_completed": frozenset({"source_agent", "target_agent", "tool_call_id", "status"}),
     "run_state_changed": frozenset({"state"}),
+    "host_interaction_requested": frozenset(
+        {
+            "checkpoint_key",
+            "resume_attempt",
+            "interaction_id",
+            "logical_cycle",
+            "operation_id",
+            "tool_call_id",
+            "request_digest",
+            "prompt",
+            "cycle_index",
+        }
+    ),
+    "host_interaction_response_consumed": frozenset(
+        {
+            "checkpoint_key",
+            "resume_attempt",
+            "interaction_id",
+            "logical_cycle",
+            "operation_id",
+            "tool_call_id",
+            "request_digest",
+            "command_id",
+            "response_digest",
+            "consumed_revision",
+            "cycle_index",
+        }
+    ),
     "diagnostic": frozenset({"level", "code", "details"}),
     "run_completed": frozenset({"status"}),
     "run_failed": frozenset({"error"}),
@@ -852,6 +907,190 @@ class RunStateChangedEvent(RunEvent):
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["state"] = self.state
+        return payload
+
+
+def _host_interaction_digest(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or value != value.lower():
+        raise ValueError(f"Run event {field_name} must be a lowercase SHA-256 digest")
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise ValueError(f"Run event {field_name} must be a lowercase SHA-256 digest") from exc
+    return value
+
+
+def _host_interaction_identity(value: Any, field_name: str) -> str:
+    text = _required_event_text(value, field_name)
+    if len(text.encode("utf-8")) > 512:
+        raise ValueError(f"Run event {field_name} exceeds the UTF-8 identity limit")
+    return text
+
+
+def _host_interaction_cycle(value: Any, field_name: str) -> int:
+    return _positive_event_integer(value, field_name)
+
+
+def _host_interaction_prompt(value: Any) -> str:
+    text = _required_event_text(value, "prompt")
+    if len(text.encode("utf-8")) > 65536:
+        raise ValueError("Run event prompt exceeds the UTF-8 content limit")
+    return text
+
+
+@dataclass(frozen=True, slots=True)
+class HostInteractionRequestedEvent(RunEvent):
+    checkpoint_key: str = ""
+    resume_attempt: int = 1
+    interaction_id: str = ""
+    logical_cycle: int = 1
+    operation_id: str = ""
+    tool_call_id: str = ""
+    request_digest: str = ""
+    prompt: str = ""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        checkpoint_key: str,
+        resume_attempt: int,
+        interaction_id: str,
+        logical_cycle: int,
+        operation_id: str,
+        tool_call_id: str,
+        request_digest: str,
+        prompt: str,
+        cycle_index: int,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="host_interaction_requested",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "checkpoint_key", _host_interaction_identity(checkpoint_key, "checkpoint_key"))
+        object.__setattr__(self, "resume_attempt", _positive_event_integer(resume_attempt, "resume_attempt"))
+        object.__setattr__(self, "interaction_id", _host_interaction_identity(interaction_id, "interaction_id"))
+        object.__setattr__(self, "logical_cycle", _host_interaction_cycle(logical_cycle, "logical_cycle"))
+        object.__setattr__(self, "operation_id", _host_interaction_identity(operation_id, "operation_id"))
+        object.__setattr__(self, "tool_call_id", _host_interaction_identity(tool_call_id, "tool_call_id"))
+        object.__setattr__(self, "request_digest", _host_interaction_digest(request_digest, "request_digest"))
+        object.__setattr__(self, "prompt", _host_interaction_prompt(prompt))
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload.update(
+            {
+                "checkpoint_key": self.checkpoint_key,
+                "resume_attempt": self.resume_attempt,
+                "interaction_id": self.interaction_id,
+                "logical_cycle": self.logical_cycle,
+                "operation_id": self.operation_id,
+                "tool_call_id": self.tool_call_id,
+                "request_digest": self.request_digest,
+                "prompt": self.prompt,
+            }
+        )
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class HostInteractionResponseConsumedEvent(RunEvent):
+    checkpoint_key: str = ""
+    resume_attempt: int = 1
+    interaction_id: str = ""
+    logical_cycle: int = 1
+    operation_id: str = ""
+    tool_call_id: str = ""
+    request_digest: str = ""
+    command_id: str = ""
+    response_digest: str = ""
+    consumed_revision: int = 0
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        checkpoint_key: str,
+        resume_attempt: int,
+        interaction_id: str,
+        logical_cycle: int,
+        operation_id: str,
+        tool_call_id: str,
+        request_digest: str,
+        command_id: str,
+        response_digest: str,
+        consumed_revision: int,
+        cycle_index: int,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _set_run_event_fields(
+            self,
+            type="host_interaction_response_consumed",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "checkpoint_key", _host_interaction_identity(checkpoint_key, "checkpoint_key"))
+        object.__setattr__(self, "resume_attempt", _positive_event_integer(resume_attempt, "resume_attempt"))
+        object.__setattr__(self, "interaction_id", _host_interaction_identity(interaction_id, "interaction_id"))
+        object.__setattr__(self, "logical_cycle", _host_interaction_cycle(logical_cycle, "logical_cycle"))
+        object.__setattr__(self, "operation_id", _host_interaction_identity(operation_id, "operation_id"))
+        object.__setattr__(self, "tool_call_id", _host_interaction_identity(tool_call_id, "tool_call_id"))
+        object.__setattr__(self, "request_digest", _host_interaction_digest(request_digest, "request_digest"))
+        object.__setattr__(self, "command_id", _host_interaction_identity(command_id, "command_id"))
+        object.__setattr__(self, "response_digest", _host_interaction_digest(response_digest, "response_digest"))
+        if isinstance(consumed_revision, bool) or not isinstance(consumed_revision, int) or consumed_revision < 0:
+            raise ValueError("Run event consumed_revision must be a non-negative integer")
+        object.__setattr__(self, "consumed_revision", consumed_revision)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload.update(
+            {
+                "checkpoint_key": self.checkpoint_key,
+                "resume_attempt": self.resume_attempt,
+                "interaction_id": self.interaction_id,
+                "logical_cycle": self.logical_cycle,
+                "operation_id": self.operation_id,
+                "tool_call_id": self.tool_call_id,
+                "request_digest": self.request_digest,
+                "command_id": self.command_id,
+                "response_digest": self.response_digest,
+                "consumed_revision": self.consumed_revision,
+            }
+        )
         return payload
 
 
@@ -2795,8 +3034,8 @@ def _required_event_text(value: Any, field_name: str) -> str:
 
 
 def _positive_event_integer(value: Any, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"Run event {field_name} must be a positive integer")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _JSON_SAFE_INTEGER_MAX:
+        raise ValueError(f"Run event {field_name} must be a positive JSON-safe integer")
     return value
 
 
@@ -2877,6 +3116,44 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         _diagnostic_level(payload.get("level"))
         _required_event_text(payload.get("code"), "code")
         _diagnostic_details(payload.get("details"))
+    if payload["type"] == "host_interaction_requested":
+        _host_interaction_identity(payload.get("checkpoint_key"), "checkpoint_key")
+        _positive_event_integer(payload.get("resume_attempt"), "resume_attempt")
+        _host_interaction_identity(payload.get("interaction_id"), "interaction_id")
+        _host_interaction_cycle(payload.get("logical_cycle"), "logical_cycle")
+        _host_interaction_identity(payload.get("operation_id"), "operation_id")
+        _host_interaction_identity(payload.get("tool_call_id"), "tool_call_id")
+        request_digest = _host_interaction_digest(payload.get("request_digest"), "request_digest")
+        prompt = _host_interaction_prompt(payload.get("prompt"))
+        expected_digest = canonical_json_sha256(
+            {
+                "interaction_id": payload["interaction_id"],
+                "logical_cycle": payload["logical_cycle"],
+                "operation_id": payload["operation_id"],
+                "prompt": prompt,
+                "schema_version": "vv-agent.host-interaction-request.v1",
+                "tool_call_id": payload["tool_call_id"],
+            },
+            "host_interaction_request",
+        )
+        if request_digest != expected_digest:
+            raise ValueError("Run event request_digest does not match host interaction request")
+    if payload["type"] == "host_interaction_response_consumed":
+        _host_interaction_identity(payload.get("checkpoint_key"), "checkpoint_key")
+        _positive_event_integer(payload.get("resume_attempt"), "resume_attempt")
+        _host_interaction_identity(payload.get("interaction_id"), "interaction_id")
+        _host_interaction_cycle(payload.get("logical_cycle"), "logical_cycle")
+        _host_interaction_identity(payload.get("operation_id"), "operation_id")
+        _host_interaction_identity(payload.get("tool_call_id"), "tool_call_id")
+        _host_interaction_digest(payload.get("request_digest"), "request_digest")
+        _host_interaction_identity(payload.get("command_id"), "command_id")
+        _host_interaction_digest(payload.get("response_digest"), "response_digest")
+        if (
+            isinstance(payload.get("consumed_revision"), bool)
+            or not isinstance(payload.get("consumed_revision"), int)
+            or payload["consumed_revision"] < 0
+        ):
+            raise ValueError("Run event consumed_revision must be a non-negative integer")
     if payload["type"] in {"model_call_started", "model_call_completed", "model_call_failed"}:
         _required_event_text(payload.get("call_id"), "call_id")
         _required_event_text(payload.get("operation_id"), "operation_id")
@@ -3125,6 +3402,32 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
     if event_type == "run_state_changed":
         return RunStateChangedEvent(
             state=str(payload.get("state") or ""),
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "host_interaction_requested":
+        return HostInteractionRequestedEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            resume_attempt=payload["resume_attempt"],
+            interaction_id=payload["interaction_id"],
+            logical_cycle=payload["logical_cycle"],
+            operation_id=payload["operation_id"],
+            tool_call_id=payload["tool_call_id"],
+            request_digest=payload["request_digest"],
+            prompt=payload["prompt"],
+            **_with_cycle_and_agent(payload, common),
+        )
+    if event_type == "host_interaction_response_consumed":
+        return HostInteractionResponseConsumedEvent(
+            checkpoint_key=payload["checkpoint_key"],
+            resume_attempt=payload["resume_attempt"],
+            interaction_id=payload["interaction_id"],
+            logical_cycle=payload["logical_cycle"],
+            operation_id=payload["operation_id"],
+            tool_call_id=payload["tool_call_id"],
+            request_digest=payload["request_digest"],
+            command_id=payload["command_id"],
+            response_digest=payload["response_digest"],
+            consumed_revision=payload["consumed_revision"],
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "diagnostic":

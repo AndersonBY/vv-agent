@@ -648,12 +648,19 @@ def test_checkpoint_invalid_fixture_cases_have_stable_codes() -> None:
         "unknown_required_extension": "checkpoint_required_extension_unavailable",
         "invalid_extension_namespace": "checkpoint_extension_namespace_invalid",
         "unknown_top_level_is_rejected": "checkpoint_unknown_field",
+        "old_v7_schema_is_rejected_forward_only": "checkpoint_schema_unsupported",
     }
     for case in fixture["invalid_cases"]:
         registered = [] if case["name"] == "unknown_required_extension" else None
+        payload = case.get("payload")
+        if payload is None:
+            base_name = case.get("base_valid_case")
+            payload = deepcopy(next(item["payload"] for item in fixture["valid_cases"] if item["name"] == base_name))
+            for field_name, replacement in case.get("mutation", {}).get("replace", {}).items():
+                payload[field_name] = replacement
         with pytest.raises(CheckpointError) as error:
             checkpoint_from_dict(
-                case["payload"],
+                payload,
                 registered_extensions=registered,
             )
         assert error.value.code == expected_codes[case["name"]]
@@ -1289,7 +1296,8 @@ def test_operator_abort_finalize_preserves_ambiguous_evidence(
         status=AgentStatus.FAILED,
         messages=checkpoint.messages,
         cycles=checkpoint.cycles,
-        error="operator_abort_with_unknown_outcome",
+        error="failed",
+        error_code="operator_abort_with_unknown_outcome",
         completion_reason=CompletionReason.FAILED,
         checkpoint_key=checkpoint.checkpoint_key,
         resume_observation=ResumeObservation(
@@ -1386,7 +1394,8 @@ def test_claimed_operator_abort_preserves_ambiguous_journal(
         status=AgentStatus.FAILED,
         messages=claimed.messages,
         cycles=claimed.cycles,
-        error="operator_abort_with_unknown_outcome",
+        error="failed",
+        error_code="operator_abort_with_unknown_outcome",
         completion_reason=CompletionReason.FAILED,
         checkpoint_key=claimed.checkpoint_key,
         resume_observation=observation,

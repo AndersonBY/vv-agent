@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `7.0.1` at revision
-`fd3352a1c3a17dd5d7ff01e5e9dcceee9e038a19`. Its immutable release artifact has
-SHA-256 `4358b9dbae6b51c476677b0c4d48fd02d7acd2fffc5bb1170276654e1f2bb6a5`.
+`contract.lock.json` selects contract `8.1.0` at revision
+`90b9b40ef91538b03b925a9f64eff69b6d73305a`. Its immutable release artifact has
+SHA-256 `9bf75cec30d04cda987beff4ae021cce62ec4624ba7547cd9440678869ee541f`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,8 +44,8 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-7.0.1.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v7.0.1/vv-agent-contract-7.0.1.zip
+  --artifact /path/to/vv-agent-contract-8.1.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v8.1.0/vv-agent-contract-8.1.0.zip
 ```
 
 ## Python Producer Map
@@ -61,6 +61,8 @@ python3 scripts/contract_snapshot.py sync \
 | Agent, Runner, result, and live control | `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `src/vv_agent/run_handle.py`, `src/vv_agent/result.py` |
 | Typed events | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `tests/test_events_contract.py`, `tests/test_event_validation.py`, `tests/test_runner_events_producer_parity.py` |
 | Durable deferred tools and claimed-checkpoint producer evidence | `src/vv_agent/deferred.py`, `src/vv_agent/runtime/tool_call_runner.py`, `src/vv_agent/runtime/stores/`; `tests/test_deferred_tools.py`, `tests/test_checkpoint_resume_events.py` |
+| Typed host-interaction producer, claim-fenced controller admission, and App Server wait projection | `src/vv_agent/runtime/controller.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/context.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/stores/`, `src/vv_agent/app_server/item_mapper.py`, `src/vv_agent/app_server/run_adapter.py`; `tests/test_runtime_controller.py`, `tests/test_app_server_item_mapper.py`, `tests/test_app_server_controller_action.py` |
+
 | LLM stream projection | `src/vv_agent/llm/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_llm_interface.py`, `tests/test_runner_events_producer_parity.py` |
 | Configured children | `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/sub_task_manager.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_sub_agent_runtime.py` |
 | Sessions | `src/vv_agent/sessions/`, `src/vv_agent/interactive.py`, `tests/test_session_store_parity.py`, `tests/test_interactive_lifecycle_contract.py` |
@@ -71,6 +73,19 @@ python3 scripts/contract_snapshot.py sync \
 | Distributed execution | `src/vv_agent/runtime/backends/distributed.py`, `src/vv_agent/runtime/backends/celery_tasks.py`, `tests/test_distributed_checkpoint.py` |
 | App Server | `src/vv_agent/app_server/usage_projection.py`, `src/vv_agent/app_server/item_mapper.py`, `src/vv_agent/app_server/run_adapter.py`, `tests/test_app_server_contract_parity.py`, `tests/test_app_server_item_mapper.py` |
 | Output validation | `src/vv_agent/output_validation.py`, `src/vv_agent/runner.py`, `tests/test_output_validation_contract.py` |
+
+### Python/Rust public-surface adaptations
+
+The Python `RunEventStore.append()` sink remains a `None`-returning best-effort
+append, while the optional `IdempotentRunEventStore.append_once()` capability
+returns the typed `EventCursor`; this is the Python spelling of Rust's default
+unsupported `append_once` method plus its idempotent store trait. Checkpoint
+recovery code only selects the typed capability after an `append_once` runtime
+check and otherwise uses the raw-sink cursor. `CheckpointStore` declares the
+checkpoint, deferred, controller, host-record, and notification CAS surfaces;
+cycle-broker receipts are deliberately not part of that language-neutral
+protocol. Python's optional `DispatchOutboxStore` is a Celery transport
+adaptation injected by the host, not a second checkpoint contract.
 
 A parser-only test cannot prove producer parity. Every declared field must be
 consumed by the planner, runtime, adapter, store, or protocol projection that
@@ -161,7 +176,7 @@ own ambiguity and replay decisions.
 
 ### Persistence
 
-Checkpoint records require `vv-agent.checkpoint.v7`; run definitions require
+Checkpoint records require `vv-agent.checkpoint.v8`; run definitions require
 `vv-agent.run-definition.v5`; distributed envelopes require
 `vv-agent.distributed-run.v5`. The frozen definition stores `prompt_bundle`,
 not a second independently editable flattened system prompt. Readers reject every other shape before claim or
@@ -188,6 +203,28 @@ result. The scheduler reloads the authoritative checkpoint after every response
 or transport failure. Public `AgentResult` readers require the complete current
 shape, reject unknown fields, and require absent optional fields to be omitted
 rather than encoded as null.
+
+Cycle dispatch receipts are a Python transport adaptation, implemented by
+`runtime/dispatch_outbox.py` and enabled only when a host explicitly injects a
+`DispatchOutboxStore` into `CeleryBackend`. In that mode `start()` and
+`advance()` CAS the stable envelope `job_id` into the adapter's owner/lease/
+attempt receipt; a completed receipt replay returns without a second broker
+call. The adapter's reaper is host-owned and must be scheduled by the Celery
+host; vv-agent core does not run a periodic dispatch reaper. The
+controller-command wake outbox remains a separate closed-command lifecycle and
+must not be used for cycle envelopes.
+
+Without the adapter, Celery performs an explicit at-least-once enqueue with the
+stable `job_id` as its task id. Broker publication is not claimed to be
+exactly-once; the worker's authoritative checkpoint claim/CAS is the
+exactly-once state-transition boundary, so duplicate delivery cannot create a
+second model/tool/state transition. Rust's Apalis integration may use the same
+enqueue-only stable idempotency key and worker checkpoint CAS without exposing
+the Python adapter. If an injected adapter is used, a crash before or after
+`send_task()` may leave a claimed receipt; the host reaper marks it `ambiguous`
+for explicit reconciliation/retry using the same task id. The receipt digest
+excludes only scheduling metadata (`deadline_unix_ms`, `claim_mode`, and
+`resume_attempt`); immutable task/run/checkpoint identity must match on replay.
 
 ### Model Usage And Memory
 
@@ -258,8 +295,8 @@ behavior remains identical:
 - Python exposes `DistributedRunHandle`, `DistributedDeliveryOutcome`, and
   `DistributedAdvanceDecision` as the passive handle, transport observation,
   and one-step scheduler decision mapped by the central nonblocking driver
-  contract. `CeleryBackend.start()` and `advance()` are enqueue-only; synchronous
-  `execute()` remains a separate controller entry point.
+  contract. `CeleryBackend.start()` and `advance()` are enqueue-only;
+  synchronous `execute_local()` remains a separate local-only controller entry point.
 - Python settings-file resolution maps to Rust's explicit `ModelProvider`.
 
 ## Completion Gate

@@ -9,6 +9,7 @@ from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
     AssistantDeltaEvent,
+    HostInteractionRequestedEvent,
     ModelCallCompletedEvent,
     ModelCallFailedEvent,
     ModelCallStartedEvent,
@@ -17,6 +18,7 @@ from vv_agent.events import (
     RunEvent,
     RunFailedEvent,
     RunStartedEvent,
+    RunStateChangedEvent,
     ToolCallCompletedEvent,
     ToolCallDeferredEvent,
     ToolCallPlannedEvent,
@@ -38,6 +40,35 @@ def item_id_for_event(event: RunEvent) -> str:
 
 
 def map_run_event(event: RunEvent, *, thread_id: str, turn_id: str) -> ItemProjection:
+    if isinstance(event, HostInteractionRequestedEvent):
+        # The execution event changes the public wait state, but the prompt is
+        # hydrated by RunAdapter exclusively from the durable UI notification
+        # outbox.  Keeping this projection prompt-free prevents event replay
+        # from becoming a second public data source.
+        return ItemProjection(
+            notification_method="thread/status/changed",
+            notification_params={
+                "threadId": thread_id,
+                "status": "interrupted",
+                "waitReason": "host_interaction",
+            },
+        )
+    if isinstance(event, RunStateChangedEvent):
+        if event.state == "suspended":
+            return ItemProjection(
+                notification_method="thread/status/changed",
+                notification_params={
+                    "threadId": thread_id,
+                    "status": "interrupted",
+                    "waitReason": "suspended",
+                },
+            )
+        if event.state == "running":
+            return ItemProjection(
+                notification_method="thread/status/changed",
+                notification_params={"threadId": thread_id, "status": "running"},
+            )
+        return ItemProjection()
     if isinstance(event, RunStartedEvent):
         item = _item(
             event,

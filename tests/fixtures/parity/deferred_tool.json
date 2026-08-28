@@ -1,7 +1,7 @@
 {
   "contract": "durable_deferred_tool",
   "schema_version": "vv-agent.durable-deferred-tool.v2",
-  "contract_version": "7.0.1",
+  "contract_version": "8.1.0",
   "scope": "framework_host_boundary_only",
   "versioning": {
     "forward_only": true,
@@ -13,6 +13,8 @@
     "agent_status": [
       "pending",
       "running",
+      "host_interaction",
+      "suspended",
       "deferred",
       "reconciliation_required",
       "wait_user",
@@ -29,6 +31,8 @@
     ],
     "deferred_is_distinct_from": [
       "running",
+      "host_interaction",
+      "suspended",
       "wait_response",
       "reconciliation_required",
       "ToolExecutionResult"

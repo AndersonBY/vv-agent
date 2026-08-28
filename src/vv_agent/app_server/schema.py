@@ -100,6 +100,8 @@ def _definitions() -> dict[str, dict[str, Any]]:
                 "type": "string",
                 "enum": [
                     "running",
+                    "host_interaction",
+                    "suspended",
                     "deferred",
                     "reconciliation_required",
                     "wait_user",
@@ -182,6 +184,7 @@ def _definitions() -> dict[str, dict[str, Any]]:
                 "notificationOptOut": {"type": "boolean"},
                 "schemaExport": {"type": "boolean"},
                 "approvalResolve": {"type": "boolean"},
+                "controllerAdmission": {"type": "boolean"},
             },
             required=["modelList", "threadLifecycle", "notificationOptOut", "schemaExport", "approvalResolve"],
         ),
@@ -208,6 +211,7 @@ def _definitions() -> dict[str, dict[str, Any]]:
             {"threadId": {"type": "string"}, "afterItemId": {"type": "string"}},
             required=["threadId"],
         ),
+        "ThreadStatusParams": _object({"threadId": {"type": "string"}}, required=["threadId"]),
         "ThreadListParams": _object(
             {
                 "includeArchived": {"type": "boolean"},
@@ -256,6 +260,37 @@ def _definitions() -> dict[str, dict[str, Any]]:
             },
             required=["threadId"],
         ),
+        "TurnActionParams": _object(
+            {
+                "threadId": {"type": "string", "minLength": 1, "maxLength": 512},
+                "turnId": {"type": "string", "minLength": 1, "maxLength": 512},
+                "actionId": {"type": "string", "minLength": 1, "maxLength": 512},
+                "action": {
+                    "oneOf": [
+                        _object(
+                            {
+                                "kind": {"const": "respond"},
+                                "message": {
+                                    "type": "object",
+                                    "properties": {
+                                        "role": {"const": "user"},
+                                        "content": {"type": "string", "minLength": 1, "maxLength": 65536},
+                                    },
+                                    "required": ["role", "content"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            required=["kind", "message"],
+                        ),
+                        *[
+                            _object({"kind": {"const": kind}}, required=["kind"])
+                            for kind in ("suspend", "resume", "cancel", "abort")
+                        ],
+                    ]
+                },
+            },
+            required=["threadId", "turnId", "actionId", "action"],
+        ),
         "ApprovalRequestParams": approval_request,
         "ApprovalResolveParams": approval_resolve,
         "InputItem": input_item,
@@ -274,7 +309,12 @@ def _definitions() -> dict[str, dict[str, Any]]:
             required=["threadId", "agentKey", "cwd", "status"],
         ),
         "ThreadStatusChangedParams": _object(
-            {"threadId": {"type": "string"}, "status": {"type": "string"}},
+            {
+                "threadId": {"type": "string"},
+                "status": {"type": "string"},
+                "waitReason": {"type": "string"},
+                "prompt": {"type": "string"},
+            },
             required=["threadId", "status"],
         ),
         "ThreadArchivedParams": _object(
@@ -389,6 +429,15 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
             },
             required=["threadId", "subscribed", "closed"],
         ),
+        "ThreadStatusResponse": _object(
+            {
+                "threadId": {"type": "string"},
+                "status": {"type": "string"},
+                "waitReason": {"type": "string"},
+                "prompt": {"type": "string"},
+            },
+            required=["threadId", "status"],
+        ),
         "TurnStartResponse": _object(
             {
                 "threadId": {"type": "string"},
@@ -430,6 +479,17 @@ def _result_definitions() -> dict[str, dict[str, Any]]:
             },
             required=["threadId", "turnId", "cancelled"],
         ),
+        "TurnActionResponse": _object(
+            {
+                "threadId": {"type": "string"},
+                "turnId": {"type": "string"},
+                "actionId": {"type": "string"},
+                "accepted": {"type": "boolean"},
+                "status": {"type": "string"},
+                "waitReason": {"type": "string"},
+            },
+            required=["threadId", "turnId", "actionId", "accepted", "status"],
+        ),
         "ApprovalResolveResponse": _object({}),
         "SchemaExportResponse": _object(
             {"jsonSchema": STRING_MAP, "typescript": STRING_MAP}, required=["jsonSchema", "typescript"]
@@ -444,6 +504,7 @@ CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "thread/start": ("ThreadStartParams", True, False),
     "thread/resume": ("ThreadResumeParams", True, True),
     "thread/read": ("ThreadReadParams", True, True),
+    "thread/status": ("ThreadStatusParams", True, True),
     "thread/list": ("ThreadListParams", True, False),
     "thread/archive": ("ThreadIdParams", True, True),
     "thread/unsubscribe": ("ThreadIdParams", True, True),
@@ -452,6 +513,7 @@ CLIENT_METHOD_SPECS: dict[str, tuple[str | None, bool, bool]] = {
     "turn/steer": ("TurnSteerParams", True, True),
     "turn/followUp": ("TurnFollowUpParams", True, True),
     "turn/interrupt": ("TurnInterruptParams", True, True),
+    "turn/action": ("TurnActionParams", True, True),
     "approval/resolve": ("ApprovalResolveParams", True, True),
     "schema/export": ("EmptyParams", True, False),
 }
@@ -648,10 +710,10 @@ export type RequestId = string | number;
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export type JsonObject = { [key: string]: JsonValue };
 export type ApprovalDecision = "allow" | "allow_session" | "deny" | "timeout";
-export type ThreadStatus = "idle" | "running" | "archived" | "closed";
+export type ThreadStatus = "idle" | "running" | "interrupted" | "archived" | "closed";
 export type TurnStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
 export type CheckpointStatus =
-  | "running" | "deferred" | "reconciliation_required" | "wait_user"
+  | "running" | "host_interaction" | "suspended" | "deferred" | "reconciliation_required" | "wait_user"
   | "completed" | "failed" | "max_cycles";
 export type AppItemStatus = "started" | "inProgress" | "completed" | "failed";
 
@@ -711,6 +773,7 @@ export interface ThreadResumeResponse { thread: AppThread; turns: AppTurn[]; ite
 export interface ThreadListResponse { threads: AppThread[]; }
 export interface ThreadArchiveResponse { threadId: string; archived: boolean; }
 export interface ThreadUnsubscribeResponse { threadId: string; subscribed: boolean; closed: boolean; }
+export interface ThreadStatusResponse { threadId: string; status: ThreadStatus; waitReason?: string; prompt?: string; }
 export interface TurnStartResponse { threadId: string; turnId: string; status: TurnStatus; }
 export interface CheckpointSummary {
   key: string; resumeAttempt: number; cycleIndex: number; status: CheckpointStatus;
@@ -727,7 +790,15 @@ export interface TurnResumeResponse {
 }
 export interface TurnQueueResponse { threadId: string; turnId: string; queued: boolean; }
 export interface TurnInterruptResponse { threadId: string; turnId: string; cancelled: boolean; }
-export interface ThreadStatusChangedParams { threadId: string; status: ThreadStatus; }
+export type TurnAction =
+  | { kind: "respond"; message: { role: "user"; content: string } }
+  | { kind: "suspend" } | { kind: "resume" } | { kind: "cancel" } | { kind: "abort" };
+export interface TurnActionParams { threadId: string; turnId: string; actionId: string; action: TurnAction; }
+export interface TurnActionResponse {
+  threadId: string; turnId: string; actionId: string; accepted: boolean;
+  status: TurnStatus; waitReason?: string;
+}
+export interface ThreadStatusChangedParams { threadId: string; status: ThreadStatus; waitReason?: string; prompt?: string; }
 export interface ThreadClosedParams { threadId: string; }
 export interface TurnStartedParams { threadId: string; turnId: string; runId?: string; status?: TurnStatus; }
 export interface TurnCompletedParams {
@@ -746,6 +817,7 @@ export type ClientRequest =
   | { jsonrpc: "2.0"; id: RequestId; method: "thread/start"; params?: ThreadStartParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "thread/resume"; params: ThreadResumeParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "thread/read"; params: ThreadReadParams }
+  | { jsonrpc: "2.0"; id: RequestId; method: "thread/status"; params: ThreadIdParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "thread/archive" | "thread/unsubscribe"; params: ThreadIdParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "thread/list"; params?: ThreadListParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "turn/start"; params: TurnStartParams }
@@ -753,6 +825,7 @@ export type ClientRequest =
   | { jsonrpc: "2.0"; id: RequestId; method: "turn/steer"; params: TurnSteerParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "turn/followUp"; params: TurnFollowUpParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "turn/interrupt"; params: TurnInterruptParams }
+  | { jsonrpc: "2.0"; id: RequestId; method: "turn/action"; params: TurnActionParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "approval/resolve"; params: ApprovalResolveParams }
   | { jsonrpc: "2.0"; id: RequestId; method: "schema/export"; params?: Record<string, never> };
 
@@ -775,7 +848,7 @@ export type ServerRequest = {
 };
 export type ClientResult =
   | InitializeResponse | ModelListResponse | ThreadStartResponse | ThreadReadResponse
-  | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | ThreadUnsubscribeResponse
+  | ThreadResumeResponse | ThreadListResponse | ThreadArchiveResponse | ThreadUnsubscribeResponse | ThreadStatusResponse
   | TurnStartResponse | TurnResumeResponse | TurnQueueResponse | TurnInterruptResponse | ApprovalResolveResponse
   | SchemaExportResponse;
 export type JsonRpcSuccess = { jsonrpc: "2.0"; id: RequestId; result: ClientResult | JsonValue };

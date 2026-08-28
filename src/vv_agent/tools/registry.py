@@ -21,7 +21,7 @@ class ToolRegistry:
     _tools: dict[str, ToolSpec] = field(default_factory=dict)
     _schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
     _executors: dict[str, ToolExecutor] = field(default_factory=dict)
-    _planner_extra_tool_names: set[str] = field(default_factory=set)
+    _planner_extra_tool_names: list[str] = field(default_factory=list)
 
     def register(self, spec: ToolSpec) -> None:
         if spec.name in self._tools:
@@ -71,6 +71,10 @@ class ToolRegistry:
     def list_planner_extra_tool_names(self) -> list[str]:
         return list(self._planner_extra_tool_names)
 
+    def _add_planner_extra_tool_name(self, name: str) -> None:
+        if name not in self._planner_extra_tool_names:
+            self._planner_extra_tool_names.append(name)
+
     def has_executor(self, name: str) -> bool:
         return name in self._executors
 
@@ -104,7 +108,7 @@ class ToolRegistry:
             self.register_schema(executor.name, executor.openai_schema(None))
         self._tools[executor.name] = executor.spec(None)
         if planner_extra and is_model_visible:
-            self._planner_extra_tool_names.add(executor.name)
+            self._add_planner_extra_tool_name(executor.name)
 
     def has_schema(self, name: str) -> bool:
         return name in self._schemas
@@ -150,7 +154,7 @@ class ToolRegistry:
                 tool_metadata=normalized_tool_metadata,
             )
         )
-        self._planner_extra_tool_names.add(name)
+        self._add_planner_extra_tool_name(name)
 
     def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult | ToolCallOutcome:
         return self.get_executor(call.name).execute(call, context)

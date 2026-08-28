@@ -142,6 +142,53 @@
       ],
       "deferred_has_no_tool_result": true,
       "missing_required_completed_fields": "reject"
+    },
+    "host_interaction_fields": {
+      "event_types": [
+        "host_interaction_requested",
+        "host_interaction_response_consumed"
+      ],
+      "version": "v4",
+      "required_identity": [
+        "event_id",
+        "run_id",
+        "trace_id",
+        "cycle_index",
+        "checkpoint_key",
+        "resume_attempt",
+        "interaction_id",
+        "logical_cycle",
+        "operation_id",
+        "tool_call_id",
+        "request_digest"
+      ],
+      "identity_max_utf8_bytes": 512,
+      "identity_fields": [
+        "event_id",
+        "run_id",
+        "trace_id",
+        "checkpoint_key",
+        "interaction_id",
+        "operation_id",
+        "tool_call_id",
+        "command_id"
+      ],
+      "request_digest_max_utf8_bytes": 64,
+      "requested_required": ["prompt"],
+      "response_consumed_required": ["command_id", "response_digest", "consumed_revision"],
+      "response_consumed": {
+        "version": "v4",
+        "consumed_revision": "positive_json_safe_integer",
+        "response_digest": "lowercase_sha256",
+        "event_outbox_entry_must_be_complete": true
+      },
+      "prompt_and_response_digest": "strict credential-redacted UTF-8 content; max 65536 bytes",
+      "unknown_fields": "reject"
+    },
+    "event_outbox": {
+      "registered_types_source": "fixtures/run_events.jsonl",
+      "entry_shape": "complete RunEvent v4 object, not a marker string",
+      "unknown_type": "reject"
     }
   },
   "reject": [
@@ -1282,6 +1329,53 @@
         "execution_started": true,
         "duration_ms": 4
       }
+    },
+    {
+      "id": "host_interaction_requested_prompt_over_utf8_limit",
+      "input": {
+        "version": "v4",
+        "type": "host_interaction_requested",
+        "event_id": "evt_invalid_host_prompt",
+        "run_id": "run-invalid-host",
+        "trace_id": "trace-invalid-host",
+        "created_at": 1,
+        "cycle_index": 3,
+        "checkpoint_key": "checkpoint/controller-42",
+        "resume_attempt": 2,
+        "interaction_id": "interaction-42",
+        "logical_cycle": 4,
+        "operation_id": "op_host_cycle_4",
+        "tool_call_id": "call_host_4",
+        "request_digest": "6eb7f7953c3aaa93c94dfe723ffa00aecb877505af29f2730b9950c20961c787",
+        "prompt": "65537 UTF-8 bytes"
+      },
+      "mutation": "host_interaction_requested.prompt encodes to 65537 UTF-8 bytes",
+      "error": "host_interaction_content_too_large"
+    },
+    {
+      "id": "host_interaction_consumed_unknown_field",
+      "input": {
+        "version": "v4",
+        "type": "host_interaction_response_consumed",
+        "event_id": "evt_invalid_host_consumed",
+        "run_id": "run-invalid-host",
+        "trace_id": "trace-invalid-host",
+        "created_at": 1,
+        "cycle_index": 3,
+        "checkpoint_key": "checkpoint/controller-42",
+        "resume_attempt": 2,
+        "interaction_id": "interaction-42",
+        "logical_cycle": 4,
+        "operation_id": "op_host_cycle_4",
+        "tool_call_id": "call_host_4",
+        "request_digest": "6eb7f7953c3aaa93c94dfe723ffa00aecb877505af29f2730b9950c20961c787",
+        "command_id": "cmd-invalid",
+        "response_digest": "aa15b8660e1f22fcd9c4237b4283b15346500262ab73916645b3aa1d6d9df6b7",
+        "consumed_revision": 10,
+        "internal_command": "forbidden"
+      },
+      "mutation": "host_interaction_response_consumed.internal_command",
+      "error": "event_fields_invalid"
     }
   ]
 }

@@ -115,6 +115,7 @@ def test_initialize_enables_notifications_and_initialized_notification_is_idempo
         "notificationOptOut": True,
         "schemaExport": True,
         "approvalResolve": True,
+        "controllerAdmission": True,
     }
 
     processor._router.send_notification("conn_1", "turn/started", {"threadId": "thread_1", "turnId": "turn_1"})

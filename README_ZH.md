@@ -6,16 +6,22 @@
 
 ## 安装
 
-当前包版本为 `0.11.0`。仓库 `HEAD` 和 Rust `vv-agent` crate 都锁定语言无关的
-Contract `7.0.1`，两边能力一致，只保留符合各自语言习惯的 API 写法。
+当前包版本为 `0.12.0`。本仓库 `HEAD` 锁定语言无关的 Contract `8.1.0`；Rust
+实现的跨仓采用状态和已验证 revision 以中央 support matrix 为准。本实现保留符合
+Python 语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.11.0"
+python -m pip install "vv-agent==0.12.0"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
 `vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
+
+### 0.12.0 重点能力
+
+- `Runner.start_distributed_compiled()` 接受已经编译好的 `AgentTask`，保留其中准备好的
+  runtime 字段，不会再次编译任务，并返回被动的分布式运行句柄。
 
 ### 0.11.0 重点能力
 
@@ -50,7 +56,7 @@ python -m pip install "vv-agent==0.11.0"
   长度。内建工具与自定义工具的旧结果默认都可归档；只有完整内容已经写入不可变 artifact，
   且模型仍能调用 `read_file` 时，runtime 才会把旧结果替换为精简标记。模型只看到短预览和
   恢复路径，大小与哈希等完整性信息只保留在宿主侧。
-- 持久化执行统一使用 `vv-agent.checkpoint.v7`、
+- 持久化执行统一使用 `vv-agent.checkpoint.v8`、
   `vv-agent.run-definition.v5`、`vv-agent.distributed-run.v5` 和
   `vv-agent.distributed-worker-response.v3`，严格限定恢复与分布式 controller
   边界。`RunEvent` 使用 wire version `v4`，SQLite session store 使用
@@ -193,7 +199,7 @@ runtime 事件入口只有强类型 `RunEvent`；任务无关的内部观测统�
 审批短路和未知工具只发出 planned 与 completed，不发 started。completed 事件包含
 `directive`、可空的
 `error_code`、`execution_started` 和可空的单调时钟 `duration_ms`。取消或进程退出可能
-留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v7 operation journal
+留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v8 operation journal
 为准。
 
 需要直接控制 cycle loop 的后端集成仍可使用底层 `AgentRuntime` API。
@@ -410,7 +416,7 @@ result = Runner.run_sync(
 - 在 Windows 上，`bash` 工具启动子进程时还会附带隐藏控制台窗口的启动参数，方便 GUI 宿主调用 `bash` / `powershell` 时不再闪出额外终端窗口。
 - `Runner.run_sync(...)` 与 `Runner.stream_sync(...)` 都会继承编译后的 shell 元数据。
 - `bash` 工具 schema 的 description 会注入运行时 shell 提示（解析后的 shell 类型与调用前缀），模型在调用前即可知道应使用哪种命令风格。
-- 该运行时 shell 提示会在单个 task/session-run 内固化，确保跨 cycles 的 tool schema 文本稳定，保护 LLM prompt cache 命中率。
+- 该运行时 shell 提示仅在本地 LLM request 的单个 task/session-run 内固化，确保跨 cycles 的 request schema 文本稳定并保护 prompt cache 命中率。分布式 run definition 保留已编译 task 规划出的 canonical schema，因此宿主机相关的提示文本不会影响 task-scoped toolset digest。
 - SDK/CLI 自动生成的任务会把一次解析完成的 `PromptBundle` 显式传给 `AgentTask`、每次
   `LlmRequest`、run definition、checkpoint 和分布式执行；通用 metadata 不再承担 prompt
   section 传输。Anthropic 可以按 canonical section 设置缓存断点，其他 provider 接收确定性
@@ -485,6 +491,10 @@ run_config = RunConfig(
     ),
 )
 ```
+
+`dispatch_outbox_store` 是可选的 Celery 传输适配器。需要持久化投递回执时由宿主显式注入，
+并由宿主负责调度 lease reaper；不注入时使用稳定的 cycle task id 和 at-least-once 投递，
+worker 侧 checkpoint claim/CAS 会阻止重复的模型或工具状态副作用。
 
 安装 celery 依赖：`uv sync --extra celery`。
 
