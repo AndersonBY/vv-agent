@@ -38,6 +38,7 @@ EXPECTED_RUNNER_OPERATIONS = (
     "run",
     "start",
     "start_distributed",
+    "start_distributed_compiled",
     "finalize_distributed",
     "stream",
     "resume",
@@ -2002,7 +2003,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             for surface in fixture["surfaces"]
             for group in ("members", "protocol_operations", "supporting_operations")
         )
-        == 306
+        == 307
     )
     assert tuple(member["id"] for member in surfaces["runner"]["members"]) == EXPECTED_RUNNER_OPERATIONS
     assert tuple(member["id"] for member in surfaces["run_handle"]["members"]) == EXPECTED_RUN_HANDLE_OPERATIONS

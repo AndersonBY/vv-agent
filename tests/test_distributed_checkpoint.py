@@ -355,9 +355,20 @@ class _StartProbeBackend(InlineBackend):
 class _CompiledStartProbeBackend(InlineBackend):
     def __init__(self) -> None:
         self.task: AgentTask | None = None
+        self.start_calls = 0
+        self.continuation: Any | None = None
 
-    def start(self, *, task: AgentTask, checkpoint_controller: Any, **_kwargs: Any) -> DistributedRunHandle:
+    def start(
+        self,
+        *,
+        task: AgentTask,
+        checkpoint_controller: Any,
+        continuation: Any | None = None,
+        **_kwargs: Any,
+    ) -> DistributedRunHandle:
+        self.start_calls += 1
         self.task = task
+        self.continuation = continuation
         checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
         assert checkpoint is not None
         return DistributedRunHandle(
@@ -870,7 +881,7 @@ def test_nonblocking_distributed_start_requires_explicit_checkpoint_key() -> Non
     assert exc_info.value.code == "checkpoint_key_required"
 
 
-def test_nonblocking_distributed_start_compiled_task_skips_compiler(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nonblocking_distributed_start_forwards_compiled_task_without_waiting() -> None:
     agent = Agent(name="compiled-start", instructions="Original instructions.", model="test-model")
     task = AgentCompiler().compile(
         agent=agent,
@@ -879,13 +890,11 @@ def test_nonblocking_distributed_start_compiled_task_skips_compiler(monkeypatch:
         resolved=_resolved(),
         trace_id="trace-compiled-start",
     )
+    task.initial_shared_state["prepared_marker"] = "compiled-task"
+    expected_task = task.to_dict()
     backend = _CompiledStartProbeBackend()
     store = InMemoryCheckpointStore()
-
-    def fail_compile(*_args: Any, **_kwargs: Any) -> AgentTask:
-        raise AssertionError("compiled distributed start must not compile again")
-
-    monkeypatch.setattr(AgentCompiler, "compile", fail_compile)
+    continuation = object()
 
     handle = Runner.start_distributed_compiled(
         agent,
@@ -900,11 +909,14 @@ def test_nonblocking_distributed_start_compiled_task_skips_compiler(monkeypatch:
                 store=store,
             ),
         ),
+        continuation=continuation,
     )
 
     assert isinstance(handle, DistributedRunHandle)
+    assert backend.start_calls == 1
+    assert backend.continuation is continuation
     assert backend.task is not None
-    assert backend.task.to_dict() == task.to_dict()
+    assert backend.task.to_dict() == expected_task
 
 
 def test_nonblocking_celery_advance_waits_for_host_interaction_and_suspended_state(tmp_path: Path) -> None:

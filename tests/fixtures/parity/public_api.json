@@ -1663,6 +1663,44 @@
           }
         },
         {
+          "adaptation": "Both implementations accept an already-compiled AgentTask, preserve its prepared runtime fields, do not re-run compile-time producers, and return a passive handle without waiting; language-level calling conventions may differ.",
+          "id": "start_distributed_compiled",
+          "kind": "operation",
+          "python": {
+            "kind": "method",
+            "name": "start_distributed_compiled",
+            "signature": {
+              "async": false,
+              "parameters": [
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "agent",
+                  "required": true
+                },
+                {
+                  "kind": "positional_or_keyword",
+                  "name": "task",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "run_config",
+                  "required": true
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "continuation",
+                  "required": false
+                }
+              ]
+            }
+          },
+          "rust": {
+            "kind": "method",
+            "name": "start_distributed_compiled"
+          }
+        },
+        {
           "adaptation": "Both implementations consume a finalize_required decision in a separate bounded framework finalizer.",
           "id": "finalize_distributed",
           "kind": "operation",

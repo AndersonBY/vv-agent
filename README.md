@@ -6,17 +6,24 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current package release is `0.11.0`. Repository `HEAD` locks
-language-neutral Contract `8.0.1` with the Rust `vv-agent` crate while keeping
-a Python-idiomatic API.
+The current package release is `0.12.0`. This repository's `HEAD` locks
+language-neutral Contract `8.1.0`. The sibling Rust implementation's
+cross-repository adoption state and verified revisions live in the central
+support matrix; this repository keeps a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.11.0"
+python -m pip install "vv-agent==0.12.0"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
 integrations are needed. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
+
+### 0.12.0 Highlights
+
+- `Runner.start_distributed_compiled()` accepts an already compiled `AgentTask`,
+  preserves its prepared runtime fields, and returns the passive distributed
+  handle without compiling the task again.
 
 ### 0.11.0 Highlights
 

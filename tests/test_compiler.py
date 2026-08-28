@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -170,7 +171,7 @@ def test_frozen_checkpoint_uses_current_threshold_and_metadata_without_rewriting
 
 def test_frozen_checkpoint_restores_computer_extra_tools_without_duplicate_builtins() -> None:
     definition = _frozen_definition(run_metadata={})
-    definition["agent"]["type"] = "computer"
+    cast(dict[str, object], definition["agent"])["type"] = "computer"
     definition["tools"] = [
         {"schema": {"function": {"name": TASK_FINISH_TOOL_NAME}}},
         {"schema": {"function": {"name": BASH_TOOL_NAME}}},

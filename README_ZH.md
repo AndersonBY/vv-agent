@@ -6,16 +6,22 @@
 
 ## 安装
 
-当前包版本为 `0.11.0`。仓库 `HEAD` 和 Rust `vv-agent` crate 都锁定语言无关的
-Contract `8.0.1`，两边能力一致，只保留符合各自语言习惯的 API 写法。
+当前包版本为 `0.12.0`。本仓库 `HEAD` 锁定语言无关的 Contract `8.1.0`；Rust
+实现的跨仓采用状态和已验证 revision 以中央 support matrix 为准。本实现保留符合
+Python 语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.11.0"
+python -m pip install "vv-agent==0.12.0"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
 `vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
+
+### 0.12.0 重点能力
+
+- `Runner.start_distributed_compiled()` 接受已经编译好的 `AgentTask`，保留其中准备好的
+  runtime 字段，不会再次编译任务，并返回被动的分布式运行句柄。
 
 ### 0.11.0 重点能力
 
