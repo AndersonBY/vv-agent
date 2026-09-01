@@ -6,17 +6,22 @@
 
 ## 安装
 
-当前包版本为 `0.12.0`。本仓库 `HEAD` 锁定语言无关的 Contract `8.1.0`；Rust
+当前包版本为 `0.12.1`。本仓库 `HEAD` 锁定语言无关的 Contract `8.1.0`；Rust
 实现的跨仓采用状态和已验证 revision 以中央 support matrix 为准。本实现保留符合
 Python 语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.12.0"
+python -m pip install "vv-agent==0.12.1"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
 `vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
+
+### 0.12.1 重点能力
+
+- 分布式 Celery worker 会先根据不可变的 run definition 恢复 planner extra 工具，
+  再校验任务 schema。
 
 ### 0.12.0 重点能力
 

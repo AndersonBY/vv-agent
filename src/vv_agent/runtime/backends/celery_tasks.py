@@ -88,7 +88,7 @@ def _validate_task_and_capabilities(
     checkpoint: Checkpoint,
     registry: DistributedCapabilityRegistry,
     extensions: list[Any],
-) -> None:
+) -> AgentTask:
     config = envelope.checkpoint_config
     assert config is not None
     stored_digest = compute_run_definition_digest(checkpoint.run_definition)
@@ -202,9 +202,28 @@ def _validate_task_and_capabilities(
 
     definition_refs = deepcopy(definition["capability_refs"])
     tool_registry = registry.resolve_toolset(capabilities.toolset_ref, task=task)
+    planning_task = deepcopy(task)
+    definition_tool_names = tuple(
+        function["name"]
+        for item in definition["tools"]
+        if isinstance(item, dict)
+        and isinstance(item.get("schema"), dict)
+        and isinstance((function := item["schema"].get("function")), dict)
+        and isinstance(function.get("name"), str)
+    )
+    definition_tool_name_set = frozenset(definition_tool_names)
+    planner_extra_tool_names = tool_registry.list_planner_extra_tool_names()
+    planning_task.extra_tool_names = [
+        *planning_task.extra_tool_names,
+        *[
+            name
+            for name in planner_extra_tool_names
+            if name in definition_tool_name_set and name not in planning_task.extra_tool_names
+        ],
+    ]
     actual_tools = _tool_definitions(
         registry=tool_registry,
-        task=task,
+        task=planning_task,
         refs=definition_refs,
     )
     if actual_tools != definition["tools"]:
@@ -214,7 +233,7 @@ def _validate_task_and_capabilities(
             "distributed tool schemas do not match the run definition "
             f"(actual_len={len(actual_names)}, expected_len={len(expected_names)}, "
             f"actual_names={actual_names}, expected_names={expected_names}, "
-            f"task_extra_tool_names={task.extra_tool_names}, task_exclude_tools={task.exclude_tools}, "
+            f"task_extra_tool_names={planning_task.extra_tool_names}, task_exclude_tools={planning_task.exclude_tools}, "
             f"registry_planner_extra_tool_names={tool_registry.list_planner_extra_tool_names()}, "
             f"registry_tool_names={tool_registry.list_tool_names()})"
         )
@@ -269,6 +288,7 @@ def _validate_task_and_capabilities(
             "required": reference.required,
         }:
             raise _definition_mismatch(f"distributed checkpoint extension {namespace!r} does not match the run definition")
+    return planning_task
 
 
 def _resolve_checkpoint_capabilities(
@@ -498,7 +518,7 @@ def _run_single_cycle(
             f"checkpoint key {config.key!r} does not exist",
             code="checkpoint_not_found",
         )
-    _validate_task_and_capabilities(
+    task = _validate_task_and_capabilities(
         envelope=envelope,
         checkpoint=existing,
         registry=capability_registry,
@@ -538,9 +558,8 @@ def _run_single_cycle(
     runtime, ctx, sub_task_manager, tool_policy, host_cost_meter = _rebuild_runtime(
         envelope.recipe,
         capability_registry,
-        task=envelope.task,
+        task=task,
     )
-    task = envelope.task
     if tool_policy.allowed_tools is None:
         task.metadata.pop("_vv_agent_allowed_tools", None)
     else:

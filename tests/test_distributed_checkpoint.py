@@ -864,6 +864,143 @@ def test_nonblocking_computer_start_uses_canonical_tool_schemas(tmp_path: Path) 
     assert "Runtime shell hint" not in bash_schema["function"]["description"]
 
 
+@pytest.mark.parametrize(
+    ("envelope_tool_names", "expect_rejection"),
+    [
+        pytest.param(["planner_extra_alpha"], False, id="repairs-agreed-omission"),
+        pytest.param(
+            ["planner_extra_alpha", "planner_extra_unagreed"],
+            True,
+            id="rejects-definition-unagreed-extra",
+        ),
+    ],
+)
+def test_celery_worker_merges_registry_planner_extras_before_schema_validation(
+    tmp_path: Path,
+    envelope_tool_names: list[str],
+    expect_rejection: bool,
+) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.planner-extras", "1")
+    llm_ref = CapabilityRef("llm.planner-extras", "1")
+    worker_model_calls = 0
+    tool_names = ("planner_extra_alpha", "planner_extra_beta")
+    unagreed_tool_name = "planner_extra_unagreed"
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+
+    def invoke(_context: Any, _arguments: dict[str, Any]) -> ToolOutputText:
+        return ToolOutputText(text="ok")
+
+    local_tools = [
+        FunctionTool(
+            name=name,
+            description=f"Run {name}.",
+            params_json_schema=schema,
+            on_invoke=invoke,
+        )
+        for name in tool_names
+    ]
+    worker_tools = build_default_registry()
+    worker_tools.register_executor(FunctionToolExecutor(local_tools[0]))
+    worker_tools.register_executor(FunctionToolExecutor(local_tools[1]))
+    worker_tools.register_executor(
+        FunctionToolExecutor(
+            FunctionTool(
+                name=unagreed_tool_name,
+                description=f"Run {unagreed_tool_name}.",
+                params_json_schema=schema,
+                on_invoke=invoke,
+            )
+        )
+    )
+    toolset_ref = ToolsetRef(
+        id="toolset.planner-extras",
+        version="1",
+        schema_digest=toolset_schema_digest(worker_tools),
+    )
+    registry = DistributedCapabilityRegistry()
+    registry.register_toolset(toolset_ref, worker_tools)
+    registry.register("checkpoint_store", checkpoint_ref, store)
+
+    def worker_complete(_request: Any) -> LLMResponse:
+        nonlocal worker_model_calls
+        worker_model_calls += 1
+        return LLMResponse(content="worker answer")
+
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[worker_complete]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            toolset_ref=toolset_ref,
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+
+    def omit_one_planner_extra(envelope: dict[str, Any]) -> None:
+        task = envelope["task"]
+        assert task["extra_tool_names"] == list(tool_names)
+        task["extra_tool_names"] = envelope_tool_names
+
+    app = _ImmediateApp(
+        registry=registry,
+        store=store,
+        mutate_envelope=omit_one_planner_extra,
+    )
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=recipe,
+        dispatch_timeout_seconds=5,
+    )
+
+    def run_agent() -> Any:
+        return Runner.run_sync(
+            Agent(
+                name="planner-extras-agent",
+                instructions="Return one answer.",
+                model="test-model",
+                tools=local_tools,
+            ),
+            "answer without tools",
+            run_config=RunConfig(
+                model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+                execution_backend=backend,
+                max_cycles=1,
+                no_tool_policy="finish",
+                checkpoint_config=CheckpointConfig(
+                    key="distributed-planner-extras",
+                    resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    store=store,
+                ),
+            ),
+        )
+
+    if expect_rejection:
+        with pytest.raises(CheckpointError) as caught:
+            run_agent()
+        assert caught.value.code == "checkpoint_definition_mismatch"
+        checkpoint = store.load_checkpoint("distributed-planner-extras")
+        assert checkpoint is not None
+        assert checkpoint.claim_token is None
+        assert checkpoint.model_call_journal == []
+        assert worker_model_calls == 0
+    else:
+        result = run_agent()
+        assert result.status is AgentStatus.COMPLETED
+        assert result.final_output == "worker answer"
+
+    assert len(app.envelopes) == 1
+    assert app.envelopes[0]["task"]["extra_tool_names"] == envelope_tool_names
+
+
 def test_nonblocking_distributed_start_requires_explicit_checkpoint_key() -> None:
     store = InMemoryCheckpointStore()
     backend = _StartProbeBackend()
