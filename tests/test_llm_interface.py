@@ -657,7 +657,7 @@ def test_llm_azure_tool_projection_disables_strict_without_mutating_schema(monke
 
     request_tools = _FakeChatClient.seen_calls[-1]["tools"]
     assert request_tools[0]["function"]["strict"] is False
-    assert request_tools[0]["function"]["parameters"] == tools[0]["function"]["parameters"]
+    assert request_tools[0]["function"]["parameters"] == cast(dict[str, object], tools[0]["function"])["parameters"]
     assert tools == canonical_tools
 
 
