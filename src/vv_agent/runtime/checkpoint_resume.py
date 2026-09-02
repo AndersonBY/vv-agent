@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import time
 import uuid
@@ -83,6 +84,7 @@ _AMBIGUOUS_TOOL_ERROR_CODES = frozenset(
         "tool_execution_failed",
     }
 )
+_DECIMAL_OPERATION_SUFFIX_RE = re.compile(r"^[0-9]+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,7 +514,11 @@ class CheckpointResumeController:
         self.bind_model_accounting(accounting)
         projection = self._model_request_projection(request, backend=backend, model=model)
         digest = compute_operation_request_digest(projection)
-        initial_identity = accounting.new_identity(
+        # Probe the next local identity without consulting terminal ledger
+        # records.  A completed record is paired with a still-live journal
+        # entry during crash recovery; seeding first would turn `main` into
+        # `main_2` and bypass the durable receipt that must be replayed.
+        initial_identity = accounting.peek_identity(
             cycle_index=cycle_index,
             operation_slot=operation_slot,
             operation=operation,
@@ -526,15 +532,48 @@ class CheckpointResumeController:
                 "deferred checkpoint cannot dispatch a model operation",
                 code="checkpoint_not_claimable",
             )
-        entry = self._find_operation(OperationKind.MODEL, operation_id=operation_id)
+        entry = self._find_model_operation_for_request(
+            cycle_index=cycle_index,
+            operation_id=operation_id,
+            operation=operation,
+            backend=backend,
+            model=model,
+            request_digest=digest,
+        )
         if entry is not None and entry.request_digest != digest:
             raise CheckpointError(
                 "model request does not match the durable operation slot",
                 code="checkpoint_journal_integrity_mismatch",
             )
+        if entry is None:
+            # No exact durable identity exists for this invocation, so this is
+            # a legitimate new operation.  Only now may terminal ledger
+            # records advance the generated slot ordinal.
+            while True:
+                initial_identity = accounting.new_identity(
+                    cycle_index=cycle_index,
+                    operation_slot=operation_slot,
+                    operation=operation,
+                    backend=backend,
+                    model=model,
+                )
+                operation_id = initial_identity.operation_id
+                entry = self._find_operation(OperationKind.MODEL, operation_id=operation_id)
+                if entry is None or entry.request_digest == digest:
+                    break
+                if entry.state not in {OperationState.SUCCEEDED, OperationState.FAILED}:
+                    raise CheckpointError(
+                        "model request does not match the durable operation slot",
+                        code="checkpoint_journal_integrity_mismatch",
+                    )
         identity = initial_identity
         if entry is not None:
             identity = self._identity_from_model_entry(entry)
+            accounting.observe_operation_id(
+                cycle_index=cycle_index,
+                operation_slot=operation_slot,
+                operation_id=identity.operation_id,
+            )
             self._require_model_identity(
                 identity,
                 operation=operation,
@@ -644,6 +683,47 @@ class CheckpointResumeController:
             identity=identity,
             budget_exhaustion=terminal.budget.exhaustion,
         )
+
+    def _find_model_operation_for_request(
+        self,
+        *,
+        cycle_index: int,
+        operation_id: str,
+        operation: ModelCallOperation,
+        backend: str,
+        model: str,
+        request_digest: str,
+    ) -> OperationJournalEntry | None:
+        """Find a matching durable slot before allocating a generated suffix.
+
+        ``operation_id`` is the coordinator's unconsumed next identity.  A
+        fresh worker may need to replay any generated ordinal retained in the
+        active journal, not only the base ordinal; the request digest and
+        effective model identity disambiguate the logical operation.
+        """
+        prefix = f"{operation_id}_"
+        matches: list[OperationJournalEntry] = []
+        for entry in self._require_checkpoint().model_call_journal:
+            if entry.cycle_index != cycle_index or entry.kind is not OperationKind.MODEL:
+                continue
+            if entry.operation_id != operation_id and (
+                not entry.operation_id.startswith(prefix)
+                or not _DECIMAL_OPERATION_SUFFIX_RE.fullmatch(entry.operation_id[len(prefix) :])
+            ):
+                continue
+            if (
+                entry.request_digest == request_digest
+                and entry.model_operation is operation
+                and entry.backend == backend
+                and entry.model == model
+            ):
+                matches.append(entry)
+        if len(matches) > 1:
+            raise CheckpointError(
+                "multiple durable model operations match the same request slot",
+                code="checkpoint_status_invalid",
+            )
+        return matches[0] if matches else None
 
     def _commit_model_terminal(
         self,

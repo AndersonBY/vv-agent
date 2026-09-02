@@ -836,6 +836,9 @@ def test_session_commit_crash_replays_model_receipt_without_duplicate_append() -
         "answer once",
         "durable answer",
     ]
+    retained = store.load_checkpoint("session-commit-crash")
+    assert retained is not None
+    assert [record.operation_id for record in retained.model_calls] == ["op_model_cycle_1_main"]
 
 
 def test_approval_resume_crash_retries_same_idempotency_key_once() -> None:
