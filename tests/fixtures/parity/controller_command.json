@@ -1,5 +1,5 @@
 {
-  "contract_version": "8.1.1",
+  "contract_version": "8.1.2",
   "schema_version": "vv-agent.controller-command.v1",
   "scope": {
     "task_neutral": true,

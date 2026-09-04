@@ -70,8 +70,13 @@ class DeferredCheckpointClaimed(DeferredResolutionError):
 
 
 class DeferredResolutionResultInvalid(DeferredResolutionError):
-    def __init__(self, message: str = "deferred resolution result is not definitive") -> None:
-        super().__init__(message, code="deferred_resolution_result_invalid")
+    def __init__(
+        self,
+        message: str = "deferred resolution result is not definitive",
+        *,
+        code: str = "deferred_resolution_result_invalid",
+    ) -> None:
+        super().__init__(message, code=code)
 
 
 def _non_empty(value: Any, field: str) -> str:
@@ -426,6 +431,8 @@ def validate_definitive_result(result: Any) -> None:
         ToolResultStatus.ERROR,
     }:
         raise DeferredResolutionResultInvalid()
+    if result.status_code is ToolResultStatus.SUCCESS and result.error_code is not None:
+        raise DeferredResolutionResultInvalid("tool_result_invalid", code="tool_result_invalid")
     if result.status_code is ToolResultStatus.ERROR and _is_ambiguous_tool_error(result):
         raise DeferredResolutionResultInvalid()
 
