@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -170,8 +171,12 @@ class VvLlmClient(LLMClient):
                 endpoint_type=target.endpoint_type,
                 model_settings=model_settings,
             )
-            request_tool_payload, request_options.tool_choice = self._apply_tool_choice(
+            request_tool_payload = self._prepare_tool_payload_for_endpoint(
                 tool_payload,
+                endpoint_type=target.endpoint_type,
+            )
+            request_tool_payload, request_options.tool_choice = self._apply_tool_choice(
+                request_tool_payload,
                 request_options.tool_choice,
             )
             request_messages = self._prepare_messages_for_model(message_payload, request_options.model)
@@ -469,6 +474,22 @@ class VvLlmClient(LLMClient):
             else:
                 payload.append({"type": "function", "function": schema})
         return payload
+
+    @staticmethod
+    def _prepare_tool_payload_for_endpoint(
+        tool_payload: list[dict[str, Any]],
+        *,
+        endpoint_type: str,
+    ) -> list[dict[str, Any]]:
+        if endpoint_type != "openai_azure":
+            return tool_payload
+
+        request_tool_payload = deepcopy(tool_payload)
+        for tool in request_tool_payload:
+            function = tool.get("function")
+            if isinstance(function, dict):
+                function["strict"] = False
+        return request_tool_payload
 
     @staticmethod
     def _should_use_stream(_model: str) -> bool:

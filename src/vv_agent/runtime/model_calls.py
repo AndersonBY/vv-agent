@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
+_DECIMAL_SUFFIX_RE = re.compile(r"^[0-9]+$")
 _DEFINITIVE_ERROR_MARKERS = (
     "context length",
     "context_length_exceeded",
@@ -251,14 +252,16 @@ class ModelCallCoordinator:
         model: str,
         attempt: int = 1,
         operation_id: str | None = None,
+        seed_from_ledger: bool = True,
     ) -> ModelCallIdentity:
         normalized_slot = _normalize_operation_slot(operation_slot)
         if operation_id is None:
             key = (cycle_index, normalized_slot)
+            if seed_from_ledger:
+                self._seed_slot_count_from_ledger(cycle_index=cycle_index, normalized_slot=normalized_slot)
             count = self._slot_counts.get(key, 0) + 1
             self._slot_counts[key] = count
-            slot = normalized_slot if count == 1 else f"{normalized_slot}_{count}"
-            operation_id = f"op_model_cycle_{cycle_index}_{slot}"
+            operation_id = self._operation_id_for_count(cycle_index, normalized_slot, count)
         return ModelCallIdentity.create(
             operation_id=operation_id,
             attempt=attempt,
@@ -267,6 +270,73 @@ class ModelCallCoordinator:
             backend=backend,
             model=model,
         )
+
+    def peek_identity(
+        self,
+        *,
+        cycle_index: int,
+        operation_slot: str,
+        operation: ModelCallOperation,
+        backend: str,
+        model: str,
+        attempt: int = 1,
+    ) -> ModelCallIdentity:
+        """Return the next local slot identity without consuming or seeding it."""
+        normalized_slot = _normalize_operation_slot(operation_slot)
+        count = self._slot_counts.get((cycle_index, normalized_slot), 0) + 1
+        return ModelCallIdentity.create(
+            operation_id=self._operation_id_for_count(cycle_index, normalized_slot, count),
+            attempt=attempt,
+            operation=operation,
+            cycle_index=cycle_index,
+            backend=backend,
+            model=model,
+        )
+
+    def observe_operation_id(self, *, cycle_index: int, operation_slot: str, operation_id: str) -> None:
+        """Remember a durable generated identity without allocating another one."""
+        normalized_slot = _normalize_operation_slot(operation_slot)
+        prefix = self._operation_id_for_count(cycle_index, normalized_slot, 1)
+        count = 0
+        if operation_id == prefix:
+            count = 1
+        elif operation_id.startswith(f"{prefix}_"):
+            suffix = operation_id[len(prefix) + 1 :]
+            if _DECIMAL_SUFFIX_RE.fullmatch(suffix):
+                try:
+                    count = int(suffix)
+                except ValueError:
+                    count = 0
+        if count:
+            key = (cycle_index, normalized_slot)
+            self._slot_counts[key] = max(self._slot_counts.get(key, 0), count)
+
+    def _seed_slot_count_from_ledger(self, *, cycle_index: int, normalized_slot: str) -> None:
+        """Recover generated slot ordinals from durable terminal call records.
+
+        Ambiguous records are deliberately ignored: their operation identity is
+        still the one that recovery must replay (or reconcile), rather than a
+        completed slot that should advance the next legitimate operation.
+        """
+        key = (cycle_index, normalized_slot)
+        count = self._slot_counts.get(key, 0)
+        completed_ids = {
+            record.operation_id
+            for record in self.ledger.records()
+            if record.cycle_index == cycle_index and record.status is ModelCallStatus.COMPLETED
+        }
+        # Compare complete generated IDs rather than parsing a suffix out of an
+        # arbitrary operation ID.  `main_2` can be either the second generated
+        # `main` slot or the first generated `main_2` slot, so prefix parsing
+        # cannot distinguish the two safely.
+        while self._operation_id_for_count(cycle_index, normalized_slot, count + 1) in completed_ids:
+            count += 1
+        self._slot_counts[key] = count
+
+    @staticmethod
+    def _operation_id_for_count(cycle_index: int, normalized_slot: str, count: int) -> str:
+        slot = normalized_slot if count == 1 else f"{normalized_slot}_{count}"
+        return f"op_model_cycle_{cycle_index}_{slot}"
 
     def started_event(
         self,

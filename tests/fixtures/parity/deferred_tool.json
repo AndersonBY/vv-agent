@@ -1,7 +1,7 @@
 {
   "contract": "durable_deferred_tool",
   "schema_version": "vv-agent.durable-deferred-tool.v2",
-  "contract_version": "8.1.0",
+  "contract_version": "8.1.1",
   "scope": "framework_host_boundary_only",
   "versioning": {
     "forward_only": true,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
@@ -605,6 +606,101 @@ def test_tool_choice_semantics_reach_the_real_provider_request(monkeypatch) -> N
             tools=tools,
             model_settings=ModelSettings(tool_choice=ToolChoice.tool("missing")),
         )
+
+
+def test_llm_azure_tool_projection_disables_strict_without_mutating_schema(monkeypatch) -> None:
+    response = SimpleNamespace(content="ok", tool_calls=[], reasoning_content=None, usage=_FakeUsage())
+    _FakeChatClient.behavior_by_endpoint = {"azure": response}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr(VvLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+
+    canonical_tools: list[dict[str, object]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        }
+    ]
+    tools = deepcopy(canonical_tools)
+    llm = VvLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="azure",
+                api_key="k",
+                api_base="https://azure.example/v1",
+                endpoint_type="openai_azure",
+            )
+        ],
+        backend="openai",
+        selected_model="demo-model",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    _complete(llm, model="demo-model", messages=[Message(role="user", content="hello")], tools=tools)
+
+    request_tools = _FakeChatClient.seen_calls[-1]["tools"]
+    assert request_tools[0]["function"]["strict"] is False
+    assert request_tools[0]["function"]["parameters"] == cast(dict[str, object], tools[0]["function"])["parameters"]
+    assert tools == canonical_tools
+
+
+def test_llm_non_azure_tool_projection_preserves_strict(monkeypatch) -> None:
+    response = SimpleNamespace(content="ok", tool_calls=[], reasoning_content=None, usage=_FakeUsage())
+    _FakeChatClient.behavior_by_endpoint = {"openai": response}
+    _FakeChatClient.seen_calls = []
+
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    monkeypatch.setattr(VvLlmClient, "_should_use_stream", staticmethod(lambda model: False))
+
+    tools: list[dict[str, object]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "lookup",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+                "strict": True,
+            },
+        }
+    ]
+    llm = VvLlmClient(
+        endpoint_targets=[
+            EndpointTarget(
+                endpoint_id="openai",
+                api_key="k",
+                api_base="https://openai.example/v1",
+                endpoint_type="openai",
+            )
+        ],
+        backend="openai",
+        selected_model="demo-model",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+
+    _complete(llm, model="demo-model", messages=[Message(role="user", content="hello")], tools=tools)
+
+    request_tools = _FakeChatClient.seen_calls[-1]["tools"]
+    assert request_tools[0]["function"]["strict"] is True
 
 
 def test_resolve_request_options_aligns_gemini3_profile() -> None:

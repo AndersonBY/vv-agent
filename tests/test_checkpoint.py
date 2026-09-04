@@ -1089,6 +1089,41 @@ def test_progress_and_heartbeat_preserve_claim_and_journal(
     assert persisted.shared_state["progress"] == "started"
 
 
+def test_memory_terminal_acknowledgement_rejects_active_claim() -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint = _minimal_checkpoint(key="terminal-active-claim")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    with store._lock:
+        current = store._store[checkpoint.checkpoint_key]
+        current.status = AgentStatus.COMPLETED
+        current.terminal_result = AgentResult(
+            status=AgentStatus.COMPLETED,
+            messages=[],
+            cycles=[],
+            final_answer="done",
+            completion_reason=CompletionReason.NO_TOOL_FINISH,
+            token_usage=summarize_task_token_usage([]),
+            checkpoint_key=checkpoint.checkpoint_key,
+        )
+        revision = current.revision
+
+    assert not store.acknowledge_terminal(checkpoint.checkpoint_key, expected_revision=revision)
+    with store._lock:
+        retained = store._store[checkpoint.checkpoint_key]
+        assert retained.revision == revision
+        assert retained.claim_token == "owner"
+        assert not retained.terminal_acknowledged
+
+
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
 def test_suspend_preserves_ambiguity_and_recovery_claims_it(
     store_kind: str,

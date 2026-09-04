@@ -1712,11 +1712,11 @@
   },
   "redis_rules": {
     "representation": "hash_or_payload_plus_control_fields",
-    "progress_atomicity": "lua_compare_revision_and_claim_then_replace_payload",
-    "suspend_atomicity": "lua_compare_revision_and_claim_then_replace_payload_and_delete_lease",
-    "claimed_finalize_atomicity": "lua_compare_revision_and_claim_then_replace_terminal_payload_and_delete_lease",
-    "event_delivery_atomicity": "lua_compare_revision_claim_and_pending_event_identity_then_record_cursor",
-    "heartbeat_atomicity": "lua_compare_claim_and_live_lease_then_update_lease_field_only",
+    "progress_atomicity": "compare_and_swap_transaction_revision_and_claim_then_replace_payload",
+    "suspend_atomicity": "compare_and_swap_transaction_revision_and_claim_then_replace_payload_and_delete_lease",
+    "claimed_finalize_atomicity": "compare_and_swap_transaction_revision_and_claim_then_replace_terminal_payload_and_delete_lease",
+    "event_delivery_atomicity": "compare_and_swap_transaction_revision_claim_and_pending_event_identity_then_record_cursor",
+    "heartbeat_atomicity": "compare_and_swap_transaction_claim_and_live_lease_then_update_lease_field_only",
     "whole_json_heartbeat_forbidden": true
   },
   "fault_rules": {

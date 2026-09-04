@@ -291,6 +291,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                 checkpoint is None
                 or checkpoint.revision != expected_revision
                 or checkpoint.terminal_result is None
+                or checkpoint.claim_token is not None
                 or checkpoint.terminal_acknowledged
             ):
                 return False
