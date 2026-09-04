@@ -592,7 +592,6 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                         error_code=result.error_code,
                         execution_started=True,
                         duration_ms=None,
-                        checkpoint_key=snapshot.checkpoint_key,
                         event_id=_stable_deferred_event_id(
                             entry,
                             "completed" if result.status_code.value == "SUCCESS" else "failed",

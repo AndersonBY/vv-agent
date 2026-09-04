@@ -27,6 +27,7 @@ from vv_agent.checkpoint import (
     ReconciliationDecision,
     ReconciliationDecisionKind,
     ResumePolicy,
+    compute_event_payload_digest,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.deferred import (
@@ -36,6 +37,7 @@ from vv_agent.deferred import (
     DeferredResolutionResultInvalid,
     DeferredResolveDecision,
     DeferredToolHandle,
+    _is_ambiguous_tool_error,
     validate_definitive_result,
 )
 from vv_agent.llm import ScriptedLLM
@@ -223,6 +225,15 @@ def test_checkpointed_tool_failures_use_definitive_or_ambiguous_lifecycles(
     assert tuple(entry.state.value for entry in checkpoint.tool_journal) == expected_states
     if mixed:
         assert (checkpoint.tool_journal[0].deferred_handle is not None) is has_handle
+        if not has_handle:
+            lifecycle_types = {
+                "tool_call_deferred",
+                "tool_call_completed",
+            }
+            assert [event.type for event in result.events if event.type in lifecycle_types] == []
+            assert all(entry.event["type"] not in lifecycle_types for entry in checkpoint.event_outbox)
+            assert any(event.type == "operation_ambiguous" for event in result.events)
+            assert any(event.type == "reconciliation_required" for event in result.events)
     if has_handle:
         assert checkpoint.tool_journal[1].error is not None and not checkpoint.tool_journal[1].error.retryable
 
@@ -237,6 +248,18 @@ def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -
     )
     with pytest.raises(DeferredResolutionResultInvalid):
         validate_definitive_result(result)
+
+    success_with_error = ToolExecutionResult(
+        "call-defer",
+        "invalid success",
+        ToolResultStatus.SUCCESS,
+        error_code="tool_execution_failed",
+    )
+    assert not _is_ambiguous_tool_error(success_with_error)
+    with pytest.raises(DeferredResolutionResultInvalid) as caught:
+        validate_definitive_result(success_with_error)
+    assert caught.value.code == "tool_result_invalid"
+
     handle = DeferredToolHandle("ambiguous-admission", "op_tool_cycle_1_call_ambiguous", 1, "a" * 64)
     store = InMemoryCheckpointStore()
     before = _deferred_checkpoint(store, handle, admit=False)
@@ -251,6 +274,113 @@ def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -
         )
     after = store.load_checkpoint(handle.checkpoint_key)
     assert after is not None and checkpoint_to_dict(after) == checkpoint_to_dict(before)
+
+    with pytest.raises(DeferredResolutionResultInvalid) as caught:
+        store.admit_deferred_batch(
+            before,
+            outcomes=[
+                (
+                    ToolCall(id="call-defer", name="defer", arguments={}),
+                    ToolCallOutcome.Completed(success_with_error),
+                )
+            ],
+            claim_token="claim",
+            expected_revision=before.revision,
+            claimed_cycle=1,
+        )
+    assert caught.value.code == "tool_result_invalid"
+    after = store.load_checkpoint(handle.checkpoint_key)
+    assert after is not None and checkpoint_to_dict(after) == checkpoint_to_dict(before)
+
+
+@pytest.mark.parametrize(
+    ("error_code", "metadata", "accepted"),
+    [
+        ("tool_timeout", {}, False),
+        ("tool_cancelled", {}, False),
+        ("tool_connection_lost", {}, False),
+        ("tool_execution_failed", {}, False),
+        ("tool_orchestrator_error", {}, False),
+        ("tool_execution_failed", {"definitive_outcome": True}, True),
+    ],
+)
+def test_mixed_deferred_and_ambiguous_admission_is_atomic(
+    error_code: str,
+    metadata: dict[str, Any],
+    accepted: bool,
+) -> None:
+    deferred_handle = DeferredToolHandle(
+        "mixed-admission",
+        "op_tool_cycle_1_call_deferred",
+        1,
+        "a" * 64,
+    )
+    store = InMemoryCheckpointStore()
+    before = _deferred_checkpoint(store, deferred_handle, admit=False)
+    assert before is not None
+    ambiguous_entry = deepcopy(before.tool_journal[0])
+    ambiguous_entry.operation_id = "op_tool_cycle_1_call_ambiguous"
+    ambiguous_entry.request_digest = "b" * 64
+    ambiguous_entry.tool_call_id = "call-ambiguous"
+    ambiguous_entry.tool_name = "ambiguous"
+    ambiguous_entry.idempotency_key = "idem-ambiguous"
+    before.tool_journal.append(ambiguous_entry)
+    assert store.progress_checkpoint(before, claim_token="claim", expected_revision=before.revision)
+    before.revision += 1
+    before_wire = checkpoint_to_dict(before)
+    result = ToolExecutionResult(
+        "call-ambiguous",
+        "unknown",
+        ToolResultStatus.ERROR,
+        error_code=error_code,
+        metadata=metadata,
+    )
+    outcomes = [
+        (
+            ToolCall(id="call-defer", name="defer", arguments={}),
+            ToolCallOutcome.Deferred(deferred_handle),
+        ),
+        (
+            ToolCall(id="call-ambiguous", name="ambiguous", arguments={}),
+            ToolCallOutcome.Completed(result),
+        ),
+    ]
+
+    if accepted:
+        assert store.admit_deferred_batch(
+            before,
+            outcomes=outcomes,
+            claim_token="claim",
+            expected_revision=before.revision,
+            claimed_cycle=1,
+        )
+        after = store.load_checkpoint(deferred_handle.checkpoint_key)
+        assert after is not None
+        assert after.status is AgentStatus.DEFERRED
+        assert after.claim_token is None
+        assert after.revision == before.revision + 1
+        assert [entry.state.value for entry in after.tool_journal] == ["deferred", "failed"]
+        assert [entry.event["type"] for entry in after.event_outbox] == [
+            "tool_call_deferred",
+            "tool_call_completed",
+        ]
+        return
+
+    with pytest.raises(DeferredResolutionResultInvalid):
+        store.admit_deferred_batch(
+            before,
+            outcomes=outcomes,
+            claim_token="claim",
+            expected_revision=before.revision,
+            claimed_cycle=1,
+        )
+    after = store.load_checkpoint(deferred_handle.checkpoint_key)
+    assert after is not None
+    assert checkpoint_to_dict(after) == before_wire
+    assert after.revision == before.revision
+    assert after.claim_token == "claim"
+    assert [entry.state.value for entry in after.tool_journal] == ["started", "started"]
+    assert after.event_outbox == before.event_outbox
 
 
 def test_completed_only_admission_keeps_claim_owner_until_cycle_commit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -596,6 +726,9 @@ def test_runner_admits_mixed_batch_once_and_projects_no_deferred_tool_message() 
         "tool_call_deferred",
         "tool_call_completed",
     ]
+    completed_event = next(event for event in checkpoint.event_outbox if event.event["type"] == "tool_call_completed")
+    assert "checkpoint_key" not in completed_event.event
+    completed_event.verify_payload()
     assert all(message.tool_call_id != "call-defer" for message in result.raw_result.messages)
 
 
@@ -725,6 +858,12 @@ def test_resolution_producer_matches_contract_receipt_and_event_jcs_goldens(monk
     assert decision.receipt.result_digest == canonical["result_digest"]
     assert decision.receipt.event_id == canonical["event_id"]
     assert decision.receipt.event_payload_digest == canonical["event_payload_digest"]
+    checkpoint = store.load_checkpoint(handle.checkpoint_key)
+    assert checkpoint is not None
+    completed_event = next(entry for entry in checkpoint.event_outbox if entry.event_id == canonical["event_id"])
+    assert completed_event.event == event_golden["value"]
+    assert compute_event_payload_digest(completed_event.event) == canonical["event_payload_digest"]
+    completed_event.verify_payload()
 
 
 def test_recovery_accepts_deferred_batch_under_recovery_claim_without_model_dispatch() -> None:

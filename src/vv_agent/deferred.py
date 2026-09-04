@@ -24,6 +24,7 @@ def _is_ambiguous_tool_error(result: Any) -> bool:
     """Return whether a tool error lacks an adapter-proven definitive outcome."""
     return (
         isinstance(result, ToolExecutionResult)
+        and result.status_code is ToolResultStatus.ERROR
         and result.error_code
         in {
             "tool_timeout",
