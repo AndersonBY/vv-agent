@@ -7,7 +7,8 @@ import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from support import FactoryModelProvider
@@ -21,10 +22,12 @@ from vv_agent import (
     ToolContext,
     function_tool,
 )
-from vv_agent.checkpoint import OperationState, ResumePolicy
+from vv_agent.checkpoint import CheckpointError, OperationState, ResumePolicy
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent, CheckpointStore
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
+from vv_agent.runtime.state import Checkpoint
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
@@ -142,6 +145,90 @@ def _config(
 def _expire_claim(store: InMemoryCheckpointStore, key: str) -> None:
     with store._lock:
         store._store[key].lease_expires_at_ms = 1
+
+
+class _HeartbeatStore(InMemoryCheckpointStore):
+    def __init__(self, mode: str) -> None:
+        super().__init__()
+        self.mode = mode
+        self.renew_calls = 0
+
+    def renew_checkpoint_claim(
+        self,
+        checkpoint_key: str,
+        *,
+        claim_token: str,
+        lease_expires_at_ms: int,
+        now_ms: int,
+    ) -> bool:
+        self.renew_calls += 1
+        if self.mode == "transient" and self.renew_calls == 1:
+            raise RuntimeError("store unavailable")
+        return self.mode != "false"
+
+
+def _heartbeat_controller(store: InMemoryCheckpointStore, key: str) -> tuple[CheckpointResumeController, Checkpoint]:
+    claimed = cast(
+        Checkpoint,
+        SimpleNamespace(
+            checkpoint_key=key,
+            claim_token="heartbeat-claim",
+            claimed_cycle=1,
+            lease_expires_at_ms=5_000,
+        ),
+    )
+    controller = CheckpointResumeController.__new__(CheckpointResumeController)
+    controller.checkpoint = claimed
+    controller.store = store
+    controller.lease_duration_ms = 1_000
+    controller._owned_claim_token = "heartbeat-claim"
+    controller._heartbeat_error = None
+    controller._heartbeat_stop = SimpleNamespace(set=lambda: None)
+    controller._now_ms = lambda: 1_000
+    return controller, claimed
+
+
+def test_heartbeat_retries_transient_store_error_only_while_local_lease_is_live() -> None:
+    store = _HeartbeatStore("transient")
+    controller, claimed = _heartbeat_controller(store, "heartbeat-transient")
+    assert CheckpointResumeController._heartbeat_tick(controller, claimed, "heartbeat-claim")
+    assert store.renew_calls == 1
+    assert CheckpointResumeController._heartbeat_tick(controller, claimed, "heartbeat-claim")
+    assert store.renew_calls == 2
+    assert claimed.lease_expires_at_ms == 2_000
+
+
+@pytest.mark.parametrize("mode", ["false", "expired"])
+def test_heartbeat_false_or_expired_local_lease_drops_claim_without_retry(
+    mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _HeartbeatStore("false" if mode == "false" else "success")
+    controller, claimed = _heartbeat_controller(store, f"heartbeat-{mode}")
+    monkeypatch.setattr(controller, "_now_ms", lambda: 6_000 if mode == "expired" else 1_000)
+    assert not CheckpointResumeController._heartbeat_tick(controller, claimed, "heartbeat-claim")
+    assert (store.renew_calls, claimed.claim_token, controller._owned_claim_token) == (0 if mode == "expired" else 1, None, None)
+    with pytest.raises(CheckpointError, match="checkpoint lease") as error:
+        CheckpointResumeController._assert_heartbeat(controller)
+    assert error.value.code == "checkpoint_lease_lost"
+
+
+@pytest.mark.parametrize("method", ["_progress", "_renew_claim_before_dispatch"])
+def test_expired_local_claim_rejects_progress_and_dispatch(method: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _HeartbeatStore("success")
+    controller, _claimed = _heartbeat_controller(store, f"heartbeat-{method}")
+    monkeypatch.setattr(controller, "_now_ms", lambda: 6_000)
+    with pytest.raises(CheckpointError, match="checkpoint lease") as error:
+        getattr(CheckpointResumeController, method)(controller)
+    assert (error.value.code, store.renew_calls) == ("checkpoint_lease_lost", 0)
+
+
+def test_renewal_return_after_known_expiry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _HeartbeatStore("success")
+    controller, claimed = _heartbeat_controller(store, "heartbeat-late")
+    monkeypatch.setattr(controller, "_now_ms", lambda: (1_000, 6_000)[store.renew_calls])
+    assert not CheckpointResumeController._heartbeat_tick(controller, claimed, "heartbeat-claim")
+    assert store.renew_calls == 1
 
 
 def _finish_response(message: str) -> LLMResponse:

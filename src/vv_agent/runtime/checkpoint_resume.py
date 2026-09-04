@@ -28,7 +28,7 @@ from vv_agent.checkpoint import (
     compute_operation_request_digest,
     compute_run_definition_digest,
 )
-from vv_agent.deferred import AcceptDeferredDecision
+from vv_agent.deferred import AcceptDeferredDecision, _is_ambiguous_tool_error
 from vv_agent.event_store import IdempotentRunEventStore, RunEventStore
 from vv_agent.events import (
     CheckpointCreatedEvent,
@@ -76,14 +76,6 @@ from vv_agent.types import (
 )
 
 DEFAULT_CHECKPOINT_LEASE_MS = 5 * 60 * 1000
-_AMBIGUOUS_TOOL_ERROR_CODES = frozenset(
-    {
-        "tool_timeout",
-        "tool_cancelled",
-        "tool_connection_lost",
-        "tool_execution_failed",
-    }
-)
 _DECIMAL_OPERATION_SUFFIX_RE = re.compile(r"^[0-9]+$")
 
 
@@ -159,6 +151,7 @@ class CheckpointResumeController:
         self._heartbeat_error: CheckpointError | None = None
         self._owned_claim_token: str | None = None
         self._active_claim_mode: ClaimMode | None = None
+        self._pending_preterminal_events: list[RunEvent] = []
         self._model_accounting: ModelCallCoordinator | None = None
 
     @property
@@ -879,8 +872,7 @@ class CheckpointResumeController:
             return
         if entry.state is not OperationState.STARTED:
             return
-        definitive_outcome = bool(result.metadata.get("definitive_outcome"))
-        if result.error_code in _AMBIGUOUS_TOOL_ERROR_CODES and not definitive_outcome:
+        if _is_ambiguous_tool_error(result):
             entry.state = OperationState.AMBIGUOUS
             self._progress()
             self._suspend_for(entry)
@@ -914,11 +906,18 @@ class CheckpointResumeController:
                 "cannot commit a checkpoint without the completed cycle record",
                 code="checkpoint_cycle_conflict",
             )
+        self._assert_heartbeat()
         self._refresh_snapshot(messages=messages, cycles=cycles, shared_state=shared_state)
         checkpoint.cycle_index = cycle_index
         checkpoint.status = AgentStatus.RUNNING
         revision = checkpoint.revision
         claim_token = checkpoint.claim_token
+        self._assert_heartbeat()
+        if self._owned_claim_token != claim_token:
+            raise CheckpointError(
+                "checkpoint cycle commit requires the locally owned claim",
+                code="checkpoint_claim_active",
+            )
         if not self.store.commit_checkpoint(
             checkpoint,
             claim_token=claim_token,
@@ -982,6 +981,8 @@ class CheckpointResumeController:
         checkpoint.shared_state = deepcopy(terminal.shared_state)
         self._snapshot_extensions(checkpoint)
         checkpoint.event_outbox = [entry for entry in checkpoint.event_outbox if entry.state == "pending"]
+        for event in self._pending_preterminal_events:
+            self._queue_outbox_event(checkpoint, event)
         if terminal_event is not None:
             stable_terminal_event = self._with_stable_terminal_event_id(terminal_event)
             self._queue_outbox_event(checkpoint, stable_terminal_event)
@@ -993,6 +994,12 @@ class CheckpointResumeController:
                 expected_revision=revision,
             )
         else:
+            self._assert_heartbeat()
+            if self._owned_claim_token != claim_token:
+                raise CheckpointError(
+                    "checkpoint terminal finalize requires the locally owned claim",
+                    code="checkpoint_claim_active",
+                )
             finalized = self.store.finalize_claimed_checkpoint(
                 checkpoint,
                 claim_token=claim_token,
@@ -1017,6 +1024,7 @@ class CheckpointResumeController:
                 code="checkpoint_store_conflict",
             )
         self.checkpoint = authoritative
+        self._pending_preterminal_events.clear()
         self._deliver_pending_outbox()
         self._acknowledge_terminal()
         result.checkpoint_key = checkpoint.checkpoint_key
@@ -1051,7 +1059,17 @@ class CheckpointResumeController:
             identity,
             str(event.cycle_index or 0),
         )
-        self._emit(event_from_dict(payload))
+        candidate = event_from_dict(payload)
+        checkpoint = self._require_checkpoint()
+        if checkpoint.claim_token is not None:
+            if self._owned_claim_token != checkpoint.claim_token:
+                raise CheckpointError(
+                    "checkpoint preterminal event requires the locally owned claim",
+                    code="checkpoint_claim_active",
+                )
+            self._emit(candidate)
+            return
+        self._pending_preterminal_events.append(candidate)
 
     @staticmethod
     def _unresolved_operation(checkpoint: Checkpoint) -> OperationJournalEntry | None:
@@ -1388,9 +1406,15 @@ class CheckpointResumeController:
                 "checkpoint progress requires an active claim",
                 code="checkpoint_claim_active",
             )
+        if self._owned_claim_token != claim_token:
+            raise CheckpointError(
+                "checkpoint progress requires the locally owned claim",
+                code="checkpoint_claim_active",
+            )
         # In-flight transcript changes are reconstructed from operation receipts.
         # Only a completed cycle may advance durable messages and cycle records.
         self._refresh_snapshot(include_runtime_transcript=False)
+        self._assert_heartbeat()
         revision = checkpoint.revision
         if not self.store.progress_checkpoint(
             checkpoint,
@@ -1798,36 +1822,8 @@ class CheckpointResumeController:
 
         def heartbeat() -> None:
             while not self._heartbeat_stop.wait(interval_seconds):
-                now_ms = self._now_ms()
-                try:
-                    renewed = self.store.renew_checkpoint_claim(
-                        checkpoint.checkpoint_key,
-                        claim_token=claim_token,
-                        lease_expires_at_ms=now_ms + self.lease_duration_ms,
-                        now_ms=now_ms,
-                    )
-                except Exception as exc:
-                    self._heartbeat_error = CheckpointError(
-                        f"checkpoint lease renewal failed: {exc}",
-                        code="checkpoint_lease_lost",
-                    )
+                if not self._heartbeat_tick(checkpoint, claim_token):
                     return
-                if not renewed:
-                    self._heartbeat_error = CheckpointError(
-                        "checkpoint lease renewal lost its claim",
-                        code="checkpoint_lease_lost",
-                    )
-                    return
-                # ``renew_checkpoint_claim`` is the authoritative CAS.  Keep
-                # the in-memory snapshot used by the typed host producer in
-                # lockstep with that successful lease write; otherwise a
-                # long-running heartbeat could leave the next producer call
-                # carrying an expired admission fence.
-                renewed_lease = now_ms + self.lease_duration_ms
-                checkpoint.lease_expires_at_ms = renewed_lease
-                current = self.checkpoint
-                if current is not None and current.checkpoint_key == checkpoint.checkpoint_key:
-                    current.lease_expires_at_ms = renewed_lease
 
         self._heartbeat_thread = threading.Thread(
             target=heartbeat,
@@ -1835,6 +1831,55 @@ class CheckpointResumeController:
             daemon=True,
         )
         self._heartbeat_thread.start()
+
+    def _heartbeat_tick(self, checkpoint: Checkpoint, claim_token: str) -> bool:
+        now_ms = self._now_ms()
+        if not self._local_claim_is_live(checkpoint, claim_token, now_ms):
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message="checkpoint lease expired before renewal",
+            )
+            return False
+        known_lease_expires_at_ms = checkpoint.lease_expires_at_ms
+        requested_lease_expires_at_ms = now_ms + self.lease_duration_ms
+        try:
+            renewed = self.store.renew_checkpoint_claim(
+                checkpoint.checkpoint_key,
+                claim_token=claim_token,
+                lease_expires_at_ms=requested_lease_expires_at_ms,
+                now_ms=now_ms,
+            )
+        except Exception as exc:
+            if self._local_claim_is_live(checkpoint, claim_token, self._now_ms()):
+                return True
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message=f"checkpoint lease renewal failed after lease expiry: {exc}",
+            )
+            return False
+        returned_at_ms = self._now_ms()
+        if self._renewal_crossed_local_expiry(known_lease_expires_at_ms, requested_lease_expires_at_ms, returned_at_ms):
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message="checkpoint lease renewal returned after its local expiry",
+            )
+            return False
+        if not renewed:
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message="checkpoint lease renewal lost its claim",
+            )
+            return False
+        renewed_lease = now_ms + self.lease_duration_ms
+        checkpoint.lease_expires_at_ms = renewed_lease
+        current = self.checkpoint
+        if current is not None and current.checkpoint_key == checkpoint.checkpoint_key and current.claim_token == claim_token:
+            current.lease_expires_at_ms = renewed_lease
+        return True
 
     def _stop_heartbeat(self) -> None:
         self._heartbeat_stop.set()
@@ -1852,12 +1897,29 @@ class CheckpointResumeController:
                 "checkpoint external dispatch requires an active claim",
                 code="checkpoint_claim_active",
             )
+        if self._owned_claim_token != claim_token:
+            raise CheckpointError(
+                "checkpoint external dispatch requires the locally owned claim",
+                code="checkpoint_claim_active",
+            )
         now_ms = self._now_ms()
+        if not self._local_claim_is_live(checkpoint, claim_token, now_ms):
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message="checkpoint lease expired before external dispatch",
+            )
+            raise CheckpointError(
+                "checkpoint lease expired before external dispatch",
+                code="checkpoint_lease_lost",
+            )
+        known_lease_expires_at_ms = checkpoint.lease_expires_at_ms
+        requested_lease_expires_at_ms = now_ms + self.lease_duration_ms
         try:
             renewed = self.store.renew_checkpoint_claim(
                 checkpoint.checkpoint_key,
                 claim_token=claim_token,
-                lease_expires_at_ms=now_ms + self.lease_duration_ms,
+                lease_expires_at_ms=requested_lease_expires_at_ms,
                 now_ms=now_ms,
             )
         except Exception as exc:
@@ -1865,7 +1927,23 @@ class CheckpointResumeController:
                 f"checkpoint lease renewal failed before external dispatch: {exc}",
                 code="checkpoint_lease_lost",
             ) from exc
+        returned_at_ms = self._now_ms()
+        if self._renewal_crossed_local_expiry(known_lease_expires_at_ms, requested_lease_expires_at_ms, returned_at_ms):
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message="checkpoint lease renewal returned after its local expiry before external dispatch",
+            )
+            raise CheckpointError(
+                "checkpoint lease renewal returned after its local expiry before external dispatch",
+                code="checkpoint_lease_lost",
+            )
         if not renewed:
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message="checkpoint lease renewal lost its claim before external dispatch",
+            )
             raise CheckpointError(
                 "checkpoint lease renewal lost its claim before external dispatch",
                 code="checkpoint_lease_lost",
@@ -1875,6 +1953,57 @@ class CheckpointResumeController:
     def _assert_heartbeat(self) -> None:
         if self._heartbeat_error is not None:
             raise self._heartbeat_error
+        checkpoint = self.checkpoint
+        claim_token = self._owned_claim_token
+        if checkpoint is None or claim_token is None or checkpoint.claim_token != claim_token:
+            return
+        if not self._local_claim_is_live(checkpoint, claim_token, self._now_ms()):
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message="checkpoint lease expired locally",
+            )
+            assert self._heartbeat_error is not None
+            raise self._heartbeat_error
+
+    @staticmethod
+    def _local_claim_is_live(checkpoint: Checkpoint, claim_token: str, now_ms: int) -> bool:
+        return bool(
+            checkpoint.claim_token == claim_token
+            and checkpoint.lease_expires_at_ms is not None
+            and checkpoint.lease_expires_at_ms > now_ms
+        )
+
+    @staticmethod
+    def _renewal_crossed_local_expiry(
+        known_lease_expires_at_ms: int | None,
+        requested_lease_expires_at_ms: int,
+        returned_at_ms: int,
+    ) -> bool:
+        return (
+            known_lease_expires_at_ms is None
+            or returned_at_ms >= known_lease_expires_at_ms
+            or returned_at_ms >= requested_lease_expires_at_ms
+        )
+
+    def _lose_local_claim(
+        self,
+        *,
+        claim_token: str,
+        checkpoint: Checkpoint,
+        message: str,
+    ) -> None:
+        if self._owned_claim_token != claim_token:
+            return
+        for candidate in (checkpoint, self.checkpoint):
+            if candidate is not None and candidate.claim_token == claim_token:
+                candidate.claim_token = None
+                candidate.claimed_cycle = None
+                candidate.lease_expires_at_ms = None
+        self._owned_claim_token = None
+        self._active_claim_mode = None
+        self._heartbeat_error = CheckpointError(message, code="checkpoint_lease_lost")
+        self._heartbeat_stop.set()
 
     def _stable_event_id(self, event_type: str, *coordinates: str) -> str:
         return self._stable_event_id_for(self.checkpoint_key, event_type, *coordinates)

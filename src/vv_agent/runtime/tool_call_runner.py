@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from vv_agent.checkpoint import CheckpointError, OperationState, ToolIdempotency
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
-from vv_agent.deferred import ToolCallOutcome
+from vv_agent.deferred import ToolCallOutcome, _is_ambiguous_tool_error
 from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY
 from vv_agent.result import _PendingToolApproval
 from vv_agent.runtime.cancellation import CancelledError
@@ -245,28 +245,23 @@ class ToolCallRunner:
                 continue
             assert outcome.result is not None
             result = outcome.result
-            if (
-                isinstance(checkpoint_controller, CheckpointResumeController)
-                and result.status_code not in {ToolResultStatus.SUCCESS, ToolResultStatus.ERROR}
-                and checkpoint_controller._find_tool_call(
-                    cycle_index=context.cycle_index,
-                    tool_call_id=patched_call.id,
-                )
-                is not None
-            ):
-                # WAIT_RESPONSE/RUNNING/PENDING_COMPRESS are not definitive
-                # deferred-resolution receipts.  They remain ordinary
-                # framework outcomes (for example ask_user) and must be
-                # finalized by the existing tool lifecycle rather than sent
-                # through admit_deferred_batch, which intentionally accepts
-                # only SUCCESS/ERROR completed receipts.
-                checkpoint_controller.finish_tool(
-                    cycle_index=context.cycle_index,
-                    call=patched_call,
-                    result=result,
-                )
-            if not isinstance(checkpoint_controller, CheckpointResumeController):
-                pass
+            if isinstance(checkpoint_controller, CheckpointResumeController):
+                ambiguous_tool_error = _is_ambiguous_tool_error(result)
+                if (
+                    ambiguous_tool_error
+                    and checkpoint_controller._find_tool_call(
+                        cycle_index=context.cycle_index,
+                        tool_call_id=patched_call.id,
+                    )
+                    is not None
+                ):
+                    # Non-definitive tool failures use the existing
+                    # ambiguity transition rather than batch admission.
+                    checkpoint_controller.finish_tool(
+                        cycle_index=context.cycle_index,
+                        call=patched_call,
+                        result=result,
+                    )
 
             cycle_record.tool_results.append(result)
             messages.append(self._tool_result_message(result))
@@ -361,6 +356,7 @@ class ToolCallRunner:
                         result=completed_outcome.result,
                     )
             if admission_batch:
+                deferred_admission = any(outcome.kind == "deferred" for _, outcome in admission_batch)
                 admitted = checkpoint_controller.store.admit_deferred_batch(
                     checkpoint_controller._require_checkpoint(),
                     outcomes=admission_batch,
@@ -374,13 +370,18 @@ class ToolCallRunner:
                 if refreshed is None:
                     raise RuntimeError("checkpoint_store_conflict: deferred batch disappeared after admission")
                 checkpoint_controller.checkpoint = refreshed
-                checkpoint_controller._owned_claim_token = None
-                checkpoint_controller._active_claim_mode = None
-                checkpoint_controller._stop_heartbeat()
                 # Admission owns the durable lifecycle event write; the
                 # controller still owns delivery to the configured event sink
                 # and records delivery cursors in a follow-up CAS.
                 checkpoint_controller._deliver_pending_outbox()
+                # A completed-only admission intentionally keeps the worker
+                # claim for the following cycle.  Release the local claim
+                # ownership and heartbeat only when the store released the
+                # durable claim for a batch containing a deferred outcome.
+                if deferred_admission and checkpoint_controller.checkpoint.claim_token is None:
+                    checkpoint_controller._owned_claim_token = None
+                    checkpoint_controller._active_claim_mode = None
+                    checkpoint_controller._stop_heartbeat()
 
         return ToolRunOutcome(
             directive_result=latest_directive_result,

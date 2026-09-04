@@ -33,11 +33,14 @@ from vv_agent.deferred import (
     AcceptDeferredDecision,
     DeferredCheckpointClaimed,
     DeferredResolutionConflict,
+    DeferredResolutionResultInvalid,
     DeferredResolveDecision,
     DeferredToolHandle,
+    validate_definitive_result,
 )
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime.checkpoint_codec import checkpoint_to_dict
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.types import LLMResponse, ToolCall, ToolResultStatus
 from vv_agent.workspace import MemoryWorkspaceBackend
@@ -71,6 +74,22 @@ def _context(*, metadata: dict[str, Any] | None = None) -> ToolContext:
         tool_call_id="call-without-checkpoint",
         metadata=metadata or {},
     )
+
+
+def _run_checkpointed_tools(
+    store: InMemoryCheckpointStore, key: str, tools: list[Any], tool_calls: list[ToolCall]
+) -> tuple[Any, Any]:
+    result = Runner.run_sync(
+        Agent(name="checkpointed-test-agent", instructions="Run the operation.", model="test-model", tools=tools),
+        "run",
+        run_config=RunConfig(
+            model_provider=_provider(lambda: ScriptedLLM(steps=[LLMResponse(content="", tool_calls=tool_calls)])),
+            max_cycles=1,
+            no_tool_policy="finish",
+            checkpoint_config=CheckpointConfig(key=key, resume_policy=ResumePolicy.RESUME_IF_PRESENT, store=store),
+        ),
+    )
+    return result, store.load_checkpoint(key)
 
 
 def test_function_tool_preserves_closed_outcome_and_fails_closed_without_checkpoint() -> None:
@@ -159,6 +178,105 @@ def test_checkpointed_non_definitive_tool_outcome_uses_normal_wait_user_lifecycl
     assert checkpoint.terminal_result is not None
     assert checkpoint.claim_token is None
     assert checkpoint.tool_journal == []
+
+
+@pytest.mark.parametrize(
+    ("error_code", "metadata", "expected_status", "expected_states", "mixed", "has_handle"),
+    [
+        ("tool_timeout", {}, AgentStatus.RECONCILIATION_REQUIRED, ("ambiguous",), False, False),
+        ("tool_execution_failed", {}, AgentStatus.RECONCILIATION_REQUIRED, ("ambiguous",), False, False),
+        ("tool_orchestrator_error", {}, AgentStatus.RECONCILIATION_REQUIRED, ("ambiguous",), False, False),
+        ("tool_execution_failed", {}, AgentStatus.RECONCILIATION_REQUIRED, ("started", "ambiguous"), True, False),
+        ("tool_execution_failed", {"definitive_outcome": True}, AgentStatus.DEFERRED, ("deferred", "failed"), True, True),
+    ],
+)
+def test_checkpointed_tool_failures_use_definitive_or_ambiguous_lifecycles(
+    error_code: str,
+    metadata: dict[str, Any],
+    expected_status: AgentStatus,
+    expected_states: tuple[str, ...],
+    mixed: bool,
+    has_handle: bool,
+) -> None:
+    @function_tool(name="defer_first", params_json_schema=_EMPTY_SCHEMA)
+    def defer_first(context: ToolContext) -> ToolCallOutcome:
+        return context.defer()
+
+    @function_tool(name="uncertain_second", params_json_schema=_EMPTY_SCHEMA)
+    def uncertain_second(_context: ToolContext) -> ToolExecutionResult:
+        return ToolExecutionResult("", "unknown", ToolResultStatus.ERROR, error_code=error_code, metadata=metadata)
+
+    tools: list[Any] = [uncertain_second]
+    calls = [ToolCall(id="call-uncertain-second", name="uncertain_second", arguments={})]
+    if mixed:
+        tools.insert(0, defer_first)
+        calls.insert(0, ToolCall(id="call-defer-first", name="defer_first", arguments={}))
+    result, checkpoint = _run_checkpointed_tools(
+        InMemoryCheckpointStore(),
+        f"checkpointed-{error_code}-{mixed}",
+        tools,
+        calls,
+    )
+    assert result.status is expected_status
+    assert checkpoint is not None
+    assert (checkpoint.status, checkpoint.claim_token) == (expected_status, None)
+    assert tuple(entry.state.value for entry in checkpoint.tool_journal) == expected_states
+    if mixed:
+        assert (checkpoint.tool_journal[0].deferred_handle is not None) is has_handle
+    if has_handle:
+        assert checkpoint.tool_journal[1].error is not None and not checkpoint.tool_journal[1].error.retryable
+
+
+def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -> None:
+    result = ToolExecutionResult(
+        "call-defer",
+        "unknown",
+        ToolResultStatus.ERROR,
+        error_code="tool_execution_failed",
+        metadata={"definitive_outcome": "false"},
+    )
+    with pytest.raises(DeferredResolutionResultInvalid):
+        validate_definitive_result(result)
+    handle = DeferredToolHandle("ambiguous-admission", "op_tool_cycle_1_call_ambiguous", 1, "a" * 64)
+    store = InMemoryCheckpointStore()
+    before = _deferred_checkpoint(store, handle, admit=False)
+    assert before is not None
+    with pytest.raises(DeferredResolutionResultInvalid):
+        store.admit_deferred_batch(
+            before,
+            outcomes=[(ToolCall(id="call-defer", name="defer", arguments={}), ToolCallOutcome.Completed(result))],
+            claim_token="claim",
+            expected_revision=before.revision,
+            claimed_cycle=1,
+        )
+    after = store.load_checkpoint(handle.checkpoint_key)
+    assert after is not None and checkpoint_to_dict(after) == checkpoint_to_dict(before)
+
+
+def test_completed_only_admission_keeps_claim_owner_until_cycle_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[tuple[str | None, str | None, bool, str | None]] = []
+    original_commit = CheckpointResumeController.commit_cycle
+
+    def capture_commit(self: CheckpointResumeController, **kwargs: Any) -> None:
+        assert self.checkpoint is not None
+        observed.append(
+            (self._owned_claim_token, self._active_claim_mode, self._heartbeat_thread is not None, self.checkpoint.claim_token)
+        )
+        original_commit(self, **kwargs)
+
+    monkeypatch.setattr(CheckpointResumeController, "commit_cycle", capture_commit)
+
+    @function_tool(name="complete", params_json_schema=_EMPTY_SCHEMA)
+    def complete(_context: ToolContext) -> str:
+        return "accepted"
+
+    result, _ = _run_checkpointed_tools(
+        InMemoryCheckpointStore(), "completed-only", [complete], [ToolCall(id="call-complete", name="complete", arguments={})]
+    )
+    assert result.status is AgentStatus.MAX_CYCLES
+    assert len(observed) == 1
+    claim_token, claim_mode, heartbeat_active, checkpoint_claim = observed[0]
+    assert claim_token is not None and (claim_mode, heartbeat_active, checkpoint_claim) == ("continue", True, claim_token)
 
 
 class _CountingStore(InMemoryCheckpointStore):
@@ -707,6 +825,7 @@ def _deferred_checkpoint(
     root_run_id: str | None = None,
     trace_id: str | None = None,
     tool_name: str = "defer",
+    admit: bool = True,
 ):
     from vv_agent.checkpoint import OperationKind, OperationState, ToolIdempotency
     from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict
@@ -749,6 +868,8 @@ def _deferred_checkpoint(
     )
     assert store.progress_checkpoint(claimed, claim_token="claim", expected_revision=claimed.revision)
     claimed.revision += 1
+    if not admit:
+        return claimed
     assert store.admit_deferred_batch(
         claimed,
         outcomes=[(ToolCall(id=tool_call_id, name="defer", arguments={}), ToolCallOutcome.Deferred(handle))],

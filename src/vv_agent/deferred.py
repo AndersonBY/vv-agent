@@ -12,12 +12,28 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from vv_agent.checkpoint import MAX_WIRE_INTEGER, canonical_json_sha256, validate_sha256
-from vv_agent.types import ToolExecutionResult
+from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
 DEFERRED_HANDLE_SCHEMA = "vv-agent.deferred-tool-handle.v2"
 TOOL_CALL_OUTCOME_SCHEMA = "vv-agent.tool-call-outcome.v2"
 DEFERRED_RESOLVE_DECISION_SCHEMA = "vv-agent.deferred-resolve-decision.v1"
 RECONCILIATION_DECISION_SCHEMA = "vv-agent.reconciliation-decision.v1"
+
+
+def _is_ambiguous_tool_error(result: Any) -> bool:
+    """Return whether a tool error lacks an adapter-proven definitive outcome."""
+    return (
+        isinstance(result, ToolExecutionResult)
+        and result.error_code
+        in {
+            "tool_timeout",
+            "tool_cancelled",
+            "tool_connection_lost",
+            "tool_execution_failed",
+            "tool_orchestrator_error",
+        }
+        and result.metadata.get("definitive_outcome") is not True
+    )
 
 
 class DeferredWireError(ValueError):
@@ -405,12 +421,12 @@ class AcceptDeferredDecision:
 
 
 def validate_definitive_result(result: Any) -> None:
-    from vv_agent.types import ToolExecutionResult, ToolResultStatus
-
     if not isinstance(result, ToolExecutionResult) or result.status_code not in {
         ToolResultStatus.SUCCESS,
         ToolResultStatus.ERROR,
     }:
+        raise DeferredResolutionResultInvalid()
+    if result.status_code is ToolResultStatus.ERROR and _is_ambiguous_tool_error(result):
         raise DeferredResolutionResultInvalid()
 
 

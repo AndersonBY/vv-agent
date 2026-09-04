@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from support import FactoryModelProvider
@@ -53,17 +53,50 @@ def _config(
     key: str,
     provider: FactoryModelProvider,
     max_cycles: int = 1,
+    no_tool_policy: Literal["continue", "wait_user", "finish"] = "finish",
+    session: MemorySession | None = None,
+    capability_refs: dict[str, dict[str, str]] | None = None,
 ) -> RunConfig:
     return RunConfig(
         model_provider=provider,
         max_cycles=max_cycles,
-        no_tool_policy="finish",
+        no_tool_policy=no_tool_policy,
+        session=session,
         checkpoint_config=CheckpointConfig(
             key=key,
             resume_policy=ResumePolicy.RESUME_IF_PRESENT,
             store=store,
+            capability_refs=capability_refs or {},
         ),
     )
+
+
+class _CrashBeforeTerminalFinalizeStore(InMemoryCheckpointStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.crash_next_finalize = True
+
+    def _finalize(self, finalize: Callable[..., bool], checkpoint: Any, **kwargs: Any) -> bool:
+        if self.crash_next_finalize:
+            self.crash_next_finalize = False
+            raise SystemExit("crash before terminal finalize")
+        return finalize(checkpoint, **kwargs)
+
+    def finalize_checkpoint(
+        self,
+        checkpoint: Any,
+        *,
+        expected_revision: int,
+    ) -> bool:
+        return self._finalize(super().finalize_checkpoint, checkpoint, expected_revision=expected_revision)
+
+    def finalize_claimed_checkpoint(self, checkpoint: Any, *, claim_token: str, expected_revision: int) -> bool:
+        return self._finalize(
+            super().finalize_claimed_checkpoint,
+            checkpoint,
+            claim_token=claim_token,
+            expected_revision=expected_revision,
+        )
 
 
 def test_runner_checkpoint_terminal_replay_skips_model_and_terminal_notification() -> None:
@@ -839,6 +872,70 @@ def test_session_commit_crash_replays_model_receipt_without_duplicate_append() -
     retained = store.load_checkpoint("session-commit-crash")
     assert retained is not None
     assert [record.operation_id for record in retained.model_calls] == ["op_model_cycle_1_main"]
+
+
+def test_claimed_session_event_is_durable_before_terminal_finalize_crash() -> None:
+    store = _CrashBeforeTerminalFinalizeStore()
+    session = MemorySession("claimed-session")
+    agent = Agent(name="claimed-session-agent", instructions="Return one answer.", model="test-model")
+    config = _config(
+        store,
+        key="claimed-session",
+        provider=_provider(lambda: ScriptedLLM(steps=[LLMResponse(content="durable answer")])),
+        session=session,
+        capability_refs={"session": {"id": "session.claimed", "version": "1"}},
+    )
+
+    with pytest.raises(SystemExit, match="crash before terminal finalize"):
+        Runner.run_sync(agent, "answer once", run_config=config)
+
+    crashed = store.load_checkpoint("claimed-session")
+    assert crashed is not None and crashed.terminal_result is None and crashed.claim_token is not None
+    session_events = [entry for entry in crashed.event_outbox if entry.event.get("type") == "session_persisted"]
+    assert len(session_events) == 1
+    assert session_events[0].state == "delivered"
+
+
+def test_max_cycles_session_event_is_replayed_after_unclaimed_terminal_finalize_crash() -> None:
+    store = _CrashBeforeTerminalFinalizeStore()
+    session = MemorySession("max-cycles-session")
+    agent = Agent(name="max-cycles-session-agent", instructions="Continue until the cycle limit.", model="test-model")
+    first_config = _config(
+        store,
+        key="max-cycles-session",
+        provider=_provider(lambda: ScriptedLLM(steps=[LLMResponse(content="partial answer")])),
+        no_tool_policy="continue",
+        session=session,
+        capability_refs={"session": {"id": "session.max-cycles", "version": "1"}},
+    )
+
+    with pytest.raises(SystemExit, match="crash before terminal finalize"):
+        Runner.run_sync(agent, "continue once", run_config=first_config)
+    committed_items = session.get_items()
+    crashed = store.load_checkpoint("max-cycles-session")
+    assert crashed is not None and (crashed.cycle_index, crashed.claim_token, crashed.terminal_result) == (1, None, None)
+    assert all(event.event.get("type") != "session_persisted" for event in crashed.event_outbox)
+
+    resumed = Runner.run_sync(
+        agent,
+        "continue once",
+        run_config=_config(
+            store,
+            key="max-cycles-session",
+            provider=_provider(lambda: ScriptedLLM(steps=[])),
+            no_tool_policy="continue",
+            session=session,
+            capability_refs={"session": {"id": "session.max-cycles", "version": "1"}},
+        ),
+    )
+
+    assert resumed.status is AgentStatus.MAX_CYCLES
+    assert session.get_items() == committed_items
+    assert [event.type for event in resumed.events].count("session_persisted") == 1
+    retained = store.load_checkpoint("max-cycles-session")
+    assert retained is not None and retained.terminal_result is not None
+    assert retained.terminal_result.status is AgentStatus.MAX_CYCLES
+    assert all(event.state == "delivered" for event in retained.event_outbox)
 
 
 def test_approval_resume_crash_retries_same_idempotency_key_once() -> None:
