@@ -20,7 +20,7 @@ from vv_agent import (
     Runner,
     ToolPolicy,
 )
-from vv_agent.approval import ApprovalDecision, ApprovalProvider, ApprovalRequest
+from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.budget import HostCost, RunBudgetLimits
 from vv_agent.checkpoint import AmbiguousModelPolicy, AmbiguousToolPolicy, CheckpointError, ResumePolicy, ToolIdempotency
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
@@ -51,8 +51,10 @@ from vv_agent.runtime.backends.distributed import (
     toolset_schema_digest,
 )
 from vv_agent.runtime.backends.inline import InlineBackend
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.controller import ControllerCommand, HostInteractionAdmissionContext, HostInteractionRequest
+from vv_agent.runtime.run_definition import build_run_definition
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.tools import (
     FunctionTool,
@@ -62,7 +64,7 @@ from vv_agent.tools import (
     build_default_registry,
 )
 from vv_agent.tools.executor import FunctionToolExecutor
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolArtifactRef
+from vv_agent.types import AgentResult, AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolArtifactRef, ToolCall
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "distributed_run_envelope.json"
 WORKER_RESPONSE_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "distributed_worker_response.json"
@@ -1370,6 +1372,165 @@ def test_nonblocking_celery_rejects_brokered_approval_recipe(tmp_path: Path) -> 
 
     with pytest.raises(DistributedContractError, match="do not support brokered approval waits"):
         backend.advance(previous_envelope={}, outcome="transport failed")
+
+
+def test_celery_worker_rejects_brokered_approval_before_worker_effects(tmp_path: Path) -> None:
+    handler_calls: list[dict[str, Any]] = []
+
+    def invoke(_context: Any, arguments: dict[str, Any]) -> ToolOutputText:
+        handler_calls.append(arguments)
+        return ToolOutputText(text="handler ran")
+
+    agent = Agent(
+        name="direct-worker-approval-agent",
+        instructions="Call the protected tool.",
+        model="test-model",
+        tools=[
+            FunctionTool(
+                name="protected",
+                description="Run the protected operation.",
+                params_json_schema={"type": "object", "properties": {}, "required": []},
+                on_invoke=invoke,
+            )
+        ],
+    )
+
+    class BlockingApprovalProvider(ApprovalProvider):
+        def should_request(self, request: ApprovalRequest) -> bool:
+            del request
+            return True
+
+        def decide(self, request: ApprovalRequest) -> ApprovalDecision | None:
+            del request
+            return None
+
+    approval_provider_ref = CapabilityRef("approval.provider.direct-worker", "1")
+    approval_broker_ref = CapabilityRef("approval.broker.direct-worker", "1")
+    checkpoint_ref = CapabilityRef("checkpoint.direct-worker", "1")
+    session_ref = CapabilityRef("session.direct-worker", "1")
+    llm_ref = CapabilityRef("llm.direct-worker", "1")
+    checkpoint_key = "direct-worker-approval"
+    model_settings = ModelSettings()
+    store = InMemoryCheckpointStore()
+    session = MemorySession("direct-worker-approval-session")
+    checkpoint_config = CheckpointConfig(
+        store=store,
+        key=checkpoint_key,
+        resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+        capability_refs={
+            "approval_provider": approval_provider_ref.to_dict(),
+            "approval_broker": approval_broker_ref.to_dict(),
+            "session": session_ref.to_dict(),
+        },
+    )
+    run_config = RunConfig(
+        max_cycles=1,
+        max_handoffs=8,
+        no_tool_policy="finish",
+        model_settings=model_settings,
+        tool_policy=ToolPolicy(approval="default"),
+        approval_provider=BlockingApprovalProvider(),
+        approval_broker=ApprovalBroker(),
+        session=session,
+        checkpoint_config=checkpoint_config,
+    )
+    tool_registry = Runner._build_tool_registry(agent=agent, run_config=run_config)
+    task = AgentCompiler().compile(
+        agent=agent,
+        input="work",
+        run_config=run_config,
+        resolved=_resolved(),
+        trace_id="trace-direct-worker-approval",
+        run_id="run-direct-worker-approval",
+    )
+    run_definition, run_definition_digest = build_run_definition(
+        agent=agent,
+        root_input="work",
+        run_config=run_config,
+        resolved=_resolved(),
+        model_settings=model_settings,
+        task=task,
+        registry=tool_registry,
+        initial_messages=[],
+    )
+    controller = CheckpointResumeController(
+        config=checkpoint_config,
+        task_id=task.task_id,
+        run_id="run-direct-worker-approval",
+        trace_id="trace-direct-worker-approval",
+        run_definition=run_definition,
+        run_definition_digest=run_definition_digest,
+        initial_messages=[],
+        initial_shared_state={},
+        initial_budget_usage=None,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+    )
+    assert controller.admit() is None
+    checkpoint_before = store.load_checkpoint(checkpoint_key)
+    assert checkpoint_before is not None
+    session_before = session.get_items()
+    workspace = tmp_path / "worker-workspace"
+    base_toolset_ref = ToolsetRef(
+        id="toolset.direct-worker",
+        version="1",
+        schema_digest=toolset_schema_digest(tool_registry),
+    )
+    task_toolset_ref = ToolsetRef(
+        id=base_toolset_ref.id,
+        version=base_toolset_ref.version,
+        schema_digest=toolset_schema_digest(tool_registry, task=task),
+    )
+    registry = DistributedCapabilityRegistry(include_defaults=False)
+    registry.register_toolset(base_toolset_ref, tool_registry)
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register(
+        "llm_client",
+        llm_ref,
+        ScriptedLLM(
+            steps=[
+                LLMResponse(
+                    content="",
+                    tool_calls=[ToolCall(id="call-protected", name="protected", arguments={})],
+                )
+            ]
+        ),
+    )
+    registry.register("approval_provider", approval_provider_ref, run_config.approval_provider)
+    registry.register("approval_broker", approval_broker_ref, run_config.approval_broker)
+    envelope = DistributedRunEnvelope.for_cycle(
+        task=task,
+        recipe=RuntimeRecipe(
+            settings_file=str(tmp_path / "unused-settings.py"),
+            backend="test",
+            model="test-model",
+            workspace=str(workspace),
+            capabilities=DistributedCapabilities(
+                toolset_ref=task_toolset_ref,
+                tool_policy=DistributedToolPolicy(approval="default"),
+                llm_client_ref=llm_ref,
+                approval_provider_ref=approval_provider_ref,
+                approval_broker_ref=approval_broker_ref,
+                checkpoint_store_ref=checkpoint_ref,
+            ),
+        ),
+        cycle_index=1,
+        root_run_id="run-direct-worker-approval",
+        trace_id="trace-direct-worker-approval",
+        run_definition_digest=run_definition_digest,
+        claim_mode="continue",
+        resume_attempt=1,
+        checkpoint_config=DistributedCheckpointConfig.from_checkpoint_config(checkpoint_config),
+    )
+
+    with pytest.raises(DistributedContractError, match="do not support brokered approval waits"):
+        run_single_cycle(envelope_dict=envelope.to_dict(), capability_registry=registry)
+
+    assert handler_calls == []
+    assert store.load_checkpoint(checkpoint_key) == checkpoint_before
+    assert session.get_items() == session_before
+    assert not workspace.exists()
 
 
 def test_nonblocking_celery_resolves_recipe_before_first_enqueue(tmp_path: Path) -> None:

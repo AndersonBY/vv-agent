@@ -6,7 +6,7 @@
 
 ## 安装
 
-当前包版本为 `0.12.3`。本仓库 `HEAD` 锁定语言无关的 Contract `8.1.1`；Python/Rust
+当前包版本为 `0.12.3`。本仓库 `HEAD` 锁定语言无关的 Contract `8.1.2`；Python/Rust
 配对采用仍为 `pending-adoption`，采用状态以中央 support matrix 为准。本实现保留
 符合 Python 语言习惯的 API 写法。
 

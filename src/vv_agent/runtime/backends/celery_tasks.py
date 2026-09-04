@@ -28,6 +28,7 @@ from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.backends.distributed import (
     ClaimMode,
     DistributedCapabilityRegistry,
+    DistributedContractError,
     DistributedRunEnvelope,
     DistributedWorkerResponse,
     RuntimeRecipe,
@@ -507,6 +508,9 @@ def _run_single_cycle(
     transport_redelivered: bool,
     transport_retry_count: int,
 ) -> DistributedWorkerResponse:
+    capabilities = envelope.recipe.capabilities
+    if capabilities.approval_provider_ref is not None or capabilities.approval_broker_ref is not None:
+        raise DistributedContractError("nonblocking distributed runs do not support brokered approval waits")
     store, event_store, extensions, reconciliation_provider, event_sink = _resolve_checkpoint_capabilities(
         envelope, capability_registry
     )

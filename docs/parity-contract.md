@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `8.1.1` at revision
-`a9c1c8e737586c4d82b5196dcce805e2092189d5`. Its immutable release artifact has
-SHA-256 `4417efedc93b2bb658c19b8c787451c14582ead2e03ad5f0415dee26348cab67`.
+`contract.lock.json` selects contract `8.1.2` at revision
+`2768c8f65bdd3014cdcc9f00b8534b3d02c045f1`. Its immutable release artifact has
+SHA-256 `3010e377f62971cf160f37fe90c1312ba63557fe97b039fd5595a736d755ee8f`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,8 +44,8 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-8.1.1.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v8.1.1/vv-agent-contract-8.1.1.zip
+  --artifact /path/to/vv-agent-contract-8.1.2.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v8.1.2/vv-agent-contract-8.1.2.zip
 ```
 
 ## Python Producer Map

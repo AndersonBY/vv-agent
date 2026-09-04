@@ -305,6 +305,16 @@
       "expected_error_code": "tool_result_invalid"
     },
     {
+      "name": "success_result_has_non_null_error_code",
+      "base": "ordinary",
+      "mutation": {
+        "add": {
+          "error_code": "unexpected_success_error"
+        }
+      },
+      "expected_error_code": "tool_result_invalid"
+    },
+    {
       "name": "truncated_without_reason",
       "base": "truncated_read",
       "mutation": {

@@ -7,7 +7,7 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 ## Install
 
 The current package release is `0.12.3`. This repository's `HEAD` locks
-language-neutral Contract `8.1.1`. Paired Python/Rust adoption remains
+language-neutral Contract `8.1.2`. Paired Python/Rust adoption remains
 `pending-adoption`; the central support matrix is the source for adoption
 status. This repository keeps a Python-idiomatic API.
 

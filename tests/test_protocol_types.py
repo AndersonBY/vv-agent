@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from vv_agent.deferred import DeferredResolutionResultInvalid, validate_definitive_result
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolCall, ToolExecutionResult, ToolResultStatus
@@ -92,9 +93,10 @@ def test_bounded_tool_result_rejects_invalid_sparse_fixture_cases() -> None:
         "cursor_source_changed",
         "cursor_offset_past_end",
     }
+    validator_only = {"success_result_has_non_null_error_code"}
 
     for case in fixture["invalid_cases"]:
-        if case["name"] in runtime_only:
+        if case["name"] in runtime_only or case["name"] in validator_only:
             continue
         payload = deepcopy(fixture["canonical_results"][case["base"]])
         mutation = case["mutation"]
@@ -107,6 +109,19 @@ def test_bounded_tool_result_rejects_invalid_sparse_fixture_cases() -> None:
 
         with pytest.raises(ValueError, match=case["expected_error_code"]):
             ToolExecutionResult.from_dict(payload)
+
+
+def test_bounded_tool_result_success_error_code_is_rejected_by_deferred_validator() -> None:
+    fixture = json.loads(BOUNDED_RESULT_FIXTURE.read_text(encoding="utf-8"))
+    case = next(case for case in fixture["invalid_cases"] if case["name"] == "success_result_has_non_null_error_code")
+    payload = deepcopy(fixture["canonical_results"][case["base"]])
+    for dotted, value in case["mutation"].get("add", {}).items():
+        _set_dotted(payload, dotted, deepcopy(value))
+
+    result = ToolExecutionResult.from_dict(payload)
+    with pytest.raises(DeferredResolutionResultInvalid, match=case["expected_error_code"]) as caught:
+        validate_definitive_result(result)
+    assert caught.value.code == case["expected_error_code"]
 
 
 def test_bounded_tool_result_optional_fields_reject_explicit_null() -> None:
