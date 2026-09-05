@@ -450,7 +450,10 @@
     "heartbeat_updates_lease_only": true,
     "heartbeat_cannot_overwrite_journal": true,
     "reconciliation_provider_is_optional": true,
-    "missing_reconciliation_provider_defaults_to_defer": true,
+    "missing_reconciliation_provider_applies_configured_policy": {
+      "require_reconciliation": "defer",
+      "surface_to_model": "tool_outcome_unknown_failed_receipt"
+    },
     "effective_claim_mode_uses_envelope_transport_metadata_and_stored_checkpoint": true,
     "terminal_commit_order": [
       "output_guardrail",
@@ -518,7 +521,11 @@
       "expired_owner_can_renew": false,
       "expired_claim_can_be_reclaimed": true,
       "heartbeat_interval_less_than_positive_lease": true,
-      "successful_commit_precedes_concurrent_renewal_error": true
+      "successful_commit_precedes_concurrent_renewal_error": true,
+      "renew_result_schema": "vv-agent.checkpoint-renewal.v1",
+      "renew_result_outcomes": ["renewed", "cancel_requested", "claim_lost"],
+      "cancel_requested_keeps_claim_until_safe_boundary": true,
+      "cycle_aborted_on_lease_loss": true
     },
     "expiry_cases": [
       {
@@ -557,7 +564,7 @@
       {
         "name": "initial_renewal_precedes_operation",
         "driver": {
-          "initial_renewal": "success",
+          "initial_renewal": "renewed",
           "operation": "return",
           "commit": "success"
         },
@@ -596,7 +603,7 @@
       {
         "name": "operation_unwind_stops_heartbeat",
         "driver": {
-          "initial_renewal": "success",
+          "initial_renewal": "renewed",
           "operation": "unwind",
           "commit": "not_called"
         },
@@ -616,7 +623,7 @@
       {
         "name": "commit_barrier_keeps_heartbeat_active",
         "driver": {
-          "initial_renewal": "success",
+          "initial_renewal": "renewed",
           "operation": "return",
           "commit": "blocked_then_success"
         },
@@ -630,7 +637,7 @@
       {
         "name": "successful_commit_beats_inflight_renewal_rejection",
         "driver": {
-          "initial_renewal": "success",
+          "initial_renewal": "renewed",
           "operation": "return",
           "commit": "success_then_renew_rejected"
         },
@@ -638,6 +645,21 @@
           "durable_commit": true,
           "heartbeat_error_suppressed": true,
           "outcome": "success"
+        }
+      },
+      {
+        "name": "renewal_observes_cancel_requested",
+        "driver": {
+          "initial_renewal": "renewed",
+          "operation": "tool_started",
+          "cancel": "controller_command_committed",
+          "next_renewal": "cancel_requested"
+        },
+        "expected": {
+          "claim_retained_until_close": true,
+          "cycle_aborted_reason": "cancelled",
+          "unclosed_tool_error_code": "tool_cancelled",
+          "external_success_assumed": false
         }
       }
     ]

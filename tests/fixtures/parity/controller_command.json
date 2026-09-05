@@ -1,11 +1,14 @@
 {
-  "contract_version": "8.1.2",
+  "contract_version": "9.0.0",
   "schema_version": "vv-agent.controller-command.v1",
   "scope": {
     "task_neutral": true,
     "deferred_resolution_is_separate": true,
     "terminal_successor_is_separate": true,
     "ask_user_terminal_semantics_unchanged": true,
+    "checkpoint_schema": "vv-agent.checkpoint.v9",
+    "cancel_requested_field": "required boolean",
+    "cycle_aborted_event": "RunEvent v4",
     "forbidden_wire_members": [
       "unregistered_extension",
       "secret_value",
@@ -201,7 +204,8 @@
           "kind"
         ],
         "optional_fields": [],
-        "terminal_result": "failed with completion_reason=cancelled"
+        "terminal_result": "failed with completion_reason=cancelled after unclaimed or expired-claim atomic reclamation",
+        "live_claim": "set cancel_requested=true and retain the claim"
       },
       "abort": {
         "required_fields": [
@@ -210,7 +214,12 @@
         "optional_fields": [],
         "requires": "reconciliation_required only",
         "terminal_result": "failed with completion_reason=failed and error_code=operator_abort_with_unknown_outcome",
-        "preserves_ambiguity": true
+        "closes_unclosed_tools": true,
+        "unclosed_tool_error_code": "tool_cancelled",
+        "resume_observation_carrier": [
+          "closed tool journal entry.resume_observation",
+          "terminal_result.resume_observations"
+        ]
       }
     }
   },
@@ -988,8 +997,28 @@
       {
         "from": "running",
         "command": "cancel",
+        "to": "running",
+        "cancel_requested": true,
+        "claim": "retained",
+        "renewal_outcome": "cancel_requested",
+        "cycle_close": "cycle_aborted at the worker safe boundary"
+      },
+      {
+        "from": "running",
+        "claim": "expired",
+        "command": "cancel",
         "to": "failed",
-        "completion_reason": "cancelled"
+        "completion_reason": "cancelled",
+        "reclaim_and_apply_same_cas": true,
+        "cycle_aborted_reason": "cancelled"
+      },
+      {
+        "from": "suspended",
+        "claim": "expired",
+        "command": "suspend",
+        "to": "suspended",
+        "reclaim_and_apply_same_cas": true,
+        "claim_after": "released"
       },
       {
         "from": "host_interaction",
@@ -1001,14 +1030,21 @@
         "from": "suspended",
         "command": "cancel",
         "to": "failed",
-        "completion_reason": "cancelled"
+        "completion_reason": "cancelled",
+        "expired_claim_reclamation": "if a stale claim is present, reclaim and apply atomically"
       },
       {
         "from": "reconciliation_required",
         "command": "abort",
         "to": "failed",
         "completion_reason": "failed",
-        "ambiguous_journal_preserved": true
+        "cycle_aborted_reason": "operator_abort",
+        "unclosed_tool_state": "failed",
+        "unclosed_tool_error_code": "tool_cancelled",
+        "resume_observation_carrier": [
+          "closed tool journal entry.resume_observation",
+          "terminal_result.resume_observations"
+        ]
       }
     ],
     "wait_user_is_still_terminal": true,
@@ -1021,6 +1057,61 @@
       "logical_cycle": "the_same_in_flight_cycle_identity_after_claim_release",
       "host_interaction_response_and_resume": "preserve_cycle_index_and_reclaim_the_same_logical_cycle",
       "no_new_cycle_is_created_by_controller_command": true
+    }
+  },
+  "lifecycle_control": {
+    "renew_result": {
+      "schema_version": "vv-agent.checkpoint-renewal.v1",
+      "outcomes": [
+        "renewed",
+        "cancel_requested",
+        "claim_lost"
+      ],
+      "renewed": {
+        "claim_retained": true,
+        "lease_updated": true
+      },
+      "cancel_requested": {
+        "claim_retained": true,
+        "lease_updated": true,
+        "worker_must_close_cycle": true
+      },
+      "claim_lost": {
+        "claim_retained": false,
+        "lease_updated": false,
+        "payload_updated": false
+      },
+      "unknown_fields": "reject"
+    },
+    "expired_claim_control": {
+      "cancel": "reclaim expired claim and apply terminal cancellation in one CAS",
+      "suspend": "reclaim expired claim and apply suspended state in one CAS",
+      "live_claim_cancel": "set cancel_requested without stealing claim",
+      "live_claim_cancel_revision_increment": 0,
+      "live_claim_cancel_receipt": "command receipt and run_state_changed event are written atomically without a checkpoint revision increment",
+      "cancel_requested_reset": "only terminal finalization or creation of the next logical cycle writes false; claimed progress, renewal, and tool receipts never clear an already-true signal"
+    },
+    "cycle_aborted": {
+      "event_type": "cycle_aborted",
+      "reasons": ["cancelled", "lease_lost", "operator_abort"],
+      "logical_cycle_required": true,
+      "unclosed_tool_state": "failed",
+      "unclosed_tool_error_code": "tool_cancelled",
+      "unclosed_tool_error_fields": ["code", "message", "retryable"],
+      "unclosed_tool_resume_observation_fields": [
+        "operation_id",
+        "operation_kind",
+        "cycle_index",
+        "state",
+        "risk",
+        "idempotency_support"
+      ],
+      "terminal_result_resume_observations_field": "resume_observations",
+      "event_identity": {
+        "stable_field": "event_id",
+        "same_event_identity_replay": "zero_write",
+        "different_payload_same_event_id": "event_identity_conflict"
+      }
     }
   },
   "cas": {
@@ -1049,7 +1140,8 @@
     "active_claim": {
       "controller_command": "controller_command_claim_active",
       "writes": [],
-      "claim_may_be_released_by": "claim-owning framework producer only"
+      "claim_may_be_released_by": "claim-owning framework producer only",
+      "expired_claim_control": "reclaim and apply cancel/suspend atomically"
     },
     "host_interaction_recovery": {
       "ordinary_continue_or_claim": "reject with host_interaction_recovery_required",
@@ -1116,19 +1208,20 @@
   ],
   "precedence": [
     "committed_terminal",
-    "live_claim",
+    "live_claim_cancel_requested",
     "unresolved_ambiguous_operation",
     "unresolved_deferred_barrier",
     "controller_command_state_rule",
+    "expired_claim_reclamation",
     "ordinary_cancel"
   ],
   "worker_observation": {
-    "worker_response_schema": "vv-agent.distributed-worker-response.v3",
+    "worker_response_schema": "vv-agent.distributed-worker-response.v4",
     "pending_semantics": "only_uncommitted_observation; never an authoritative result or state transition",
     "driver_authority": "read checkpoint exactly once after pending and choose deferred, host_interaction, suspended, or reconciliation_required case",
     "host_interaction_observation": {
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "pending"
       },
       "authoritative_checkpoint_status": "host_interaction",
@@ -1138,7 +1231,7 @@
     },
     "suspended_observation": {
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "pending"
       },
       "authoritative_checkpoint_status": "suspended",
@@ -1148,7 +1241,7 @@
     },
     "deferred_observation": {
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "pending"
       },
       "authoritative_checkpoint_status": "deferred",
@@ -1566,17 +1659,41 @@
       "id": "C16",
       "point": "cancel_outbox_dispatch_guard",
       "before": {"checkpoint": {"status": "running", "revision": 40}, "receipt": null, "event_outbox": [], "wake_outbox": []},
-      "operation": {"kind": "cancel"},
-      "after": {"checkpoint": {"status": "failed", "revision": 41}, "terminal_result": {"status": "failed", "completion_reason": "cancelled"}, "receipt": {"outbox_action": "none"}, "event_outbox": ["run_state_changed", "run_cancelled"], "wake_outbox": [], "worker_enqueue_count": 0},
-      "expected": "cancel_is_terminal_failed_with_cancelled_reason_and_canonical_run_cancelled_event"
+      "operation": {"kind": "cancel", "closure_operation": "finalize"},
+      "after": {"checkpoint": {"status": "failed", "revision": 41}, "terminal_result": {"status": "failed", "completion_reason": "cancelled", "resume_observations": []}, "cycle_aborted_event": false, "receipt": {"outbox_action": "none"}, "event_outbox": ["run_state_changed", "run_cancelled"], "wake_outbox": [], "worker_enqueue_count": 0},
+      "expected": "cancel_without_logical_cycle_is_terminal_failed_with_empty_resume_observations_and_no_cycle_aborted_event"
     },
     {
       "id": "C17",
       "point": "abort_reconciliation_only_outbox_dispatch_guard",
       "before": {"checkpoint": {"status": "reconciliation_required", "revision": 50}, "receipt": null, "event_outbox": ["operation_ambiguous"], "wake_outbox": []},
-      "operation": {"kind": "abort"},
-      "after": {"checkpoint": {"status": "failed", "revision": 51}, "receipt": {"outbox_action": "none"}, "event_outbox": ["operation_ambiguous", "run_state_changed", "run_failed"], "wake_outbox": [], "worker_enqueue_count": 0},
+      "operation": {"kind": "abort", "closure_operation": "finalize", "logical_cycle": 2},
+      "after": {"checkpoint": {"status": "failed", "revision": 51}, "terminal_result": {"status": "failed", "completion_reason": "failed", "error_code": "operator_abort_with_unknown_outcome", "resume_observations": [{"operation_id": "op_tool_cycle_2_call_2", "operation_kind": "tool", "cycle_index": 2, "state": "ambiguous", "risk": "unknown_tool_side_effect", "idempotency_support": "unknown"}]}, "receipt": {"outbox_action": "none"}, "event_outbox": ["operation_ambiguous", "cycle_aborted", "run_state_changed", "run_failed"], "cycle_aborted_event_id": "evt_cycle_aborted_operator_abort", "cycle_aborted_reason": "operator_abort", "cycle_aborted_logical_cycle": 2, "unclosed_tool_state": "failed", "unclosed_tool_error_code": "tool_cancelled", "unclosed_tool_error": {"code": "tool_cancelled", "message": "Tool execution ended before a definitive receipt; external effect remains unknown.", "retryable": false}, "unclosed_tool_resume_observation": {"operation_id": "op_tool_cycle_2_call_2", "operation_kind": "tool", "cycle_index": 2, "state": "ambiguous", "risk": "unknown_tool_side_effect", "idempotency_support": "unknown"}, "event_replay": {"same_event_identity": {"writes": 0, "duplicate_event_count": 0}}, "wake_outbox": [], "worker_enqueue_count": 0},
       "expected": "abort_is_allowed_only_from_reconciliation_required_and_does_not_dispatch_worker"
+    },
+    {
+      "id": "C18",
+      "point": "live_claim_cancel_sets_checkpoint_signal",
+      "before": {"checkpoint": {"checkpoint_key": "tenant-7/run-42", "status": "running", "revision": 60, "claim_token": "owner-a", "claimed_cycle": 2, "lease_expires_at_ms": 400, "cancel_requested": false}, "receipt": null, "event_outbox": [], "wake_outbox": []},
+      "operation": {"kind": "cancel", "command_id": "cmd-c18", "expected_revision": 60},
+      "after": {"checkpoint": {"checkpoint_key": "tenant-7/run-42", "status": "running", "revision": 60, "claim_token": "owner-a", "claimed_cycle": 2, "lease_expires_at_ms": 400, "cancel_requested": true}, "run_state_changed_payload": {"cancel_requested": {"from": false, "to": true}}, "receipt": {"command_id": "cmd-c18", "outbox_action": "none"}, "same_command_replay": {"writes": 0, "revision": 60, "duplicate_event_count": 0}, "continuation": {"claim_token": "owner-a", "cancel_requested": true, "progress": {"expected_revision": 60, "after_revision": 61, "writes": 1, "event": "checkpoint_progress", "cancel_requested": true}, "record_tool_receipt": {"checkpoint_key": "tenant-7/run-42", "request_golden_case": "tool_write_record", "expected_revision": 61, "operation_id": "op_tool_cycle_2_call_1", "attempt": 1, "tool_call_id": "call_1", "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf", "identity_key": "955b7c93c5ae07537d1ec16c9523a9733e72f4c46267dc17bc7c5695759c3094", "result_digest": "5eeba4f574c9a063b13c194e0efe02828535706e0d3d72c6969bc18cb0ae32b2", "after_revision": 62, "writes": 1, "event": "tool_call_completed", "cancel_requested": true}, "renew": {"claim_token": "owner-a", "outcome": "cancel_requested", "revision": 62, "cancel_requested": true}, "event_outbox": ["run_state_changed", "checkpoint_progress", "tool_call_completed"], "duplicate_event_count": 0, "receipt_count": 1}, "event_outbox": ["run_state_changed"], "wake_outbox": [], "worker_enqueue_count": 0},
+      "expected": "live_claim_is_not_stolen_and_worker_renew_returns_cancel_requested"
+    },
+    {
+      "id": "C19",
+      "point": "expired_claim_cancel_reclaims_before_terminal_close",
+      "before": {"checkpoint": {"resume_attempt": 2, "status": "running", "revision": 62, "claim_token": "owner-dead", "claimed_cycle": 2, "lease_expires_at_ms": 200, "cancel_requested": false}, "receipt": null, "event_outbox": [], "wake_outbox": []},
+      "operation": {"kind": "cancel", "closure_operation": "finalize_claimed", "now_ms": 200, "expected_revision": 62},
+      "after": {"checkpoint": {"resume_attempt": 3, "status": "failed", "revision": 63, "claim_token": null, "claimed_cycle": null, "lease_expires_at_ms": null, "cancel_requested": true}, "terminal_result": {"status": "failed", "completion_reason": "cancelled", "resume_observations": [{"operation_id": "op_tool_cycle_2_call_2", "operation_kind": "tool", "cycle_index": 2, "state": "ambiguous", "risk": "unknown_tool_side_effect", "idempotency_support": "unknown"}]}, "receipt": {"outbox_action": "none"}, "event_outbox": ["cycle_aborted", "run_state_changed", "run_cancelled"], "cycle_aborted_event_id": "evt_cycle_aborted_cancelled", "cycle_aborted_reason": "cancelled", "unclosed_tool_state": "failed", "unclosed_tool_error_code": "tool_cancelled", "unclosed_tool_error": {"code": "tool_cancelled", "message": "Tool execution ended before a definitive receipt; external effect remains unknown.", "retryable": false}, "unclosed_tool_resume_observation": {"operation_id": "op_tool_cycle_2_call_2", "operation_kind": "tool", "cycle_index": 2, "state": "ambiguous", "risk": "unknown_tool_side_effect", "idempotency_support": "unknown"}, "event_replay": {"same_event_identity": {"writes": 0, "duplicate_event_count": 0}}, "wake_outbox": [], "worker_enqueue_count": 0},
+      "expected": "expired_claim_reclamation_and_cancel_are_one_cas"
+    },
+    {
+      "id": "C20",
+      "point": "expired_claim_suspend_reclaims_before_state_change",
+      "before": {"checkpoint": {"status": "running", "revision": 64, "claim_token": "owner-dead", "claimed_cycle": 2, "lease_expires_at_ms": 200, "cancel_requested": false}, "receipt": null, "event_outbox": [], "wake_outbox": []},
+      "operation": {"kind": "suspend", "now_ms": 200, "expected_revision": 64},
+      "after": {"checkpoint": {"status": "suspended", "revision": 65, "claim_token": null, "claimed_cycle": null, "lease_expires_at_ms": null, "cancel_requested": false}, "receipt": {"outbox_action": "none"}, "event_outbox": ["run_state_changed"], "wake_outbox": [], "worker_enqueue_count": 0},
+      "expected": "expired_claim_reclamation_and_suspend_are_one_cas"
     }
   ],
   "digest_vectors": [

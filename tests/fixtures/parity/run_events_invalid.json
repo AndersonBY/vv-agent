@@ -143,6 +143,30 @@
       "deferred_has_no_tool_result": true,
       "missing_required_completed_fields": "reject"
     },
+    "cycle_aborted_fields": {
+      "event_type": "cycle_aborted",
+      "required_fields": [
+        "version",
+        "type",
+        "event_id",
+        "run_id",
+        "trace_id",
+        "created_at",
+        "cycle_index",
+        "logical_cycle",
+        "reason"
+      ],
+      "reason_values": [
+        "cancelled",
+        "lease_lost",
+        "operator_abort"
+      ],
+    "logical_cycle": "positive_json_safe_integer",
+    "logical_cycle_relation": "logical_cycle = cycle_index + 1",
+    "cycle_index_semantics": "last committed cycle index",
+      "closes_unclosed_tools_with": "tool_cancelled",
+      "unknown_fields": "reject"
+    },
     "host_interaction_fields": {
       "event_types": [
         "host_interaction_requested",
@@ -1328,6 +1352,48 @@
         },
         "execution_started": true,
         "duration_ms": 4
+      }
+    },
+    {
+      "id": "cycle_aborted_unknown_reason",
+      "input": {
+        "version": "v4",
+        "type": "cycle_aborted",
+        "event_id": "evt_invalid_cycle_abort",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": 1,
+        "logical_cycle": 2,
+        "reason": "timeout"
+      }
+    },
+    {
+      "id": "cycle_aborted_missing_logical_cycle",
+      "input": {
+        "version": "v4",
+        "type": "cycle_aborted",
+        "event_id": "evt_invalid_cycle_abort",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": 1,
+        "reason": "cancelled"
+      }
+    },
+    {
+      "id": "cycle_aborted_unknown_field",
+      "input": {
+        "version": "v4",
+        "type": "cycle_aborted",
+        "event_id": "evt_invalid_cycle_abort",
+        "run_id": "run_invalid",
+        "trace_id": "trace_invalid",
+        "created_at": 1,
+        "cycle_index": 1,
+        "logical_cycle": 2,
+        "reason": "cancelled",
+        "operator_note": "forbidden"
       }
     },
     {

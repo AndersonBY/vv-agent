@@ -1,7 +1,7 @@
 {
   "contract": "durable_deferred_tool",
   "schema_version": "vv-agent.durable-deferred-tool.v2",
-  "contract_version": "8.1.2",
+  "contract_version": "9.0.0",
   "scope": "framework_host_boundary_only",
   "versioning": {
     "forward_only": true,
@@ -311,6 +311,10 @@
         "deferred"
       ]
     ],
+    "admission_transition_operations": {
+      "started_to_deferred": "admit_deferred_batch",
+      "ambiguous_to_deferred": "accept_deferred_batch"
+    },
     "deferred_is_not": [
       "started",
       "ambiguous",
@@ -321,10 +325,12 @@
   "batch": {
     "model_tool_batch_is_collected_while_claim_is_held": true,
     "admission_operation": "admit_deferred_batch",
+    "ordinary_receipt_operation": "record_tool_receipt",
+    "ordinary_receipts_are_written_before_admission": true,
     "caller_loops_single_item_admission": false,
     "outcome_order": "original_model_tool_call_order",
     "mixed_completed_and_deferred": {
-      "completed_outcomes": "persist definitive completed journal entries and ordinary tool_call_completed events in this same batch CAS",
+      "completed_outcomes": "already persisted by record_tool_receipt while the active claim is retained",
       "completed_status_mapping": {
         "SUCCESS": {
           "journal_state": "succeeded",
@@ -336,10 +342,14 @@
           "error_required": true
         }
       },
-      "deferred_outcomes": "persist deferred journal handles and tool_call_deferred events in this same batch CAS",
+      "deferred_outcomes": "persist only deferred journal handles and tool_call_deferred events in this same batch CAS",
       "checkpoint_status": "deferred when at least one deferred outcome exists",
       "claim_release": "one release after the complete batch CAS, never once per item",
       "all_or_none": true,
+      "all_or_none_scope": "deferred_admission_only; ordinary receipts are committed by record_tool_receipt before this CAS",
+      "completed_outcome_admission": "reject_deferred_admission_completed_outcome",
+      "already_receipted_admission": "reject_deferred_admission_receipt_already_recorded",
+      "ordinary_receipt_is_not_repeated": true,
       "pre_cas_crash": "every started entry not covered by the CAS is ambiguous; no completed or deferred outcome is inferred"
     },
     "admission_cas": {
@@ -349,17 +359,20 @@
         "active_claim_token",
         "active_claimed_cycle"
       ],
-      "input": "ordered batch of ToolCallOutcome values for every started model tool call",
+      "input": "ordered deferred-only outcomes for the still-unresolved model tool calls",
       "writes": [
-        "all completed journal receipts",
         "all deferred journal handles",
-        "all ordinary completed events",
         "all tool_call_deferred events",
         "checkpoint status/barrier",
         "claim and lease release"
       ],
       "revision_increment": 1,
       "external_tools_called": 0,
+      "rejects": [
+        "completed outcome",
+        "already receipted definitive outcome",
+        "duplicate deferred handle"
+      ],
       "atomic": true
     },
     "outbox_preflight": {
@@ -395,6 +408,13 @@
         "deferred",
         "completed",
         "deferred"
+      ],
+      "ordinary_receipt_order": [
+        "call_b"
+      ],
+      "admission_deferred_only_order": [
+        "call_a",
+        "call_c"
       ],
       "handles": [
         {
@@ -438,6 +458,8 @@
       },
       "completed_journal_state": "failed",
       "completed_event_type": "tool_call_completed",
+      "completed_receipt_before_admission": true,
+      "admission_does_not_write_completed_receipt": true,
       "deferred_journal_count": 2,
       "checkpoint_status": "deferred",
       "claim_release_count": 1,
@@ -545,7 +567,7 @@
         "succeeded",
         "failed"
       ],
-      "result_digest": "lowercase_sha256_of_rfc8785_complete_result",
+      "result_digest": "lowercase_sha256_of_rfc8785_canonical_typed_writer_result",
       "event_payload_digest": "lowercase_sha256_of_rfc8785_tool_call_completed_event",
       "same_store_atomicity": [
         "sqlite transaction",
@@ -628,7 +650,7 @@
         "handle_key": "lowercase_sha256_of_rfc8785_canonical_exact_handle",
         "handle_type": "exact DeferredToolHandle",
         "result": "canonical definitive ToolExecutionResult",
-        "result_digest": "lowercase_sha256_of_rfc8785_complete_result",
+        "result_digest": "lowercase_sha256_of_rfc8785_canonical_typed_writer_result",
         "event_id": "stable tool_call_completed event identity",
         "event_payload_digest": "lowercase_sha256_of_rfc8785_tool_call_completed_event",
         "receipt_status": "succeeded or failed"
@@ -886,7 +908,7 @@
     }
   },
   "distributed": {
-    "worker_response_schema_unchanged": "vv-agent.distributed-worker-response.v3",
+    "worker_response_schema": "vv-agent.distributed-worker-response.v4",
     "new_worker_response_variant": false,
     "pending_semantics": "no cycle commit and no response result were returned by this delivery attempt",
     "admission_response_type": "pending",
@@ -894,7 +916,7 @@
     "driver_wait_reason": "deferred_pending",
     "pending_case": {
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "pending"
       },
       "checkpoint_status": "deferred",
@@ -974,10 +996,15 @@
       "batch": "example",
       "expected": {
         "admission_calls": 1,
+        "ordinary_receipt_calls": 1,
         "claim_releases": 1,
-        "revision_increment": 1,
+        "ordinary_receipt_revision_increment": 1,
+        "admission_revision_increment": 1,
+        "total_revision_increment": 2,
         "status": "deferred",
-        "completed_journal_state": "succeeded",
+        "completed_journal_state": "succeeded_before_admission",
+        "completed_event_written_by": "record_tool_receipt",
+        "completed_event_not_written_by": "admit_deferred_batch",
         "deferred_journal_state": "deferred"
       }
     },
@@ -1235,6 +1262,16 @@
       "expected_error": "deferred_resolve_decision_invalid"
     },
     {
+      "name": "admission_contains_definitive_outcome",
+      "expected_error": "deferred_admission_completed_outcome_invalid",
+      "writes": []
+    },
+    {
+      "name": "admission_repeats_receipted_outcome",
+      "expected_error": "deferred_admission_receipt_already_recorded",
+      "writes": []
+    },
+    {
       "name": "outbox_full_after_external_effect_is_forbidden",
       "expected_error": "outbox_preflight_contract_invalid"
     },
@@ -1266,8 +1303,10 @@
         "ToolContext.defer factory",
         "deferred_requires_checkpoint before side effect",
         "ToolCallOutcome completed/deferred",
-        "admit_deferred_batch all-or-none CAS",
-        "mixed completed/deferred batch",
+        "record_tool_receipt immediate definitive journal and event CAS",
+        "admit_deferred_batch deferred-only all-or-none CAS",
+        "completed admission is rejected without a second receipt",
+        "mixed completed/deferred batch separates receipt and admission",
         "CheckpointStore.resolve_deferred(handle, result) revision retry loop",
         "deferred receipt index replay/conflict",
         "early started callback returns deferred_resolution_not_admitted without a write",
@@ -1297,8 +1336,10 @@
         "ToolContext::defer factory",
         "deferred_requires_checkpoint before side effect",
         "ToolCallOutcome completed/deferred",
-        "admit_deferred_batch all-or-none CAS",
-        "mixed completed/deferred batch",
+        "record_tool_receipt immediate definitive journal and event CAS",
+        "admit_deferred_batch deferred-only all-or-none CAS",
+        "completed admission is rejected without a second receipt",
+        "mixed completed/deferred batch separates receipt and admission",
         "CheckpointStore::resolve_deferred(handle, result) revision retry loop",
         "deferred receipt index replay/conflict",
         "early started callback returns deferred_resolution_not_admitted without a write",

@@ -1,13 +1,31 @@
 {
   "contract": "checkpoint_store",
-  "version": 8,
-  "checkpoint_schema": "vv-agent.checkpoint.v8",
+  "version": 9,
+  "checkpoint_schema": "vv-agent.checkpoint.v9",
   "run_definition_schema": "vv-agent.run-definition.v5",
   "checkpoint_state_columns": {
     "active_host_interaction": "complete closed vv-agent.host-interaction-request.v1 JSON object (including prompt and schema_version) or null",
     "suspended_origin": "closed JSON origin object or null",
     "crash_reload": "load both fields and host_interaction_records before deciding whether to wake or wait",
-    "old_schema": "vv-agent.checkpoint.v7 is rejected; no fallback reader"
+    "cancel_requested": "required boolean cancellation signal",
+    "old_schema": "vv-agent.checkpoint.v8 is rejected; no fallback reader"
+  },
+  "resume_observation": {
+    "schema_version": "vv-agent.resume-observation.v1",
+    "required_fields": [
+      "operation_id",
+      "operation_kind",
+      "cycle_index",
+      "state",
+      "risk",
+      "idempotency_support"
+    ],
+    "canonical_durable_carriers": [
+      "closed tool journal entry.resume_observation",
+      "terminal_result.resume_observations"
+    ],
+    "boolean_presence_is_not_evidence": true,
+    "unknown_fields": "reject"
   },
   "deferred_contract": "deferred_tool.json",
   "deferred_receipt_index": {
@@ -206,15 +224,19 @@
     },
     {
       "name": "renew",
-      "atomic": "compare_claim_token_and_live_lease_then_update_lease_only"
+      "atomic": "compare_claim_token_and_live_lease_then_return_typed_renewed_or_cancel_requested_outcome; claim_lost writes no lease or payload"
     },
     {
       "name": "progress",
       "atomic": "compare_revision_and_claim_token_then_update_payload_and_revision_preserving_claim"
     },
     {
+      "name": "record_tool_receipt",
+      "atomic": "receipt-first lookup by identity_key; compare the stored result_digest for same-result replay or typed conflict, even for a stale expected_revision, and only an identity miss compares active claim, claimed cycle, and revision before atomically persisting the journal receipt, tool_call_completed event, and revision while retaining the claim"
+    },
+    {
       "name": "admit_deferred_batch",
-      "atomic": "compare revision claim and complete ordered batch outcomes then persist all journals events barrier and release claim once"
+      "atomic": "compare revision and active claim then admit only deferred outcomes, persist deferred journals/events/barrier, and release claim once; completed or already-receipted outcomes are rejected"
     },
     {
       "name": "accept_deferred_batch",
@@ -266,15 +288,16 @@
     },
     {
       "name": "commit_cycle",
-      "atomic": "compare_revision_and_claim_token_then_commit_cycle_clear_journals_and_claim"
+      "atomic": "compare_revision_and_claim_token_then commit the successful cycle, clear committed journals, and release claim",
+      "success_only": true
     },
     {
       "name": "finalize_claimed",
-      "atomic": "compare_revision_and_claim_token_then_write_terminal_clear_claim_and_clear_ordinary_journals"
+      "atomic": "compare_revision_and_claim_token_then write terminal, clear claim, and clear or close journals; cancel, operator_abort, or lease_lost closes every unclosed tool with a concrete tool_cancelled error and ResumeObservation, writes cycle_aborted, and projects the observations into terminal_result.resume_observations"
     },
     {
       "name": "finalize",
-      "atomic": "compare_revision_and_no_claim_then_write_terminal_preserving_explicit_operator_abort_ambiguity"
+      "atomic": "compare_revision_and_no_claim_then branch: ordinary terminal finalization writes terminal_result with resume_observations=[] and no cycle_aborted; cancel, operator_abort, or lease_lost with a positive logical_cycle closes every unclosed tool with a concrete tool_cancelled error and ResumeObservation, writes cycle_aborted, and then writes terminal lifecycle"
     },
     {
       "name": "record_event_delivery",
@@ -289,6 +312,43 @@
       "atomic": "explicit_host_retention_cleanup_deletes_checkpoint_and_all_handle_receipt_index_rows_together"
     }
   ],
+  "renew_result": {
+    "schema_version": "vv-agent.checkpoint-renewal.v1",
+    "discriminator": "outcome",
+    "closed_objects": true,
+    "variants": {
+      "renewed": {
+        "outcome": "renewed",
+        "required_fields": [
+          "schema_version",
+          "outcome",
+          "lease_expires_at_ms"
+        ],
+        "claim_retained": true
+      },
+      "cancel_requested": {
+        "outcome": "cancel_requested",
+        "required_fields": [
+          "schema_version",
+          "outcome",
+          "lease_expires_at_ms"
+        ],
+        "claim_retained": true,
+        "worker_action": "close_current_logical_cycle_at_safe_boundary"
+      },
+      "claim_lost": {
+        "outcome": "claim_lost",
+        "required_fields": [
+          "schema_version",
+          "outcome",
+          "revision"
+        ],
+        "lease_write": false,
+        "payload_write": false
+      }
+    },
+    "unknown_fields": "reject"
+  },
   "revision_rules": {
     "create": 0,
     "claim_increment": 1,
@@ -299,12 +359,38 @@
     "finalize_increment": 1,
     "event_delivery_increment": 1,
     "renew_increment": 0,
+    "live_claim_cancel_increment": 0,
+    "live_claim_cancel_sets_cancel_requested_without_revision_change": true,
+    "cancel_requested_cannot_be_cleared_by_claimed_progress_or_receipt": true,
+    "cancel_requested_reset": "terminal finalization clears the claim; the next logical cycle is created with cancel_requested=false",
     "acknowledge_increment": 1,
     "heartbeat_requires_revision": false,
     "heartbeat_requires_claim_token": true,
     "progress_preserves_claim": true,
+    "record_tool_receipt_increment": 1,
+    "record_tool_receipt_preserves_claim": true,
+    "record_tool_receipt_writes_journal_and_event_atomically": true,
+    "record_tool_receipt_duplicate_same_identity_is_zero_write": true,
+    "record_tool_receipt_identity_fields": [
+      "checkpoint_key",
+      "operation_id",
+      "attempt",
+      "tool_call_id",
+      "request_digest"
+    ],
+    "record_tool_receipt_result_digest": "RFC 8785 canonical strict vv-agent.tool-execution-result.v4 after canonical typed-writer normalization (empty metadata omitted; present optional fields retained), followed by lowercase SHA-256",
+    "record_tool_receipt_receipt_first": true,
+    "record_tool_receipt_stale_same_identity_same_result_is_zero_write": true,
+    "record_tool_receipt_conflict_error": "tool_receipt_conflict",
+    "record_tool_receipt_conflict_is_zero_write": true,
+    "ordinary_tool_receipts_are_serialized": true,
+    "ordinary_tool_receipts_have_no_parallel_cas_retry_contract": true,
+    "record_tool_receipt_unknown_started_outcome_is_not_definitive": true,
     "admit_deferred_batch_releases_claim_atomically": true,
     "admit_deferred_batch_requires_started_journal": true,
+    "admit_deferred_batch_deferred_only": true,
+    "admit_deferred_batch_rejects_completed_or_receipted": true,
+    "admit_deferred_batch_does_not_repeat_tool_receipt": true,
     "resolve_deferred_requires_exact_handle": true,
     "resolve_deferred_requires_definitive_result": true,
     "resolve_deferred_same_replay_is_idempotent": true,
@@ -316,6 +402,15 @@
     "resolve_deferred_claimed_error": "deferred_checkpoint_claimed",
     "resolve_deferred_not_admitted_error": "deferred_resolution_not_admitted",
     "resolve_deferred_does_not_claim_or_invoke_tool": true,
+    "renew_result_schema": "vv-agent.checkpoint-renewal.v1",
+    "renew_result_values": [
+      "renewed",
+      "cancel_requested",
+      "claim_lost"
+    ],
+    "renew_cancel_requested_preserves_claim": true,
+    "renew_claim_lost_preserves_revision_and_writes_nothing": true,
+    "cancel_or_suspend_expired_claim_reclaimed_atomically": true,
     "host_interaction_response_persists_full_message_before_wake": true,
     "host_interaction_response_consumed_exactly_once": true,
     "host_interaction_response_revision_semantics": {
@@ -381,11 +476,21 @@
     "receipt_replay_does_not_append_model_call_or_budget": true,
     "cycle_commit_preserves_model_call_ledger": true,
     "run_definition_and_digest_immutable_after_create": true,
-    "operator_abort_finalize_preserves_ambiguous_journal": true,
+    "operator_abort_finalize_closes_unclosed_tools": true,
+    "lease_lost_recovery_uses_existing_claimed_finalize": true,
+    "lease_lost_recovery_requires_active_recovery_claim": true,
+    "lease_lost_recovery_requires_revision_and_cycle_fence": true,
+    "lease_lost_recovery_closes_all_unclosed_tools": true,
+    "lease_lost_recovery_writes_cycle_aborted": true,
+    "lease_lost_recovery_retains_resume_observations": true,
+    "stale_lease_owner_writes_nothing": true,
+    "same_lease_lost_event_replay_is_zero_write": true,
     "admit_deferred_batch_all_or_none": true,
     "admit_deferred_batch_one_revision_increment": true,
     "admit_deferred_batch_one_claim_release": true,
-    "mixed_completed_and_deferred_batch_is_atomic": true,
+    "admit_deferred_batch_deferred_only": true,
+    "admit_deferred_batch_rejects_completed_or_receipted": true,
+    "mixed_completed_and_deferred_batch_separates_receipts_from_admission": true,
     "deferred_receipt_index_independent_from_checkpoint": true,
     "deferred_receipt_index_unbounded_by_contract": true,
     "deferred_receipt_index_retained_after_terminal": true,
@@ -400,7 +505,7 @@
     "controller_command_stale_fence_writes_nothing": true,
     "controller_command_active_claim_is_not_stolen": true,
     "controller_command_deferred_barrier_precedes_control": true,
-    "controller_command_ambiguity_precedes_cancel": true,
+    "controller_command_ambiguity_remains_explicit_during_cancel": true,
     "controller_command_pending_outbox_reaper_reuses_command_id": true,
     "controller_command_outbox_claim_is_owner_and_attempt_fenced": true,
     "controller_command_outbox_expired_claim_is_reaped_with_same_command_id": true,
@@ -430,31 +535,37 @@
   },
   "deferred_cases": [
     {
-      "name": "admit_deferred_batch_mixed_outcomes_releases_claim_once",
+      "name": "admit_deferred_batch_deferred_only_after_ordinary_receipt",
       "scenario_id": "deferred_batch_mixed_call_a_b_c.v1",
       "source": "fixtures/deferred_tool.json#batch.example",
+      "ordinary_receipt": {
+        "kind": "record_tool_receipt",
+        "expected_revision": 3,
+        "claim_token": "owner-b",
+        "tool_call_id": "call_b",
+        "status_code": "SUCCESS",
+        "revision": 4,
+        "event": "tool_call_completed"
+      },
       "operation": {
         "kind": "admit_deferred_batch",
-        "expected_revision": 3,
+        "expected_revision": 4,
         "claim_token": "owner-b",
         "operation_id": "op_tool_cycle_2_call_1",
         "attempt": 1,
         "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
         "batch_tool_call_ids": [
           "call_a",
-          "call_b",
           "call_c"
         ],
         "outcomes": [
           "deferred",
-          "completed",
           "deferred"
-        ],
-        "completed_status_code": "SUCCESS"
+        ]
       },
       "expected": {
         "updated": true,
-        "revision": 4,
+        "revision": 5,
         "status": "deferred",
         "journal_state": "deferred",
         "claim_token": null,
@@ -462,51 +573,54 @@
         "lease_expires_at_ms": null,
         "outbox_event_types": [
           "tool_call_deferred",
-          "tool_call_completed",
           "tool_call_deferred"
         ],
-        "completed_journal_state": "succeeded",
+        "ordinary_receipt_event_type": "tool_call_completed",
+        "ordinary_receipt_revision": 4,
+        "completed_journal_state": "succeeded_before_admission",
         "deferred_journal_count": 2,
         "claim_release_count": 1,
         "all_or_none": true
       }
     },
     {
-      "name": "admit_deferred_batch_mixed_error_marks_failed_journal",
+      "name": "admit_deferred_batch_deferred_only_after_ordinary_error_receipt",
       "scenario_id": "deferred_batch_mixed_error_call_a_b_c.v1",
       "source": "fixtures/deferred_tool.json#batch.error_completed_batch",
+      "ordinary_receipt": {
+        "kind": "record_tool_receipt",
+        "expected_revision": 3,
+        "claim_token": "owner-b",
+        "tool_call_id": "call_b",
+        "status_code": "ERROR",
+        "error_code": "provider_rejected",
+        "revision": 4,
+        "event": "tool_call_completed"
+      },
       "operation": {
         "kind": "admit_deferred_batch",
-        "expected_revision": 3,
+        "expected_revision": 4,
         "claim_token": "owner-b",
         "batch_tool_call_ids": [
           "call_a",
-          "call_b",
           "call_c"
         ],
         "outcomes": [
           "deferred",
-          "completed(ERROR)",
           "deferred"
-        ],
-        "completed_result": {
-          "tool_call_id": "call_b",
-          "content": "provider rejected",
-          "status_code": "ERROR",
-          "directive": "continue",
-          "error_code": "provider_rejected"
-        }
+        ]
       },
       "expected": {
         "updated": true,
-        "revision": 4,
+        "revision": 5,
         "status": "deferred",
-        "completed_journal_state": "failed",
+        "ordinary_receipt_event_type": "tool_call_completed",
+        "ordinary_receipt_revision": 4,
+        "completed_journal_state": "failed_before_admission",
         "completed_error_code": "provider_rejected",
         "deferred_journal_count": 2,
         "outbox_event_types": [
           "tool_call_deferred",
-          "tool_call_completed",
           "tool_call_deferred"
         ],
         "claim_release_count": 1,
@@ -1122,6 +1236,231 @@
       }
     },
     {
+      "name": "record_tool_receipt_preserves_claim",
+      "initial": {
+        "revision": 3,
+        "checkpoint_key": "tenant-7/run-42",
+        "cycle_index": 0,
+        "status": "running",
+        "claim_token": "owner-tools",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 300,
+        "tool_journal_state": "started",
+        "outbox_event_types": ["tool_call_started"]
+      },
+      "operation": {
+        "kind": "record_tool_receipt",
+        "expected_revision": 3,
+        "claim_token": "owner-tools",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "attempt": 1,
+        "tool_call_id": "call_1",
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "identity_key": "d4b806a61fedb3c00ed151b519bc35481f19514cc49f35416e2961311201f949",
+        "result_digest": "5eeba4f574c9a063b13c194e0efe02828535706e0d3d72c6969bc18cb0ae32b2",
+        "result": {
+          "tool_call_id": "call_1",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "content": "updated",
+          "metadata": {
+            "receipt_id": "receipt-42"
+          }
+        }
+      },
+      "expected": {
+        "updated": true,
+        "revision": 4,
+        "tool_journal_state": "succeeded",
+        "outbox_event_types": ["tool_call_started", "tool_call_completed"],
+        "result_digest": "5eeba4f574c9a063b13c194e0efe02828535706e0d3d72c6969bc18cb0ae32b2",
+        "claim_token": "owner-tools",
+        "claimed_cycle": 1,
+        "lease_expires_at_ms": 300
+      }
+    },
+    {
+      "name": "record_tool_receipt_duplicate_is_zero_write",
+      "initial": {
+        "revision": 4,
+        "checkpoint_key": "tenant-7/run-42",
+        "status": "running",
+        "claim_token": "owner-tools",
+        "tool_journal_state": "succeeded",
+        "receipt_event_id": "evt_tool_receipt_1",
+        "receipt_identity_key": "d4b806a61fedb3c00ed151b519bc35481f19514cc49f35416e2961311201f949",
+        "receipt_result_digest": "5eeba4f574c9a063b13c194e0efe02828535706e0d3d72c6969bc18cb0ae32b2"
+      },
+      "operation": {
+        "kind": "record_tool_receipt",
+        "expected_revision": 3,
+        "claim_token": "owner-tools",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "attempt": 1,
+        "tool_call_id": "call_1",
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "identity_key": "d4b806a61fedb3c00ed151b519bc35481f19514cc49f35416e2961311201f949",
+        "result_digest": "5eeba4f574c9a063b13c194e0efe02828535706e0d3d72c6969bc18cb0ae32b2",
+        "result": {
+          "tool_call_id": "call_1",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "content": "updated",
+          "metadata": {
+            "receipt_id": "receipt-42"
+          }
+        }
+      },
+      "expected": {
+        "updated": false,
+        "replayed": true,
+        "revision": 4,
+        "duplicate_event_count": 0
+      }
+    },
+    {
+      "name": "record_tool_receipt_conflicting_result_is_typed_zero_write",
+      "initial": {
+        "revision": 4,
+        "checkpoint_key": "tenant-7/run-42",
+        "status": "running",
+        "claim_token": "owner-tools",
+        "claimed_cycle": 1,
+        "tool_journal_state": "succeeded",
+        "receipt_event_id": "evt_tool_receipt_1",
+        "receipt_identity_key": "d4b806a61fedb3c00ed151b519bc35481f19514cc49f35416e2961311201f949",
+        "receipt_result_digest": "5eeba4f574c9a063b13c194e0efe02828535706e0d3d72c6969bc18cb0ae32b2"
+      },
+      "operation": {
+        "kind": "record_tool_receipt",
+        "expected_revision": 3,
+        "claim_token": "owner-tools",
+        "operation_id": "op_tool_cycle_1_call_1",
+        "attempt": 1,
+        "tool_call_id": "call_1",
+        "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+        "identity_key": "d4b806a61fedb3c00ed151b519bc35481f19514cc49f35416e2961311201f949",
+        "result_digest": "7096ef2f8ada6f95271d648fc88280f3d59598704c14e250f17a02b851127056",
+        "result": {
+          "tool_call_id": "call_1",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "content": "different definitive content",
+          "metadata": {
+            "receipt_id": "receipt-42"
+          }
+        }
+      },
+      "expected": {
+        "updated": false,
+        "replayed": false,
+        "error": "tool_receipt_conflict",
+        "revision": 4,
+        "duplicate_event_count": 0,
+        "claim_token": "owner-tools"
+      }
+    },
+    {
+      "name": "record_tool_receipt_same_revision_wrong_claim_is_zero_write",
+      "initial": {
+        "revision": 3,
+        "checkpoint_key": "tenant-7/run-42",
+        "status": "running",
+        "claim_token": "owner-tools",
+        "claimed_cycle": 1,
+        "tool_journal_state": "started",
+        "outbox_event_types": ["tool_call_started"]
+      },
+      "operation": {
+        "kind": "record_tool_receipt",
+        "expected_revision": 3,
+        "claim_token": "stale-owner",
+        "operation_id": "op_tool_cycle_1_call_2",
+        "attempt": 1,
+        "tool_call_id": "call_2",
+        "request_digest": "6b05beb10de1bae7a2989e39294d4a1f02f4f4b357437bc198f47b6b7be85b49",
+        "identity_key": "00cf5ecff3e06ad4a401981b18668fe33a62733e44ad3909dfe1f00d0d0b427c",
+        "result_digest": "bc2c77a18818e5fc9081d93cee309de9648f4552e0600b19b14a2a8189f86131",
+        "result": {
+          "tool_call_id": "call_2",
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "content": "updated"
+        }
+      },
+      "expected": {
+        "updated": false,
+        "writes": 0,
+        "error": "checkpoint_claim_conflict",
+        "revision": 3,
+        "claim_token": "owner-tools",
+        "outbox_event_types": ["tool_call_started"]
+      }
+    },
+    {
+      "name": "record_two_definitive_tool_results_serially",
+      "initial": {
+        "revision": 3,
+        "checkpoint_key": "tenant-7/run-42",
+        "status": "running",
+        "claim_token": "owner-tools",
+        "claimed_cycle": 1,
+        "outbox_event_types": ["tool_call_started"]
+      },
+      "operations": [
+        {
+          "kind": "record_tool_receipt",
+          "expected_revision": 3,
+          "claim_token": "owner-tools",
+          "operation_id": "op_tool_cycle_1_call_1",
+          "attempt": 1,
+          "tool_call_id": "call_1",
+          "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+          "identity_key": "d4b806a61fedb3c00ed151b519bc35481f19514cc49f35416e2961311201f949",
+          "result_digest": "5eeba4f574c9a063b13c194e0efe02828535706e0d3d72c6969bc18cb0ae32b2",
+          "result": {
+            "tool_call_id": "call_1",
+            "status_code": "SUCCESS",
+            "directive": "continue",
+            "content": "updated",
+            "metadata": {
+              "receipt_id": "receipt-42"
+            }
+          }
+        },
+        {
+          "kind": "record_tool_receipt",
+          "expected_revision": 4,
+          "claim_token": "owner-tools",
+          "operation_id": "op_tool_cycle_1_call_2",
+          "attempt": 1,
+          "tool_call_id": "call_2",
+          "request_digest": "6b05beb10de1bae7a2989e39294d4a1f02f4f4b357437bc198f47b6b7be85b49",
+          "identity_key": "00cf5ecff3e06ad4a401981b18668fe33a62733e44ad3909dfe1f00d0d0b427c",
+          "result_digest": "2d8705220d1451b55e13048c34abb630936e81917cfa87f2dbd815e05ec58987",
+          "result": {
+            "tool_call_id": "call_2",
+            "status_code": "ERROR",
+            "directive": "continue",
+            "content": "rejected",
+            "error_code": "provider_rejected"
+          }
+        }
+      ],
+      "expected": {
+        "updated": true,
+        "revision": 5,
+        "receipt_order": ["call_1", "call_2"],
+        "outbox_event_types": [
+          "tool_call_started",
+          "tool_call_completed",
+          "tool_call_completed"
+        ],
+        "claim_token": "owner-tools",
+        "parallel_cas_retry": false
+      }
+    },
+    {
       "name": "stale_progress_loses_cas",
       "initial": {
         "revision": 3,
@@ -1159,10 +1498,67 @@
         "lease_expires_at_ms": 400
       },
       "expected": {
-        "renewed": true,
+        "renew_result": {
+          "schema_version": "vv-agent.checkpoint-renewal.v1",
+          "outcome": "renewed",
+          "lease_expires_at_ms": 400
+        },
         "revision": 3,
         "lease_expires_at_ms": 400,
         "journal_state": "started"
+      }
+    },
+    {
+      "name": "renew_returns_cancel_requested_and_retains_claim",
+      "initial": {
+        "revision": 4,
+        "status": "running",
+        "cancel_requested": true,
+        "claim_token": "owner-cancel",
+        "claimed_cycle": 2,
+        "lease_expires_at_ms": 300
+      },
+      "operation": {
+        "kind": "renew",
+        "claim_token": "owner-cancel",
+        "now_ms": 250,
+        "lease_expires_at_ms": 400
+      },
+      "expected": {
+        "renew_result": {
+          "schema_version": "vv-agent.checkpoint-renewal.v1",
+          "outcome": "cancel_requested",
+          "lease_expires_at_ms": 400
+        },
+        "revision": 4,
+        "claim_token": "owner-cancel",
+        "lease_expires_at_ms": 400
+      }
+    },
+    {
+      "name": "renew_expired_claim_returns_claim_lost_without_write",
+      "initial": {
+        "revision": 4,
+        "status": "running",
+        "claim_token": "owner-lost",
+        "claimed_cycle": 2,
+        "lease_expires_at_ms": 200
+      },
+      "operation": {
+        "kind": "renew",
+        "claim_token": "owner-lost",
+        "now_ms": 200,
+        "lease_expires_at_ms": 400
+      },
+      "expected": {
+        "renew_result": {
+          "schema_version": "vv-agent.checkpoint-renewal.v1",
+          "outcome": "claim_lost",
+          "revision": 4
+        },
+        "revision": 4,
+        "lease_expires_at_ms": 200,
+        "payload_write": false
       }
     },
     {
@@ -1299,7 +1695,8 @@
         "kind": "commit_cycle",
         "expected_revision": 4,
         "claim_token": "owner-b",
-        "cycle_index": 1
+        "cycle_index": 1,
+        "outcome": "succeeded"
       },
       "expected": {
         "updated": true,
@@ -1329,7 +1726,12 @@
         "updated": true,
         "revision": 6,
         "status": "completed",
-        "terminal_result_present": true
+        "terminal_result_present": true,
+        "terminal_result": {
+          "status": "completed",
+          "resume_observations": []
+        },
+        "cycle_aborted_event": false
       }
     },
     {
@@ -1361,7 +1763,7 @@
       }
     },
     {
-      "name": "claimed_operator_abort_retains_unknown_outcome",
+      "name": "claimed_operator_abort_closes_unclosed_tools",
       "initial": {
         "revision": 6,
         "cycle_index": 1,
@@ -1376,16 +1778,365 @@
         "expected_revision": 6,
         "claim_token": "owner-reconcile",
         "status": "failed",
-        "terminal_error_code": "operator_abort_with_unknown_outcome"
+        "terminal_error_code": "operator_abort_with_unknown_outcome",
+        "cycle_aborted_reason": "operator_abort",
+        "logical_cycle": 2
       },
       "expected": {
         "updated": true,
         "revision": 7,
         "status": "failed",
         "claim_token": null,
-        "tool_journal_state": "ambiguous",
-        "resume_observation_present": true,
+        "tool_journal_state": "failed",
+        "tool_error_code": "tool_cancelled",
+        "cycle_aborted_event": true,
+        "cycle_aborted_reason": "operator_abort",
+        "logical_cycle": 2,
+        "tool_closure": {
+          "operation_id": "op_tool_cycle_2_call_2",
+          "operation_kind": "tool",
+          "state": "failed",
+          "error": {
+            "code": "tool_cancelled",
+            "message": "Tool execution ended before a definitive receipt; external effect remains unknown.",
+            "retryable": false
+          },
+          "resume_observation": {
+            "operation_id": "op_tool_cycle_2_call_2",
+            "operation_kind": "tool",
+            "cycle_index": 2,
+            "state": "ambiguous",
+            "risk": "unknown_tool_side_effect",
+            "idempotency_support": "unknown"
+          }
+        },
+        "terminal_result": {
+          "status": "failed",
+          "completion_reason": "failed",
+          "error_code": "operator_abort_with_unknown_outcome",
+          "resume_observations": [
+            {
+              "operation_id": "op_tool_cycle_2_call_2",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          ]
+        },
+        "event_sequence": [
+          "operation_ambiguous",
+          "cycle_aborted",
+          "run_state_changed",
+          "run_failed"
+        ],
+        "cycle_aborted_event_id": "evt_cycle_aborted_operator_abort",
+        "replay": {
+          "same_event_identity": {
+            "updated": false,
+            "writes": 0,
+            "duplicate_event_count": 0
+          }
+        },
         "terminal_result_present": true
+      }
+    },
+    {
+      "name": "claimed_operator_abort_closes_multiple_unclosed_tools",
+      "initial": {
+        "revision": 7,
+        "cycle_index": 1,
+        "status": "running",
+        "claim_token": "owner-reconcile-multiple",
+        "claimed_cycle": 2,
+        "tool_journal": [
+          {
+            "operation_id": "op_tool_cycle_2_call_2",
+            "operation_kind": "tool",
+            "state": "ambiguous",
+            "resume_observation": {
+              "operation_id": "op_tool_cycle_2_call_2",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          },
+          {
+            "operation_id": "op_tool_cycle_2_call_3",
+            "operation_kind": "tool",
+            "state": "started",
+            "resume_observation": {
+              "operation_id": "op_tool_cycle_2_call_3",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          }
+        ],
+        "terminal_result": null
+      },
+      "operation": {
+        "kind": "finalize_claimed",
+        "expected_revision": 7,
+        "claim_token": "owner-reconcile-multiple",
+        "status": "failed",
+        "terminal_error_code": "operator_abort_with_unknown_outcome",
+        "cycle_aborted_reason": "operator_abort",
+        "logical_cycle": 2
+      },
+      "expected": {
+        "updated": true,
+        "revision": 8,
+        "status": "failed",
+        "claim_token": null,
+        "cycle_aborted_event": true,
+        "cycle_aborted_reason": "operator_abort",
+        "logical_cycle": 2,
+        "tool_journal": [
+          {
+            "operation_id": "op_tool_cycle_2_call_2",
+            "operation_kind": "tool",
+            "state": "failed",
+            "error": {
+              "code": "tool_cancelled",
+              "message": "Tool execution ended before a definitive receipt; external effect remains unknown.",
+              "retryable": false
+            },
+            "resume_observation": {
+              "operation_id": "op_tool_cycle_2_call_2",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          },
+          {
+            "operation_id": "op_tool_cycle_2_call_3",
+            "operation_kind": "tool",
+            "state": "failed",
+            "error": {
+              "code": "tool_cancelled",
+              "message": "Tool execution ended before a definitive receipt; external effect remains unknown.",
+              "retryable": false
+            },
+            "resume_observation": {
+              "operation_id": "op_tool_cycle_2_call_3",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          }
+        ],
+        "terminal_result": {
+          "status": "failed",
+          "completion_reason": "failed",
+          "error_code": "operator_abort_with_unknown_outcome",
+          "resume_observations": [
+            {
+              "operation_id": "op_tool_cycle_2_call_2",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            },
+            {
+              "operation_id": "op_tool_cycle_2_call_3",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          ]
+        },
+        "journal_is_authoritative": true,
+        "terminal_resume_observations_projection": "same-CAS journal observations sorted by operation_id with unique operation identity",
+        "event_sequence": [
+          "operation_ambiguous",
+          "cycle_aborted",
+          "run_state_changed",
+          "run_failed"
+        ],
+        "cycle_aborted_event_id": "evt_cycle_aborted_operator_abort_multiple",
+        "replay": {
+          "same_event_identity": {
+            "updated": false,
+            "writes": 0,
+            "duplicate_event_count": 0
+          }
+        }
+      }
+    },
+    {
+      "name": "cycle_abort_closes_unclosed_tools",
+      "initial": {
+        "revision": 6,
+        "cycle_index": 1,
+        "status": "running",
+        "claim_token": "owner-cancel",
+        "claimed_cycle": 2,
+        "lease_expires_at_ms": 400,
+        "tool_journal_state": "started"
+      },
+      "operation": {
+        "kind": "finalize_claimed",
+        "expected_revision": 6,
+        "claim_token": "owner-cancel",
+        "status": "failed",
+        "terminal_error_code": "cancelled_with_unknown_outcome",
+        "cycle_aborted_reason": "cancelled",
+        "logical_cycle": 2
+      },
+      "expected": {
+        "updated": true,
+        "revision": 7,
+        "status": "failed",
+        "cycle_closed": true,
+        "cycle_aborted_event": true,
+        "logical_cycle": 2,
+        "tool_journal_state": "failed",
+        "tool_error_code": "tool_cancelled",
+        "tool_closure": {
+          "operation_id": "op_tool_cycle_2_call_2",
+          "operation_kind": "tool",
+          "state": "failed",
+          "error": {
+            "code": "tool_cancelled",
+            "message": "Tool execution ended before a definitive receipt; external effect remains unknown.",
+            "retryable": false
+          },
+          "resume_observation": {
+            "operation_id": "op_tool_cycle_2_call_2",
+            "operation_kind": "tool",
+            "cycle_index": 2,
+            "state": "ambiguous",
+            "risk": "unknown_tool_side_effect",
+            "idempotency_support": "unknown"
+          }
+        },
+        "terminal_result": {
+          "status": "failed",
+          "completion_reason": "cancelled",
+          "resume_observations": [
+            {
+              "operation_id": "op_tool_cycle_2_call_2",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          ]
+        },
+        "cycle_aborted_event_id": "evt_cycle_aborted_cancelled",
+        "replay": {
+          "same_event_identity": {
+            "updated": false,
+            "writes": 0,
+            "duplicate_event_count": 0
+          }
+        },
+        "claim_token": null,
+        "lease_expires_at_ms": null
+      }
+    },
+    {
+      "name": "lease_lost_recovery_claim_closes_cycle_and_races_old_owner",
+      "initial": {
+        "revision": 9,
+        "cycle_index": 1,
+        "status": "running",
+        "claim_token": "recovery-owner",
+        "claim_mode": "recovery",
+        "claimed_cycle": 2,
+        "lease_expires_at_ms": 500,
+        "tool_journal_state": "ambiguous",
+        "terminal_result": null
+      },
+      "operation": {
+        "kind": "finalize_claimed",
+        "claim_mode": "recovery",
+        "expected_revision": 9,
+        "claim_token": "recovery-owner",
+        "claimed_cycle": 2,
+        "status": "failed",
+        "terminal_error_code": "lease_lost_with_unknown_outcome",
+        "cycle_aborted_reason": "lease_lost",
+        "logical_cycle": 2,
+        "cycle_fence": "cycle_index + 1"
+      },
+      "old_owner_attempt": {
+        "kind": "finalize_claimed",
+        "claim_mode": "continue",
+        "expected_revision": 8,
+        "claim_token": "old-owner",
+        "claimed_cycle": 2,
+        "writes": [],
+        "error": "checkpoint_claim_conflict"
+      },
+      "expected": {
+        "updated": true,
+        "revision": 10,
+        "status": "failed",
+        "claim_token": null,
+        "claimed_cycle": null,
+        "lease_expires_at_ms": null,
+        "tool_closure": {
+          "operation_id": "op_tool_cycle_2_call_2",
+          "operation_kind": "tool",
+          "state": "failed",
+          "error": {
+            "code": "tool_cancelled",
+            "message": "Tool execution ended before a definitive receipt; external effect remains unknown.",
+            "retryable": false
+          },
+          "resume_observation": {
+            "operation_id": "op_tool_cycle_2_call_2",
+            "operation_kind": "tool",
+            "cycle_index": 2,
+            "state": "ambiguous",
+            "risk": "unknown_tool_side_effect",
+            "idempotency_support": "unknown"
+          }
+        },
+        "terminal_result": {
+          "status": "failed",
+          "completion_reason": "failed",
+          "error_code": "lease_lost_with_unknown_outcome",
+          "resume_observations": [
+            {
+              "operation_id": "op_tool_cycle_2_call_2",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          ]
+        },
+        "cycle_aborted_event_id": "evt_cycle_aborted_lease_lost",
+        "event_sequence": [
+          "operation_ambiguous",
+          "cycle_aborted",
+          "run_state_changed",
+          "run_failed"
+        ],
+        "replay": {
+          "same_event_identity": {
+            "updated": false,
+            "writes": 0,
+            "duplicate_event_count": 0
+          }
+        }
       }
     },
     {
@@ -1406,7 +2157,7 @@
       }
     },
     {
-      "name": "operator_abort_terminal_retains_unknown_outcome",
+      "name": "operator_abort_terminal_closes_unclosed_tools",
       "initial": {
         "revision": 6,
         "cycle_index": 1,
@@ -1419,14 +2170,53 @@
         "kind": "finalize",
         "expected_revision": 6,
         "status": "failed",
-        "terminal_error_code": "operator_abort_with_unknown_outcome"
+        "terminal_error_code": "operator_abort_with_unknown_outcome",
+        "cycle_aborted_reason": "operator_abort",
+        "logical_cycle": 2
       },
       "expected": {
         "updated": true,
         "revision": 7,
         "status": "failed",
-        "tool_journal_state": "ambiguous",
-        "resume_observation_present": true,
+        "tool_journal_state": "failed",
+        "tool_error_code": "tool_cancelled",
+        "cycle_aborted_event": true,
+        "cycle_aborted_reason": "operator_abort",
+        "logical_cycle": 2,
+        "tool_closure": {
+          "operation_id": "op_tool_cycle_2_call_2",
+          "operation_kind": "tool",
+          "state": "failed",
+          "error": {
+            "code": "tool_cancelled",
+            "message": "Tool execution ended before a definitive receipt; external effect remains unknown.",
+            "retryable": false
+          },
+          "resume_observation": {
+            "operation_id": "op_tool_cycle_2_call_2",
+            "operation_kind": "tool",
+            "cycle_index": 2,
+            "state": "ambiguous",
+            "risk": "unknown_tool_side_effect",
+            "idempotency_support": "unknown"
+          }
+        },
+        "terminal_result": {
+          "status": "failed",
+          "completion_reason": "failed",
+          "error_code": "operator_abort_with_unknown_outcome",
+          "resume_observations": [
+            {
+              "operation_id": "op_tool_cycle_2_call_2",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          ]
+        },
+        "cycle_aborted_event_id": "evt_cycle_aborted_operator_abort",
         "terminal_result_present": true
       }
     },
