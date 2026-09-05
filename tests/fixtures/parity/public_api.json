@@ -1,5 +1,5 @@
 {
-  "contract": "vv-agent-public-api-v5",
+  "contract": "vv-agent-public-api-v6",
   "domains": [
     {
       "capabilities": [
@@ -296,9 +296,9 @@
           "rust": "vv_agent::BudgetExhaustion"
         },
         {
-          "id": "result.resume_observation",
-          "python": "vv_agent.ResumeObservation",
-          "rust": "vv_agent::ResumeObservation"
+          "id": "result.resume_observations",
+          "python": "list[vv_agent.ResumeObservation]",
+          "rust": "Vec<vv_agent::ResumeObservation>"
         }
       ],
       "id": "result"
@@ -1066,7 +1066,7 @@
       "id": "runtime_backend"
     }
   ],
-  "schema_version": 5,
+  "schema_version": 6,
   "surfaces": [
     {
       "id": "agent",
@@ -2635,12 +2635,12 @@
           }
         },
         {
-          "id": "resume_observation",
+          "id": "resume_observations",
           "kind": "field",
           "python": {
             "declaration": "property",
             "kind": "property",
-            "name": "resume_observation",
+            "name": "resume_observations",
             "signature": {
               "async": false,
               "parameters": [
@@ -2654,7 +2654,7 @@
           },
           "rust": {
             "kind": "method",
-            "name": "resume_observation"
+            "name": "resume_observations"
           }
         },
         {

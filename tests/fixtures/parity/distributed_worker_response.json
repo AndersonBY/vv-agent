@@ -1,5 +1,5 @@
 {
-  "schema_version": "vv-agent.distributed-worker-response.v3",
+  "schema_version": "vv-agent.distributed-worker-response.v4",
   "wire_rules": {
     "discriminator": "type",
     "types": [
@@ -57,7 +57,7 @@
       "shared_state",
       "token_usage",
       "checkpoint_key",
-      "resume_observation"
+      "resume_observations"
     ],
     "optional_fields": [
       "budget_usage",
@@ -128,14 +128,14 @@
     {
       "name": "pending",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "pending"
       }
     },
     {
       "name": "committed",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "committed",
         "checkpoint_revision": 2,
         "committed_cycle": 1
@@ -144,7 +144,7 @@
     {
       "name": "terminal_candidate",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "terminal_candidate",
         "checkpoint_revision": 2,
         "result": {
@@ -214,14 +214,14 @@
             "model_calls": []
           },
           "checkpoint_key": null,
-          "resume_observation": null
+          "resume_observations": []
         }
       }
     },
     {
       "name": "terminal_replay",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "terminal_replay",
         "checkpoint_revision": 2,
         "result": {
@@ -291,7 +291,7 @@
             "model_calls": []
           },
           "checkpoint_key": null,
-          "resume_observation": null
+          "resume_observations": []
         }
       }
     }
@@ -371,7 +371,7 @@
     {
       "name": "unknown_schema_version",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v4",
+        "schema_version": "vv-agent.distributed-worker-response.v5",
         "type": "pending"
       },
       "error": "unsupported distributed worker response schema_version"
@@ -379,7 +379,7 @@
     {
       "name": "missing_type",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3"
+        "schema_version": "vv-agent.distributed-worker-response.v4"
       },
       "error": "unsupported distributed worker response type"
     },
@@ -422,7 +422,7 @@
     {
       "name": "unknown_type",
       "response": {
-        "schema_version": "vv-agent.distributed-worker-response.v3",
+        "schema_version": "vv-agent.distributed-worker-response.v4",
         "type": "finished"
       },
       "error": "unsupported distributed worker response type"

@@ -1,8 +1,8 @@
 {
   "contract": "checkpoint_codec",
-  "version": 8,
+  "version": 9,
   "discriminator": {
-    "required_value": "vv-agent.checkpoint.v8",
+    "required_value": "vv-agent.checkpoint.v9",
     "missing_or_unknown_error": "checkpoint_schema_unsupported"
   },
   "message_wire": {
@@ -63,7 +63,7 @@
     ]
   },
   "canonical_checkpoint": {
-    "schema_version": "vv-agent.checkpoint.v8",
+    "schema_version": "vv-agent.checkpoint.v9",
     "run_definition_schema": "vv-agent.run-definition.v5",
     "run_definition": {
       "schema_version": "vv-agent.run-definition.v5",
@@ -144,6 +144,7 @@
     "resume_attempt": 2,
     "cycle_index": 1,
     "status": "running",
+    "cancel_requested": false,
     "active_host_interaction": null,
     "suspended_origin": null,
     "messages": [
@@ -364,6 +365,7 @@
     "resume_attempt",
     "cycle_index",
     "status",
+    "cancel_requested",
     "messages",
     "cycles",
     "model_calls",
@@ -396,10 +398,24 @@
     "suspended_persists_origin_and_previous_active_interaction": true,
     "suspended_origin_is_restored_after_resume": true,
     "host_interaction_and_suspended_have_no_live_claim": true,
+    "suspended_never_persists_live_or_expired_claim": true,
+    "expired_claim_is_reclaimed_before_suspended_status": true,
     "old_checkpoint_discriminator_is_rejected_without_reader_fallback": true,
+    "cancel_requested_is_required_boolean": true,
+    "cancel_requested_live_claim_retains_claim": true,
+    "cancel_requested_terminal_is_evidence": true,
+    "expired_claim_cancel_or_suspend_reclaims_atomically": true,
+    "renew_returns_typed_outcome": [
+      "renewed",
+      "cancel_requested",
+      "claim_lost"
+    ],
+    "renewed_and_cancel_requested_retain_claim": true,
+    "claim_lost_has_no_lease_or_payload_write": true,
+    "cycle_aborted_closes_logical_cycle_and_unclosed_tools": true,
     "controller_command_does_not_rewrite_wait_user_terminal": true,
     "controller_command_deferred_barrier_precedes_control": true,
-    "controller_command_ambiguity_precedes_cancel": true,
+    "controller_command_ambiguity_remains_explicit_during_cancel": true,
     "reconciliation_required_requires_ambiguous_journal": true,
     "reconciliation_required_has_no_claim": true,
     "deferred_requires_at_least_one_deferred_journal": true,
@@ -410,8 +426,14 @@
     "deferred_resolve_same_replay_is_idempotent": true,
     "deferred_resolve_conflict_or_stale_is_rejected": true,
     "running_with_ambiguous_journal_requires_active_recovery_claim": true,
-    "terminal_result_requires_no_active_journal_except_explicit_operator_abort": true,
-    "operator_abort_terminal_preserves_ambiguous_journal_and_resume_observation": true,
+    "terminal_result_requires_no_active_journal": true,
+    "terminal_journal_state_rule": {
+      "active_states": ["planned", "started", "deferred", "ambiguous"],
+      "closed_states": ["succeeded", "failed"],
+      "terminal_allows_closed_entries": true,
+      "terminal_forbids_active_entries": true
+    },
+    "operator_abort_terminal_closes_unclosed_tools_and_retains_resume_observations": true,
     "event_outbox_event_ids_are_unique": true,
     "model_call_ids_are_unique": true,
     "model_journal_records_actual_backend_and_model": true,
@@ -702,15 +724,105 @@
       "valid": true
     },
     {
-      "name": "operator_abort_terminal_preserves_unknown_outcome",
+      "name": "operator_abort_terminal_closes_unclosed_tools",
       "source_valid_case": "reconciliation_required_retains_ambiguous_journal",
       "decision": "abort",
       "expected": {
         "status": "failed",
         "completion_reason": "failed",
+        "completion_tool_name": null,
+        "partial_output": null,
+        "messages": [],
+        "cycles": [],
+        "final_answer": null,
+        "wait_reason": null,
+        "error": {
+          "code": "operator_abort_with_unknown_outcome",
+          "message": "Operator accepted that the external outcome is unknown.",
+          "retryable": false
+        },
+        "shared_state": {},
+        "token_usage": {
+          "schema_version": "vv-agent.task-token-usage.v2",
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "total_tokens": 0,
+          "reasoning_tokens": 0,
+          "cache_usage": {
+            "status": "accounting_missing",
+            "read_input_tokens": null,
+            "write_input_tokens": null,
+            "uncached_input_tokens": null,
+            "source": "aggregate"
+          },
+          "model_calls": []
+        },
+        "checkpoint_key": "tenant-7/run-42",
         "terminal_error_code": "operator_abort_with_unknown_outcome",
-        "ambiguous_journal_preserved": true,
-        "resume_observation_preserved": true
+        "tool_journal_state": "failed",
+        "tool_error_code": "tool_cancelled",
+        "cycle_aborted_reason": "operator_abort",
+        "logical_cycle": 2,
+        "tool_closure": {
+          "state": "failed",
+          "error": {
+            "code": "tool_cancelled",
+            "message": "Tool execution ended before a definitive receipt; external effect remains unknown.",
+            "retryable": false
+          },
+          "resume_observation": {
+            "operation_id": "op_tool_cycle_2_call_2",
+            "operation_kind": "tool",
+            "cycle_index": 2,
+            "state": "ambiguous",
+            "risk": "unknown_tool_side_effect",
+            "idempotency_support": "unknown"
+          }
+        },
+        "terminal_result": {
+          "status": "failed",
+          "completion_reason": "failed",
+          "completion_tool_name": null,
+          "partial_output": null,
+          "messages": [],
+          "cycles": [],
+          "final_answer": null,
+          "wait_reason": null,
+          "error": {
+            "code": "operator_abort_with_unknown_outcome",
+            "message": "Operator accepted that the external outcome is unknown.",
+            "retryable": false
+          },
+          "shared_state": {},
+          "token_usage": {
+            "schema_version": "vv-agent.task-token-usage.v2",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            },
+            "model_calls": []
+          },
+          "checkpoint_key": "tenant-7/run-42",
+          "resume_observations": [
+            {
+              "operation_id": "op_tool_cycle_2_call_2",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          ]
+        },
+        "cycle_aborted_event_id": "evt_cycle_aborted_operator_abort",
+        "unknown_external_outcome_preserved": true
       }
     },
     {
@@ -968,7 +1080,7 @@
     {
       "name": "minimal_running",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1049,6 +1161,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -1072,7 +1185,7 @@
     {
       "name": "reconciliation_required_retains_ambiguous_journal",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1153,6 +1266,7 @@
         "resume_attempt": 2,
         "cycle_index": 1,
         "status": "reconciliation_required",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -1195,7 +1309,7 @@
     {
       "name": "claimed_active_cycle",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1276,6 +1390,7 @@
         "resume_attempt": 2,
         "cycle_index": 1,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [
@@ -1452,7 +1567,7 @@
     {
       "name": "acknowledged_terminal_is_retained",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1533,6 +1648,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "completed",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -1580,7 +1696,237 @@
             "model_calls": []
           },
           "checkpoint_key": "terminal",
-          "resume_observation": null
+          "resume_observations": []
+        },
+        "terminal_acknowledged": true,
+        "model_calls": []
+      }
+    },
+    {
+      "name": "operator_abort_terminal_retains_closed_tool_entries",
+      "payload": {
+        "schema_version": "vv-agent.checkpoint.v9",
+        "run_definition_schema": "vv-agent.run-definition.v5",
+        "run_definition": {
+          "schema_version": "vv-agent.run-definition.v5",
+          "agent": {
+            "name": "checkpoint-agent",
+            "type": null
+          },
+          "root_input": "Summarize the status.",
+          "prompt_bundle": {
+            "sections": [
+              {
+                "id": "agent_instructions",
+                "text": "You are a careful assistant.",
+                "stable": true,
+                "source": "agent.instructions"
+              }
+            ],
+            "stable_hash": "8db9554262fc432708ae857344e425c9679cc4d2ccde39cdc4c4c4c4b0d15290"
+          },
+          "initial_messages": [],
+          "initial_shared_state": {},
+          "run_metadata": {},
+          "context_ref": null,
+          "model": {
+            "backend": "test",
+            "model_id": "test-model",
+            "transport_timeout_seconds": 90,
+            "settings": {}
+          },
+          "credential_slots": [],
+          "runtime_controls": {
+            "max_cycles": 10,
+            "max_handoffs": 10,
+            "no_tool_policy": "continue",
+            "session_memory_enabled": false,
+            "memory_compact_threshold": 250000,
+            "memory_threshold_percentage": 90,
+            "microcompaction_policy": {
+              "trigger_ratio": 0.75,
+              "target_ratio": 0.6,
+              "keep_recent_cycles": 3,
+              "min_result_chars": 500
+            },
+            "allow_interruption": true,
+            "native_multimodal": false,
+            "tool_use_behavior": "run_llm_again",
+            "stop_at_tool_names": []
+          },
+          "tools": [],
+          "tool_policy": {
+            "allowed_tools": null,
+            "disallowed_tools": [],
+            "approval": "default",
+            "predicate_ref": null,
+            "approval_timeout_seconds": null,
+            "denied_side_effects": [],
+            "denied_capability_tags": [],
+            "deny_terminal_tools": false,
+            "denied_cost_dimensions": []
+          },
+          "checkpoint_policy": {
+            "ambiguous_model_policy": "require_reconciliation",
+            "ambiguous_tool_policy": "require_reconciliation",
+            "max_extension_state_bytes": 262144
+          },
+          "budget_limits": null,
+          "output_schema": null,
+          "workspace_ref": null,
+          "session_ref": null,
+          "extensions": [],
+          "capability_refs": {}
+        },
+        "checkpoint_key": "operator-abort-terminal",
+        "task_id": "task-1",
+        "root_run_id": "run-1",
+        "trace_id": "trace-1",
+        "run_definition_digest": "69bd7dbe501dbadd9b5326e71bb288dd5498aed2b427ed4d413d730baf7b4c3f",
+        "resume_attempt": 2,
+        "cycle_index": 1,
+        "status": "failed",
+        "cancel_requested": false,
+        "active_host_interaction": null,
+        "suspended_origin": null,
+        "messages": [],
+        "cycles": [],
+        "shared_state": {},
+        "budget_usage": null,
+        "event_cursor": null,
+        "event_outbox": [],
+        "extension_state": {},
+        "model_call_journal": [],
+        "tool_journal": [
+          {
+            "kind": "tool",
+            "operation_id": "op_tool_cycle_2_call_1",
+            "cycle_index": 2,
+            "attempt": 1,
+            "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+            "tool_call_id": "call_1",
+            "tool_name": "write_record",
+            "arguments": {
+              "record_id": "42",
+              "value": "approved"
+            },
+            "idempotency_key": "idem_7f5ca6d5",
+            "idempotency_support": "supported",
+            "state": "succeeded",
+            "identity_key": "517b5fc58dd4c62878ebb0ae769d57b2b129fc5ee5a83e473dddc7710e6c9ad3",
+            "result_digest": "5eeba4f574c9a063b13c194e0efe02828535706e0d3d72c6969bc18cb0ae32b2",
+            "result": {
+              "tool_call_id": "call_1",
+              "content": "updated",
+              "status_code": "SUCCESS",
+              "directive": "continue",
+              "metadata": {
+                "receipt_id": "receipt-42"
+              }
+            },
+            "error": null
+          },
+          {
+            "kind": "tool",
+            "operation_id": "op_tool_cycle_2_call_2",
+            "cycle_index": 2,
+            "attempt": 1,
+            "request_digest": "6b05beb10de1bae7a2989e39294d4a1f02f4f4b357437bc198f47b6b7be85b49",
+            "tool_call_id": "call_2",
+            "tool_name": "write_record",
+            "arguments": {
+              "record_id": "42",
+              "value": "approved"
+            },
+            "idempotency_key": "idem_5a40b4f1",
+            "idempotency_support": "unknown",
+            "state": "failed",
+            "identity_key": "383032e0cb55edf40a2958cb23907deddc7c16e039ec54f7b8073cd9cd575d0d",
+            "result_digest": "2d8705220d1451b55e13048c34abb630936e81917cfa87f2dbd815e05ec58987",
+            "result": null,
+            "error": {
+              "code": "provider_rejected",
+              "message": "rejected",
+              "retryable": false
+            }
+          },
+          {
+            "kind": "tool",
+            "operation_id": "op_tool_cycle_2_call_3",
+            "cycle_index": 2,
+            "attempt": 1,
+            "request_digest": "223d24f1600427316b4d4eeb943f7abccd8c79222a2c12dc5c57a0697aa0c64f",
+            "tool_call_id": "call_3",
+            "tool_name": "write_record",
+            "arguments": {
+              "record_id": "42",
+              "value": "approved"
+            },
+            "idempotency_key": "idem-closure-3",
+            "idempotency_support": "unknown",
+            "state": "failed",
+            "identity_key": "af9e1e01d64c3b1c9cf0bd6971f43af87aec330443c3a6d506d9f63aee798023",
+            "result": null,
+            "error": {
+              "code": "tool_cancelled",
+              "message": "Tool execution ended before a definitive receipt; external effect remains unknown.",
+              "retryable": false
+            },
+            "resume_observation": {
+              "operation_id": "op_tool_cycle_2_call_3",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          }
+        ],
+        "revision": 6,
+        "claim_token": null,
+        "claimed_cycle": null,
+        "lease_expires_at_ms": null,
+        "terminal_result": {
+          "status": "failed",
+          "completion_reason": "failed",
+          "completion_tool_name": null,
+          "partial_output": null,
+          "messages": [],
+          "cycles": [],
+          "final_answer": null,
+          "wait_reason": null,
+          "error": {
+            "code": "operator_abort_with_unknown_outcome",
+            "message": "Operator accepted that the external outcome is unknown.",
+            "retryable": false
+          },
+          "shared_state": {},
+          "token_usage": {
+            "schema_version": "vv-agent.task-token-usage.v2",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            },
+            "model_calls": []
+          },
+          "checkpoint_key": "operator-abort-terminal",
+          "resume_observations": [
+            {
+              "operation_id": "op_tool_cycle_2_call_3",
+              "operation_kind": "tool",
+              "cycle_index": 2,
+              "state": "ambiguous",
+              "risk": "unknown_tool_side_effect",
+              "idempotency_support": "unknown"
+            }
+          ]
         },
         "terminal_acknowledged": true,
         "model_calls": []
@@ -1589,7 +1935,7 @@
     {
       "name": "unknown_optional_extension_is_preserved",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1670,6 +2016,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -1701,11 +2048,11 @@
   ],
   "invalid_cases": [
     {
-      "name": "old_v7_schema_is_rejected_forward_only",
+      "name": "old_v8_schema_is_rejected_forward_only",
       "base_valid_case": "minimal_running",
       "mutation": {
         "replace": {
-          "schema_version": "vv-agent.checkpoint.v7"
+          "schema_version": "vv-agent.checkpoint.v8"
         }
       },
       "error": "checkpoint_schema_unsupported",
@@ -1724,6 +2071,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -1748,7 +2096,7 @@
     {
       "name": "blank_checkpoint_key",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1829,6 +2177,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -1853,7 +2202,7 @@
     {
       "name": "bad_definition_digest",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1934,6 +2283,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -1958,7 +2308,7 @@
     {
       "name": "zero_resume_attempt",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2039,6 +2389,7 @@
         "resume_attempt": 0,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -2063,7 +2414,7 @@
     {
       "name": "partial_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2144,6 +2495,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -2168,7 +2520,7 @@
     {
       "name": "claimed_cycle_not_next",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2249,6 +2601,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -2273,7 +2626,7 @@
     {
       "name": "terminal_with_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2354,6 +2707,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "completed",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -2401,7 +2755,7 @@
             "model_calls": []
           },
           "checkpoint_key": "terminal",
-          "resume_observation": null
+          "resume_observations": []
         },
         "terminal_acknowledged": true,
         "model_calls": []
@@ -2411,7 +2765,7 @@
     {
       "name": "journal_cycle_not_active",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2492,6 +2846,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -2532,7 +2887,7 @@
     {
       "name": "unknown_required_extension",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2613,6 +2968,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -2646,7 +3002,7 @@
     {
       "name": "invalid_extension_namespace",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2727,6 +3083,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -2755,9 +3112,20 @@
       "error": "checkpoint_extension_namespace_invalid"
     },
     {
+      "name": "cancel_requested_not_boolean",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace": {
+          "cancel_requested": "yes"
+        }
+      },
+      "error": "checkpoint_status_invalid",
+      "writes": []
+    },
+    {
       "name": "unknown_top_level_is_rejected",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v8",
+        "schema_version": "vv-agent.checkpoint.v9",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2838,6 +3206,7 @@
         "resume_attempt": 1,
         "cycle_index": 0,
         "status": "running",
+        "cancel_requested": false,
         "active_host_interaction": null,
         "suspended_origin": null,
         "messages": [],
@@ -2861,6 +3230,37 @@
         "model_calls": []
       },
       "error": "checkpoint_unknown_field"
+    },
+    {
+      "name": "terminal_result_with_active_tool_journal_is_invalid",
+      "base_valid_case": "operator_abort_terminal_retains_closed_tool_entries",
+      "mutation": {
+        "replace": {
+          "tool_journal": [
+            {
+              "kind": "tool",
+              "operation_id": "op_tool_cycle_2_active",
+              "cycle_index": 2,
+              "attempt": 1,
+              "request_digest": "cc94008fb3960d6728cc88e405d5b35d273890f9d9d0de8a01cdc964e44d46cf",
+              "tool_call_id": "call-active",
+              "tool_name": "write_record",
+              "arguments": {
+                "record_id": "42",
+                "value": "approved"
+              },
+              "idempotency_key": "idem-active",
+              "idempotency_support": "unknown",
+              "state": "started",
+              "result": null,
+              "error": null
+            }
+          ]
+        }
+      },
+      "active_state_representative": "started",
+      "terminal_result_preserved": true,
+      "error": "checkpoint_status_invalid"
     }
   ],
   "extension_limits": {
