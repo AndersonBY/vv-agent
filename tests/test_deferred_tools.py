@@ -253,8 +253,8 @@ def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -
         "call-defer",
         "invalid success",
         ToolResultStatus.SUCCESS,
-        error_code="tool_execution_failed",
     )
+    success_with_error.error_code = "tool_execution_failed"
     assert not _is_ambiguous_tool_error(success_with_error)
     with pytest.raises(DeferredResolutionResultInvalid) as caught:
         validate_definitive_result(success_with_error)

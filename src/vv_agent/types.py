@@ -720,6 +720,8 @@ class ToolExecutionResult:
             canonical_json_bytes(self.metadata, "tool result metadata")
         except (TypeError, ValueError, UnicodeError) as exc:
             raise ValueError("tool_result_invalid: metadata must be RFC 8785 I-JSON") from exc
+        if self.status_code is ToolResultStatus.SUCCESS and self.error_code is not None:
+            raise ValueError("tool_result_invalid: SUCCESS results cannot contain error_code")
         recovery_values = (
             self.truncation_reason,
             self.original_bytes,
