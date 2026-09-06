@@ -38,6 +38,7 @@ _KNOWN_FIELDS = frozenset(
         "resume_attempt",
         "cycle_index",
         "status",
+        "cancel_requested",
         "active_host_interaction",
         "suspended_origin",
         "messages",
@@ -85,6 +86,7 @@ def checkpoint_to_dict(
         "resume_attempt": checkpoint.resume_attempt,
         "cycle_index": checkpoint.cycle_index,
         "status": checkpoint.status.value,
+        "cancel_requested": checkpoint.cancel_requested,
         "messages": [message.to_dict() for message in checkpoint.messages],
         "cycles": [_cycle_to_dict(cycle) for cycle in checkpoint.cycles],
         "model_calls": [record.to_dict() for record in checkpoint.model_calls],
@@ -104,7 +106,7 @@ def checkpoint_to_dict(
     }
     payload["active_host_interaction"] = checkpoint.active_host_interaction
     payload["suspended_origin"] = checkpoint.suspended_origin
-    return _json_object(payload, "checkpoint v8")
+    return _json_object(payload, "checkpoint v10")
 
 
 def checkpoint_from_dict(
@@ -114,7 +116,7 @@ def checkpoint_from_dict(
     registered_extensions: Iterable[Any] | None = None,
 ) -> Checkpoint:
     if not isinstance(payload, dict):
-        raise ValueError("checkpoint v8 payload must be an object")
+        raise ValueError("checkpoint v10 payload must be an object")
     unknown_fields = set(payload) - _KNOWN_FIELDS
     if unknown_fields:
         names = ", ".join(sorted(unknown_fields))
@@ -191,6 +193,7 @@ def checkpoint_from_dict(
         resume_attempt=payload.get("resume_attempt"),
         cycle_index=payload.get("cycle_index"),
         status=status,
+        cancel_requested=payload.get("cancel_requested"),
         active_host_interaction=payload.get("active_host_interaction"),
         suspended_origin=payload.get("suspended_origin"),
         messages=[Message.from_dict(_object(item, "checkpoint message")) for item in messages_raw],
@@ -231,7 +234,7 @@ def checkpoint_to_json(
             checkpoint,
             max_extension_state_bytes=max_extension_state_bytes,
         ),
-        "checkpoint v8",
+        "checkpoint v10",
     ).decode("utf-8")
 
 
@@ -242,11 +245,11 @@ def checkpoint_from_json(
     registered_extensions: Iterable[Any] | None = None,
 ) -> Checkpoint:
     if not isinstance(payload, str | bytes):
-        raise TypeError("checkpoint v8 JSON must be str or bytes")
+        raise TypeError("checkpoint v10 JSON must be str or bytes")
     try:
         decoded = _strict_json_loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("checkpoint v8 JSON is invalid") from exc
+        raise ValueError("checkpoint v10 JSON is invalid") from exc
     return checkpoint_from_dict(
         decoded,
         max_extension_state_bytes=max_extension_state_bytes,

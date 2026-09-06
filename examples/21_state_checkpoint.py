@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable checkpoint v8: resume or replay one stable Runner task."""
+"""Durable checkpoint v10: resume or replay one stable Runner task."""
 
 from __future__ import annotations
 

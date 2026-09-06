@@ -1326,7 +1326,7 @@ wheels = [
 
 [[package]]
 name = "vv-agent"
-version = "0.12.4"
+version = "0.14.0"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },

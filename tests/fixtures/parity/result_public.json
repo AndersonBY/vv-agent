@@ -1,6 +1,6 @@
 {
   "contract": "result_public",
-  "version": 5,
+  "version": 6,
   "agent_result_wire": {
     "required_fields": [
       "status",
@@ -15,7 +15,7 @@
       "shared_state",
       "token_usage",
       "checkpoint_key",
-      "resume_observation"
+      "resume_observations"
     ],
     "optional_fields": [
       "budget_usage",
@@ -25,6 +25,21 @@
     "optional_fields_omitted_when_absent": true,
     "optional_fields_reject_null": true,
     "unknown_fields": "reject",
+    "resume_observations": {
+      "item_schema": "vv-agent.resume-observation.v1",
+      "unique_by": [
+        "operation_id",
+        "operation_kind",
+        "cycle_index"
+      ],
+      "sort_by": [
+        "operation_id",
+        "operation_kind",
+        "cycle_index"
+      ],
+      "terminal_projection": "same-CAS closed tool journal entries, one item per operation identity",
+      "empty_when_no_unclosed_tool": true
+    },
     "message_wire": {
       "type": "Message",
       "artifact_ref_preserved": true,
@@ -201,7 +216,7 @@
       ]
     },
     "checkpoint_key": null,
-    "resume_observation": null
+    "resume_observations": []
   },
   "expected_approvals": [
     {
@@ -230,7 +245,7 @@
     "new_items",
     "partial_output",
     "resolved_model",
-    "resume_observation",
+    "resume_observations",
     "run_id",
     "status",
     "token_usage",
@@ -252,14 +267,16 @@
     "wait_reason": null,
     "error": null,
     "checkpoint_key": "tenant-7/run-42",
-    "resume_observation": {
-      "operation_id": "op_tool_cycle_2_call_2",
-      "operation_kind": "tool",
-      "cycle_index": 2,
-      "state": "ambiguous",
-      "risk": "unknown_tool_side_effect",
-      "idempotency_support": "unknown"
-    }
+    "resume_observations": [
+      {
+        "operation_id": "op_tool_cycle_2_call_2",
+        "operation_kind": "tool",
+        "cycle_index": 2,
+        "state": "ambiguous",
+        "risk": "unknown_tool_side_effect",
+        "idempotency_support": "unknown"
+      }
+    ]
   },
   "deferred_pending_result": {
     "status": "deferred",
@@ -270,7 +287,7 @@
     "wait_reason": "deferred_pending",
     "error": null,
     "checkpoint_key": "tenant-7/run-42",
-    "resume_observation": null,
+    "resume_observations": [],
     "turn_projection": {
       "status": "interrupted",
       "terminal": false,
@@ -278,5 +295,46 @@
       "error": null,
       "resume_method": "turn/resume"
     }
-  }
+  },
+  "resume_observation_vectors": [
+    {
+      "name": "unsorted_input_is_canonicalized_by_operation_identity",
+      "input": [
+        {
+          "operation_id": "op_tool_cycle_2_call_3",
+          "operation_kind": "tool",
+          "cycle_index": 2,
+          "state": "ambiguous",
+          "risk": "unknown_tool_side_effect",
+          "idempotency_support": "unknown"
+        },
+        {
+          "operation_id": "op_tool_cycle_2_call_2",
+          "operation_kind": "tool",
+          "cycle_index": 2,
+          "state": "ambiguous",
+          "risk": "unknown_tool_side_effect",
+          "idempotency_support": "unknown"
+        }
+      ],
+      "canonical": [
+        {
+          "operation_id": "op_tool_cycle_2_call_2",
+          "operation_kind": "tool",
+          "cycle_index": 2,
+          "state": "ambiguous",
+          "risk": "unknown_tool_side_effect",
+          "idempotency_support": "unknown"
+        },
+        {
+          "operation_id": "op_tool_cycle_2_call_3",
+          "operation_kind": "tool",
+          "cycle_index": 2,
+          "state": "ambiguous",
+          "risk": "unknown_tool_side_effect",
+          "idempotency_support": "unknown"
+        }
+      ]
+    }
+  ]
 }

@@ -351,8 +351,9 @@ def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_pat
     assert tool_execution_count == expected["tool_execution_count"]
     if "partial_output" in expected:
         assert result.partial_output == expected["partial_output"]
-    if "error" in expected:
-        assert result.raw_result.error == expected["error"]
+    if "error" in expected and expected["error"] is not None:
+        assert result.raw_result.error is not None
+        assert result.raw_result.error["message"] == expected["error"]
     if expected.get("budget_usage") is None and case["limits"] is None:
         assert result.budget_usage is None
     if "usage" in expected:
@@ -418,7 +419,11 @@ def test_budget_exhaustion_precedes_output_guardrails(tmp_path: Path) -> None:
     )
 
     assert result.completion_reason is CompletionReason.BUDGET_EXHAUSTED
-    assert result.raw_result.error == "Run budget exhausted."
+    assert result.raw_result.error == {
+        "code": "run_budget_exhausted",
+        "message": "Run budget exhausted.",
+        "retryable": False,
+    }
     assert guardrail_calls == 0
 
 

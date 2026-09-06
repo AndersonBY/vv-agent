@@ -40,7 +40,10 @@ from vv_agent.runtime.controller import (
     ControllerCommand,
     ControllerCommandResolution,
     DistributedBackend,
+    HostInteractionRecoveryEnvelope,
     HostInteractionRecoveryResult,
+    HostInteractionRequest,
+    derive_host_interaction_record_id,
 )
 from vv_agent.runtime.dispatch_outbox import (
     DispatchOutboxClaim,
@@ -118,7 +121,7 @@ class CeleryBackend:
         return True
 
     def controller_backend(self) -> DistributedBackend:
-        """Return the public v8 controller seam backed by the recipe store."""
+        """Return the public v9 controller seam backed by the recipe store."""
         self._validate_nonblocking_recipe()
         assert self.capability_registry is not None
         self.capability_registry.validate(self.runtime_recipe.capabilities)
@@ -276,6 +279,7 @@ class CeleryBackend:
         if checkpoint is None:
             raise CheckpointError("checkpoint disappeared before distributed advance", code="checkpoint_not_found")
         self._validate_advance_checkpoint(envelope, checkpoint)
+        checkpoint = self._consume_pending_host_response(store=store, checkpoint=checkpoint)
         handle = self._handle_for_checkpoint(checkpoint)
         response = delivery.response
 
@@ -493,6 +497,128 @@ class CeleryBackend:
             )
         return decision
 
+    def _consume_pending_host_response(self, *, store: Any, checkpoint: Any) -> Any:
+        """Consume one admitted host response before the ordinary claim path."""
+        if checkpoint.status is not AgentStatus.RUNNING or checkpoint.claim_token is not None:
+            return checkpoint
+        now_ms = time.time_ns() // 1_000_000
+        wakes = store.reap_controller_command_wakes(checkpoint.checkpoint_key, now_ms)
+        for wake in wakes:
+            if not isinstance(wake, Mapping) or wake.get("outbox_state") != "pending":
+                continue
+            command_id = wake.get("command_id")
+            command_digest = wake.get("command_digest")
+            if not isinstance(command_id, str) or not isinstance(command_digest, str):
+                continue
+            command = store.get_controller_command(command_id)
+            if command is None or command.handle.checkpoint_key != checkpoint.checkpoint_key:
+                continue
+            response_command_id: str
+            if command.kind == "host_interaction_response":
+                payload = command.command
+                request_event = next(
+                    (
+                        entry.event
+                        for entry in checkpoint.event_outbox
+                        if entry.event.get("type") == "host_interaction_requested"
+                        and entry.event.get("interaction_id") == payload.get("interaction_id")
+                        and entry.event.get("request_digest") == payload.get("request_digest")
+                    ),
+                    None,
+                )
+                if not isinstance(request_event, dict):
+                    raise CheckpointError(
+                        "host interaction recovery request is missing",
+                        code="host_interaction_recovery_required",
+                    )
+                request = HostInteractionRequest(
+                    interaction_id=request_event["interaction_id"],
+                    logical_cycle=request_event["logical_cycle"],
+                    operation_id=request_event["operation_id"],
+                    tool_call_id=request_event["tool_call_id"],
+                    prompt=request_event["prompt"],
+                    request_digest=request_event["request_digest"],
+                )
+                response_command_id = command.command_id
+            elif command.kind == "resume":
+                find_record = getattr(store, "_find_resolved_pending_host_interaction", None)
+                if not callable(find_record):
+                    raise CheckpointError(
+                        "host interaction recovery record lookup is unavailable",
+                        code="host_interaction_recovery_required",
+                    )
+                record = find_record(checkpoint_key=checkpoint.checkpoint_key)
+                if not isinstance(record, Mapping):
+                    continue
+                request = HostInteractionRequest.from_dict(record["request"])
+                response_command_id = record["command_id"]
+                response_command = store.get_controller_command(response_command_id)
+                if (
+                    response_command is None
+                    or response_command.kind != "host_interaction_response"
+                    or response_command.handle.checkpoint_key != checkpoint.checkpoint_key
+                ):
+                    raise CheckpointError(
+                        "host interaction recovery command is stale",
+                        code="host_interaction_recovery_stale",
+                    )
+            else:
+                continue
+            record_id = derive_host_interaction_record_id(checkpoint.checkpoint_key, request)
+            store.reap_host_interaction_record(
+                record_id=record_id,
+                checkpoint_key=checkpoint.checkpoint_key,
+                now_ms=now_ms,
+            )
+            current = store.load_checkpoint(checkpoint.checkpoint_key)
+            if current is None:
+                raise CheckpointError(
+                    "checkpoint disappeared before host interaction recovery",
+                    code="checkpoint_not_found",
+                )
+            claim_token = f"distributed-host-response:{command_id}"
+            claimed_wake = store.claim_controller_command_wake(
+                command_id=command_id,
+                command_digest=command_digest,
+                claim_token=claim_token,
+                lease_expires_at_ms=now_ms + max(self.lease_duration_ms, 1_000),
+                now_ms=now_ms,
+            )
+            if not isinstance(claimed_wake, Mapping) or claimed_wake.get("outbox_state") != "claimed":
+                continue
+            recovery = HostInteractionRecoveryEnvelope(
+                record_id=record_id,
+                checkpoint_key=current.checkpoint_key,
+                run_id=current.root_run_id,
+                trace_id=current.trace_id,
+                claim_mode="recovery",
+                resume_attempt=current.resume_attempt,
+                expected_revision=current.revision,
+                logical_cycle=request.logical_cycle,
+                interaction_id=request.interaction_id,
+                operation_id=request.operation_id,
+                tool_call_id=request.tool_call_id,
+                request_digest=request.request_digest or "",
+                command_id=response_command_id,
+            )
+            DistributedBackend(store).claim_and_consume_host_interaction_response(recovery.to_dict())
+            store.complete_controller_command_wake(
+                command_id=command_id,
+                command_digest=command_digest,
+                claim_token=claim_token,
+                attempt=int(claimed_wake["attempt"]),
+                outcome="delivered",
+                now_ms=time.time_ns() // 1_000_000,
+            )
+            refreshed = store.load_checkpoint(checkpoint.checkpoint_key)
+            if refreshed is None:
+                raise CheckpointError(
+                    "checkpoint disappeared after host interaction recovery",
+                    code="checkpoint_not_found",
+                )
+            return refreshed
+        return checkpoint
+
     # ------------------------------------------------------------------
     # Distributed mode: each cycle → independent Celery task
     # ------------------------------------------------------------------
@@ -542,7 +668,7 @@ class CeleryBackend:
                     partial_output=_last_assistant_output(cycles),
                     messages=messages,
                     cycles=cycles,
-                    error=cancellation_reason,
+                    error={"code": "cancelled", "message": cancellation_reason, "retryable": False},
                     shared_state=shared_state,
                     token_usage=summarize_task_token_usage(current.model_calls if current is not None else []),
                     budget_usage=(current.budget_usage if current is not None else None),
@@ -590,7 +716,7 @@ class CeleryBackend:
                     partial_output=_last_assistant_output(cycles),
                     messages=messages,
                     cycles=cycles,
-                    error=cancellation_reason,
+                    error={"code": "cancelled", "message": cancellation_reason, "retryable": False},
                     shared_state=shared_state,
                     token_usage=summarize_task_token_usage(current.model_calls if current is not None else []),
                     budget_usage=(current.budget_usage if current is not None else None),

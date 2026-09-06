@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.result import RunResult
-from vv_agent.types import AgentResult
+from vv_agent.types import AgentResult, AgentStatus
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "result_public.json"
 
@@ -101,6 +101,19 @@ def test_agent_result_reader_enforces_the_closed_current_wire() -> None:
 
     with pytest.raises(ValueError, match="unknown"):
         AgentResult.from_dict({**deepcopy(raw), "legacy": True})
+
+    with pytest.raises(TypeError, match="typed error object"):
+        AgentResult.from_dict({**deepcopy(raw), "error": "legacy failure"})
+
+
+def test_agent_result_constructor_rejects_string_errors() -> None:
+    with pytest.raises(TypeError, match="typed error object"):
+        AgentResult(
+            status=AgentStatus.FAILED,
+            messages=[],
+            cycles=[],
+            error=cast(Any, "legacy failure"),
+        )
 
 
 def test_agent_result_preserves_bounded_tool_recovery_fields() -> None:

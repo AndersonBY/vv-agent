@@ -152,8 +152,8 @@ class RunResult:
         return self.raw_result.checkpoint_key
 
     @property
-    def resume_observation(self) -> ResumeObservation | None:
-        return self.raw_result.resume_observation
+    def resume_observations(self) -> list[ResumeObservation]:
+        return list(self.raw_result.resume_observations)
 
     @property
     def error_code(self) -> str | None:
@@ -181,7 +181,7 @@ class RunResult:
             "budget_usage": self.budget_usage.to_dict() if self.budget_usage is not None else None,
             "budget_exhaustion": self.budget_exhaustion.to_dict() if self.budget_exhaustion is not None else None,
             "checkpoint_key": self.checkpoint_key,
-            "resume_observation": (self.resume_observation.to_dict() if self.resume_observation is not None else None),
+            "resume_observations": [observation.to_dict() for observation in self.resume_observations],
             "events": [event.to_dict() for event in self.events],
             "token_usage": self.token_usage.to_dict(),
             "trace_id": self.trace_id,

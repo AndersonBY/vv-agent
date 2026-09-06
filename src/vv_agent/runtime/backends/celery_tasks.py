@@ -37,6 +37,7 @@ from vv_agent.runtime.backends.distributed import (
 from vv_agent.runtime.checkpoint_resume import (
     CheckpointReconciliationRequired,
     CheckpointResumeController,
+    _checkpoint_control_result,
 )
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.engine import (
@@ -601,6 +602,8 @@ def _run_single_cycle(
         lease_duration_ms=envelope.lease_duration_ms,
         preloaded_checkpoint=existing,
     )
+    if claim_mode == "recovery":
+        controller.set_next_claim_mode(claim_mode)
     replayed = controller.admit()
     if replayed is not None:
         controller.close()
@@ -609,8 +612,8 @@ def _run_single_cycle(
             checkpoint_revision=(retained.revision if retained is not None else existing.revision),
             result=replayed,
         )
-    controller.set_next_claim_mode(claim_mode)
-
+    if claim_mode == "continue":
+        controller.set_next_claim_mode(claim_mode)
     budget_controller: _RunBudgetController | None = None
     if envelope.budget_limits is not None and envelope.budget_limits.has_limits:
         budget_controller = _RunBudgetController(
@@ -681,7 +684,11 @@ def _run_single_cycle(
                     completion_reason=CompletionReason.CANCELLED,
                     messages=messages,
                     cycles=cycles,
-                    error=ctx.cancellation_token.reason or "Operation was cancelled",
+                    error={
+                        "code": "cancelled",
+                        "message": ctx.cancellation_token.reason or "Operation was cancelled",
+                        "retryable": False,
+                    },
                     shared_state=shared_state,
                     budget_usage=budget_controller.snapshot,
                 )
@@ -736,22 +743,37 @@ def _run_single_cycle(
                     "distributed cycle returned without a durable cycle record",
                     code="checkpoint_cycle_conflict",
                 )
-            controller.commit_cycle(
-                cycle_index=envelope.cycle_index,
-                messages=messages,
-                cycles=cycles,
-                shared_state=shared_state,
-            )
-            committed = store.load_checkpoint(config.key)
-            if committed is None:
-                raise CheckpointError(
-                    "checkpoint disappeared after distributed cycle commit",
-                    code="checkpoint_not_found",
+            try:
+                controller.commit_cycle(
+                    cycle_index=envelope.cycle_index,
+                    messages=messages,
+                    cycles=cycles,
+                    shared_state=shared_state,
                 )
-            return DistributedWorkerResponse.committed(
-                checkpoint_revision=committed.revision,
-                committed_cycle=committed.cycle_index,
-            )
+            except CheckpointError as exc:
+                if budget_controller is not None:
+                    budget_controller.tool_batch_complete(envelope.cycle_index, operation_failed=True)
+                result = _checkpoint_control_result(
+                    exc,
+                    messages=messages,
+                    cycles=cycles,
+                    shared_state=shared_state,
+                    token_usage=ctx.model_call_ledger.usage(),
+                    budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
+                )
+                if result is None:
+                    raise
+            else:
+                committed = store.load_checkpoint(config.key)
+                if committed is None:
+                    raise CheckpointError(
+                        "checkpoint disappeared after distributed cycle commit",
+                        code="checkpoint_not_found",
+                    )
+                return DistributedWorkerResponse.committed(
+                    checkpoint_revision=committed.revision,
+                    committed_cycle=committed.cycle_index,
+                )
 
         controller.assert_heartbeat_healthy()
         current = store.load_checkpoint(config.key)
@@ -797,7 +819,7 @@ def run_single_cycle(
 ) -> dict[str, Any]:
     """Execute a single agent cycle on a Celery worker.
 
-    Returns one closed ``vv-agent.distributed-worker-response.v3`` payload.
+    Returns one closed ``vv-agent.distributed-worker-response.v4`` payload.
     """
     envelope = DistributedRunEnvelope.from_dict(envelope_dict)
 

@@ -605,7 +605,7 @@ def test_cancelled_turn_projects_as_failed_with_error() -> None:
         status=AgentStatus.FAILED,
         messages=[],
         cycles=[],
-        error="run cancelled",
+        error={"code": "cancelled", "message": "run cancelled", "retryable": False},
         completion_reason=CompletionReason.CANCELLED,
     )
     result = RunResult(
@@ -670,7 +670,7 @@ def test_budget_exhaustion_projects_typed_usage_to_turn_and_store() -> None:
         status=AgentStatus.FAILED,
         messages=[],
         cycles=[],
-        error="Run budget exhausted.",
+        error={"code": "run_budget_exhausted", "message": "Run budget exhausted.", "retryable": False},
         completion_reason=CompletionReason.BUDGET_EXHAUSTED,
         partial_output="draft",
         budget_usage=usage,

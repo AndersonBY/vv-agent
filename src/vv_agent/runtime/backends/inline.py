@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from vv_agent.checkpoint import CheckpointError
 from vv_agent.runtime.backends.base import CycleExecutor
-from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController, _checkpoint_control_result
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.types import (
     AgentResult,
@@ -68,7 +69,7 @@ class InlineBackend:
                         partial_output=_last_assistant_output(cycles),
                         messages=messages,
                         cycles=cycles,
-                        error="Operation was cancelled",
+                        error={"code": "cancelled", "message": "Operation was cancelled", "retryable": False},
                         shared_state=shared_state,
                         token_usage=_task_token_usage(ctx),
                     )
@@ -80,12 +81,24 @@ class InlineBackend:
                 and cycles
                 and cycles[-1].index == cycle_index
             ):
-                checkpoint_controller.commit_cycle(
-                    cycle_index=cycle_index,
-                    messages=messages,
-                    cycles=cycles,
-                    shared_state=shared_state,
-                )
+                try:
+                    checkpoint_controller.commit_cycle(
+                        cycle_index=cycle_index,
+                        messages=messages,
+                        cycles=cycles,
+                        shared_state=shared_state,
+                    )
+                except CheckpointError as exc:
+                    control_result = _checkpoint_control_result(
+                        exc,
+                        messages=messages,
+                        cycles=cycles,
+                        shared_state=shared_state,
+                        token_usage=_task_token_usage(ctx),
+                    )
+                    if control_result is None:
+                        raise
+                    return control_result
             if result is not None:
                 return result
 

@@ -396,9 +396,9 @@ PUBLIC_API_DOMAINS: tuple[dict[str, Any], ...] = (
                 "rust": "vv_agent::BudgetExhaustion",
             },
             {
-                "id": "result.resume_observation",
-                "python": "vv_agent.ResumeObservation",
-                "rust": "vv_agent::ResumeObservation",
+                "id": "result.resume_observations",
+                "python": "list[vv_agent.ResumeObservation]",
+                "rust": "Vec<vv_agent::ResumeObservation>",
             },
         ],
     },
@@ -1143,9 +1143,9 @@ PUBLIC_API_SURFACES: tuple[dict[str, Any], ...] = (
                 rust_kind="method",
             ),
             _field(
-                "resume_observation",
-                "resume_observation",
-                "resume_observation",
+                "resume_observations",
+                "resume_observations",
+                "resume_observations",
                 python_kind="property",
                 rust_kind="method",
             ),
@@ -1938,6 +1938,9 @@ def _load_fixture(name: str) -> Any:
 
 
 def _resolve_python_export(path: str) -> Any:
+    if path.startswith("list[") and path.endswith("]"):
+        inner = _resolve_python_export(path[5:-1])
+        return list[inner]
     parts = path.split(".")
     for split_index in range(len(parts) - 1, 0, -1):
         module_name = ".".join(parts[:split_index])
@@ -1993,7 +1996,7 @@ def test_public_api_manifest_resolves_real_python_exports() -> None:
             assert capability["id"] not in capability_ids
             capability_ids.add(capability["id"])
             assert _resolve_python_export(capability["python"]) is not None
-    assert len(capability_ids) == 177
+    assert len(capability_ids) == 178
 
     surfaces = {surface["id"]: surface for surface in fixture["surfaces"]}
     assert len(surfaces) == len(fixture["surfaces"])

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import replace
 from threading import RLock
 from typing import Any, Literal, cast
 
-from vv_agent.checkpoint import CheckpointError, EventCursor
+from vv_agent.checkpoint import CheckpointError, EventCursor, ResumeObservation
 from vv_agent.deferred import (
     DeferredCheckpointClaimed,
     DeferredResolutionConflict,
@@ -16,7 +17,7 @@ from vv_agent.deferred import (
     ToolCallOutcome,
     validate_definitive_result,
 )
-from vv_agent.events import ToolCallCompletedEvent, ToolCallDeferredEvent
+from vv_agent.events import RUN_EVENT_VERSION, ToolCallCompletedEvent, ToolCallDeferredEvent
 from vv_agent.runtime.checkpoint_codec import clone_checkpoint
 from vv_agent.runtime.dispatch_outbox import (
     DispatchOutboxClaim,
@@ -29,16 +30,22 @@ from vv_agent.runtime.dispatch_outbox import (
 from vv_agent.runtime.state import (
     Checkpoint,
     CheckpointConflictError,
+    CheckpointRenewal,
     ClaimMode,
     OperationState,
+    RenewOutcome,
     _LeaseOperationClock,
     _validate_claim,
     _validate_renew,
     check_claim,
     checkpoint_definition_matches,
     claim_matches,
+    merge_event_outbox,
+    operation_error_from_tool_result,
     prepare_claimed_terminal,
     prepare_event_delivery,
+    prepare_unclaimed_terminal,
+    validate_checkpoint_creation,
     validate_model_journal_accounting,
 )
 from vv_agent.runtime.stores.controller_store import ControllerStoreMixin
@@ -57,8 +64,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
 
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
         snapshot = clone_checkpoint(checkpoint)
-        if snapshot.revision != 0 or snapshot.resume_attempt != 1 or snapshot.claim_token is not None:
-            raise ValueError("new checkpoint records must be unclaimed at revision zero")
+        validate_checkpoint_creation(snapshot)
         with self._lock:
             if snapshot.checkpoint_key in self._store:
                 return False
@@ -93,6 +99,14 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                 raise CheckpointConflictError("expired checkpoint claims require recovery mode")
             if checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED and claim_mode != "recovery":
                 raise CheckpointConflictError("reconciliation checkpoints require recovery mode")
+            if any(
+                record["checkpoint_key"] == checkpoint_key and record["state"] in {"resolved_pending", "resolved_claimed"}
+                for record in self._host_interaction_records.values()
+            ):
+                raise CheckpointError(
+                    "host interaction response requires dedicated recovery",
+                    code="host_interaction_recovery_required",
+                )
             checkpoint.revision += 1
             if claim_mode == "recovery":
                 checkpoint.resume_attempt += 1
@@ -121,6 +135,9 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             ):
                 return False
             snapshot = clone_checkpoint(checkpoint)
+            snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
+            snapshot.cancel_requested = snapshot.cancel_requested or current.cancel_requested
+            snapshot.event_cursor = deepcopy(current.event_cursor)
             snapshot.revision = expected_revision + 1
             snapshot.claim_token = current.claim_token
             snapshot.claimed_cycle = current.claimed_cycle
@@ -155,6 +172,9 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                     lease_expires_at_ms=None,
                 )
             )
+            snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
+            snapshot.event_cursor = deepcopy(current.event_cursor)
+            snapshot.cancel_requested = current.cancel_requested
             self._store[snapshot.checkpoint_key] = snapshot
             return True
 
@@ -175,8 +195,17 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                 or checkpoint.terminal_result is not None
                 or checkpoint.status is not AgentStatus.RUNNING
                 or checkpoint.cycle_index != current.claimed_cycle
+                or current.cancel_requested
+                or checkpoint.cancel_requested
+                or any(
+                    entry.state
+                    in {OperationState.PLANNED, OperationState.STARTED, OperationState.DEFERRED, OperationState.AMBIGUOUS}
+                    for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
+                )
             ):
                 return False
+            checkpoint.event_outbox = merge_event_outbox(current.event_outbox, checkpoint.event_outbox)
+            checkpoint.event_cursor = deepcopy(current.event_cursor)
             validate_model_journal_accounting(checkpoint)
             snapshot = clone_checkpoint(
                 replace(
@@ -194,7 +223,8 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             return True
 
     def finalize_checkpoint(self, checkpoint: Checkpoint, *, expected_revision: int) -> bool:
-        snapshot = clone_checkpoint(checkpoint)
+        snapshot = prepare_unclaimed_terminal(checkpoint)
+        snapshot = clone_checkpoint(snapshot)
         if snapshot.terminal_result is None or snapshot.claim_token is not None:
             raise ValueError("finalized checkpoint must be terminal and unclaimed")
         with self._lock:
@@ -208,6 +238,9 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                 or not checkpoint_definition_matches(current, snapshot)
             ):
                 return False
+            snapshot.cancel_requested = current.cancel_requested
+            snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
+            snapshot.event_cursor = deepcopy(current.event_cursor)
             snapshot.revision = expected_revision + 1
             self._store[snapshot.checkpoint_key] = snapshot
             return True
@@ -268,20 +301,189 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
         claim_token: str,
         lease_expires_at_ms: int,
         now_ms: int,
-    ) -> bool:
+    ) -> CheckpointRenewal:
         _validate_renew(claim_token, lease_expires_at_ms, now_ms)
         clock = _LeaseOperationClock(now_ms)
         with self._lock:
             current_now_ms = clock.now_ms()
             checkpoint = self._store.get(checkpoint_key)
+            if checkpoint is None:
+                return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=0)
             if (
-                checkpoint is None
-                or checkpoint.claim_token != claim_token
+                checkpoint.claim_token != claim_token
                 or (checkpoint.lease_expires_at_ms or 0) <= current_now_ms
                 or lease_expires_at_ms <= current_now_ms
             ):
-                return False
+                return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=checkpoint.revision)
             checkpoint.lease_expires_at_ms = lease_expires_at_ms
+            return CheckpointRenewal(
+                outcome=(RenewOutcome.CANCEL_REQUESTED if checkpoint.cancel_requested else RenewOutcome.RENEWED),
+                lease_expires_at_ms=lease_expires_at_ms,
+            )
+
+    def record_tool_receipt(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        operation_id: str,
+        attempt: int,
+        tool_call_id: str,
+        request_digest: str,
+        result: ToolExecutionResult,
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool:
+        validate_definitive_result(result)
+        if result.tool_call_id != tool_call_id:
+            raise CheckpointError(
+                "tool receipt result tool_call_id does not match the journal identity",
+                code="tool_receipt_identity_invalid",
+            )
+        from vv_agent.checkpoint import canonical_json_sha256
+        from vv_agent.runtime.state import compute_tool_identity_key
+
+        identity_key = compute_tool_identity_key(
+            checkpoint.checkpoint_key,
+            operation_id,
+            attempt,
+            tool_call_id,
+            request_digest,
+        )
+        result_digest = canonical_json_sha256(result.to_dict(), "tool result")
+        with self._lock:
+            current = self._store.get(checkpoint.checkpoint_key)
+            existing = (
+                next(
+                    (entry for entry in current.tool_journal if entry.identity_key == identity_key),
+                    None,
+                )
+                if current is not None
+                else None
+            )
+            if existing is not None:
+                if existing.result_digest == result_digest:
+                    return True
+                raise CheckpointError(
+                    "tool receipt conflicts with the retained identity",
+                    code="tool_receipt_conflict",
+                )
+            if current is None:
+                return False
+            if current.claim_token is None or not claim_token:
+                raise CheckpointError(
+                    "tool receipt requires an active claim",
+                    code="checkpoint_claim_required",
+                )
+            if current.claim_token != claim_token or current.claimed_cycle != claimed_cycle:
+                raise CheckpointError(
+                    "tool receipt claim does not match the checkpoint claim",
+                    code="checkpoint_claim_conflict",
+                )
+            if current.revision != expected_revision or checkpoint.revision != expected_revision:
+                raise CheckpointError(
+                    "tool receipt revision does not match the checkpoint revision",
+                    code="checkpoint_revision_conflict",
+                )
+            if (
+                current.status is not AgentStatus.RUNNING
+                or current.terminal_result is not None
+                or not checkpoint_definition_matches(current, checkpoint)
+            ):
+                return False
+            entry = next(
+                (
+                    item
+                    for item in current.tool_journal
+                    if item.operation_id == operation_id
+                    and item.attempt == attempt
+                    and item.tool_call_id == tool_call_id
+                    and item.request_digest == request_digest
+                    and item.cycle_index == claimed_cycle
+                ),
+                None,
+            )
+            if entry is None or entry.state not in {OperationState.STARTED, OperationState.AMBIGUOUS}:
+                return False
+            execution_started = entry.state in {OperationState.STARTED, OperationState.AMBIGUOUS}
+            snapshot = clone_checkpoint(current)
+            target = next(
+                item
+                for item in snapshot.tool_journal
+                if item.cycle_index == entry.cycle_index
+                and item.operation_id == entry.operation_id
+                and item.attempt == entry.attempt
+                and item.tool_call_id == entry.tool_call_id
+                and item.request_digest == entry.request_digest
+            )
+            target.identity_key = identity_key
+            target.result_digest = result_digest
+            source = next(
+                (
+                    item
+                    for item in checkpoint.tool_journal
+                    if item.operation_id == entry.operation_id
+                    and item.attempt == entry.attempt
+                    and item.tool_call_id == entry.tool_call_id
+                    and item.request_digest == entry.request_digest
+                    and item.cycle_index == entry.cycle_index
+                ),
+                None,
+            )
+            if result.error_code == "tool_outcome_unknown":
+                observation = (
+                    ResumeObservation(
+                        operation_id=entry.operation_id,
+                        operation_kind=entry.kind,
+                        cycle_index=entry.cycle_index,
+                        risk="unknown_tool_side_effect",
+                        idempotency_support=entry.idempotency_support,
+                    )
+                    if source is not None
+                    and source.kind is entry.kind
+                    and source.state is OperationState.AMBIGUOUS
+                    and source.resume_observation is not None
+                    else None
+                )
+                if observation is None or source is None or source.resume_observation != observation:
+                    raise CheckpointError(
+                        "tool outcome observation does not match the authoritative operation",
+                        code="checkpoint_journal_integrity_mismatch",
+                    )
+                target.resume_observation = observation
+            else:
+                target.resume_observation = None
+            target.deferred_handle = None
+            if result.status_code.value == "SUCCESS":
+                target.state = OperationState.SUCCEEDED
+                target.result = result.to_dict()
+                target.error = None
+            else:
+                target.state = OperationState.FAILED
+                target.result = result.to_dict()
+                target.error = operation_error_from_tool_result(result)
+            event = ToolCallCompletedEvent(
+                run_id=snapshot.root_run_id,
+                trace_id=snapshot.trace_id,
+                cycle_index=target.cycle_index,
+                tool_call_id=target.tool_call_id or tool_call_id,
+                tool_name=target.tool_name or "tool",
+                operation_id=target.operation_id,
+                attempt=target.attempt,
+                status=result.status_code.value.lower(),
+                directive=result.directive.value,
+                error_code=result.error_code,
+                execution_started=execution_started,
+                duration_ms=None,
+                checkpoint_key=snapshot.checkpoint_key,
+                event_id=f"evt_receipt_{identity_key}",
+            ).to_dict()
+            _enqueue_event(snapshot, event)
+            snapshot.revision = expected_revision + 1
+            from vv_agent.runtime.state import validate_checkpoint
+
+            validate_checkpoint(snapshot)
+            self._store[snapshot.checkpoint_key] = snapshot
             return True
 
     def acknowledge_terminal(self, checkpoint_key: str, *, expected_revision: int) -> bool:
@@ -510,21 +712,45 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             normalized = _normalize_batch_outcomes(outcomes)
             if not normalized:
                 return False
+            if any(outcome.kind == "completed" for _call_id, outcome in normalized):
+                raise CheckpointError(
+                    "deferred admission accepts deferred outcomes only",
+                    code="deferred_admission_completed_outcome_invalid",
+                )
             snapshot = clone_checkpoint(current)
-            covered: set[str] = set()
+            covered: set[tuple[str, int, str | None, str, int]] = set()
             deferred_seen = False
             for call_id, outcome in normalized:
                 # Completed outcomes identify a journal slot by tool_call_id;
-                # a deferred outcome only carries the framework operation_id
-                # in its opaque handle.  Accept both identities, but still
-                # verify the complete handle below before mutating anything.
+                # deferred outcomes carry the complete operation identity in
+                # their handle.  Select by that identity before mutating.
+                handle = outcome.handle if outcome.kind == "deferred" else None
                 entry = next(
-                    (item for item in snapshot.tool_journal if item.tool_call_id == call_id or item.operation_id == call_id),
+                    (
+                        item
+                        for item in snapshot.tool_journal
+                        if item.cycle_index == claimed_cycle
+                        and (
+                            (
+                                handle is not None
+                                and item.operation_id == handle.operation_id
+                                and item.attempt == handle.attempt
+                                and item.request_digest == handle.request_digest
+                            )
+                            or (handle is None and item.tool_call_id == call_id)
+                        )
+                    ),
                     None,
                 )
                 if entry is None or entry.cycle_index != claimed_cycle or entry.state is not OperationState.STARTED:
                     return False
-                identity = entry.operation_id
+                identity = (
+                    entry.operation_id,
+                    entry.attempt,
+                    entry.tool_call_id,
+                    entry.request_digest,
+                    entry.cycle_index,
+                )
                 if identity in covered:
                     return False
                 covered.add(identity)
@@ -559,58 +785,40 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                         event_id=_stable_deferred_event_id(entry, "deferred"),
                     ).to_dict()
                 else:
-                    result = outcome.result
-                    validate_definitive_result(result)
-                    assert result is not None
-                    if result.tool_call_id != entry.tool_call_id:
-                        return False
-                    entry.deferred_handle = None
-                    if result.status_code.value == "SUCCESS":
-                        entry.state = OperationState.SUCCEEDED
-                        entry.result = result.to_dict()
-                        entry.error = None
-                    else:
-                        from vv_agent.runtime.state import OperationError
-
-                        entry.state = OperationState.FAILED
-                        entry.result = None
-                        entry.error = OperationError(
-                            code=result.error_code or "tool_operation_failed",
-                            message=result.content or "tool operation failed",
-                            retryable=bool(result.metadata.get("retryable")),
-                        )
-                    event = ToolCallCompletedEvent(
-                        run_id=snapshot.root_run_id,
-                        trace_id=snapshot.trace_id,
-                        cycle_index=entry.cycle_index,
-                        tool_call_id=entry.tool_call_id or call_id,
-                        tool_name=entry.tool_name or "tool",
-                        operation_id=entry.operation_id,
-                        attempt=entry.attempt,
-                        status=result.status_code.value.lower(),
-                        directive=result.directive.value,
-                        error_code=result.error_code,
-                        execution_started=True,
-                        duration_ms=None,
-                        event_id=_stable_deferred_event_id(
-                            entry,
-                            "completed" if result.status_code.value == "SUCCESS" else "failed",
-                        ),
-                    ).to_dict()
+                    # Definitive outcomes are admitted by record_tool_receipt
+                    # before this barrier.  Re-admitting one would duplicate
+                    # the receipt event and violate the one-claim release.
+                    raise CheckpointError(
+                        "deferred admission accepts deferred outcomes only",
+                        code="deferred_admission_completed_outcome_invalid",
+                    )
                 _enqueue_event(snapshot, event)
             # Admission is the all-or-none boundary for the complete started
             # model-tool batch.  A missing started slot would otherwise leave
             # an unclassified external operation behind a released claim.
             if any(
-                entry.cycle_index == claimed_cycle and entry.state is OperationState.STARTED and entry.operation_id not in covered
+                entry.cycle_index == claimed_cycle
+                and entry.state is OperationState.STARTED
+                and (
+                    entry.operation_id,
+                    entry.attempt,
+                    entry.tool_call_id,
+                    entry.request_digest,
+                    entry.cycle_index,
+                )
+                not in covered
                 for entry in [*snapshot.model_call_journal, *snapshot.tool_journal]
             ):
+                raise CheckpointError(
+                    "deferred batch must cover every started tool in the claimed cycle",
+                    code="deferred_batch_incomplete",
+                )
+            if not deferred_seen:
                 return False
-            if deferred_seen:
-                snapshot.status = AgentStatus.DEFERRED
-                snapshot.claim_token = None
-                snapshot.claimed_cycle = None
-                snapshot.lease_expires_at_ms = None
+            snapshot.status = AgentStatus.DEFERRED
+            snapshot.claim_token = None
+            snapshot.claimed_cycle = None
+            snapshot.lease_expires_at_ms = None
             snapshot.revision = expected_revision + 1
             try:
                 from vv_agent.runtime.state import validate_checkpoint
@@ -626,6 +834,8 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
         with self._lock:
             existing = self._deferred_receipts.get(handle.key)
             if existing is not None:
+                if existing.handle.key != handle.key or existing.handle_key != handle.key:
+                    raise ValueError("deferred_receipt_identity_invalid")
                 if existing.result.to_dict() != result.to_dict():
                     raise DeferredResolutionConflict()
                 return DeferredResolveDecision.Replayed(existing)
@@ -658,9 +868,24 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             target = next(
                 item
                 for item in snapshot.tool_journal
-                if item.operation_id == handle.operation_id and item.attempt == handle.attempt
+                if item.cycle_index == entry.cycle_index
+                and item.operation_id == entry.operation_id
+                and item.attempt == entry.attempt
+                and item.tool_call_id == entry.tool_call_id
+                and item.request_digest == entry.request_digest
             )
-            from vv_agent.runtime.state import OperationError
+            from vv_agent.checkpoint import canonical_json_sha256
+            from vv_agent.runtime.state import compute_tool_identity_key
+
+            identity_key = compute_tool_identity_key(
+                snapshot.checkpoint_key,
+                target.operation_id,
+                target.attempt,
+                target.tool_call_id or result.tool_call_id,
+                target.request_digest,
+            )
+            target.identity_key = identity_key
+            target.result_digest = canonical_json_sha256(result.to_dict(), "deferred result")
 
             if result.status_code.value == "SUCCESS":
                 target.state = OperationState.SUCCEEDED
@@ -671,12 +896,8 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             else:
                 target.state = OperationState.FAILED
                 target.deferred_handle = None
-                target.result = None
-                target.error = OperationError(
-                    code=result.error_code or "tool_operation_failed",
-                    message=result.content or "tool operation failed",
-                    retryable=bool(result.metadata.get("retryable")),
-                )
+                target.result = result.to_dict()
+                target.error = operation_error_from_tool_result(result)
                 receipt_status = "failed"
             event = ToolCallCompletedEvent(
                 run_id=snapshot.root_run_id,
@@ -691,10 +912,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                 error_code=result.error_code,
                 execution_started=True,
                 duration_ms=None,
-                event_id=_stable_deferred_event_id(
-                    target,
-                    "completed" if result.status_code.value == "SUCCESS" else "failed",
-                ),
+                event_id=f"evt_receipt_{identity_key}",
             ).to_dict()
             _enqueue_event(snapshot, event)
             remaining = [item for item in snapshot.tool_journal if item.state is OperationState.DEFERRED]
@@ -736,12 +954,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
 
         with self._lock:
             current = self._store.get(checkpoint.checkpoint_key)
-            if (
-                current is None
-                or current.revision != expected_revision
-                or checkpoint.revision != expected_revision
-                or not checkpoint_definition_matches(current, checkpoint)
-            ):
+            if current is None:
                 return False
             parsed = [d if isinstance(d, AcceptDeferredDecision) else AcceptDeferredDecision.from_dict(d) for d in decisions]
             if not parsed:
@@ -753,7 +966,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             # controller performs the same aggregation before calling the
             # store, but keeping the invariant here is essential for direct
             # SQLite/Redis callers and for the all-or-none CAS contract.
-            decision_keys = [(item.handle.operation_id, item.handle.attempt) for item in parsed]
+            decision_keys = [(item.handle.operation_id, item.handle.attempt, item.handle.request_digest) for item in parsed]
             if len(decision_keys) != len(set(decision_keys)):
                 return False
 
@@ -774,7 +987,8 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                 decision_cycles = {
                     item.cycle_index
                     for item in snapshot.tool_journal
-                    if item.state is OperationState.DEFERRED and (item.operation_id, item.attempt) in decision_keys_set
+                    if item.state is OperationState.DEFERRED
+                    and (item.operation_id, item.attempt, item.request_digest) in decision_keys_set
                 }
                 deferred_cycles = {item.cycle_index for item in snapshot.tool_journal if item.state is OperationState.DEFERRED}
                 if len(decision_cycles) == 1:
@@ -808,6 +1022,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                         if item.cycle_index == current_cycle
                         and item.operation_id == decision.handle.operation_id
                         and item.attempt == decision.handle.attempt
+                        and item.request_digest == decision.handle.request_digest
                     ),
                     None,
                 )
@@ -816,6 +1031,12 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                     break
             if replayed:
                 return True
+            if (
+                current.revision != expected_revision
+                or checkpoint.revision != expected_revision
+                or not checkpoint_definition_matches(current, checkpoint)
+            ):
+                return False
             if current.resume_attempt <= 1 or current.claim_token != claim_token or current.claimed_cycle != claimed_cycle:
                 return False
 
@@ -838,14 +1059,16 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             current_entries = list(ambiguous_entries)
             if not ambiguous_entries or len(parsed) != len(current_entries):
                 return False
-            current_keys = {(item.operation_id, item.attempt) for item in current_entries}
+            current_keys = {(item.operation_id, item.attempt, item.request_digest) for item in current_entries}
             if set(decision_keys) != current_keys:
                 return False
             # Provider response order is not the model-call order.  Apply
             # accepted entries in journal order so event/outbox ordering is
             # deterministic and independent of reconciliation delivery order.
             decisions_by_key = dict(zip(decision_keys, parsed, strict=True))
-            ordered_decisions = [decisions_by_key[(item.operation_id, item.attempt)] for item in current_entries]
+            ordered_decisions = [
+                decisions_by_key[(item.operation_id, item.attempt, item.request_digest)] for item in current_entries
+            ]
             for decision in ordered_decisions:
                 entry = next(
                     (
@@ -854,6 +1077,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                         if item.cycle_index == current_cycle
                         and item.operation_id == decision.handle.operation_id
                         and item.attempt == decision.handle.attempt
+                        and item.request_digest == decision.handle.request_digest
                     ),
                     None,
                 )
@@ -876,8 +1100,9 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                 entry.deferred_handle = decision.handle
                 entry.result = None
                 entry.error = None
+                entry.resume_observation = None
                 audit = {
-                    "version": "v4",
+                    "version": RUN_EVENT_VERSION,
                     "type": "reconciliation_resolved",
                     "event_id": _stable_deferred_event_id(entry, "reconciliation"),
                     "run_id": snapshot.root_run_id,
@@ -969,6 +1194,6 @@ def _enqueue_event(checkpoint: Checkpoint, event: dict[str, Any]) -> None:
     for existing in checkpoint.event_outbox:
         if existing.event_id == event_id:
             if existing.event != event:
-                raise ValueError("event_identity_conflict")
+                raise CheckpointError("event_identity_conflict", code="event_identity_conflict")
             return
     checkpoint.event_outbox.append(EventOutboxEntry.pending(event_id, event))

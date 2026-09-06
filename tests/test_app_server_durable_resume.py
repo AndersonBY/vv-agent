@@ -18,7 +18,7 @@ from vv_agent.app_server import (
 )
 from vv_agent.app_server.item_mapper import map_run_event
 from vv_agent.app_server.run_adapter import StartedTurn
-from vv_agent.checkpoint import ResumePolicy
+from vv_agent.checkpoint import AmbiguousToolPolicy, ResumePolicy
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.events import ToolCallCompletedEvent
 from vv_agent.llm import ScriptedLLM
@@ -62,6 +62,7 @@ def _checkpoint_config(store: InMemoryCheckpointStore) -> CheckpointConfig:
         store=store,
         key=CHECKPOINT_KEY,
         resume_policy=ResumePolicy.NEW,
+        ambiguous_tool_policy=AmbiguousToolPolicy.REQUIRE_RECONCILIATION,
         capability_refs={name: {"id": f"app-server.{name}", "version": "1"} for name in capability_names},
     )
 

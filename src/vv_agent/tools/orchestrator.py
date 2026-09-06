@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Any, cast
 
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalProvider, ApprovalRequest, bind_request_cancellation
+from vv_agent.checkpoint import CheckpointError
 from vv_agent.deferred import ToolCallOutcome
 from vv_agent.events import (
     ApprovalRequestedEvent,
@@ -96,12 +97,13 @@ class ToolOrchestrator:
         tool_metadata = get_executor_tool_metadata(executor) if executor is not None else None
         if tool_metadata is not None:
             call_context.metadata[_TOOL_TYPED_METADATA_KEY] = tool_metadata
-        self._emit_planned(
-            normalized_call,
-            executor=executor,
-            context=call_context,
-            event_sink=event_sink,
-        )
+        if call_context.metadata.get("_vv_agent_checkpoint_replay") is not True:
+            self._emit_planned(
+                normalized_call,
+                executor=executor,
+                context=call_context,
+                event_sink=event_sink,
+            )
         if _precomputed_result is not None:
             result = _precomputed_result
         elif executor is None:
@@ -150,6 +152,8 @@ class ToolOrchestrator:
                                 )
                             result = executor.execute(normalized_call, call_context)
             except ApprovalError:
+                raise
+            except CheckpointError:
                 raise
             except Exception as exc:
                 if _is_cancelled_error(exc):
@@ -200,7 +204,7 @@ class ToolOrchestrator:
             ToolResultStatus.SUCCESS,
             ToolResultStatus.ERROR,
         }
-        if not admission_owned_completion:
+        if not admission_owned_completion and call_context.metadata.get("_vv_agent_checkpoint_replay") is not True:
             self._emit_completed(normalized_call, result=result, context=call_context, event_sink=event_sink)
         return result
 

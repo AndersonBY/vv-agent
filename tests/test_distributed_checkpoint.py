@@ -55,6 +55,7 @@ from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.controller import ControllerCommand, HostInteractionAdmissionContext, HostInteractionRequest
 from vv_agent.runtime.run_definition import build_run_definition
+from vv_agent.runtime.state import CheckpointRenewal
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.tools import (
     FunctionTool,
@@ -1147,6 +1148,272 @@ def test_nonblocking_celery_advance_waits_for_host_interaction_and_suspended_sta
     assert len(app.envelopes) == 1
 
 
+def test_nonblocking_celery_advance_ignores_host_response_for_other_checkpoint(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.shared-wake", "1")
+    llm_ref = CapabilityRef("llm.shared-wake", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(celery_app=app, runtime_recipe=recipe, capability_registry=registry)
+
+    def start_checkpoint(key: str) -> dict[str, Any]:
+        Runner.start_distributed(
+            Agent(name=f"{key}-agent", instructions="Continue.", model="test-model"),
+            "work",
+            run_config=RunConfig(
+                model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+                execution_backend=backend,
+                max_cycles=1,
+                checkpoint_config=CheckpointConfig(
+                    key=key,
+                    resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    store=store,
+                ),
+            ),
+        )
+        return app.envelopes[-1]
+
+    current_key = "shared-current"
+    other_key = "shared-other"
+    current_envelope = start_checkpoint(current_key)
+    start_checkpoint(other_key)
+    claimed = store.claim_checkpoint(
+        other_key,
+        1,
+        claim_token="other-host-producer",
+        lease_expires_at_ms=10_000,
+        now_ms=1,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    request = HostInteractionRequest(
+        interaction_id="other-interaction",
+        logical_cycle=1,
+        operation_id="other-operation",
+        tool_call_id="other-tool",
+        prompt="Choose.",
+    )
+    store.produce_host_interaction(
+        request,
+        admission_context=HostInteractionAdmissionContext(
+            checkpoint_key=other_key,
+            claim_token="other-host-producer",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+            now_ms=1,
+            lease_expires_at_ms=10_000,
+        ),
+    )
+    other = store.load_checkpoint(other_key)
+    assert other is not None
+    command = ControllerCommand(
+        command_id="other-host-response",
+        handle=DistributedRunHandle(other_key, other.root_run_id, other.trace_id),
+        resume_attempt=other.resume_attempt,
+        expected_revision=other.revision,
+        command={
+            "kind": "host_interaction_response",
+            "interaction_id": request.interaction_id,
+            "logical_cycle": request.logical_cycle,
+            "operation_id": request.operation_id,
+            "tool_call_id": request.tool_call_id,
+            "request_digest": request.request_digest,
+            "response": {"role": "user", "content": "approved"},
+        },
+    )
+    resolution = store.resolve_controller_command(command)
+    assert resolution.kind == "applied"
+    assert resolution.receipt is not None and resolution.receipt.outbox_state == "pending"
+
+    before_current = store.load_checkpoint(current_key)
+    assert before_current is not None
+    decision = backend.advance(
+        previous_envelope=current_envelope,
+        outcome=DistributedWorkerResponse.pending(),
+        enqueue=False,
+    )
+    assert decision.action == "dispatch"
+    assert decision.envelope is not None and decision.envelope.checkpoint_config.key == current_key
+    after_current = store.load_checkpoint(current_key)
+    assert after_current == before_current
+    other_after = store.load_checkpoint(other_key)
+    assert other_after is not None and other_after.claim_token is None
+    receipt = store.get_controller_command_receipt(command.command_id)
+    assert receipt is not None and receipt.outbox_state == "pending"
+
+
+@pytest.mark.parametrize("suspended", [False, True], ids=["active", "suspended"])
+def test_nonblocking_celery_response_recovery_consumes_once_before_continue(
+    tmp_path: Path,
+    suspended: bool,
+) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.host-recovery", "1")
+    llm_ref = CapabilityRef("llm.host-recovery", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[LLMResponse(content="continued")]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(celery_app=app, runtime_recipe=recipe, capability_registry=registry)
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=2,
+        no_tool_policy="continue",
+        checkpoint_config=CheckpointConfig(
+            key="host-recovery",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+        ),
+    )
+    agent = Agent(name="host-recovery-agent", instructions="Continue after input.", model="test-model")
+    Runner.start_distributed(agent, "work", run_config=run_config)
+    first_envelope = app.envelopes[0]
+    claimed = store.claim_checkpoint(
+        "host-recovery",
+        1,
+        claim_token="host-producer",
+        lease_expires_at_ms=10_000,
+        now_ms=1,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    request = HostInteractionRequest(
+        interaction_id="host-interaction",
+        logical_cycle=1,
+        operation_id="host-operation",
+        tool_call_id="host-tool",
+        prompt="Choose.",
+    )
+    store.produce_host_interaction(
+        request,
+        admission_context=HostInteractionAdmissionContext(
+            checkpoint_key="host-recovery",
+            claim_token="host-producer",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+            now_ms=1,
+            lease_expires_at_ms=10_000,
+        ),
+    )
+    current = store.load_checkpoint("host-recovery")
+    assert current is not None
+    handle = DistributedRunHandle("host-recovery", current.root_run_id, current.trace_id)
+    if suspended:
+        suspend = ControllerCommand(
+            command_id="suspend-host-recovery",
+            handle=handle,
+            resume_attempt=current.resume_attempt,
+            expected_revision=current.revision,
+            command={"kind": "suspend"},
+        )
+        suspended_resolution = store.resolve_controller_command(suspend)
+        assert suspended_resolution.kind == "applied"
+        assert suspended_resolution.receipt is not None and suspended_resolution.receipt.outbox_action == "none"
+        current = store.load_checkpoint("host-recovery")
+        assert current is not None and current.status is AgentStatus.SUSPENDED
+    command = ControllerCommand(
+        command_id="host-response-command",
+        handle=handle,
+        resume_attempt=current.resume_attempt,
+        expected_revision=current.revision,
+        command={
+            "kind": "host_interaction_response",
+            "interaction_id": request.interaction_id,
+            "logical_cycle": request.logical_cycle,
+            "operation_id": request.operation_id,
+            "tool_call_id": request.tool_call_id,
+            "request_digest": request.request_digest,
+            "response": {"role": "user", "content": "approved"},
+        },
+    )
+    resolution = store.resolve_controller_command(command)
+    assert resolution.kind == "applied"
+    assert resolution.receipt is not None
+    if suspended:
+        assert resolution.receipt.outbox_action == "none"
+        current = store.load_checkpoint("host-recovery")
+        assert current is not None and current.status is AgentStatus.SUSPENDED
+        resume = ControllerCommand(
+            command_id="resume-host-recovery",
+            handle=handle,
+            resume_attempt=current.resume_attempt,
+            expected_revision=current.revision,
+            command={"kind": "resume"},
+        )
+        resume_resolution = store.resolve_controller_command(resume)
+        assert resume_resolution.kind == "applied"
+        assert resume_resolution.receipt is not None and resume_resolution.receipt.outbox_state == "pending"
+        wake_command = resume
+    else:
+        assert resolution.receipt.outbox_state == "pending"
+        wake_command = command
+    crashed_wake = store.claim_controller_command_wake(
+        command_id=wake_command.command_id,
+        command_digest=wake_command.command_digest or "",
+        claim_token="crashed-wake-owner",
+        lease_expires_at_ms=2,
+        now_ms=1,
+    )
+    assert crashed_wake is not None and crashed_wake["outbox_state"] == "claimed"
+
+    decision = backend.advance(
+        previous_envelope=first_envelope,
+        outcome=DistributedWorkerResponse.pending(),
+    )
+    assert decision.action in {"dispatch", "retry_at"}
+    assert decision.envelope is not None and decision.envelope.claim_mode == "recovery"
+    assert len(app.envelopes) == 2
+    consumed = store.load_checkpoint("host-recovery")
+    assert consumed is not None
+    assert consumed.messages[-1].content == "approved"
+    assert consumed.claim_token is not None and consumed.claim_token.startswith("host-response:")
+    receipt = store.get_controller_command_receipt(wake_command.command_id)
+    assert receipt is not None and receipt.outbox_state == "delivered"
+    if suspended:
+        response_receipt = store.get_controller_command_receipt(command.command_id)
+        assert response_receipt is not None and response_receipt.outbox_action == "none"
+    consumed_revision = consumed.revision
+
+    replay = backend.advance(
+        previous_envelope=first_envelope,
+        outcome=DistributedWorkerResponse.pending(),
+        enqueue=False,
+    )
+    assert replay.action in {"dispatch", "retry_at"}
+    replayed = store.load_checkpoint("host-recovery")
+    assert replayed is not None
+    assert replayed.revision == consumed_revision
+    assert [message.content for message in replayed.messages].count("approved") == 1
+
+    worker_response = run_single_cycle(envelope_dict=app.envelopes[1], capability_registry=registry)
+    assert worker_response["type"] == "committed"
+    committed = store.load_checkpoint("host-recovery")
+    assert committed is not None and committed.cycle_index == 1 and committed.claim_token is None
+
+
 def test_nonblocking_celery_advance_enqueues_one_cycle_per_committed_callback(tmp_path: Path) -> None:
     store = InMemoryCheckpointStore()
     checkpoint_ref = CapabilityRef("checkpoint.nonblocking-chain", "1")
@@ -1980,7 +2247,7 @@ def test_celery_returns_candidate_then_runner_owns_terminal_order(
     renewal_arguments: list[set[str]] = []
     original_renew = store.renew_checkpoint_claim
 
-    def recording_renew(checkpoint_key: str, **kwargs: Any) -> bool:
+    def recording_renew(checkpoint_key: str, **kwargs: Any) -> CheckpointRenewal:
         renewal_arguments.append(set(kwargs))
         return original_renew(checkpoint_key, **kwargs)
 

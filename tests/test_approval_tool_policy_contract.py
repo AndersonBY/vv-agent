@@ -286,7 +286,11 @@ def test_approval_provider_failure_contract(tmp_path: Path) -> None:
     )
 
     assert result.status == AgentStatus(failure["status"])
-    assert result.raw_result.error == failure["message"]
+    assert result.raw_result.error == {
+        "code": "agent_failed",
+        "message": failure["message"],
+        "retryable": False,
+    }
     assert bool(calls) is failure["tool_executes"]
     assert provider.request_id
     assert (broker.pending_request(provider.request_id) is not None) is failure["broker_retains_request"]

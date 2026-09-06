@@ -6,22 +6,34 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current package release is `0.12.4`. This repository's `HEAD` locks
-language-neutral Contract `8.1.2`. Paired Python/Rust adoption remains
+The current package release is `0.14.0`. This repository's `HEAD` locks
+language-neutral Contract `12.0.0`. Paired Python/Rust adoption remains
 `pending-adoption`; the central support matrix is the source for adoption
 status. This repository keeps a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.12.4"
+python -m pip install "vv-agent==0.14.0"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
 integrations are needed. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
 
-### 0.12.4 Highlights
+### 0.14.0 Highlights
 
-- Tool result readers reject successful results that carry an error code.
+- Checkpoint v10 records complete canonical definitive tool receipts atomically;
+  failed receipts retain the result and digest while synthetic cancellation
+  closures remain resultless.
+- Recovery replays failed results directly from the verified journal result,
+  preserving metadata, directives, artifacts, and cursors without tool or model
+  side effects.
+- Public results carry sorted `resume_observations`; worker responses use v4.
+- The public API inventory is `vv-agent-public-api-v7`; the AgentResult wire remains v6.
+- RunEvent uses wire version v5. Live-claim cancellation is a top-level typed
+  transition, and deferred admission rejects completed outcomes without writes.
+- Definitive ordinary and deferred tool receipts use the stable
+  `evt_receipt_<identity_key>` event identity; controller wake reaping is
+  checkpoint-scoped and excludes ambiguous rows.
 
 ### 0.12.3 Highlights
 
@@ -89,10 +101,10 @@ accept only the current strict public and wire shapes.
   complete immutable artifact is available and only when `read_file` remains
   model-visible. The compact marker keeps a short excerpt and recovery path
   while integrity metadata stays host-only.
-- Durable execution uses `vv-agent.checkpoint.v8`,
+- Durable execution uses `vv-agent.checkpoint.v10`,
   `vv-agent.run-definition.v5`, `vv-agent.distributed-run.v5`, and
-  `vv-agent.distributed-worker-response.v3` for strict recovery and
-  distributed-controller boundaries. `RunEvent` uses wire version `v4`, and
+  `vv-agent.distributed-worker-response.v4` for strict recovery and
+  distributed-controller boundaries. `RunEvent` uses wire version `v5`, and
   SQLite session stores use `PRAGMA user_version=2`.
 
 See [output validation](docs/output-validation.md) and
@@ -241,7 +253,7 @@ Argument parse failures emit none of these events. Schema validation, policy,
 approval, and unknown-tool short-circuits emit planned plus completed without
 started; completed events report `directive`, nullable `error_code`,
 `execution_started`, and nullable monotonic `duration_ms`. A started event may
-remain unmatched after cancellation or process loss, so checkpoint v8's
+remain unmatched after cancellation or process loss, so checkpoint v10's
 operation journal remains the recovery authority.
 
 The lower-level `AgentRuntime` API remains available for backend integrations

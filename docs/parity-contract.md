@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `8.1.2` at revision
-`2768c8f65bdd3014cdcc9f00b8534b3d02c045f1`. Its immutable release artifact has
-SHA-256 `3010e377f62971cf160f37fe90c1312ba63557fe97b039fd5595a736d755ee8f`.
+`contract.lock.json` selects contract `12.0.0` at revision
+`3e082ce2a850192e8b6f4dec6a14f1f06ccddef2`. Its immutable release artifact has
+SHA-256 `45d39c17c9bc1a883eaae2073f04afd7fb55d6d9e3076459aad8f37450618b7b`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,8 +44,9 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact /path/to/vv-agent-contract-8.1.2.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v8.1.2/vv-agent-contract-8.1.2.zip
+  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v12.0.0/vv-agent-contract-12.0.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v12.0.0/vv-agent-contract-12.0.0.zip \
+  --revision 3e082ce2a850192e8b6f4dec6a14f1f06ccddef2
 ```
 
 ## Python Producer Map
@@ -108,8 +109,13 @@ diagnostic cannot replace lifecycle, approval, budget, cancellation, tool, or
 terminal state. Child event forwarding preserves the original event identity
 and parent/run/trace/session relationships.
 
-RunEvent `v4` is a strict current discriminator. Readers reject missing, stale,
+RunEvent `v5` is a strict current discriminator. Readers reject missing, stale,
 unknown, and malformed fields; there is no alternate event decoder.
+Live-claim cancellation uses only the top-level typed
+`cancel_requested: {from: false, to: true}` field on `run_state_changed`; a
+metadata carrier or malformed transition is rejected.
+The public API inventory is `vv-agent-public-api-v7`/schema 7. The
+`AgentResult` result-public wire remains v6.
 
 ### Model Capacity
 
@@ -176,12 +182,20 @@ own ambiguity and replay decisions.
 
 ### Persistence
 
-Checkpoint records require `vv-agent.checkpoint.v8`; run definitions require
+Checkpoint records require `vv-agent.checkpoint.v10`; run definitions require
 `vv-agent.run-definition.v5`; distributed envelopes require
 `vv-agent.distributed-run.v5`. The frozen definition stores `prompt_bundle`,
 not a second independently editable flattened system prompt. Readers reject every other shape before claim or
 external work. There is no namespace probe, alternate decoder, field synthesis,
 or in-place repair.
+
+Definitive ordinary and deferred `ERROR` receipts persist the complete
+canonical `ToolExecutionResult` and its digest. `OperationError` is only the
+normalized projection of that result; recovery verifies the digest and uses the
+result itself, including its metadata, directive, and legal artifact or cursor
+fields, to rebuild the tool message. Ordinary failed entries forbid
+`resume_observation`; `tool_outcome_unknown` requires it, and synthetic
+`tool_cancelled` closures remain resultless.
 
 The checkpoint owns the complete run-level model-call ledger. A started journal
 entry and started event become durable together. After dispatch, the terminal
@@ -192,7 +206,7 @@ A definitive pre-dispatch failure is the only terminal model journal state with
 no dispatch evidence.
 
 Distributed worker responses use only the closed
-`vv-agent.distributed-worker-response.v3` wire. Python owns the typed value and
+`vv-agent.distributed-worker-response.v4` wire. Python owns the typed value and
 strict reader in `runtime/backends/distributed.py`, Celery workers produce it in
 `celery_tasks.py`, and the scheduler consumes it in `celery.py`. `pending`,
 `committed`, `terminal_candidate`, and `terminal_replay` are the only variants;
@@ -203,6 +217,19 @@ result. The scheduler reloads the authoritative checkpoint after every response
 or transport failure. Public `AgentResult` readers require the complete current
 shape, reject unknown fields, and require absent optional fields to be omitted
 rather than encoded as null.
+
+Definitive ordinary and deferred tool receipts derive one lowercase SHA-256
+`identity_key` from the RFC 8785 UTF-8 closed identity object containing
+`attempt`, `checkpoint_key`, `operation_id`, `request_digest`, and
+`tool_call_id`. Their `tool_call_completed` event ID is exactly
+`evt_receipt_<identity_key>`; same-result replays retain the event ID and
+created-at timestamp. Ordinary receipt conflicts return `tool_receipt_conflict`
+without writes; deferred resolution conflicts return
+`deferred_resolution_conflict` without writes. Controller wake reaping is
+checkpoint-scoped through
+`reap_controller_command_wakes(checkpoint_key, now_ms)`, returns only pending or
+expired claimed `recovery_dispatch` rows in `(expected_revision, command_id)`
+order, and never retries ambiguous rows.
 
 Cycle dispatch receipts are a Python transport adaptation, implemented by
 `runtime/dispatch_outbox.py` and enabled only when a host explicitly injects a

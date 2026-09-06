@@ -18,6 +18,8 @@ from vv_agent import (
     ToolSideEffect,
 )
 from vv_agent.checkpoint import (
+    AmbiguousModelPolicy,
+    AmbiguousToolPolicy,
     CheckpointConfig,
     CheckpointError,
     ToolIdempotency,
@@ -66,7 +68,11 @@ def _minimal_inputs() -> tuple[Agent, RunConfig, ResolvedModelConfig, AgentTask]
         max_cycles=10,
         max_handoffs=10,
         no_tool_policy="continue",
-        checkpoint_config=CheckpointConfig(store=InMemoryCheckpointStore()),
+        checkpoint_config=CheckpointConfig(
+            store=InMemoryCheckpointStore(),
+            ambiguous_model_policy=AmbiguousModelPolicy.REQUIRE_RECONCILIATION,
+            ambiguous_tool_policy=AmbiguousToolPolicy.REQUIRE_RECONCILIATION,
+        ),
     )
     resolved = ResolvedModelConfig(
         backend="test",

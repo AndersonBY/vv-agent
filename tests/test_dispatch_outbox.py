@@ -5,6 +5,7 @@ import os
 import threading
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from test_checkpoint import _minimal_checkpoint, _redis_store
@@ -110,6 +111,73 @@ def test_dispatch_receipt_replay_has_one_claim_and_rejects_identity_drift(
         )
     assert exc_info.value.code == "dispatch_outbox_conflict"
     assert store.get_distributed_dispatch(payload["job_id"]).state == "delivered"
+
+
+@pytest.mark.parametrize("store_kind", ["fake", "real"])
+def test_redis_dispatch_payload_key_binding_fails_closed(store_kind: str) -> None:
+    if store_kind == "real":
+        redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+        if not redis_url:
+            pytest.skip("set VV_AGENT_TEST_REDIS_URL for live Redis")
+        store: Any = RedisCheckpointStore(redis_url)
+    else:
+        store = _redis_store()
+
+    first_key = f"redis-dispatch-first-{uuid4().hex}"
+    second_key = f"redis-dispatch-second-{uuid4().hex}"
+    first_payload = _strict_envelope().to_dict()
+    second_payload = _strict_envelope().to_dict()
+    first_payload["checkpoint_config"]["key"] = first_key
+    first_payload["job_id"] = f"{first_payload['run_id']}:cycle:{first_payload['cycle_index']}:first"
+    second_payload["checkpoint_config"]["key"] = second_key
+    second_payload["job_id"] = f"{second_payload['run_id']}:cycle:{second_payload['cycle_index']}:second"
+    first_checkpoint = _minimal_checkpoint(key=first_key)
+    second_checkpoint = _minimal_checkpoint(key=second_key)
+    first_key_store = store._dispatch_outbox_key(first_payload["job_id"])  # type: ignore[attr-defined]
+    second_key_store = store._dispatch_outbox_key(second_payload["job_id"])  # type: ignore[attr-defined]
+    first_raw: str | None = None
+    second_raw: str | None = None
+    try:
+        assert store.create_checkpoint(first_checkpoint)
+        assert store.create_checkpoint(second_checkpoint)
+        first_claim = store.claim_distributed_dispatch(
+            first_payload,
+            claim_token="dispatch-binding-first",
+            lease_expires_at_ms=10_000,
+            now_ms=1,
+        )
+        store.claim_distributed_dispatch(
+            second_payload,
+            claim_token="dispatch-binding-second",
+            lease_expires_at_ms=10_000,
+            now_ms=1,
+        )
+        first_raw = store._client.get(first_key_store)  # type: ignore[attr-defined]
+        second_raw = store._client.get(second_key_store)  # type: ignore[attr-defined]
+        assert first_raw is not None and second_raw is not None
+        store._client.set(first_key_store, second_raw)  # type: ignore[attr-defined]
+        store._client.set(second_key_store, first_raw)  # type: ignore[attr-defined]
+        before = (store._client.get(first_key_store), store._client.get(second_key_store))  # type: ignore[attr-defined]
+        with pytest.raises(CheckpointError) as get_error:
+            store.get_distributed_dispatch(first_payload["job_id"])
+        assert get_error.value.code == "dispatch_outbox_conflict"
+        with pytest.raises(CheckpointError) as complete_error:
+            store.complete_distributed_dispatch(
+                dispatch_id=first_payload["job_id"],
+                envelope_digest=first_claim.record.envelope_digest,
+                claim_token="dispatch-binding-first",
+                attempt=1,
+                outcome="delivered",
+                now_ms=2,
+            )
+        assert complete_error.value.code == "dispatch_outbox_conflict"
+        assert (store._client.get(first_key_store), store._client.get(second_key_store)) == before  # type: ignore[attr-defined]
+    finally:
+        if first_raw is not None and second_raw is not None:
+            store._client.set(first_key_store, first_raw)  # type: ignore[attr-defined]
+            store._client.set(second_key_store, second_raw)  # type: ignore[attr-defined]
+        store.delete_checkpoint(first_key)
+        store.delete_checkpoint(second_key)
 
 
 @pytest.mark.parametrize("store_index", [0, 1, 2])

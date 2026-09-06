@@ -6,21 +6,28 @@
 
 ## 安装
 
-当前包版本为 `0.12.4`。本仓库 `HEAD` 锁定语言无关的 Contract `8.1.2`；Python/Rust
+当前包版本为 `0.14.0`。本仓库 `HEAD` 锁定语言无关的 Contract `12.0.0`；Python/Rust
 配对采用仍为 `pending-adoption`，采用状态以中央 support matrix 为准。本实现保留
 符合 Python 语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.12.4"
+python -m pip install "vv-agent==0.14.0"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
 `vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
 
-### 0.12.4 重点能力
+### 0.14.0 重点能力
 
-- 工具结果 reader 会拒绝携带错误码的成功结果。
+- Checkpoint v10 对确定性工具 receipt 原子记录完整 canonical result；普通失败保留 result 与 digest，合成的取消闭包保持无 result。
+- 恢复过程直接从经过 digest 校验的 journal result 重放失败结果，保留 metadata、directive、artifact 和 cursor，不重复执行工具或模型。
+- 公共结果使用排序后的 `resume_observations`，worker response 升级为 v4。
+- 公共 API inventory 为 `vv-agent-public-api-v7`；AgentResult wire 保持 v6。
+- RunEvent 使用 wire version v5；live claim 的取消信号使用顶层 typed transition，deferred admission 遇到 Completed outcome 时零写拒绝。
+- 确定性 ordinary/deferred tool receipt 统一使用稳定的
+  `evt_receipt_<identity_key>` event identity；controller wake reaper 按 checkpoint
+  限定范围，并排除 ambiguous row。
 
 ### 0.12.3 重点能力
 
@@ -77,10 +84,10 @@ python -m pip install "vv-agent==0.12.4"
   长度。内建工具与自定义工具的旧结果默认都可归档；只有完整内容已经写入不可变 artifact，
   且模型仍能调用 `read_file` 时，runtime 才会把旧结果替换为精简标记。模型只看到短预览和
   恢复路径，大小与哈希等完整性信息只保留在宿主侧。
-- 持久化执行统一使用 `vv-agent.checkpoint.v8`、
+- 持久化执行统一使用 `vv-agent.checkpoint.v10`、
   `vv-agent.run-definition.v5`、`vv-agent.distributed-run.v5` 和
-  `vv-agent.distributed-worker-response.v3`，严格限定恢复与分布式 controller
-  边界。`RunEvent` 使用 wire version `v4`，SQLite session store 使用
+  `vv-agent.distributed-worker-response.v4`，严格限定恢复与分布式 controller
+  边界。`RunEvent` 使用 wire version `v5`，SQLite session store 使用
   `PRAGMA user_version=2`。
 
 详细规则见[输出校验](docs/output-validation.md)和
@@ -220,7 +227,7 @@ runtime 事件入口只有强类型 `RunEvent`；任务无关的内部观测统�
 审批短路和未知工具只发出 planned 与 completed，不发 started。completed 事件包含
 `directive`、可空的
 `error_code`、`execution_started` 和可空的单调时钟 `duration_ms`。取消或进程退出可能
-留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v8 operation journal
+留下没有 completed 的 started 事件，因此恢复时仍以 checkpoint v10 operation journal
 为准。
 
 需要直接控制 cycle loop 的后端集成仍可使用底层 `AgentRuntime` API。

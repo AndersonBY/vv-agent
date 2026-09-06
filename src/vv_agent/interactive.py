@@ -31,7 +31,15 @@ from vv_agent.runtime.hooks import RuntimeHook
 from vv_agent.runtime.sub_task_manager import SubTaskManager, _SubTaskTurnSnapshot
 from vv_agent.sessions import MemorySession, Session
 from vv_agent.tools import ToolRegistry, build_default_registry
-from vv_agent.types import AgentResult, AgentStatus, AgentTask, Message, NoToolPolicy, SubAgentConfig
+from vv_agent.types import (
+    AgentResult,
+    AgentStatus,
+    AgentTask,
+    Message,
+    NoToolPolicy,
+    SubAgentConfig,
+    _agent_result_error_text,
+)
 
 RunEventObserver = Callable[[RunEvent], None]
 SessionEventHandler = Callable[[str, dict[str, Any]], None]
@@ -196,7 +204,7 @@ class AgentSessionRun(RunResult):
         super().__init__(
             input="",
             new_items=[],
-            final_output=result.final_answer or result.wait_reason or result.error,
+            final_output=result.final_answer or result.wait_reason or _agent_result_error_text(result.error),
             status=result.status,
             raw_result=result,
             token_usage=result.token_usage,
@@ -526,10 +534,11 @@ class AgentSession:
         run = self.prompt(prompt)
         if run.result.status == AgentStatus.COMPLETED:
             return run.result.final_answer or ""
+        error = _agent_result_error_text(run.result.error)
         if require_completed:
-            reason = run.result.error or run.result.wait_reason or run.result.final_answer or "session query did not complete"
+            reason = error or run.result.wait_reason or run.result.final_answer or "session query did not complete"
             raise RuntimeError(f"Session query failed with status={run.result.status.value}: {reason}")
-        return run.result.final_answer or run.result.wait_reason or run.result.error or ""
+        return run.result.final_answer or run.result.wait_reason or error or ""
 
     def state(self) -> AgentSessionState:
         with self._lock:
@@ -638,7 +647,7 @@ class AgentSession:
             cycles=len(run.result.cycles),
             final_answer=run.result.final_answer,
             wait_reason=run.result.wait_reason,
-            error=run.result.error,
+            error=_agent_result_error_text(run.result.error),
         )
         return run
 

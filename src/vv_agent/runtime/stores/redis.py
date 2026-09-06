@@ -50,13 +50,19 @@ from vv_agent.runtime.dispatch_outbox import (
 from vv_agent.runtime.state import (
     Checkpoint,
     CheckpointConflictError,
+    CheckpointRenewal,
     ClaimMode,
+    OperationState,
+    RenewOutcome,
     _validate_claim,
     _validate_renew,
     check_claim,
     checkpoint_definition_matches,
+    merge_event_outbox,
     prepare_claimed_terminal,
     prepare_event_delivery,
+    prepare_unclaimed_terminal,
+    validate_checkpoint_creation,
     validate_model_journal_accounting,
 )
 from vv_agent.types import AgentStatus
@@ -95,11 +101,28 @@ class RedisCheckpointStore:
         )
 
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
-        if checkpoint.revision != 0 or checkpoint.resume_attempt != 1 or checkpoint.claim_token is not None:
-            raise ValueError("new checkpoint v8 records must be unclaimed at revision zero")
-        data_key, _lease_key = self._keys(checkpoint.checkpoint_key)
+        validate_checkpoint_creation(checkpoint)
+        data_key, lease_key = self._keys(checkpoint.checkpoint_key)
         payload, _lease = _checkpoint_to_storage(checkpoint)
-        return bool(self._client.set(data_key, payload, nx=True))
+        with self._client.pipeline() as pipe:
+            for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
+                try:
+                    pipe.watch(data_key, lease_key)
+                    if pipe.get(data_key) is not None:
+                        pipe.unwatch()
+                        return False
+                    pipe.multi()
+                    pipe.set(data_key, payload, nx=True)
+                    pipe.delete(lease_key)
+                    results = pipe.execute()
+                    return bool(results[0])
+                except self._watch_error:
+                    pipe.unwatch()
+                    continue
+                except Exception:
+                    pipe.unwatch()
+                    raise
+        raise RuntimeError("redis checkpoint v10 creation exceeded transaction retry limit")
 
     def load_checkpoint(self, checkpoint_key: str) -> Checkpoint | None:
         data_key, lease_key = self._keys(checkpoint_key)
@@ -109,8 +132,8 @@ class RedisCheckpointStore:
                 return None
             lease = self._client.get(lease_key)
             if self._client.get(data_key) == raw and self._client.get(lease_key) == lease:
-                return _checkpoint_from_storage(raw, lease)
-        raise RuntimeError("redis checkpoint v8 load could not obtain a stable snapshot")
+                return _checkpoint_from_storage(raw, lease, checkpoint_key=checkpoint_key)
+        raise RuntimeError("redis checkpoint v10 load could not obtain a stable snapshot")
 
     def claim_checkpoint(
         self,
@@ -124,15 +147,16 @@ class RedisCheckpointStore:
     ) -> Checkpoint | None:
         _validate_claim(cycle_index, claim_token, lease_expires_at_ms, now_ms)
         data_key, lease_key = self._keys(checkpoint_key)
+        record_set_key = self._host_record_set_key(checkpoint_key)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
-                    pipe.watch(data_key, lease_key)
+                    pipe.watch(data_key, lease_key, record_set_key)
                     raw = pipe.get(data_key)
                     if raw is None:
                         pipe.unwatch()
                         return None
-                    checkpoint = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    checkpoint = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
                     try:
                         check_claim(checkpoint, cycle_index, now_ms, claim_mode)
                     except ValueError as exc:
@@ -141,6 +165,19 @@ class RedisCheckpointStore:
                         raise CheckpointConflictError("expired checkpoint claims require recovery mode")
                     if checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED and claim_mode != "recovery":
                         raise CheckpointConflictError("reconciliation checkpoints require recovery mode")
+                    for raw_record_key in tuple(pipe.smembers(record_set_key)):
+                        record_key = raw_record_key.decode("utf-8") if isinstance(raw_record_key, bytes) else str(raw_record_key)
+                        raw_record = pipe.get(record_key)
+                        if raw_record is None:
+                            continue
+                        record = _host_record_from_storage(raw_record, expected_key=record_key)
+                        if record["checkpoint_key"] != checkpoint_key:
+                            continue
+                        if record["state"] in {"resolved_pending", "resolved_claimed"}:
+                            raise CheckpointError(
+                                "host interaction response requires dedicated recovery",
+                                code="host_interaction_recovery_required",
+                            )
                     checkpoint.revision += 1
                     if claim_mode == "recovery":
                         checkpoint.resume_attempt += 1
@@ -154,9 +191,12 @@ class RedisCheckpointStore:
                     pipe.set(lease_key, str(lease_expires_at_ms))
                     pipe.execute()
                     return checkpoint
+                except CheckpointError:
+                    pipe.unwatch()
+                    raise
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 claim exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 claim exceeded transaction retry limit")
 
     def progress_checkpoint(
         self,
@@ -174,7 +214,11 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, self._client.get(lease_key))
+                    current = _checkpoint_from_storage(
+                        raw,
+                        self._client.get(lease_key),
+                        checkpoint_key=checkpoint.checkpoint_key,
+                    )
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -188,6 +232,9 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return False
                     snapshot = checkpoint_from_json(checkpoint_to_json(checkpoint))
+                    snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
+                    snapshot.event_cursor = deepcopy(current.event_cursor)
+                    snapshot.cancel_requested = snapshot.cancel_requested or current.cancel_requested
                     snapshot.revision = expected_revision + 1
                     snapshot.claim_token = current.claim_token
                     snapshot.claimed_cycle = current.claimed_cycle
@@ -199,7 +246,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 progress exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 progress exceeded transaction retry limit")
 
     def suspend_checkpoint(
         self,
@@ -217,7 +264,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -230,13 +277,20 @@ class RedisCheckpointStore:
                     ):
                         pipe.unwatch()
                         return False
-                    snapshot = replace(
-                        checkpoint,
-                        revision=expected_revision + 1,
-                        claim_token=None,
-                        claimed_cycle=None,
-                        lease_expires_at_ms=None,
+                    snapshot = checkpoint_from_json(
+                        checkpoint_to_json(
+                            replace(
+                                checkpoint,
+                                revision=expected_revision + 1,
+                                claim_token=None,
+                                claimed_cycle=None,
+                                lease_expires_at_ms=None,
+                            )
+                        )
                     )
+                    snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
+                    snapshot.event_cursor = deepcopy(current.event_cursor)
+                    snapshot.cancel_requested = current.cancel_requested
                     payload, _lease = _checkpoint_to_storage(snapshot)
                     pipe.multi()
                     pipe.set(data_key, payload)
@@ -245,7 +299,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 suspend exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 suspend exceeded transaction retry limit")
 
     def commit_checkpoint(
         self,
@@ -263,7 +317,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -272,6 +326,13 @@ class RedisCheckpointStore:
                         or current.terminal_result is not None
                         or checkpoint.terminal_result is not None
                         or checkpoint.status is not AgentStatus.RUNNING
+                        or current.cancel_requested
+                        or checkpoint.cancel_requested
+                        or any(
+                            entry.state
+                            in {OperationState.PLANNED, OperationState.STARTED, OperationState.DEFERRED, OperationState.AMBIGUOUS}
+                            for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
+                        )
                         or not checkpoint_definition_matches(current, checkpoint)
                     ):
                         pipe.unwatch()
@@ -282,6 +343,8 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return False
                     validate_model_journal_accounting(checkpoint)
+                    checkpoint.event_outbox = merge_event_outbox(current.event_outbox, checkpoint.event_outbox)
+                    checkpoint.event_cursor = deepcopy(current.event_cursor)
                     committed = replace(
                         checkpoint,
                         revision=expected_revision + 1,
@@ -300,7 +363,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 commit exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 commit exceeded transaction retry limit")
 
     def finalize_checkpoint(
         self,
@@ -309,7 +372,8 @@ class RedisCheckpointStore:
         expected_revision: int,
     ) -> bool:
         if checkpoint.terminal_result is None or checkpoint.claim_token is not None:
-            raise ValueError("finalized checkpoint v8 must be terminal and unclaimed")
+            raise ValueError("finalized checkpoint v10 must be terminal and unclaimed")
+        checkpoint = prepare_unclaimed_terminal(checkpoint)
         data_key, lease_key = self._keys(checkpoint.checkpoint_key)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -319,7 +383,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -329,6 +393,9 @@ class RedisCheckpointStore:
                     ):
                         pipe.unwatch()
                         return False
+                    checkpoint.cancel_requested = current.cancel_requested
+                    checkpoint.event_outbox = merge_event_outbox(current.event_outbox, checkpoint.event_outbox)
+                    checkpoint.event_cursor = deepcopy(current.event_cursor)
                     terminal = replace(checkpoint, revision=expected_revision + 1)
                     payload, _lease = _checkpoint_to_storage(terminal)
                     pipe.multi()
@@ -338,7 +405,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 finalization exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 finalization exceeded transaction retry limit")
 
     def finalize_claimed_checkpoint(
         self,
@@ -356,10 +423,11 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    candidate = deepcopy(checkpoint)
                     terminal = prepare_claimed_terminal(
                         current,
-                        checkpoint,
+                        candidate,
                         claim_token=claim_token,
                         expected_revision=expected_revision,
                     )
@@ -374,7 +442,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis claimed checkpoint v8 finalization exceeded transaction retry limit")
+        raise RuntimeError("redis claimed checkpoint v10 finalization exceeded transaction retry limit")
 
     def record_event_delivery(
         self,
@@ -395,7 +463,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
                     delivered = prepare_event_delivery(
                         current,
                         event_id=event_id,
@@ -416,7 +484,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 event delivery exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 event delivery exceeded transaction retry limit")
 
     def renew_checkpoint_claim(
         self,
@@ -425,7 +493,7 @@ class RedisCheckpointStore:
         claim_token: str,
         lease_expires_at_ms: int,
         now_ms: int,
-    ) -> bool:
+    ) -> CheckpointRenewal:
         _validate_renew(claim_token, lease_expires_at_ms, now_ms)
         data_key, lease_key = self._keys(checkpoint_key)
         with self._client.pipeline() as pipe:
@@ -434,10 +502,10 @@ class RedisCheckpointStore:
                     pipe.watch(data_key, lease_key)
                     raw = pipe.get(data_key)
                     raw_lease = pipe.get(lease_key)
-                    if raw is None or raw_lease is None:
+                    if raw is None:
                         pipe.unwatch()
-                        return False
-                    checkpoint = _checkpoint_from_storage(raw, raw_lease)
+                        return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=0)
+                    checkpoint = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     current_now_ms = max(now_ms, _redis_server_now_ms(self._client))
                     if (
                         checkpoint.claim_token != claim_token
@@ -445,14 +513,73 @@ class RedisCheckpointStore:
                         or lease_expires_at_ms <= current_now_ms
                     ):
                         pipe.unwatch()
-                        return False
+                        return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=checkpoint.revision)
                     pipe.multi()
                     pipe.set(lease_key, str(lease_expires_at_ms))
                     pipe.execute()
-                    return True
+                    return CheckpointRenewal(
+                        outcome=(RenewOutcome.CANCEL_REQUESTED if checkpoint.cancel_requested else RenewOutcome.RENEWED),
+                        lease_expires_at_ms=lease_expires_at_ms,
+                    )
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 renewal exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 renewal exceeded transaction retry limit")
+
+    def record_tool_receipt(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        operation_id: str,
+        attempt: int,
+        tool_call_id: str,
+        request_digest: str,
+        result: Any,
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool:
+        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+
+        data_key, lease_key = self._keys(checkpoint.checkpoint_key)
+        with self._client.pipeline() as pipe:
+            for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
+                try:
+                    pipe.watch(data_key, lease_key)
+                    raw = pipe.get(data_key)
+                    if raw is None:
+                        pipe.unwatch()
+                        return False
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    helper = InMemoryCheckpointStore()
+                    helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
+                    updated = helper.record_tool_receipt(
+                        checkpoint,
+                        operation_id=operation_id,
+                        attempt=attempt,
+                        tool_call_id=tool_call_id,
+                        request_digest=request_digest,
+                        result=result,
+                        claim_token=claim_token,
+                        expected_revision=expected_revision,
+                        claimed_cycle=claimed_cycle,
+                    )
+                    authoritative = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
+                    if not updated or authoritative.revision == current.revision:
+                        pipe.unwatch()
+                        return updated
+                    payload, _lease = _checkpoint_to_storage(authoritative)
+                    pipe.multi()
+                    pipe.set(data_key, payload)
+                    if authoritative.lease_expires_at_ms is not None:
+                        pipe.set(lease_key, str(authoritative.lease_expires_at_ms))
+                    pipe.execute()
+                    return True
+                except CheckpointError:
+                    pipe.unwatch()
+                    raise
+                except self._watch_error:
+                    continue
+        raise RuntimeError("redis checkpoint v10 tool receipt exceeded transaction retry limit")
 
     def acknowledge_terminal(self, checkpoint_key: str, *, expected_revision: int) -> bool:
         data_key, lease_key = self._keys(checkpoint_key)
@@ -464,7 +591,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    checkpoint = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    checkpoint = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
                     if (
                         checkpoint.revision != expected_revision
                         or checkpoint.terminal_result is None
@@ -483,9 +610,25 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 acknowledgement exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 acknowledgement exceeded transaction retry limit")
 
     def delete_checkpoint(self, checkpoint_key: str) -> None:
+        def cleanup_member_key(member: object, label: str) -> str:
+            if isinstance(member, bytes):
+                try:
+                    member = member.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise CheckpointError(
+                        f"redis {label} reverse index member is invalid",
+                        code="checkpoint_store_conflict",
+                    ) from exc
+            if not isinstance(member, str) or not member:
+                raise CheckpointError(
+                    f"redis {label} reverse index member is invalid",
+                    code="checkpoint_store_conflict",
+                )
+            return member
+
         data_key, lease_key = self._keys(checkpoint_key)
         receipt_set_key = self._receipt_set_key(checkpoint_key)
         controller_set_key = self._controller_receipt_set_key(checkpoint_key)
@@ -522,6 +665,18 @@ class RedisCheckpointStore:
                         record_keys = tuple(client_smembers(record_set_key)) if callable(client_smembers) else ()
                         notification_keys = tuple(client_smembers(notification_set_key)) if callable(client_smembers) else ()
                         dispatch_keys = tuple(client_smembers(dispatch_set_key)) if callable(client_smembers) else ()
+                    receipt_keys = tuple(cleanup_member_key(key, "deferred receipt") for key in receipt_keys)
+                    controller_keys = tuple(cleanup_member_key(key, "controller receipt") for key in controller_keys)
+                    record_keys = tuple(cleanup_member_key(key, "host record") for key in record_keys)
+                    notification_keys = tuple(cleanup_member_key(key, "host notification") for key in notification_keys)
+                    dispatch_keys = tuple(cleanup_member_key(key, "dispatch outbox") for key in dispatch_keys)
+                    raw_checkpoint = pipe.get(data_key)
+                    if raw_checkpoint is not None:
+                        _checkpoint_from_storage(
+                            raw_checkpoint,
+                            pipe.get(lease_key),
+                            checkpoint_key=checkpoint_key,
+                        )
                     if not receipt_keys:
                         # Legacy/test doubles may not expose the reverse set.
                         # Keep the scan under WATCH; a concurrent modern
@@ -529,11 +684,15 @@ class RedisCheckpointStore:
                         scan_iter = getattr(self._client, "scan_iter", None)
                         if callable(scan_iter):
                             for candidate in scan_iter(f"{_DEFERRED_RECEIPT_PREFIX}*"):
+                                candidate = cleanup_member_key(candidate, "deferred receipt")
                                 raw = self._client.get(candidate)
                                 if raw is None:
                                     continue
                                 try:
-                                    if _receipt_from_storage(raw).handle.checkpoint_key == checkpoint_key:
+                                    receipt = _receipt_from_storage(raw)
+                                    if receipt.handle.checkpoint_key == checkpoint_key and candidate == self._receipt_key(
+                                        receipt.handle.key
+                                    ):
                                         receipt_keys = (*receipt_keys, candidate)
                                 except (TypeError, ValueError):
                                     continue
@@ -541,6 +700,7 @@ class RedisCheckpointStore:
                     if callable(scan_iter):
                         if not controller_keys:
                             for candidate in scan_iter(f"{_CONTROLLER_RECEIPT_PREFIX}*"):
+                                candidate = cleanup_member_key(candidate, "controller receipt")
                                 raw = self._client.get(candidate)
                                 if raw is None:
                                     continue
@@ -548,41 +708,142 @@ class RedisCheckpointStore:
                                     receipt = _controller_receipt_from_storage(raw)
                                 except (TypeError, ValueError):
                                     continue
-                                if receipt.handle.checkpoint_key == checkpoint_key:
+                                if receipt.handle.checkpoint_key == checkpoint_key and candidate == self._controller_receipt_key(
+                                    receipt.command_id
+                                ):
                                     controller_keys = (*controller_keys, candidate)
                         if not record_keys:
                             for candidate in scan_iter(f"{_HOST_RECORD_PREFIX}*"):
+                                candidate = cleanup_member_key(candidate, "host record")
                                 raw = self._client.get(candidate)
                                 if raw is None:
                                     continue
                                 try:
-                                    record = _host_record_from_storage(raw)
+                                    record = _host_record_from_storage(raw, expected_key=candidate)
                                 except (TypeError, ValueError):
                                     continue
                                 if record.get("checkpoint_key") == checkpoint_key:
                                     record_keys = (*record_keys, candidate)
                         if not notification_keys:
                             for candidate in scan_iter(f"{_HOST_NOTIFICATION_PREFIX}*"):
+                                candidate = cleanup_member_key(candidate, "host notification")
                                 raw = self._client.get(candidate)
                                 if raw is None:
                                     continue
                                 try:
-                                    notification = _notification_from_storage(raw)
+                                    notification = _notification_from_storage(raw, expected_key=candidate)
                                 except (TypeError, ValueError):
                                     continue
                                 if notification.get("checkpoint_key") == checkpoint_key:
                                     notification_keys = (*notification_keys, candidate)
                         if not dispatch_keys:
                             for candidate in scan_iter(f"{_DISPATCH_OUTBOX_PREFIX}*"):
+                                candidate = cleanup_member_key(candidate, "dispatch outbox")
                                 raw = self._client.get(candidate)
                                 if raw is None:
                                     continue
                                 try:
-                                    dispatch = _dispatch_outbox_from_storage(raw)
+                                    dispatch = _dispatch_outbox_from_storage(raw, expected_key=candidate)
                                 except (TypeError, ValueError):
                                     continue
                                 if dispatch.checkpoint_key == checkpoint_key:
                                     dispatch_keys = (*dispatch_keys, candidate)
+                    for receipt_key in receipt_keys:
+                        raw = pipe.get(receipt_key)
+                        if raw is None:
+                            raise CheckpointError(
+                                "redis deferred receipt reverse index member is missing",
+                                code="checkpoint_store_conflict",
+                            )
+                        try:
+                            receipt = _receipt_from_storage(raw)
+                        except (TypeError, ValueError) as exc:
+                            raise CheckpointError(
+                                "redis deferred receipt reverse index member is invalid",
+                                code="checkpoint_store_conflict",
+                            ) from exc
+                        if receipt.handle.checkpoint_key != checkpoint_key or receipt_key != self._receipt_key(
+                            receipt.handle.key
+                        ):
+                            raise CheckpointError(
+                                "redis deferred receipt reverse index member is foreign",
+                                code="checkpoint_store_conflict",
+                            )
+                    for controller_key in controller_keys:
+                        raw = pipe.get(controller_key)
+                        if raw is None:
+                            raise CheckpointError(
+                                "redis controller receipt reverse index member is missing",
+                                code="checkpoint_store_conflict",
+                            )
+                        try:
+                            receipt = _controller_receipt_from_storage(raw)
+                        except (TypeError, ValueError) as exc:
+                            raise CheckpointError(
+                                "redis controller receipt reverse index member is invalid",
+                                code="checkpoint_store_conflict",
+                            ) from exc
+                        if receipt.handle.checkpoint_key != checkpoint_key or controller_key != self._controller_receipt_key(
+                            receipt.command_id
+                        ):
+                            raise CheckpointError(
+                                "redis controller receipt reverse index member is foreign",
+                                code="checkpoint_store_conflict",
+                            )
+                    for record_key in record_keys:
+                        raw = pipe.get(record_key)
+                        if raw is None:
+                            raise CheckpointError(
+                                "redis host record reverse index member is missing",
+                                code="checkpoint_store_conflict",
+                            )
+                        try:
+                            record = _host_record_from_storage(
+                                raw,
+                                expected_checkpoint_key=checkpoint_key,
+                                expected_key=record_key,
+                            )
+                        except (TypeError, ValueError) as exc:
+                            raise CheckpointError(
+                                "redis host record reverse index member is invalid",
+                                code="checkpoint_store_conflict",
+                            ) from exc
+                    for notification_key in notification_keys:
+                        raw = pipe.get(notification_key)
+                        if raw is None:
+                            raise CheckpointError(
+                                "redis host notification reverse index member is missing",
+                                code="checkpoint_store_conflict",
+                            )
+                        try:
+                            notification = _notification_from_storage(
+                                raw,
+                                expected_checkpoint_key=checkpoint_key,
+                                expected_key=notification_key,
+                            )
+                        except (TypeError, ValueError) as exc:
+                            raise CheckpointError(
+                                "redis host notification reverse index member is invalid",
+                                code="checkpoint_store_conflict",
+                            ) from exc
+                    for dispatch_key in dispatch_keys:
+                        raw = pipe.get(dispatch_key)
+                        if raw is None:
+                            raise CheckpointError(
+                                "redis dispatch outbox reverse index member is missing",
+                                code="checkpoint_store_conflict",
+                            )
+                        try:
+                            dispatch = _dispatch_outbox_from_storage(
+                                raw,
+                                expected_checkpoint_key=checkpoint_key,
+                                expected_key=dispatch_key,
+                            )
+                        except (TypeError, ValueError) as exc:
+                            raise CheckpointError(
+                                "redis dispatch outbox reverse index member is invalid",
+                                code="checkpoint_store_conflict",
+                            ) from exc
                     pipe.multi()
                     for key in (
                         data_key,
@@ -605,7 +866,7 @@ class RedisCheckpointStore:
                     return
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 cleanup exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 cleanup exceeded transaction retry limit")
 
     def claim_distributed_dispatch(
         self,
@@ -623,11 +884,25 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key, outbox_key, index_key)
-                    if pipe.get(data_key) is None:
+                    raw_checkpoint = pipe.get(data_key)
+                    if raw_checkpoint is None:
                         pipe.unwatch()
                         raise CheckpointError("dispatch checkpoint was not found", code="checkpoint_not_found")
+                    _checkpoint_from_storage(
+                        raw_checkpoint,
+                        pipe.get(lease_key),
+                        checkpoint_key=candidate.checkpoint_key,
+                    )
                     raw = pipe.get(outbox_key)
-                    current = candidate if raw is None else _dispatch_outbox_from_storage(raw)
+                    current = (
+                        candidate
+                        if raw is None
+                        else _dispatch_outbox_from_storage(
+                            raw,
+                            expected_checkpoint_key=candidate.checkpoint_key,
+                            expected_key=outbox_key,
+                        )
+                    )
                     if current.envelope_digest != candidate.envelope_digest:
                         pipe.unwatch()
                         raise CheckpointError(
@@ -672,7 +947,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return None
-                    current = _dispatch_outbox_from_storage(raw)
+                    current = _dispatch_outbox_from_storage(raw, expected_key=outbox_key)
                     if current.envelope_digest != envelope_digest:
                         pipe.unwatch()
                         raise CheckpointError("dispatch envelope digest conflicts", code="dispatch_outbox_conflict")
@@ -717,7 +992,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return None
-                    current = _dispatch_outbox_from_storage(raw)
+                    current = _dispatch_outbox_from_storage(raw, expected_key=outbox_key)
                     if current.envelope_digest != envelope_digest:
                         pipe.unwatch()
                         raise CheckpointError("dispatch envelope digest conflicts", code="dispatch_outbox_conflict")
@@ -746,7 +1021,9 @@ class RedisCheckpointStore:
 
     def get_distributed_dispatch(self, dispatch_id: str) -> DispatchOutboxRecord | None:
         raw = self._client.get(self._dispatch_outbox_key(dispatch_id))
-        return _dispatch_outbox_from_storage(raw) if raw is not None else None
+        return (
+            _dispatch_outbox_from_storage(raw, expected_key=self._dispatch_outbox_key(dispatch_id)) if raw is not None else None
+        )
 
     def reap_distributed_dispatches(
         self,
@@ -770,10 +1047,11 @@ class RedisCheckpointStore:
                         if raw is None:
                             pipe.unwatch()
                             break
-                        current = _dispatch_outbox_from_storage(raw)
-                        if checkpoint_key is not None and current.checkpoint_key != checkpoint_key:
-                            pipe.unwatch()
-                            break
+                        current = _dispatch_outbox_from_storage(
+                            raw,
+                            expected_checkpoint_key=checkpoint_key,
+                            expected_key=key,
+                        )
                         updated = reap_dispatch(current, now_ms=now_ms)
                         if updated is None:
                             pipe.unwatch()
@@ -807,7 +1085,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -829,7 +1107,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 outbox preflight exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 outbox preflight exceeded transaction retry limit")
 
     def admit_deferred_batch(
         self,
@@ -857,7 +1135,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
                     helper = InMemoryCheckpointStore()
                     helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
                     if not helper.admit_deferred_batch(
@@ -881,7 +1159,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 deferred admission exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 deferred admission exceeded transaction retry limit")
 
     def resolve_deferred(self, handle: DeferredToolHandle, result: Any) -> DeferredResolveDecision:
         """Resolve one handle with a receipt-first Redis WATCH/MULTI CAS."""
@@ -898,10 +1176,12 @@ class RedisCheckpointStore:
                     helper = InMemoryCheckpointStore()
                     if raw_receipt is not None:
                         receipt = _receipt_from_storage(raw_receipt)
+                        if receipt.handle.key != handle.key or receipt.handle_key != handle.key:
+                            raise ValueError("deferred_receipt_identity_invalid")
                         helper._deferred_receipts[handle.key] = receipt  # type: ignore[attr-defined]
                     raw = pipe.get(data_key)
                     if raw is not None:
-                        current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                        current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=handle.checkpoint_key)
                         helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
                     decision = helper.resolve_deferred(handle, result)
                     if decision.kind in {"replayed", "not_admitted", "reconciliation_required"}:
@@ -926,7 +1206,7 @@ class RedisCheckpointStore:
                     return decision
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 deferred resolution exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 deferred resolution exceeded transaction retry limit")
 
     def accept_deferred_batch(
         self,
@@ -948,7 +1228,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
                     helper = InMemoryCheckpointStore()
                     helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
                     if not helper.accept_deferred_batch(
@@ -974,7 +1254,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v8 deferred reconciliation exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v10 deferred reconciliation exceeded transaction retry limit")
 
     def produce_host_interaction(
         self,
@@ -1005,7 +1285,11 @@ class RedisCheckpointStore:
                         raise CheckpointError("host interaction checkpoint was not found", code="host_interaction_claim_required")
                     raw_record = pipe.get(record_key)
                     if raw_record is not None:
-                        record = _host_record_from_storage(raw_record)
+                        record = _host_record_from_storage(
+                            raw_record,
+                            expected_checkpoint_key=checkpoint_key,
+                            expected_key=record_key,
+                        )
                         if (
                             record["request_digest"] != request_value.request_digest
                             or record["request"] != request_value.to_dict()
@@ -1021,8 +1305,15 @@ class RedisCheckpointStore:
                                 "host interaction notification row is missing", code="host_interaction_conflict"
                             )
                         try:
-                            checkpoint = _checkpoint_from_storage(raw, pipe.get(lease_key))
-                        except (CheckpointError, ValueError):
+                            checkpoint = _checkpoint_from_storage(
+                                raw,
+                                pipe.get(lease_key),
+                                checkpoint_key=checkpoint_key,
+                            )
+                        except CheckpointError:
+                            pipe.unwatch()
+                            raise
+                        except ValueError:
                             # Data and lease are separate Redis keys.  A
                             # concurrent CAS can update one between the two
                             # watched reads; retry before decoding a mixed
@@ -1035,13 +1326,20 @@ class RedisCheckpointStore:
                             raise CheckpointError("host interaction replay revision is stale", code="host_interaction_stale")
                         return _host_interaction_outcome(
                             record,
-                            _notification_from_storage(notification_raw),
+                            _notification_from_storage(
+                                notification_raw,
+                                expected_checkpoint_key=checkpoint_key,
+                                expected_key=notification_key,
+                            ),
                             status="replayed",
                             checkpoint_revision=checkpoint.revision,
                         )
                     try:
-                        current = _checkpoint_from_storage(raw, pipe.get(lease_key))
-                    except (CheckpointError, ValueError):
+                        current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    except CheckpointError:
+                        pipe.unwatch()
+                        raise
+                    except ValueError:
                         pipe.unwatch()
                         continue
                     helper = InMemoryCheckpointStore()
@@ -1123,8 +1421,11 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         raise CheckpointError("controller command checkpoint was not found", code="controller_command_stale")
                     try:
-                        current = _checkpoint_from_storage(raw, pipe.get(lease_key))
-                    except (CheckpointError, ValueError):
+                        current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    except CheckpointError:
+                        pipe.unwatch()
+                        raise
+                    except ValueError:
                         pipe.unwatch()
                         continue
                     active = current.active_host_interaction
@@ -1153,7 +1454,11 @@ class RedisCheckpointStore:
                     if record_key is not None:
                         raw_record = pipe.get(record_key)
                         if raw_record is not None:
-                            record = _host_record_from_storage(raw_record)
+                            record = _host_record_from_storage(
+                                raw_record,
+                                expected_checkpoint_key=checkpoint_key,
+                                expected_key=record_key,
+                            )
                             helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
                     receipt = helper.admit_controller_command(command_value)
                     updated = helper._store[checkpoint_key]  # type: ignore[attr-defined]
@@ -1250,7 +1555,29 @@ class RedisCheckpointStore:
 
     def get_host_interaction_notification(self, notification_id: str) -> dict[str, Any] | None:
         raw = self._client.get(self._host_notification_key(notification_id))
-        return _notification_from_storage(raw) if raw is not None else None
+        return (
+            _notification_from_storage(raw, expected_key=self._host_notification_key(notification_id))
+            if raw is not None
+            else None
+        )
+
+    def _find_resolved_pending_host_interaction(self, *, checkpoint_key: str) -> dict[str, Any] | None:
+        found: dict[str, Any] | None = None
+        for candidate in self._client.smembers(self._host_record_set_key(checkpoint_key)):
+            record_key = candidate.decode("utf-8") if isinstance(candidate, bytes) else str(candidate)
+            raw = self._client.get(record_key)
+            if raw is None:
+                continue
+            record = _host_record_from_storage(raw, expected_key=record_key)
+            if record["checkpoint_key"] != checkpoint_key or record["state"] != "resolved_pending":
+                continue
+            if found is not None:
+                raise CheckpointError(
+                    "checkpoint has multiple pending host interaction responses",
+                    code="host_interaction_conflict",
+                )
+            found = record
+        return found
 
     @staticmethod
     def _controller_wake_matches_receipt(receipt: ControllerCommandReceipt, wake: Mapping[str, Any]) -> None:
@@ -1452,7 +1779,7 @@ class RedisCheckpointStore:
                     continue
         raise RuntimeError("redis controller wake reconciliation exceeded transaction retry limit")
 
-    def reap_controller_command_wake(self, *, command_id: str, now_ms: int) -> dict[str, Any] | None:
+    def _reap_controller_command_wake(self, *, command_id: str, now_ms: int) -> dict[str, Any] | None:
         receipt_key = self._controller_receipt_key(command_id)
         outbox_key = self._controller_outbox_key(command_id)
         with self._client.pipeline() as pipe:
@@ -1478,29 +1805,31 @@ class RedisCheckpointStore:
                     continue
         raise RuntimeError("redis controller wake reaper exceeded transaction retry limit")
 
-    def reap_controller_command_wakes(self, *, now_ms: int) -> list[dict[str, Any]]:
-        # The controller reverse index stores hashed receipt keys, so callers
-        # normally reap a known command id.  Live Redis deployments can scan
-        # the namespace when a periodic reaper is configured.
-        scan_iter = getattr(self._client, "scan_iter", None)
-        if not callable(scan_iter):
-            return []
-        command_ids: set[str] = set()
-        for key in scan_iter(f"{_CONTROLLER_RECEIPT_PREFIX}*"):
-            if not str(key).endswith(_CONTROLLER_OUTBOX_SUFFIX):
+    def reap_controller_command_wakes(self, checkpoint_key: str, now_ms: int) -> list[dict[str, Any]]:
+        candidates: list[tuple[int, str]] = []
+        for member in self._client.smembers(self._controller_receipt_set_key(checkpoint_key)):
+            receipt_key = member.decode("utf-8") if isinstance(member, bytes) else str(member)
+            raw_receipt = self._client.get(receipt_key)
+            if raw_receipt is None:
                 continue
-            # The command id is intentionally not recoverable from its hashed
-            # Redis key; scan the outbox payload instead and call the single
-            # CAS operation with its durable identity.
-            raw = self._client.get(key)
-            if raw is None:
+            receipt = _controller_receipt_from_storage(raw_receipt)
+            if receipt.handle.checkpoint_key != checkpoint_key:
                 continue
-            wake = _controller_wake_from_storage(raw)
-            command_ids.add(str(wake["command_id"]))
+            raw_wake = self._client.get(f"{receipt_key}{_CONTROLLER_OUTBOX_SUFFIX}")
+            if raw_wake is None:
+                raise CheckpointError("controller wake outbox is missing", code="controller_command_conflict")
+            wake = _controller_wake_from_storage(raw_wake)
+            if wake["outbox_action"] != "recovery_dispatch" or not (
+                wake["outbox_state"] == "pending"
+                or (wake["outbox_state"] == "claimed" and int(wake["lease_expires_at_ms"] or 0) <= now_ms)
+            ):
+                continue
+            candidates.append((receipt.expected_revision, receipt.command_id))
+        candidates.sort()
         rows: list[dict[str, Any]] = []
-        for command_id in sorted(command_ids):
-            row = self.reap_controller_command_wake(command_id=command_id, now_ms=now_ms)
-            if row is not None and row["outbox_state"] in {"pending", "ambiguous"}:
+        for _expected_revision, command_id in candidates:
+            row = self._reap_controller_command_wake(command_id=command_id, now_ms=now_ms)
+            if row is not None and row["outbox_action"] == "recovery_dispatch" and row["outbox_state"] == "pending":
                 rows.append(row)
         return rows
 
@@ -1541,8 +1870,12 @@ class RedisCheckpointStore:
                         raise CheckpointError(
                             "host interaction recovery record was not found", code="host_interaction_recovery_stale"
                         )
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
-                    record = _host_record_from_storage(raw_record)
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    record = _host_record_from_storage(
+                        raw_record,
+                        expected_checkpoint_key=checkpoint_key,
+                        expected_key=record_key,
+                    )
                     helper = InMemoryCheckpointStore()
                     helper._store[checkpoint_key] = current  # type: ignore[attr-defined]
                     helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
@@ -1586,7 +1919,7 @@ class RedisCheckpointStore:
                         candidate_raw = pipe.get(candidate_value)
                         if candidate_raw is None:
                             continue
-                        candidate_record = _host_record_from_storage(candidate_raw)
+                        candidate_record = _host_record_from_storage(candidate_raw, expected_key=candidate_value)
                         if candidate_record["record_id"] == record_id and candidate_record["checkpoint_key"] == checkpoint_key:
                             record_key = candidate_value
                             raw_record = candidate_raw
@@ -1595,8 +1928,12 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return False
                     pipe.watch(record_key)
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key))
-                    record = _host_record_from_storage(raw_record)
+                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    record = _host_record_from_storage(
+                        raw_record,
+                        expected_checkpoint_key=checkpoint_key,
+                        expected_key=record_key,
+                    )
                     helper = InMemoryCheckpointStore()
                     helper._store[checkpoint_key] = current  # type: ignore[attr-defined]
                     helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
@@ -1632,7 +1969,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return None
-                    row = _notification_from_storage(raw)
+                    row = _notification_from_storage(raw, expected_key=notification_key)
                     before = deepcopy(row)
                     helper = InMemoryCheckpointStore()
                     helper._host_interaction_notifications[notification_id] = row  # type: ignore[attr-defined]
@@ -1679,7 +2016,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return None
-                    row = _notification_from_storage(raw)
+                    row = _notification_from_storage(raw, expected_key=notification_key)
                     before = deepcopy(row)
                     helper = InMemoryCheckpointStore()
                     helper._host_interaction_notifications[notification_id] = row  # type: ignore[attr-defined]
@@ -1726,7 +2063,7 @@ class RedisCheckpointStore:
                     if raw is None:
                         pipe.unwatch()
                         return None
-                    row = _notification_from_storage(raw)
+                    row = _notification_from_storage(raw, expected_key=notification_key)
                     before = deepcopy(row)
                     helper = InMemoryCheckpointStore()
                     helper._host_interaction_notifications[notification_id] = row  # type: ignore[attr-defined]
@@ -1825,25 +2162,47 @@ def _dispatch_outbox_to_storage(record: DispatchOutboxRecord) -> str:
     return canonical_json_bytes(record.to_dict(), "redis distributed dispatch outbox").decode("utf-8")
 
 
-def _dispatch_outbox_from_storage(raw: str | bytes) -> DispatchOutboxRecord:
+def _dispatch_outbox_from_storage(
+    raw: str | bytes,
+    *,
+    expected_checkpoint_key: str | None = None,
+    expected_key: str | None = None,
+) -> DispatchOutboxRecord:
     try:
         payload = _strict_json_loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("redis distributed dispatch outbox is invalid") from exc
-    return DispatchOutboxRecord.from_dict(payload)
+    record = DispatchOutboxRecord.from_dict(payload)
+    if expected_checkpoint_key is not None and record.checkpoint_key != expected_checkpoint_key:
+        raise CheckpointError("redis distributed dispatch checkpoint identity conflicts", code="dispatch_outbox_conflict")
+    if expected_key is not None and expected_key != RedisCheckpointStore._dispatch_outbox_key(record.dispatch_id):
+        raise CheckpointError("redis distributed dispatch outbox identity conflicts", code="dispatch_outbox_conflict")
+    return record
 
 
-def _host_record_from_storage(raw: str | bytes) -> dict[str, Any]:
+def _host_record_from_storage(
+    raw: str | bytes,
+    *,
+    expected_checkpoint_key: str | None = None,
+    expected_key: str | None = None,
+) -> dict[str, Any]:
     try:
         payload = _strict_json_loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("redis host interaction record is invalid") from exc
     if not isinstance(payload, dict):
         raise ValueError("redis host interaction record must be an object")
+    if expected_checkpoint_key is not None and payload.get("checkpoint_key") != expected_checkpoint_key:
+        raise CheckpointError("redis host interaction record checkpoint identity conflicts", code="host_interaction_conflict")
     try:
-        return validate_host_interaction_record(payload, checkpoint_key=str(payload.get("checkpoint_key")))
+        record = validate_host_interaction_record(payload, checkpoint_key=str(payload.get("checkpoint_key")))
     except (TypeError, ValueError) as exc:
         raise ValueError("redis host interaction record is invalid") from exc
+    if expected_key is not None and expected_key != RedisCheckpointStore._host_record_key(
+        record["checkpoint_key"], record["interaction_id"]
+    ):
+        raise CheckpointError("redis host interaction record identity conflicts", code="host_interaction_conflict")
+    return record
 
 
 def _notification_to_storage(row: Mapping[str, Any]) -> str:
@@ -1851,7 +2210,12 @@ def _notification_to_storage(row: Mapping[str, Any]) -> str:
     return canonical_json_bytes(checked, "redis host interaction notification").decode("utf-8")
 
 
-def _notification_from_storage(raw: str | bytes) -> dict[str, Any]:
+def _notification_from_storage(
+    raw: str | bytes,
+    *,
+    expected_checkpoint_key: str | None = None,
+    expected_key: str | None = None,
+) -> dict[str, Any]:
     try:
         payload = _strict_json_loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
@@ -1862,6 +2226,12 @@ def _notification_from_storage(raw: str | bytes) -> dict[str, Any]:
         payload = _validate_redis_notification_row(payload)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("redis host interaction notification is invalid") from exc
+    if expected_checkpoint_key is not None and payload["checkpoint_key"] != expected_checkpoint_key:
+        raise CheckpointError(
+            "redis host interaction notification checkpoint identity conflicts", code="host_interaction_conflict"
+        )
+    if expected_key is not None and expected_key != RedisCheckpointStore._host_notification_key(str(payload["notification_id"])):
+        raise CheckpointError("redis host interaction notification identity conflicts", code="host_interaction_conflict")
     return payload
 
 
@@ -2088,7 +2458,7 @@ def _host_interaction_outcome(
 def _checkpoint_to_storage(checkpoint: Checkpoint) -> tuple[str, int | None]:
     payload = checkpoint_to_dict(checkpoint)
     lease = payload.pop("lease_expires_at_ms")
-    return canonical_json_bytes(payload, "redis checkpoint v8").decode("utf-8"), lease
+    return canonical_json_bytes(payload, "redis checkpoint v10").decode("utf-8"), lease
 
 
 def _receipt_to_storage(receipt: DeferredResolutionReceipt) -> str:
@@ -2105,13 +2475,23 @@ def _receipt_from_storage(raw: str | bytes) -> DeferredResolutionReceipt:
     return DeferredResolutionReceipt.from_dict(payload)
 
 
-def _checkpoint_from_storage(raw: str | bytes, raw_lease: object | None) -> Checkpoint:
+def _checkpoint_from_storage(
+    raw: str | bytes,
+    raw_lease: object | None,
+    *,
+    checkpoint_key: str,
+) -> Checkpoint:
     try:
         payload = _strict_json_loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("redis checkpoint v8 payload is invalid") from exc
+        raise ValueError("redis checkpoint v10 payload is invalid") from exc
     if not isinstance(payload, dict):
-        raise ValueError("redis checkpoint v8 payload must be an object")
+        raise ValueError("redis checkpoint v10 payload must be an object")
+    if payload.get("checkpoint_key") != checkpoint_key:
+        raise CheckpointError(
+            "redis checkpoint payload key does not match the requested key",
+            code="checkpoint_store_conflict",
+        )
     payload["lease_expires_at_ms"] = _lease_from_storage(raw_lease)
     return checkpoint_from_dict(payload)
 
@@ -2120,11 +2500,11 @@ def _lease_from_storage(raw_lease: object | None) -> int | None:
     if raw_lease is None:
         return None
     if isinstance(raw_lease, bool) or not isinstance(raw_lease, str | bytes | int):
-        raise ValueError("redis checkpoint v8 lease must be an integer")
+        raise ValueError("redis checkpoint v10 lease must be an integer")
     try:
         return int(raw_lease)
     except ValueError as exc:
-        raise ValueError("redis checkpoint v8 lease must be an integer") from exc
+        raise ValueError("redis checkpoint v10 lease must be an integer") from exc
 
 
 def _redis_server_now_ms(client: Any) -> int:

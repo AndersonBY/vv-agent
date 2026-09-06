@@ -141,10 +141,14 @@ def test_invalid_output_without_repair_is_persisted_as_typed_failure() -> None:
     assert result.error_code == expected["error_code"]
     assert result.to_dict()["error_code"] == expected["error_code"]
     assert result.raw_result.to_dict()["error_code"] == expected["error_code"]
-    assert result.raw_result.error == "output_validation_failed: format_invalid: expected a valid marker"
+    assert result.raw_result.error == {
+        "code": "output_validation_failed",
+        "message": "output_validation_failed: format_invalid: expected a valid marker",
+        "retryable": False,
+    }
     assert result.partial_output == "invalid"
     assert result.events[-1].type == "run_failed"
-    assert result.events[-1].to_dict()["error"] == ("output_validation_failed: format_invalid: expected a valid marker")
+    assert result.events[-1].to_dict()["error"] == "output_validation_failed: format_invalid: expected a valid marker"
 
 
 def test_one_tools_free_repair_is_revalidated_without_an_extra_model_call() -> None:
@@ -250,7 +254,8 @@ def test_repair_provider_failure_is_typed_validation_failure() -> None:
     assert result.status is AgentStatus.FAILED
     assert result.error_code == expected["error_code"]
     assert result.raw_result.error is not None
-    assert "repair_provider_error: provider unavailable" in result.raw_result.error
+    assert result.raw_result.error is not None
+    assert "repair_provider_error: provider unavailable" in result.raw_result.error["message"]
 
 
 def test_output_type_failure_can_be_repaired_then_typed_validator_rechecks_it() -> None:

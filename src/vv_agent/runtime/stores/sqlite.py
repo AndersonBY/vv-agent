@@ -4,6 +4,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from threading import RLock
@@ -49,15 +50,21 @@ from vv_agent.runtime.dispatch_outbox import (
 from vv_agent.runtime.state import (
     Checkpoint,
     CheckpointConflictError,
+    CheckpointRenewal,
     ClaimMode,
     EventOutboxEntry,
+    OperationState,
+    RenewOutcome,
     _LeaseOperationClock,
     _validate_claim,
     _validate_renew,
     check_claim,
+    merge_event_outbox,
     prepare_claimed_terminal,
     prepare_event_delivery,
+    prepare_unclaimed_terminal,
     validate_checkpoint,
+    validate_checkpoint_creation,
     validate_model_journal_accounting,
 )
 from vv_agent.types import AgentStatus
@@ -141,8 +148,7 @@ class SqliteCheckpointStore:
 
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
         snapshot = checkpoint_from_json(checkpoint_to_json(checkpoint))
-        if snapshot.revision != 0 or snapshot.resume_attempt != 1 or snapshot.claim_token is not None:
-            raise ValueError("new checkpoint v8 records must be unclaimed at revision zero")
+        validate_checkpoint_creation(snapshot)
         row = _checkpoint_row(snapshot)
         with self._lock, self._conn:
             cursor = self._conn.execute(
@@ -189,6 +195,18 @@ class SqliteCheckpointStore:
                     raise CheckpointConflictError("expired checkpoint claims require recovery mode")
                 if checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED and claim_mode != "recovery":
                     raise CheckpointConflictError("reconciliation checkpoints require recovery mode")
+                if (
+                    self._conn.execute(
+                        "SELECT 1 FROM host_interaction_records "
+                        "WHERE checkpoint_key = ? AND state IN ('resolved_pending', 'resolved_claimed') LIMIT 1",
+                        (checkpoint_key,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise CheckpointError(
+                        "host interaction response requires dedicated recovery",
+                        code="host_interaction_recovery_required",
+                    )
                 cursor = self._conn.execute(
                     """
                     UPDATE checkpoints
@@ -241,6 +259,17 @@ class SqliteCheckpointStore:
         row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
         columns = _PROGRESS_COLUMNS
         with self._lock, self._conn:
+            current_row = self._conn.execute(
+                _SELECT_CHECKPOINT + " WHERE checkpoint_key = ? AND revision = ? AND claim_token = ?",
+                (snapshot.checkpoint_key, expected_revision, claim_token),
+            ).fetchone()
+            if current_row is None:
+                return False
+            current = _checkpoint_from_row(current_row)
+            snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
+            snapshot.event_cursor = deepcopy(current.event_cursor)
+            snapshot.cancel_requested = snapshot.cancel_requested or current.cancel_requested
+            row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
             cursor = self._conn.execute(
                 "UPDATE checkpoints SET "
                 + ", ".join(f"{column} = ?" for column in columns)
@@ -269,7 +298,7 @@ class SqliteCheckpointStore:
             return False
         claimed_cycle = checkpoint.claimed_cycle
         if claimed_cycle is None:
-            raise ValueError("checkpoint v8 suspend requires an active claim")
+            raise ValueError("checkpoint v10 suspend requires an active claim")
         snapshot = replace(
             checkpoint,
             revision=expected_revision + 1,
@@ -283,6 +312,17 @@ class SqliteCheckpointStore:
         row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
         columns = _PROGRESS_COLUMNS
         with self._lock, self._conn:
+            current_row = self._conn.execute(
+                _SELECT_CHECKPOINT + " WHERE checkpoint_key = ? AND revision = ? AND claim_token = ?",
+                (snapshot.checkpoint_key, expected_revision, claim_token),
+            ).fetchone()
+            if current_row is None:
+                return False
+            current = _checkpoint_from_row(current_row)
+            snapshot.cancel_requested = current.cancel_requested
+            snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
+            snapshot.event_cursor = deepcopy(current.event_cursor)
+            row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
             cursor = self._conn.execute(
                 "UPDATE checkpoints SET "
                 + ", ".join(f"{column} = ?" for column in columns)
@@ -312,11 +352,16 @@ class SqliteCheckpointStore:
             return False
         claimed_cycle = checkpoint.claimed_cycle
         if claimed_cycle is None:
-            raise ValueError("checkpoint v8 commit requires an active claim")
+            raise ValueError("checkpoint v10 commit requires an active claim")
         if (
             checkpoint.cycle_index != claimed_cycle
             or checkpoint.status is not AgentStatus.RUNNING
             or checkpoint.terminal_result is not None
+            or checkpoint.cancel_requested
+            or any(
+                entry.state in {OperationState.PLANNED, OperationState.STARTED, OperationState.DEFERRED, OperationState.AMBIGUOUS}
+                for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
+            )
         ):
             return False
         validate_model_journal_accounting(checkpoint)
@@ -326,7 +371,7 @@ class SqliteCheckpointStore:
             claim_token=None,
             claimed_cycle=None,
             lease_expires_at_ms=None,
-            event_outbox=[entry for entry in checkpoint.event_outbox if entry.state == "pending"],
+            event_outbox=checkpoint.event_outbox,
             model_call_journal=[],
             tool_journal=[],
         )
@@ -334,6 +379,21 @@ class SqliteCheckpointStore:
         row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
         columns = _PROGRESS_COLUMNS
         with self._lock, self._conn:
+            current_row = self._conn.execute(
+                _SELECT_CHECKPOINT + " WHERE checkpoint_key = ? AND revision = ? AND claim_token = ?",
+                (snapshot.checkpoint_key, expected_revision, claim_token),
+            ).fetchone()
+            if current_row is None:
+                return False
+            current = _checkpoint_from_row(current_row)
+            if current.cancel_requested:
+                return False
+            snapshot.event_outbox = [
+                entry for entry in merge_event_outbox(current.event_outbox, snapshot.event_outbox) if entry.state == "pending"
+            ]
+            snapshot.event_cursor = deepcopy(current.event_cursor)
+            snapshot.cancel_requested = current.cancel_requested
+            row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
             cursor = self._conn.execute(
                 "UPDATE checkpoints SET "
                 + ", ".join(f"{column} = ?" for column in columns)
@@ -360,13 +420,25 @@ class SqliteCheckpointStore:
     ) -> bool:
         if checkpoint.revision != expected_revision:
             return False
-        snapshot = checkpoint_from_json(checkpoint_to_json(checkpoint))
+        snapshot = prepare_unclaimed_terminal(checkpoint)
+        snapshot = checkpoint_from_json(checkpoint_to_json(snapshot))
         if snapshot.terminal_result is None or snapshot.claim_token is not None:
-            raise ValueError("finalized checkpoint v8 must be terminal and unclaimed")
+            raise ValueError("finalized checkpoint v10 must be terminal and unclaimed")
         snapshot.revision = expected_revision + 1
         row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
         columns = _FINALIZE_COLUMNS
         with self._lock, self._conn:
+            current_row = self._conn.execute(
+                _SELECT_CHECKPOINT + " WHERE checkpoint_key = ? AND revision = ? AND claim_token IS NULL",
+                (snapshot.checkpoint_key, expected_revision),
+            ).fetchone()
+            if current_row is None:
+                return False
+            current = _checkpoint_from_row(current_row)
+            snapshot.cancel_requested = current.cancel_requested
+            snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
+            snapshot.event_cursor = deepcopy(current.event_cursor)
+            row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
             cursor = self._conn.execute(
                 "UPDATE checkpoints SET "
                 + ", ".join(f"{column} = ?" for column in columns)
@@ -475,16 +547,28 @@ class SqliteCheckpointStore:
         claim_token: str,
         lease_expires_at_ms: int,
         now_ms: int,
-    ) -> bool:
+    ) -> CheckpointRenewal:
         _validate_renew(claim_token, lease_expires_at_ms, now_ms)
         clock = _LeaseOperationClock(now_ms)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 current_now_ms = clock.now_ms()
-                if lease_expires_at_ms <= current_now_ms:
+                row = self._conn.execute(
+                    _SELECT_CHECKPOINT + " WHERE checkpoint_key = ?",
+                    (checkpoint_key,),
+                ).fetchone()
+                current = _checkpoint_from_row(row) if row is not None else None
+                if current is None:
                     self._conn.rollback()
-                    return False
+                    return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=0)
+                if (
+                    current.claim_token != claim_token
+                    or (current.lease_expires_at_ms or 0) <= current_now_ms
+                    or lease_expires_at_ms <= current_now_ms
+                ):
+                    self._conn.rollback()
+                    return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=current.revision)
                 cursor = self._conn.execute(
                     """
                     UPDATE checkpoints
@@ -499,8 +583,64 @@ class SqliteCheckpointStore:
                         current_now_ms,
                     ),
                 )
+                if cursor.rowcount != 1:
+                    self._conn.rollback()
+                    return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=current.revision)
                 self._conn.commit()
-                return cursor.rowcount == 1
+                return CheckpointRenewal(
+                    outcome=(RenewOutcome.CANCEL_REQUESTED if current.cancel_requested else RenewOutcome.RENEWED),
+                    lease_expires_at_ms=lease_expires_at_ms,
+                )
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def record_tool_receipt(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        operation_id: str,
+        attempt: int,
+        tool_call_id: str,
+        request_digest: str,
+        result: Any,
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
+    ) -> bool:
+        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    _SELECT_CHECKPOINT + " WHERE checkpoint_key = ?",
+                    (checkpoint.checkpoint_key,),
+                ).fetchone()
+                if row is None:
+                    self._conn.rollback()
+                    return False
+                current = _checkpoint_from_row(row)
+                helper = InMemoryCheckpointStore()
+                helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
+                updated = helper.record_tool_receipt(
+                    checkpoint,
+                    operation_id=operation_id,
+                    attempt=attempt,
+                    tool_call_id=tool_call_id,
+                    request_digest=request_digest,
+                    result=result,
+                    claim_token=claim_token,
+                    expected_revision=expected_revision,
+                    claimed_cycle=claimed_cycle,
+                )
+                authoritative = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
+                if not updated or authoritative.revision == current.revision:
+                    self._conn.rollback()
+                    return updated
+                self._write_checkpoint_tx(authoritative, expected_revision=expected_revision, claim_token=claim_token)
+                self._conn.commit()
+                return True
             except BaseException:
                 self._conn.rollback()
                 raise
@@ -886,6 +1026,24 @@ class SqliteCheckpointStore:
     def get_host_interaction_notification(self, notification_id: str) -> dict[str, Any] | None:
         with self._lock:
             return self._notification_row(notification_id)
+
+    def _find_resolved_pending_host_interaction(self, *, checkpoint_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT record_id, checkpoint_key, interaction_id, logical_cycle, request, request_digest, state, "
+                "attempt, claim_token, lease_expires_at_ms, response, response_digest, command_id, "
+                "resolved_revision, consumed_revision, last_error "
+                "FROM host_interaction_records WHERE checkpoint_key = ? AND state = 'resolved_pending' LIMIT 2",
+                (checkpoint_key,),
+            ).fetchall()
+            if not rows:
+                return None
+            if len(rows) > 1:
+                raise CheckpointError(
+                    "checkpoint has multiple pending host interaction responses",
+                    code="host_interaction_conflict",
+                )
+            return self._host_record_from_row(rows[0])
 
     @staticmethod
     def _notification_values(row: dict[str, Any]) -> tuple[object, ...]:
@@ -1515,7 +1673,7 @@ class SqliteCheckpointStore:
                 self._conn.rollback()
                 raise
 
-    def reap_controller_command_wake(self, *, command_id: str, now_ms: int) -> dict[str, Any] | None:
+    def _reap_controller_command_wake(self, *, command_id: str, now_ms: int) -> dict[str, Any] | None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1537,19 +1695,23 @@ class SqliteCheckpointStore:
                 self._conn.rollback()
                 raise
 
-    def reap_controller_command_wakes(self, *, now_ms: int) -> list[dict[str, Any]]:
+    def reap_controller_command_wakes(self, checkpoint_key: str, now_ms: int) -> list[dict[str, Any]]:
         with self._lock:
             command_ids = tuple(
                 str(item[0])
                 for item in self._conn.execute(
                     "SELECT command_id FROM controller_command_receipts "
-                    "WHERE outbox_action = 'recovery_dispatch' ORDER BY command_id ASC"
+                    "WHERE checkpoint_key = ? AND outbox_action = 'recovery_dispatch' "
+                    "AND (outbox_state = 'pending' OR "
+                    "(outbox_state = 'claimed' AND lease_expires_at_ms <= ?)) "
+                    "ORDER BY expected_revision ASC, command_id ASC",
+                    (checkpoint_key, now_ms),
                 ).fetchall()
             )
         rows: list[dict[str, Any]] = []
         for command_id in command_ids:
-            row = self.reap_controller_command_wake(command_id=command_id, now_ms=now_ms)
-            if row is not None and row["outbox_state"] in {"pending", "ambiguous"}:
+            row = self._reap_controller_command_wake(command_id=command_id, now_ms=now_ms)
+            if row is not None and row["outbox_action"] == "recovery_dispatch" and row["outbox_state"] == "pending":
                 rows.append(row)
         return rows
 
@@ -2013,7 +2175,7 @@ class SqliteCheckpointStore:
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v8'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v10'),
     run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v5'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,
@@ -2023,6 +2185,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     resume_attempt INTEGER NOT NULL CHECK (resume_attempt >= 1),
     cycle_index INTEGER NOT NULL CHECK (cycle_index >= 0),
     status TEXT NOT NULL,
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
     active_host_interaction TEXT,
     suspended_origin TEXT,
     messages TEXT NOT NULL,
@@ -2299,6 +2462,7 @@ _COLUMNS = (
     "resume_attempt",
     "cycle_index",
     "status",
+    "cancel_requested",
     "active_host_interaction",
     "suspended_origin",
     "messages",
@@ -2344,7 +2508,7 @@ _IDENTITY_WHERE = (
     " AND schema_version = ? AND run_definition_schema = ? AND run_definition = ?"
     " AND task_id = ? AND root_run_id = ? AND trace_id = ?"
     " AND run_definition_digest = ? AND resume_attempt = ?"
-    " AND terminal_acknowledged = ?"
+    " AND cancel_requested = ? AND terminal_acknowledged = ?"
 )
 _SELECT_CHECKPOINT = f"SELECT {', '.join(_COLUMNS)} FROM checkpoints"
 
@@ -2363,6 +2527,7 @@ def _checkpoint_row(checkpoint: Checkpoint) -> tuple[object, ...]:
         full["resume_attempt"],
         full["cycle_index"],
         full["status"],
+        int(full["cancel_requested"]),
         _json_dump(full["active_host_interaction"]) if full["active_host_interaction"] is not None else None,
         _json_dump(full["suspended_origin"]) if full["suspended_origin"] is not None else None,
         _json_dump(full["messages"]),
@@ -2400,6 +2565,7 @@ def _checkpoint_from_row(row: tuple[object, ...]) -> Checkpoint:
         "resume_attempt": values["resume_attempt"],
         "cycle_index": values["cycle_index"],
         "status": values["status"],
+        "cancel_requested": bool(values["cancel_requested"]),
         "active_host_interaction": (
             _json_load(values["active_host_interaction"], "active_host_interaction")
             if values["active_host_interaction"] is not None
@@ -2443,6 +2609,7 @@ def _identity_values(row: dict[str, object]) -> tuple[object, ...]:
         row["trace_id"],
         row["run_definition_digest"],
         row["resume_attempt"],
+        row["cancel_requested"],
         row["terminal_acknowledged"],
     )
 
@@ -2461,7 +2628,7 @@ def _json_load(value: object, field_name: str) -> Any:
     try:
         return _strict_json_loads(str(value))
     except (json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(f"invalid checkpoint v8 {field_name} JSON") from exc
+        raise ValueError(f"invalid checkpoint v10 {field_name} JSON") from exc
 
 
 def _sqlite_int(value: object, field_name: str) -> int:
@@ -2487,10 +2654,13 @@ def _receipt_from_row(row: tuple[object, ...]) -> DeferredResolutionReceipt:
             strict=True,
         )
     )
+    handle = DeferredToolHandle.from_dict(_json_load(values["handle"], "deferred receipt handle"))
+    if values["handle_key"] != handle.key or values["checkpoint_key"] != handle.checkpoint_key:
+        raise ValueError("deferred_receipt_identity_invalid")
     return DeferredResolutionReceipt.from_dict(
         {
             "handle_key": values["handle_key"],
-            "handle": _json_load(values["handle"], "deferred receipt handle"),
+            "handle": handle.to_dict(),
             "result": _json_load(values["result"], "deferred receipt result"),
             "result_digest": values["result_digest"],
             "event_id": values["event_id"],
