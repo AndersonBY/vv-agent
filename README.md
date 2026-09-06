@@ -6,18 +6,23 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current package release is `0.14.0`. This repository's `HEAD` locks
-language-neutral Contract `12.0.0`. Paired Python/Rust adoption remains
-`pending-adoption`; the central support matrix is the source for adoption
-status. This repository keeps a Python-idiomatic API.
+The current package release is `0.14.1`. This repository's `HEAD` locks
+language-neutral Contract `12.0.0`. Paired Python/Rust adoption is
+`verified`; the central support matrix is the source for adoption status. This
+repository keeps a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.14.0"
+python -m pip install "vv-agent==0.14.1"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
 integrations are needed. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
+
+### 0.14.1 Highlights
+
+- Redis controller admission uses Redis authoritative time for claim expiry and
+  recovery lease calculation.
 
 ### 0.14.0 Highlights
 

@@ -502,7 +502,7 @@ class ControllerStoreMixin:
                 raise
             return self._outcome_for_record(record, status="admitted", checkpoint_revision=snapshot.revision)
 
-    def _validate_command_binding(self, command: ControllerCommand) -> Any:
+    def _validate_command_binding(self, command: ControllerCommand, *, lease_now_ms: int) -> Any:
         current = self._load_controller_checkpoint(command.handle.checkpoint_key)
         if current is None:
             raise _controller_error("controller command checkpoint was not found", "controller_command_stale")
@@ -511,7 +511,7 @@ class ControllerStoreMixin:
         if current.terminal_result is not None:
             raise _controller_error("controller command cannot rewrite a committed terminal", "controller_command_terminal")
         if current.claim_token is not None and command.kind != "cancel":
-            claim_expired = (current.lease_expires_at_ms or 0) <= self._lease_now_ms(None)
+            claim_expired = (current.lease_expires_at_ms or 0) <= lease_now_ms
             if command.kind != "suspend" or not claim_expired:
                 raise _controller_error(
                     "controller command cannot clear a live execution claim", "controller_command_claim_active"
@@ -610,6 +610,14 @@ class ControllerStoreMixin:
 
     def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
+        return self._admit_controller_command(command_value, lease_now_ms=None)
+
+    def _admit_controller_command(
+        self,
+        command_value: ControllerCommand,
+        *,
+        lease_now_ms: int | None,
+    ) -> ControllerCommandReceipt:
         with self._lock:
             existing = self._controller_command_receipts.get(command_value.command_id)
             if existing is not None:
@@ -619,7 +627,8 @@ class ControllerStoreMixin:
                     )
                 self._ensure_controller_wake(existing)
                 return deepcopy(self._controller_command_receipts[command_value.command_id])
-            checkpoint = clone_checkpoint(self._validate_command_binding(command_value))
+            now_ms = self._lease_now_ms(lease_now_ms)
+            checkpoint = clone_checkpoint(self._validate_command_binding(command_value, lease_now_ms=now_ms))
             kind = command_value.kind
             resulting_status = checkpoint.status.value
             wake_action = "none"
@@ -744,7 +753,7 @@ class ControllerStoreMixin:
                 resulting_status = checkpoint.status.value
             elif kind == "cancel":
                 if checkpoint.claim_token is not None:
-                    claim_expired = (checkpoint.lease_expires_at_ms or 0) <= self._lease_now_ms(None)
+                    claim_expired = (checkpoint.lease_expires_at_ms or 0) <= now_ms
                     if not claim_expired:
                         cancel_transition = not checkpoint.cancel_requested
                         checkpoint.cancel_requested = True
@@ -762,7 +771,7 @@ class ControllerStoreMixin:
                         authority.resume_attempt += 1
                         authority.claim_token = recovery_claim
                         authority.claimed_cycle = checkpoint.claimed_cycle
-                        authority.lease_expires_at_ms = self._lease_now_ms(None) + _RECOVERY_LEASE_DURATION_MS
+                        authority.lease_expires_at_ms = now_ms + _RECOVERY_LEASE_DURATION_MS
                         authority.cancel_requested = True
                         terminal_candidate = clone_checkpoint(authority)
                         terminal_candidate.terminal_result = self._terminal_result(
