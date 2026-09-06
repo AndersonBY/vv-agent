@@ -51,7 +51,7 @@ def _result(*, status: AgentStatus, error: str | None = None) -> AgentResult:
         messages=[],
         cycles=[],
         final_answer="done" if status == AgentStatus.COMPLETED else None,
-        error=error,
+        error=({"code": "agent_failed", "message": error, "retryable": False} if error is not None else None),
     )
 
 
@@ -110,18 +110,22 @@ def test_multiword_prompt_model_settings_and_resolved_limits_project_to_task() -
     ("result", "expected_status", "expected_error"),
     [
         (_result(status=AgentStatus.COMPLETED), "completed", None),
-        (_result(status=AgentStatus.FAILED, error="request failed"), "failed", "request failed"),
+        (
+            _result(status=AgentStatus.FAILED, error="request failed"),
+            "failed",
+            {"code": "agent_failed", "message": "request failed", "retryable": False},
+        ),
         (
             _result(status=AgentStatus.FAILED, error="Operation was cancelled"),
             "failed",
-            "Operation was cancelled",
+            {"code": "agent_failed", "message": "Operation was cancelled", "retryable": False},
         ),
     ],
 )
 def test_result_json_covers_success_failure_and_cancellation(
     result: AgentResult,
     expected_status: str,
-    expected_error: str | None,
+    expected_error: dict[str, Any] | None,
 ) -> None:
     payload = cli._result_payload(result, _resolved())
 

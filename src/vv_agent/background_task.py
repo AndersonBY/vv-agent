@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from vv_agent.run_config import RunConfig
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.outputs import ToolOutputJson
-from vv_agent.types import AgentStatus
+from vv_agent.types import AgentStatus, _agent_result_error_text
 
 if TYPE_CHECKING:
     from vv_agent.agent import Agent
@@ -98,7 +98,7 @@ class BackgroundAgentTaskHandle:
             agent_name=self.agent_name,
             status=result.status,
             final_output=result.final_output,
-            error=result.raw_result.error,
+            error=_agent_result_error_text(result.raw_result.error),
         )
 
 

@@ -1,4 +1,4 @@
-"""Task-neutral v8 controller admission and host-interaction wire types.
+"""Task-neutral v9 controller admission and host-interaction wire types.
 
 The controller protocol is deliberately independent of any application task
 model.  Stores and distributed backends consume these immutable values at
@@ -152,7 +152,7 @@ def _strict_fields(payload: Mapping[str, Any], expected: set[str], label: str) -
     missing = expected - actual
     unknown = actual - expected
     if missing or unknown:
-        raise ValueError(f"{label} fields do not match v8 schema: missing={sorted(missing)}, unknown={sorted(unknown)}")
+        raise ValueError(f"{label} fields do not match current schema: missing={sorted(missing)}, unknown={sorted(unknown)}")
     if not all(isinstance(key, str) for key in payload):
         raise ValueError(f"{label} field names must be strings")
 
@@ -162,7 +162,7 @@ def _closed_fields(payload: Mapping[str, Any], allowed: set[str], required: set[
     missing = required - actual
     unknown = actual - allowed
     if missing or unknown:
-        raise ValueError(f"{label} fields do not match v8 schema: missing={sorted(missing)}, unknown={sorted(unknown)}")
+        raise ValueError(f"{label} fields do not match current schema: missing={sorted(missing)}, unknown={sorted(unknown)}")
     if not all(isinstance(key, str) for key in payload):
         raise ValueError(f"{label} field names must be strings")
 
@@ -323,13 +323,16 @@ class HostInteractionRequest:
         if payload["schema_version"] != HOST_REQUEST_SCHEMA:
             raise ValueError("unsupported host interaction request schema")
         request_digest = _digest(payload["request_digest"], "request_digest")
+        prompt = _content(payload["prompt"], "prompt")
+        if sanitize_host_prompt(prompt) != prompt:
+            raise ValueError("host interaction request prompt is not sanitized")
         return cls(
             interaction_id=payload["interaction_id"],
             logical_cycle=payload["logical_cycle"],
             operation_id=payload["operation_id"],
             tool_call_id=payload["tool_call_id"],
             request_digest=request_digest,
-            prompt=payload["prompt"],
+            prompt=prompt,
         )
 
 
@@ -421,7 +424,7 @@ class HostInteractionResponse:
 
 @dataclass(frozen=True, slots=True)
 class HostInteractionRecoveryEnvelope:
-    """Strict v8 recovery envelope; no lease/default fields are accepted."""
+    """Strict recovery envelope; no lease/default fields are accepted."""
 
     record_id: str
     checkpoint_key: str

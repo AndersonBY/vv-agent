@@ -78,6 +78,7 @@ from vv_agent.types import (
     ToolDirective,
     ToolExecutionResult,
     ToolResultStatus,
+    _agent_result_error_text,
     _last_assistant_output,
 )
 
@@ -629,7 +630,11 @@ class Runner:
                 raw_result.partial_output = _last_assistant_output(raw_result.cycles)
                 raw_result.final_answer = None
                 raw_result.wait_reason = None
-                raw_result.error = "Run budget exhausted."
+                raw_result.error = {
+                    "code": "run_budget_exhausted",
+                    "message": "Run budget exhausted.",
+                    "retryable": False,
+                }
                 budget_event: RunEvent = BudgetExhaustedEvent(
                     run_id=resumed_run_id,
                     trace_id=source.trace_id,
@@ -797,7 +802,11 @@ class Runner:
         raw_result.status = AgentStatus.FAILED
         raw_result.final_answer = None
         raw_result.wait_reason = None
-        raw_result.error = cancellation_token.reason or "Operation was cancelled"
+        raw_result.error = {
+            "code": "cancelled",
+            "message": cancellation_token.reason or "Operation was cancelled",
+            "retryable": False,
+        }
         raw_result.completion_reason = CompletionReason.CANCELLED
         raw_result.completion_tool_name = None
         cls._normalize_completion_observation(raw_result, cancellation_token=cancellation_token)
@@ -805,7 +814,7 @@ class Runner:
         resumed_run_id = f"run_{uuid.uuid4().hex}"
         terminal_event = cls._terminal_event(
             result=raw_result,
-            final_output=raw_result.error,
+            final_output=_agent_result_error_text(raw_result.error),
             run_id=resumed_run_id,
             trace_id=source.trace_id,
             agent_name=source.agent_name,
@@ -816,7 +825,7 @@ class Runner:
         return RunResult(
             input=source.input,
             new_items=deepcopy(source.new_items),
-            final_output=raw_result.error,
+            final_output=_agent_result_error_text(raw_result.error),
             status=raw_result.status,
             raw_result=raw_result,
             events=[*source.events, terminal_event],
@@ -907,6 +916,7 @@ class Runner:
             metadata={
                 **context.metadata,
                 _TOOL_DISPATCH_CALLBACK_METADATA_KEY: mark_started,
+                "_vv_agent_checkpoint_replay": plan.replay_result is not None,
             },
         )
         behavior_reason: CompletionReason | None = None
@@ -1426,7 +1436,7 @@ class Runner:
                 completion_reason=CompletionReason.FAILED,
                 messages=[],
                 cycles=[],
-                error=message,
+                error={"code": "agent_failed", "message": message, "retryable": False},
             )
             trace_metadata = {"status": "failed", "error": message}
             result = RunResult(
@@ -1678,9 +1688,20 @@ class Runner:
                     "checkpoint approval resume requires a checkpoint controller",
                     code="checkpoint_approval_resume_config_invalid",
                 )
+            authoritative_checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+            if authoritative_checkpoint is None:
+                raise CheckpointError(
+                    "checkpoint disappeared during approval resume",
+                    code="checkpoint_not_found",
+                )
+            checkpoint_cycle_already_advanced = authoritative_checkpoint.cycle_index > 0
             approval_budget: BudgetEvaluator | None = None
             approval_exhaustion = None
-            if run_config.budget_limits is not None and run_config.budget_limits.has_limits:
+            if (
+                not checkpoint_cycle_already_advanced
+                and run_config.budget_limits is not None
+                and run_config.budget_limits.has_limits
+            ):
                 approval_budget = BudgetEvaluator(
                     run_config.budget_limits,
                     host_cost_meter=run_config.host_cost_meter,
@@ -1690,7 +1711,7 @@ class Runner:
             approval_shared_state = deepcopy(run_config.shared_state or {})
             tool_result: ToolExecutionResult | None = None
             approval_behavior_reason: CompletionReason | None = None
-            if approval_exhaustion is None:
+            if not checkpoint_cycle_already_advanced and approval_exhaustion is None:
                 tool_result, approval_shared_state, approval_behavior_reason = cls._execute_checkpoint_approved_tool(
                     pending=_approval_invocation.pending,
                     task=task,
@@ -1731,7 +1752,9 @@ class Runner:
                     )
                 capture_event(budget_event)
 
-            if tool_result is not None and approval_exhaustion is None and tool_result.directive is ToolDirective.CONTINUE:
+            if checkpoint_cycle_already_advanced or (
+                tool_result is not None and approval_exhaustion is None and tool_result.directive is ToolDirective.CONTINUE
+            ):
                 raw_result = runtime.run(
                     task,
                     workspace=cls._resolve_workspace(run_config.workspace),
@@ -1761,7 +1784,11 @@ class Runner:
                     raw_result.partial_output = _last_assistant_output(raw_result.cycles)
                     raw_result.final_answer = None
                     raw_result.wait_reason = None
-                    raw_result.error = "Run budget exhausted."
+                    raw_result.error = {
+                        "code": "run_budget_exhausted",
+                        "message": "Run budget exhausted.",
+                        "retryable": False,
+                    }
                 else:
                     assert tool_result is not None
                     for cycle in raw_result.cycles:
@@ -1819,18 +1846,38 @@ class Runner:
                 except CheckpointReconciliationRequired as interruption:
                     raw_result = interruption.result
 
+            result_error = _agent_result_error_text(raw_result.error)
             final_output = (
                 None
                 if raw_result.status in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED}
-                else raw_result.final_answer or raw_result.wait_reason or raw_result.error
+                else raw_result.final_answer or raw_result.wait_reason or result_error
             )
             reconciliation_required = raw_result.status is AgentStatus.RECONCILIATION_REQUIRED
             deferred_waiting = raw_result.status is AgentStatus.DEFERRED
+            terminal_error_code = raw_result.error_code
+            if terminal_error_code is None and raw_result.error is not None:
+                terminal_error_code = raw_result.error.get("code")
             operator_abort = bool(
                 raw_result.status is AgentStatus.FAILED
-                and raw_result.error == "operator_abort_with_unknown_outcome"
-                and raw_result.resume_observation is not None
+                and terminal_error_code == "operator_abort_with_unknown_outcome"
+                and raw_result.resume_observations
             )
+            checkpoint_control = bool(
+                raw_result.status is AgentStatus.FAILED
+                and terminal_error_code
+                in {
+                    "cancelled_with_unknown_outcome",
+                    "lease_lost_with_unknown_outcome",
+                }
+            )
+            lease_lost_without_claim = bool(
+                checkpoint_control
+                and terminal_error_code == "lease_lost_with_unknown_outcome"
+                and checkpoint_controller is not None
+                and checkpoint_controller._owned_claim_token is None
+            )
+            if lease_lost_without_claim and checkpoint_controller is not None:
+                raw_result.checkpoint_key = checkpoint_controller.checkpoint_key
             if terminal_replayed:
                 new_items = []
                 if raw_result.status is AgentStatus.COMPLETED:
@@ -1841,8 +1888,13 @@ class Runner:
                         )
                     except Exception as exc:
                         output_coercion_error = ValueError(f"failed to validate final output: {exc}")
-            elif reconciliation_required or deferred_waiting or operator_abort:
+            elif reconciliation_required or deferred_waiting:
                 new_items = []
+            elif operator_abort or checkpoint_control:
+                new_items = cls._new_session_items(
+                    initial_messages=initial_messages,
+                    result=raw_result,
+                )
             else:
                 final_output, output_coercion_error = cls._postprocess_output(
                     agent=agent,
@@ -1863,8 +1915,8 @@ class Runner:
                     result=raw_result,
                 )
 
-            if not terminal_replayed and not reconciliation_required and not deferred_waiting:
-                if run_config.session is not None and not operator_abort:
+            if not terminal_replayed and not reconciliation_required and not deferred_waiting and not lease_lost_without_claim:
+                if run_config.session is not None:
                     session_items = cls._session_items_for_persistence(new_items, raw_result)
                     session_event = SessionPersistedEvent(
                         run_id=run_id,
@@ -1998,7 +2050,11 @@ class Runner:
             raw_result.partial_output = raw_result.partial_output or _last_assistant_output(raw_result.cycles)
             raw_result.final_answer = None
             raw_result.wait_reason = None
-            raw_result.error = final_output
+            raw_result.error = {
+                "code": "agent_failed",
+                "message": str(final_output),
+                "retryable": False,
+            }
 
         cls._normalize_completion_observation(raw_result, cancellation_token=cancellation_token)
         output_coercion_error: Exception | None = None
@@ -2128,8 +2184,8 @@ class Runner:
         raw_result.partial_output = cast(str | None, serializable) or _last_assistant_output(raw_result.cycles)
         raw_result.final_answer = None
         raw_result.wait_reason = None
-        raw_result.error = error
         raw_result.error_code = OUTPUT_VALIDATION_FAILED
+        raw_result.error = {"code": OUTPUT_VALIDATION_FAILED, "message": error, "retryable": False}
 
     @staticmethod
     def _replace_raw_result_output(result: AgentResult, output: Any) -> None:
@@ -2139,7 +2195,11 @@ class Runner:
         elif result.status == AgentStatus.WAIT_USER:
             result.wait_reason = value
         else:
-            result.error = value
+            result.error = {
+                "code": result.error_code or "agent_failed",
+                "message": value or "operation failed",
+                "retryable": False,
+            }
 
     @staticmethod
     def _terminal_event(
@@ -2153,28 +2213,38 @@ class Runner:
         cancellation_token: Any | None,
     ) -> RunEvent:
         cycle_index = len(result.cycles) or None
-        cancelled = bool(result.status == AgentStatus.FAILED and cancellation_token is not None and cancellation_token.cancelled)
+        cancelled = bool(
+            result.status == AgentStatus.FAILED
+            and (
+                result.completion_reason is CompletionReason.CANCELLED
+                or (cancellation_token is not None and cancellation_token.cancelled)
+            )
+        )
         if cancelled:
+            cancellation_reason = _agent_result_error_text(result.error)
             return RunCancelledEvent(
                 run_id=run_id,
                 trace_id=trace_id,
                 agent_name=agent_name,
                 session_id=session_id,
                 cycle_index=cycle_index,
-                reason=result.error or cancellation_token.reason or "run cancelled",
+                reason=cancellation_reason
+                or (cancellation_token.reason if cancellation_token is not None else None)
+                or "run cancelled",
                 completion_reason=CompletionReason.CANCELLED,
                 partial_output=result.partial_output,
                 budget_usage=result.budget_usage,
                 budget_exhaustion=result.budget_exhaustion,
             )
         if result.status in {AgentStatus.FAILED, AgentStatus.MAX_CYCLES}:
+            failure_error = _agent_result_error_text(result.error)
             return RunFailedEvent(
                 run_id=run_id,
                 trace_id=trace_id,
                 agent_name=agent_name,
                 session_id=session_id,
                 cycle_index=cycle_index,
-                error=result.error or result.status.value,
+                error=failure_error or result.status.value,
                 status=(result.status.value if result.budget_usage is not None else None),
                 completion_reason=result.completion_reason,
                 completion_tool_name=result.completion_tool_name,

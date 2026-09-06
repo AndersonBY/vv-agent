@@ -39,6 +39,7 @@ class BudgetExhaustionReason(StrEnum):
 
 
 class BudgetUnavailableReason(StrEnum):
+    ACCOUNTING_MISSING = "accounting_missing"
     USAGE_MISSING = "usage_missing"
     METER_MISSING = "meter_missing"
     METER_UNAVAILABLE = "meter_unavailable"
@@ -164,14 +165,23 @@ class BudgetUnavailableDimension:
             )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "dimension": self.dimension.value,
             "reason": self.reason.value,
-            "expected_unit": self.expected_unit,
-            "observed_unit": self.observed_unit,
-            "expected_currency": self.expected_currency,
-            "observed_currency": self.observed_currency,
         }
+        if self.reason is BudgetUnavailableReason.USAGE_MISSING:
+            return {
+                **payload,
+                "expected_unit": self.expected_unit,
+                "observed_unit": self.observed_unit,
+                "expected_currency": self.expected_currency,
+                "observed_currency": self.observed_currency,
+            }
+        for field_name in ("expected_unit", "observed_unit", "expected_currency", "observed_currency"):
+            value = getattr(self, field_name)
+            if value is not None:
+                payload[field_name] = value
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> BudgetUnavailableDimension:

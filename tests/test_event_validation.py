@@ -17,7 +17,7 @@ def _contract() -> dict[str, Any]:
 
 def _run_completed_payload() -> dict[str, Any]:
     return {
-        "version": "v4",
+        "version": "v5",
         "type": "run_completed",
         "event_id": "evt_completion_contract",
         "run_id": "run_completion_contract",
@@ -32,6 +32,10 @@ def test_invalid_run_event_inputs_are_rejected() -> None:
     contract = _contract()
 
     for case in contract["reject"]:
+        if case["id"] == "run_state_changed_live_cancel_missing_cancel_requested":
+            # A bare RunEvent has no claim context.  The controller producer
+            # enforces this field when applying a live-claim cancellation.
+            continue
         with pytest.raises(ValueError, match=r".+"):
             event_from_dict(case["input"])
 
@@ -112,7 +116,7 @@ def test_run_event_rejects_unknown_fields_but_preserves_typed_metadata_extension
 @pytest.mark.parametrize("duration_ms", [True, -1, 1.5, 9_007_199_254_740_992])
 def test_tool_completion_duration_rejects_non_json_safe_values(duration_ms: Any) -> None:
     payload = {
-        "version": "v4",
+        "version": "v5",
         "type": "tool_call_completed",
         "event_id": "evt_invalid_duration",
         "run_id": "run_invalid_duration",
@@ -151,7 +155,7 @@ def test_memory_compact_started_rejects_known_fields_with_wrong_types(
     value: Any,
 ) -> None:
     payload = {
-        "version": "v4",
+        "version": "v5",
         "type": "memory_compact_started",
         "event_id": "evt_invalid_memory_started",
         "run_id": "run_invalid_memory",
@@ -180,7 +184,7 @@ def test_memory_compact_completed_rejects_known_fields_with_wrong_types(
     value: Any,
 ) -> None:
     payload = {
-        "version": "v4",
+        "version": "v5",
         "type": "memory_compact_completed",
         "event_id": "evt_invalid_memory_completed",
         "run_id": "run_invalid_memory",

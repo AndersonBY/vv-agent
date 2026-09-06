@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from vv_agent.budget import BudgetUsageSnapshot
@@ -12,6 +13,7 @@ from vv_agent.checkpoint import (
     EventCursor,
     OperationKind,
     OperationState,
+    ResumeObservation,
     ToolIdempotency,
     canonical_json_bytes,
     canonical_json_sha256,
@@ -22,6 +24,7 @@ from vv_agent.checkpoint import (
     validate_sha256,
 )
 from vv_agent.deferred import DeferredResolveDecision, DeferredToolHandle
+from vv_agent.runtime.controller import sanitize_host_prompt
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -31,12 +34,13 @@ from vv_agent.types import (
     ModelCallRecord,
     ModelCallStatus,
     ToolExecutionResult,
+    ToolResultStatus,
 )
 
 if TYPE_CHECKING:
     from vv_agent.runtime.controller import HostInteractionAdmissionContext
 
-CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v8"
+CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v10"
 HOST_INTERACTION_REQUEST_SCHEMA = "vv-agent.host-interaction-request.v1"
 _HOST_INTERACTION_REQUEST_FIELDS = frozenset(
     {
@@ -52,6 +56,73 @@ _HOST_INTERACTION_REQUEST_FIELDS = frozenset(
 _SUSPENDED_ORIGIN_FIELDS = frozenset({"status", "active_host_interaction"})
 MAX_WIRE_INTEGER = (1 << 53) - 1
 ClaimMode = Literal["continue", "recovery"]
+
+
+class RenewOutcome(StrEnum):
+    RENEWED = "renewed"
+    CANCEL_REQUESTED = "cancel_requested"
+    CLAIM_LOST = "claim_lost"
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointRenewal:
+    outcome: RenewOutcome
+    lease_expires_at_ms: int | None = None
+    revision: int | None = None
+    schema_version: str = "vv-agent.checkpoint-renewal.v1"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.outcome, RenewOutcome):
+            object.__setattr__(self, "outcome", RenewOutcome(self.outcome))
+        if self.outcome is RenewOutcome.CLAIM_LOST:
+            if (
+                self.revision is None
+                or isinstance(self.revision, bool)
+                or not isinstance(self.revision, int)
+                or self.revision < 0
+            ):
+                raise ValueError("claim_lost renewal requires a non-negative revision")
+            if self.lease_expires_at_ms is not None:
+                raise ValueError("claim_lost renewal cannot include a lease")
+        else:
+            if (
+                self.lease_expires_at_ms is None
+                or isinstance(self.lease_expires_at_ms, bool)
+                or not isinstance(self.lease_expires_at_ms, int)
+                or self.lease_expires_at_ms < 0
+            ):
+                raise ValueError("renewal requires a non-negative lease expiry")
+            if self.revision is not None:
+                raise ValueError("successful renewal cannot include a revision")
+        if self.schema_version != "vv-agent.checkpoint-renewal.v1":
+            raise ValueError("unsupported checkpoint renewal schema_version")
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"schema_version": self.schema_version, "outcome": self.outcome.value}
+        if self.outcome is RenewOutcome.CLAIM_LOST:
+            payload["revision"] = self.revision
+        else:
+            payload["lease_expires_at_ms"] = self.lease_expires_at_ms
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> CheckpointRenewal:
+        if not isinstance(payload, dict):
+            raise ValueError("checkpoint renewal must be an object")
+        outcome = RenewOutcome(payload.get("outcome"))
+        expected = (
+            {"schema_version", "outcome", "revision"}
+            if outcome is RenewOutcome.CLAIM_LOST
+            else {"schema_version", "outcome", "lease_expires_at_ms"}
+        )
+        if set(payload) != expected:
+            raise ValueError("checkpoint renewal has missing or unknown fields")
+        return cls(
+            outcome=outcome,
+            lease_expires_at_ms=payload.get("lease_expires_at_ms"),
+            revision=payload.get("revision"),
+            schema_version=payload.get("schema_version", ""),
+        )
 
 
 class CheckpointConflictError(RuntimeError):
@@ -119,6 +190,16 @@ class OperationError:
         )
 
 
+def operation_error_from_tool_result(result: ToolExecutionResult) -> OperationError:
+    """Project a failed tool result into the journal's diagnostic error."""
+    retryable = result.metadata.get("retryable")
+    return OperationError(
+        code=result.error_code or "tool_operation_failed",
+        message=result.content or "tool operation failed",
+        retryable=retryable if isinstance(retryable, bool) else False,
+    )
+
+
 @dataclass(slots=True)
 class OperationJournalEntry:
     kind: OperationKind
@@ -140,6 +221,9 @@ class OperationJournalEntry:
     model: str | None = None
     call_id: str | None = None
     deferred_handle: DeferredToolHandle | None = None
+    identity_key: str | None = None
+    result_digest: str | None = None
+    resume_observation: ResumeObservation | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, OperationKind):
@@ -262,13 +346,34 @@ class OperationJournalEntry:
                     "deferred_handle must be a DeferredToolHandle",
                     code="deferred_handle_invalid",
                 )
-            if self.state is OperationState.DEFERRED:
-                if self.deferred_handle is None or self.result is not None or self.error is not None:
-                    raise CheckpointError(
-                        "deferred operation requires an exact handle and no receipt",
-                        code="operation_deferred_fields_invalid",
-                    )
-            elif self.deferred_handle is not None:
+            if self.state is OperationState.DEFERRED and (
+                self.deferred_handle is None
+                or self.result is not None
+                or self.error is not None
+                or self.identity_key is not None
+                or self.result_digest is not None
+                or self.resume_observation is not None
+            ):
+                raise CheckpointError(
+                    "deferred operation requires an exact handle and no receipt",
+                    code="operation_deferred_fields_invalid",
+                )
+            if self.identity_key is not None:
+                try:
+                    validate_sha256(self.identity_key, "tool identity_key")
+                except ValueError as exc:
+                    raise CheckpointError(str(exc), code="tool_receipt_identity_invalid") from exc
+            if self.result_digest is not None:
+                try:
+                    validate_sha256(self.result_digest, "tool result_digest")
+                except ValueError as exc:
+                    raise CheckpointError(str(exc), code="tool_receipt_digest_invalid") from exc
+            if self.resume_observation is not None and not isinstance(self.resume_observation, ResumeObservation):
+                raise CheckpointError(
+                    "tool resume_observation must be a ResumeObservation",
+                    code="tool_resume_observation_invalid",
+                )
+            if self.deferred_handle is not None and self.state is not OperationState.DEFERRED:
                 raise CheckpointError(
                     "only deferred operation entries may contain deferred_handle",
                     code="operation_deferred_fields_invalid",
@@ -282,6 +387,15 @@ class OperationJournalEntry:
                 )
             canonical_json_bytes(receipt, "operation success receipt")
             if self.kind is OperationKind.TOOL:
+                if self.identity_key is None or self.result_digest is None or self.resume_observation is not None:
+                    raise CheckpointError(
+                        "successful tool receipt requires identity_key and result_digest",
+                        code=(
+                            "operation_receipt_identity_required"
+                            if self.identity_key is None
+                            else "operation_result_digest_required"
+                        ),
+                    )
                 try:
                     parsed_result = ToolExecutionResult.from_dict(receipt)
                 except (TypeError, ValueError) as exc:
@@ -289,17 +403,103 @@ class OperationJournalEntry:
                         "tool operation receipt is not a current ToolExecutionResult",
                         code="operation_receipt_invalid",
                     ) from exc
+                if parsed_result.status_code is not ToolResultStatus.SUCCESS:
+                    raise CheckpointError(
+                        "succeeded tool receipt must contain a SUCCESS result",
+                        code="operation_receipt_invalid",
+                    )
                 if parsed_result.to_dict() != receipt:
                     raise CheckpointError(
                         "tool operation receipt is not canonical",
                         code="operation_receipt_invalid",
                     )
+                if canonical_json_sha256(parsed_result.to_dict(), "tool result") != self.result_digest:
+                    raise CheckpointError(
+                        "tool result_digest does not match result",
+                        code="tool_receipt_digest_invalid",
+                    )
         elif self.state is OperationState.FAILED:
-            if self.error is None or self.response is not None or self.result is not None:
+            synthetic_cancelled = (
+                self.kind is OperationKind.TOOL and self.error is not None and self.error.code == "tool_cancelled"
+            )
+            if synthetic_cancelled:
+                if self.resume_observation is None:
+                    raise CheckpointError(
+                        "synthetic tool outcome requires a resume observation",
+                        code="operation_resume_observation_required",
+                    )
+                if self.result is not None or self.result_digest is not None:
+                    raise CheckpointError(
+                        "synthetic tool outcome cannot contain a definitive receipt",
+                        code="operation_closure_receipt_forbidden",
+                    )
+            if self.error is None or self.response is not None:
                 raise CheckpointError(
                     "failed operation requires exactly one typed error",
                     code="operation_error_required",
                 )
+            if self.kind is OperationKind.TOOL:
+                if self.identity_key is None:
+                    raise CheckpointError(
+                        "failed tool receipt requires identity_key",
+                        code="operation_receipt_identity_required",
+                    )
+                if synthetic_cancelled:
+                    return
+                if self.result is None:
+                    raise CheckpointError(
+                        "failed tool receipt requires result",
+                        code="operation_result_required",
+                    )
+                if self.result_digest is None:
+                    raise CheckpointError(
+                        "failed tool receipt requires result_digest",
+                        code="operation_result_digest_required",
+                    )
+                try:
+                    parsed_result = ToolExecutionResult.from_dict(self.result)
+                except (TypeError, ValueError) as exc:
+                    raise CheckpointError(
+                        "failed tool receipt result is invalid",
+                        code="operation_failed_result_status_invalid",
+                    ) from exc
+                if parsed_result.status_code.value != "ERROR":
+                    raise CheckpointError(
+                        "failed tool receipt must contain an ERROR result",
+                        code="operation_failed_result_status_invalid",
+                    )
+                if parsed_result.tool_call_id != self.tool_call_id:
+                    raise CheckpointError(
+                        "failed tool receipt tool_call_id does not match its journal entry",
+                        code="tool_receipt_identity_invalid",
+                    )
+                if parsed_result.to_dict() != self.result:
+                    raise CheckpointError(
+                        "failed tool receipt is not canonical",
+                        code="operation_receipt_invalid",
+                    )
+                if canonical_json_sha256(parsed_result.to_dict(), "tool result") != self.result_digest:
+                    raise CheckpointError(
+                        "failed tool result_digest does not match result",
+                        code="operation_result_digest_mismatch",
+                    )
+                expected_error = operation_error_from_tool_result(parsed_result)
+                if self.error != expected_error:
+                    raise CheckpointError(
+                        "failed tool error projection does not match result",
+                        code="operation_error_projection_mismatch",
+                    )
+                if self.error.code == "tool_outcome_unknown":
+                    if self.resume_observation is None:
+                        raise CheckpointError(
+                            "unknown tool outcome requires a resume observation",
+                            code="operation_resume_observation_required",
+                        )
+                elif self.resume_observation is not None:
+                    raise CheckpointError(
+                        "ordinary failed tool receipt cannot contain resume_observation",
+                        code="operation_resume_observation_forbidden",
+                    )
         elif self.state is OperationState.DEFERRED:
             # The tool-specific branch above enforces the closed deferred
             # shape; model entries can never be deferred.
@@ -308,10 +508,18 @@ class OperationJournalEntry:
                     "model operation entries cannot be deferred",
                     code="operation_deferred_fields_invalid",
                 )
-        elif self.response is not None or self.result is not None or self.error is not None:
+        elif (
+            self.response is not None
+            or self.result is not None
+            or self.error is not None
+            or self.identity_key is not None
+            or self.result_digest is not None
+            or self.resume_observation is not None
+            or self.deferred_handle is not None
+        ):
             raise CheckpointError(
-                f"{self.state.value} operation cannot contain a receipt",
-                code="operation_receipt_forbidden",
+                "non-terminal operation cannot contain a receipt",
+                code="operation_receipt_unexpected",
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -350,6 +558,12 @@ class OperationJournalEntry:
             )
             if self.deferred_handle is not None:
                 payload["deferred_handle"] = self.deferred_handle.to_dict()
+            if self.identity_key is not None:
+                payload["identity_key"] = self.identity_key
+            if self.result_digest is not None:
+                payload["result_digest"] = self.result_digest
+            if self.resume_observation is not None:
+                payload["resume_observation"] = self.resume_observation.to_dict()
         payload["error"] = self.error.to_dict() if self.error is not None else None
         return payload
 
@@ -368,8 +582,8 @@ class OperationJournalEntry:
                 code="operation_entry_invalid",
             )
         try:
-            kind = OperationKind(payload.get("kind"))
-        except (TypeError, ValueError) as exc:
+            kind = OperationKind(payload["kind"])
+        except (KeyError, TypeError, ValueError) as exc:
             raise CheckpointError(
                 "operation kind is invalid",
                 code="operation_kind_fields_invalid",
@@ -381,7 +595,7 @@ class OperationJournalEntry:
                 "operation state is invalid",
                 code="operation_state_invalid",
             ) from exc
-        model_fields = {
+        common_fields = {
             "kind",
             "operation_id",
             "cycle_index",
@@ -389,6 +603,8 @@ class OperationJournalEntry:
             "request_digest",
             "idempotency_key",
             "state",
+        }
+        model_fields = common_fields | {
             "response",
             "error",
             "model_operation",
@@ -396,23 +612,30 @@ class OperationJournalEntry:
             "model",
             "call_id",
         }
-        tool_fields = {
-            "kind",
-            "operation_id",
-            "cycle_index",
-            "attempt",
-            "request_digest",
+        tool_fields = common_fields | {
             "tool_call_id",
             "tool_name",
             "arguments",
-            "idempotency_key",
             "idempotency_support",
-            "state",
             "result",
             "error",
         }
-        if state is OperationState.DEFERRED:
-            tool_fields.add("deferred_handle")
+        try:
+            error_payload = payload["error"]
+        except KeyError:
+            error_payload = None
+        is_synthetic_closure = (
+            kind is OperationKind.TOOL
+            and state is OperationState.FAILED
+            and isinstance(error_payload, dict)
+            and error_payload.get("code") == "tool_cancelled"
+        )
+        is_unknown_outcome = (
+            kind is OperationKind.TOOL
+            and state is OperationState.FAILED
+            and isinstance(error_payload, dict)
+            and error_payload.get("code") == "tool_outcome_unknown"
+        )
         if kind is OperationKind.MODEL and not {
             "model_operation",
             "backend",
@@ -423,12 +646,118 @@ class OperationJournalEntry:
                 "model journal entry is missing model identity fields",
                 code="model_identity_invalid",
             )
-        if set(payload) != (model_fields if kind is OperationKind.MODEL else tool_fields):
+        if kind is OperationKind.MODEL:
+            expected_fields = model_fields
+        elif state is OperationState.DEFERRED:
+            expected_fields = tool_fields | {"deferred_handle"}
+        elif state is OperationState.SUCCEEDED:
+            expected_fields = tool_fields | {"identity_key", "result_digest"}
+        elif state is OperationState.FAILED and is_synthetic_closure:
+            expected_fields = tool_fields | {"identity_key", "resume_observation"}
+        elif state is OperationState.FAILED:
+            expected_fields = tool_fields | {"identity_key", "result_digest"}
+            if is_unknown_outcome:
+                expected_fields.add("resume_observation")
+        else:
+            expected_fields = tool_fields
+
+        missing_fields = expected_fields - set(payload)
+        if missing_fields:
+            if kind is OperationKind.MODEL and missing_fields & {
+                "model_operation",
+                "backend",
+                "model",
+                "call_id",
+            }:
+                raise CheckpointError(
+                    "model journal entry is missing model identity fields",
+                    code="model_identity_invalid",
+                )
+            if kind is OperationKind.MODEL and state is OperationState.FAILED and "error" in missing_fields:
+                raise CheckpointError(
+                    "failed operation requires exactly one typed error",
+                    code="operation_error_required",
+                )
+            if kind is OperationKind.MODEL and state is OperationState.SUCCEEDED and "response" in missing_fields:
+                raise CheckpointError(
+                    "succeeded operation requires exactly one success receipt",
+                    code="operation_receipt_required",
+                )
+            if kind is OperationKind.TOOL:
+                if state is OperationState.SUCCEEDED and ("result" in missing_fields or payload["result"] is None):
+                    raise CheckpointError(
+                        "succeeded operation requires exactly one success receipt",
+                        code="operation_receipt_required",
+                    )
+                if "identity_key" in missing_fields:
+                    raise CheckpointError(
+                        "tool receipt requires identity_key",
+                        code="operation_receipt_identity_required",
+                    )
+                if "result_digest" in missing_fields:
+                    raise CheckpointError(
+                        "tool receipt requires result_digest",
+                        code="operation_result_digest_required",
+                    )
+                if "result" in missing_fields and state is OperationState.FAILED:
+                    raise CheckpointError(
+                        "failed tool receipt requires result",
+                        code="operation_result_required",
+                    )
+                if "error" in missing_fields and state is OperationState.FAILED:
+                    raise CheckpointError(
+                        "failed operation requires exactly one typed error",
+                        code="operation_error_required",
+                    )
+                if "resume_observation" in missing_fields and (is_synthetic_closure or is_unknown_outcome):
+                    raise CheckpointError(
+                        "unknown tool outcome requires a resume observation",
+                        code="operation_resume_observation_required",
+                    )
+                if "deferred_handle" in missing_fields:
+                    raise CheckpointError(
+                        "deferred operation requires an exact handle and no receipt",
+                        code="operation_deferred_fields_invalid",
+                    )
             raise CheckpointError(
-                "operation journal fields do not match operation kind",
+                "operation journal entry is missing required fields",
                 code="operation_kind_fields_invalid",
             )
-        error_raw = payload.get("error")
+        if kind is OperationKind.TOOL and state is OperationState.FAILED:
+            if is_synthetic_closure and "result_digest" in payload:
+                raise CheckpointError(
+                    "synthetic tool outcome cannot contain a definitive receipt",
+                    code="operation_closure_receipt_forbidden",
+                )
+            if not is_synthetic_closure and not is_unknown_outcome and "resume_observation" in payload:
+                raise CheckpointError(
+                    "ordinary failed tool receipt cannot contain resume_observation",
+                    code="operation_resume_observation_forbidden",
+                )
+        if (
+            kind is OperationKind.TOOL
+            and state
+            in {
+                OperationState.PLANNED,
+                OperationState.STARTED,
+                OperationState.DEFERRED,
+                OperationState.AMBIGUOUS,
+            }
+            and "resume_observation" in payload
+        ):
+            raise CheckpointError(
+                "non-terminal operation cannot contain a receipt",
+                code=(
+                    "operation_deferred_fields_invalid" if state is OperationState.DEFERRED else "operation_receipt_unexpected"
+                ),
+            )
+        extra_fields = set(payload) - expected_fields
+        cross_kind_fields = (tool_fields if kind is OperationKind.MODEL else model_fields) & extra_fields
+        if extra_fields:
+            raise CheckpointError(
+                "operation journal contains unknown fields",
+                code=("operation_kind_fields_invalid" if cross_kind_fields else "operation_entry_unknown_field"),
+            )
         return cls(
             kind=kind,
             operation_id=_required_string(payload, "operation_id"),
@@ -436,19 +765,38 @@ class OperationJournalEntry:
             attempt=_required_integer(payload, "attempt"),
             state=state,
             request_digest=_required_string(payload, "request_digest"),
-            idempotency_key=payload.get("idempotency_key"),
-            response=payload.get("response"),
-            result=payload.get("result"),
-            error=OperationError.from_dict(error_raw) if error_raw is not None else None,
-            tool_call_id=payload.get("tool_call_id"),
-            tool_name=payload.get("tool_name"),
-            arguments=payload.get("arguments"),
-            idempotency_support=(payload.get("idempotency_support") if kind is OperationKind.TOOL else None),
-            model_operation=(payload.get("model_operation") if kind is OperationKind.MODEL else None),
-            backend=(payload.get("backend") if kind is OperationKind.MODEL else None),
-            model=(payload.get("model") if kind is OperationKind.MODEL else None),
-            call_id=(payload.get("call_id") if kind is OperationKind.MODEL else None),
-            deferred_handle=(DeferredToolHandle.from_dict(payload["deferred_handle"]) if "deferred_handle" in payload else None),
+            idempotency_key=payload["idempotency_key"],
+            response=payload["response"] if kind is OperationKind.MODEL else None,
+            result=payload["result"] if kind is OperationKind.TOOL else None,
+            error=OperationError.from_dict(payload["error"]) if payload["error"] is not None else None,
+            tool_call_id=payload["tool_call_id"] if kind is OperationKind.TOOL else None,
+            tool_name=payload["tool_name"] if kind is OperationKind.TOOL else None,
+            arguments=payload["arguments"] if kind is OperationKind.TOOL else None,
+            idempotency_support=payload["idempotency_support"] if kind is OperationKind.TOOL else None,
+            model_operation=payload["model_operation"] if kind is OperationKind.MODEL else None,
+            backend=payload["backend"] if kind is OperationKind.MODEL else None,
+            model=payload["model"] if kind is OperationKind.MODEL else None,
+            call_id=payload["call_id"] if kind is OperationKind.MODEL else None,
+            deferred_handle=(
+                DeferredToolHandle.from_dict(payload["deferred_handle"]) if state is OperationState.DEFERRED else None
+            ),
+            identity_key=(
+                payload["identity_key"]
+                if kind is OperationKind.TOOL and state in {OperationState.SUCCEEDED, OperationState.FAILED}
+                else None
+            ),
+            result_digest=(
+                payload["result_digest"]
+                if kind is OperationKind.TOOL
+                and state in {OperationState.SUCCEEDED, OperationState.FAILED}
+                and not is_synthetic_closure
+                else None
+            ),
+            resume_observation=(
+                ResumeObservation.from_dict(payload["resume_observation"])
+                if kind is OperationKind.TOOL and state is OperationState.FAILED and (is_synthetic_closure or is_unknown_outcome)
+                else None
+            ),
         )
 
 
@@ -576,6 +924,7 @@ class Checkpoint:
     status: AgentStatus
     messages: list[Message]
     cycles: list[CycleRecord]
+    cancel_requested: bool = False
     active_host_interaction: dict[str, Any] | None = None
     suspended_origin: dict[str, Any] | None = None
     model_calls: list[ModelCallRecord] = field(default_factory=list)
@@ -670,6 +1019,20 @@ class CheckpointStore(Protocol):
         claim_token: str,
         lease_expires_at_ms: int,
         now_ms: int,
+    ) -> CheckpointRenewal: ...
+
+    def record_tool_receipt(
+        self,
+        checkpoint: Checkpoint,
+        *,
+        operation_id: str,
+        attempt: int,
+        tool_call_id: str,
+        request_digest: str,
+        result: ToolExecutionResult,
+        claim_token: str,
+        expected_revision: int,
+        claimed_cycle: int,
     ) -> bool: ...
 
     def acknowledge_terminal(self, checkpoint_key: str, *, expected_revision: int) -> bool: ...
@@ -747,9 +1110,7 @@ class CheckpointStore(Protocol):
         now_ms: int,
     ) -> Any: ...
 
-    def reap_controller_command_wake(self, *, command_id: str, now_ms: int) -> Any: ...
-
-    def reap_controller_command_wakes(self, *, now_ms: int) -> list[Any]: ...
+    def reap_controller_command_wakes(self, checkpoint_key: str, now_ms: int) -> list[Any]: ...
 
     def produce_host_interaction(
         self,
@@ -850,6 +1211,11 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         raise CheckpointError(str(exc), code="checkpoint_revision_invalid") from exc
     if not isinstance(checkpoint.status, AgentStatus):
         raise TypeError("checkpoint status must be an AgentStatus")
+    if not isinstance(checkpoint.cancel_requested, bool):
+        raise CheckpointError(
+            "checkpoint cancel_requested must be a boolean",
+            code="checkpoint_status_invalid",
+        )
     _validate_host_interaction_request(checkpoint.active_host_interaction, "active_host_interaction")
     _validate_suspended_origin(checkpoint.suspended_origin)
     if checkpoint.status is AgentStatus.HOST_INTERACTION:
@@ -969,12 +1335,80 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 "journal cycle_index must equal active cycle",
                 code="checkpoint_journal_cycle_invalid",
             )
+        entry.__post_init__()
     validate_model_journal_accounting(checkpoint)
     for entry in checkpoint.tool_journal:
         if entry.kind is not OperationKind.TOOL:
             raise CheckpointError(
                 "tool_journal contains a non-tool entry",
                 code="operation_kind_fields_invalid",
+            )
+        if entry.state is OperationState.DEFERRED:
+            handle = entry.deferred_handle
+            if handle is None or (
+                handle.checkpoint_key != checkpoint.checkpoint_key
+                or handle.operation_id != entry.operation_id
+                or handle.attempt != entry.attempt
+                or handle.request_digest != entry.request_digest
+            ):
+                raise CheckpointError(
+                    "deferred handle identity does not match its journal entry",
+                    code="deferred_handle_invalid",
+                )
+            continue
+        if entry.state not in {OperationState.SUCCEEDED, OperationState.FAILED}:
+            continue
+        expected_identity = compute_tool_identity_key(
+            checkpoint.checkpoint_key,
+            entry.operation_id,
+            entry.attempt,
+            entry.tool_call_id or "",
+            entry.request_digest,
+        )
+        if entry.identity_key != expected_identity:
+            raise CheckpointError(
+                "terminal tool journal identity_key does not match its identity fields",
+                code="tool_receipt_identity_invalid",
+            )
+        if entry.result is not None:
+            try:
+                parsed_result = ToolExecutionResult.from_dict(entry.result)
+            except (TypeError, ValueError) as exc:
+                raise CheckpointError(
+                    "terminal tool journal result is invalid",
+                    code="tool_receipt_identity_invalid",
+                ) from exc
+            if parsed_result.tool_call_id != entry.tool_call_id:
+                raise CheckpointError(
+                    "terminal tool result tool_call_id does not match its journal entry",
+                    code="tool_receipt_identity_invalid",
+                )
+        if entry.result_digest is None:
+            continue
+        expected_event_id = f"evt_receipt_{entry.identity_key}"
+        matching_events = [item for item in checkpoint.event_outbox if item.event_id == expected_event_id]
+        if len(matching_events) != 1 or matching_events[0].event.get("type") != "tool_call_completed":
+            raise CheckpointError(
+                "terminal tool journal has no canonical receipt completion event",
+                code="tool_receipt_identity_invalid",
+            )
+        completed_event = matching_events[0].event
+        if any(
+            completed_event.get(field) != expected
+            for field, expected in (
+                ("operation_id", entry.operation_id),
+                ("attempt", entry.attempt),
+                ("tool_call_id", entry.tool_call_id),
+            )
+        ):
+            raise CheckpointError(
+                "receipt completion event does not match its terminal tool journal",
+                code="tool_receipt_identity_invalid",
+            )
+        if "checkpoint_key" in completed_event and completed_event["checkpoint_key"] != checkpoint.checkpoint_key:
+            raise CheckpointError(
+                "receipt completion event checkpoint_key does not match its checkpoint",
+                code="tool_receipt_identity_invalid",
             )
     ambiguous = [entry for entry in journals if entry.state is OperationState.AMBIGUOUS]
     deferred_entries = [entry for entry in checkpoint.tool_journal if entry.state is OperationState.DEFERRED]
@@ -1016,7 +1450,10 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 "terminal result model-call ledger does not match checkpoint",
                 code="checkpoint_status_invalid",
             )
-        if journals and not _is_operator_abort_terminal(checkpoint, ambiguous):
+        if any(
+            entry.state in {OperationState.PLANNED, OperationState.STARTED, OperationState.DEFERRED, OperationState.AMBIGUOUS}
+            for entry in journals
+        ):
             raise CheckpointError(
                 "terminal checkpoint cannot retain active journals",
                 code="checkpoint_status_invalid",
@@ -1029,6 +1466,51 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
                 str(exc),
                 code="checkpoint_extension_namespace_invalid",
             ) from exc
+
+
+def validate_checkpoint_creation(checkpoint: Checkpoint) -> None:
+    validate_checkpoint(checkpoint)
+
+    def invalid(message: str) -> CheckpointError:
+        return CheckpointError(message, code="checkpoint_initial_invalid")
+
+    if checkpoint.revision != 0:
+        raise invalid("new checkpoints must start at revision zero")
+    if checkpoint.resume_attempt != 1:
+        raise invalid("new checkpoints must start at resume_attempt one")
+    if any(value is not None for value in (checkpoint.claim_token, checkpoint.claimed_cycle, checkpoint.lease_expires_at_ms)):
+        raise invalid("new checkpoints must not carry an execution claim")
+    if checkpoint.status in {AgentStatus.WAIT_USER, AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.MAX_CYCLES}:
+        raise invalid("new checkpoints must be non-terminal")
+    if checkpoint.terminal_result is not None or checkpoint.terminal_acknowledged:
+        raise invalid("new checkpoints must be non-terminal")
+    has_only_creation_event = not checkpoint.event_outbox
+    if len(checkpoint.event_outbox) == 1:
+        entry = checkpoint.event_outbox[0]
+        event = entry.event
+        has_only_creation_event = (
+            entry.state == "pending"
+            and entry.cursor is None
+            and event.get("type") == "checkpoint_created"
+            and event.get("cycle_index") == 0
+            and event.get("checkpoint_key") == checkpoint.checkpoint_key
+            and event.get("resume_attempt") == 1
+        )
+    if (
+        checkpoint.cancel_requested
+        or checkpoint.active_host_interaction is not None
+        or checkpoint.suspended_origin is not None
+        or checkpoint.event_cursor is not None
+        or checkpoint.cycles
+        or checkpoint.model_calls
+        or not has_only_creation_event
+        or checkpoint.model_call_journal
+        or checkpoint.tool_journal
+    ):
+        raise CheckpointError(
+            "new checkpoints must not carry persisted lifecycle state",
+            code="checkpoint_initial_invalid",
+        )
 
 
 def _validate_host_interaction_request(value: Any, field_name: str) -> None:
@@ -1062,6 +1544,11 @@ def _validate_host_interaction_request(value: Any, field_name: str) -> None:
         raise CheckpointError(
             f"{field_name}.prompt is invalid",
             code="host_interaction_content_too_large" if isinstance(prompt, str) else "host_interaction_fields_invalid",
+        )
+    if sanitize_host_prompt(prompt) != prompt:
+        raise CheckpointError(
+            f"{field_name}.prompt is not sanitized",
+            code="host_interaction_fields_invalid",
         )
     request_digest = value.get("request_digest")
     if not isinstance(request_digest, str) or len(request_digest.encode("utf-8")) != 64:
@@ -1321,6 +1808,149 @@ def checkpoint_definition_matches(current: Checkpoint, snapshot: Checkpoint) -> 
     )
 
 
+def merge_event_outbox(
+    authoritative: list[EventOutboxEntry],
+    candidate: list[EventOutboxEntry],
+) -> list[EventOutboxEntry]:
+    merged = deepcopy(authoritative)
+    by_id = {entry.event_id: entry for entry in merged}
+    for entry in candidate:
+        entry.verify_payload()
+        current = by_id.get(entry.event_id)
+        if current is None:
+            current = deepcopy(entry)
+            merged.append(current)
+            by_id[entry.event_id] = current
+        elif current.payload_digest != entry.payload_digest or current.event != entry.event:
+            raise CheckpointError(
+                f"checkpoint event id {entry.event_id!r} has conflicting payload bytes",
+                code="event_identity_conflict",
+            )
+    return merged
+
+
+TOOL_CANCELLED_MESSAGE = "Tool execution ended before a definitive receipt; external effect remains unknown."
+TOOL_UNKNOWN_OUTCOME_MESSAGE = "The tool outcome is unknown."
+
+
+def compute_tool_identity_key(
+    checkpoint_key: str,
+    operation_id: str,
+    attempt: int,
+    tool_call_id: str,
+    request_digest: str,
+) -> str:
+    return canonical_json_sha256(
+        {
+            "attempt": attempt,
+            "checkpoint_key": checkpoint_key,
+            "operation_id": operation_id,
+            "request_digest": request_digest,
+            "tool_call_id": tool_call_id,
+        },
+        "tool identity",
+    )
+
+
+def _terminal_abort_reason(terminal: AgentResult) -> str | None:
+    error_code = terminal.error_code
+    if error_code is None and isinstance(terminal.error, dict):
+        error_code = terminal.error.get("code")
+    return {
+        "cancelled_with_unknown_outcome": "cancelled",
+        "operator_abort_with_unknown_outcome": "operator_abort",
+        "lease_lost_with_unknown_outcome": "lease_lost",
+    }.get(error_code or "")
+
+
+def _close_unclosed_tools(
+    checkpoint: Checkpoint,
+) -> list[ResumeObservation]:
+    observations: list[ResumeObservation] = []
+    for entry in checkpoint.tool_journal:
+        if entry.state not in {
+            OperationState.PLANNED,
+            OperationState.STARTED,
+            OperationState.DEFERRED,
+            OperationState.AMBIGUOUS,
+        }:
+            continue
+        observation = ResumeObservation(
+            operation_id=entry.operation_id,
+            operation_kind=entry.kind,
+            cycle_index=entry.cycle_index,
+            risk="unknown_tool_side_effect",
+            idempotency_support=entry.idempotency_support,
+        )
+        entry.state = OperationState.FAILED
+        entry.deferred_handle = None
+        entry.result = None
+        entry.error = OperationError(
+            code="tool_cancelled",
+            message=TOOL_CANCELLED_MESSAGE,
+            retryable=False,
+        )
+        entry.identity_key = compute_tool_identity_key(
+            checkpoint.checkpoint_key,
+            entry.operation_id,
+            entry.attempt,
+            entry.tool_call_id or "",
+            entry.request_digest,
+        )
+        entry.result_digest = None
+        entry.resume_observation = observation
+        observations.append(observation)
+    observations.sort(key=lambda item: (item.operation_id, item.operation_kind.value, item.cycle_index))
+    return observations
+
+
+def _merge_resume_observations(
+    existing: list[ResumeObservation],
+    additions: list[ResumeObservation],
+) -> list[ResumeObservation]:
+    merged: dict[tuple[str, str, int], ResumeObservation] = {}
+    for observation in [*existing, *additions]:
+        key = (
+            observation.operation_id,
+            observation.operation_kind.value,
+            observation.cycle_index,
+        )
+        merged[key] = observation
+    return [merged[key] for key in sorted(merged)]
+
+
+def _append_cycle_aborted_event(checkpoint: Checkpoint, *, logical_cycle: int, reason: str) -> None:
+    from vv_agent.events import CycleAbortedEvent
+
+    event = CycleAbortedEvent(
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        cycle_index=logical_cycle - 1,
+        logical_cycle=logical_cycle,
+        reason=reason,
+        event_id=f"evt_cycle_aborted_{reason}",
+    ).to_dict()
+    existing = next((entry for entry in checkpoint.event_outbox if entry.event_id == event["event_id"]), None)
+    if existing is not None:
+        existing.verify_payload()
+        durable_identity = {key: value for key, value in existing.event.items() if key != "created_at"}
+        requested_identity = {key: value for key, value in event.items() if key != "created_at"}
+        if durable_identity != requested_identity:
+            raise CheckpointError("cycle_aborted event identity conflicts", code="event_identity_conflict")
+        return
+    entry = EventOutboxEntry.pending(event["event_id"], event)
+    terminal_index = next(
+        (
+            index
+            for index, existing_entry in enumerate(checkpoint.event_outbox)
+            if existing_entry.event.get("type") in {"run_completed", "run_failed", "run_cancelled"}
+            or (existing_entry.event.get("type") == "run_state_changed" and existing_entry.event.get("state") != "running")
+        ),
+        len(checkpoint.event_outbox),
+    )
+    checkpoint.event_outbox.insert(terminal_index, entry)
+
+
 def prepare_claimed_terminal(
     current: Checkpoint,
     checkpoint: Checkpoint,
@@ -1339,19 +1969,90 @@ def prepare_claimed_terminal(
         or not checkpoint_definition_matches(current, checkpoint)
     ):
         return None
+    checkpoint.cancel_requested = current.cancel_requested
+    checkpoint.event_outbox = merge_event_outbox(current.event_outbox, checkpoint.event_outbox)
+    checkpoint.event_cursor = deepcopy(current.event_cursor)
     validate_model_journal_accounting(checkpoint)
-    journals = [*checkpoint.model_call_journal, *checkpoint.tool_journal]
-    ambiguous = [entry for entry in journals if entry.state is OperationState.AMBIGUOUS]
-    preserve_ambiguity = _is_operator_abort_terminal(checkpoint, ambiguous)
+    terminal_result = deepcopy(checkpoint.terminal_result)
+    assert terminal_result is not None
+    reason = _terminal_abort_reason(terminal_result)
+    logical_cycle = checkpoint.cycle_index + 1
+    existing_observations = list(terminal_result.resume_observations)
+    observations: list[ResumeObservation] = []
+    if reason is not None:
+        observations = _close_unclosed_tools(checkpoint)
+        terminal_result.resume_observations = _merge_resume_observations(existing_observations, observations)
+        has_unclosed_cycle = any(
+            entry.state in {OperationState.PLANNED, OperationState.STARTED, OperationState.DEFERRED, OperationState.AMBIGUOUS}
+            for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
+        )
+        if terminal_result.resume_observations or has_unclosed_cycle:
+            _append_cycle_aborted_event(checkpoint, logical_cycle=logical_cycle, reason=reason)
+    checkpoint.terminal_result = terminal_result
+    preserve_model_journal = reason is not None
+    preserve_journals = bool(reason is not None and observations)
     terminal = replace(
         deepcopy(checkpoint),
         revision=expected_revision + 1,
         claim_token=None,
         claimed_cycle=None,
         lease_expires_at_ms=None,
-        model_call_journal=(deepcopy(checkpoint.model_call_journal) if preserve_ambiguity else []),
-        tool_journal=(deepcopy(checkpoint.tool_journal) if preserve_ambiguity else []),
+        model_call_journal=(
+            [
+                deepcopy(entry)
+                for entry in checkpoint.model_call_journal
+                if entry.state
+                not in {
+                    OperationState.PLANNED,
+                    OperationState.STARTED,
+                    OperationState.DEFERRED,
+                    OperationState.AMBIGUOUS,
+                }
+            ]
+            if preserve_model_journal
+            else []
+        ),
+        tool_journal=(deepcopy(checkpoint.tool_journal) if preserve_journals else []),
     )
+    validate_checkpoint(terminal)
+    return terminal
+
+
+def prepare_unclaimed_terminal(checkpoint: Checkpoint) -> Checkpoint:
+    if checkpoint.terminal_result is None or checkpoint.claim_token is not None:
+        raise ValueError("unclaimed terminal preparation requires a terminal result and no claim")
+    terminal = deepcopy(checkpoint)
+    result = terminal.terminal_result
+    assert result is not None
+    reason = _terminal_abort_reason(result)
+    logical_cycle = terminal.cycle_index + 1
+    existing_observations = list(result.resume_observations)
+    observations: list[ResumeObservation] = []
+    if reason is not None:
+        observations = _close_unclosed_tools(terminal)
+        result.resume_observations = _merge_resume_observations(existing_observations, observations)
+        has_unclosed_cycle = any(
+            entry.state in {OperationState.PLANNED, OperationState.STARTED, OperationState.DEFERRED, OperationState.AMBIGUOUS}
+            for entry in [*terminal.model_call_journal, *terminal.tool_journal]
+        )
+        if result.resume_observations or has_unclosed_cycle:
+            _append_cycle_aborted_event(terminal, logical_cycle=logical_cycle, reason=reason)
+    terminal.model_call_journal = (
+        [
+            entry
+            for entry in terminal.model_call_journal
+            if entry.state
+            not in {
+                OperationState.PLANNED,
+                OperationState.STARTED,
+                OperationState.DEFERRED,
+                OperationState.AMBIGUOUS,
+            }
+        ]
+        if reason is not None
+        else []
+    )
+    terminal.tool_journal = deepcopy(terminal.tool_journal) if observations else []
     validate_checkpoint(terminal)
     return terminal
 
@@ -1397,30 +2098,6 @@ def prepare_event_delivery(
     return delivered
 
 
-def _is_operator_abort_terminal(
-    checkpoint: Checkpoint,
-    ambiguous: list[OperationJournalEntry],
-) -> bool:
-    terminal = checkpoint.terminal_result
-    journals = [*checkpoint.model_call_journal, *checkpoint.tool_journal]
-    observation = terminal.resume_observation if terminal is not None else None
-    return bool(
-        terminal is not None
-        and checkpoint.status is AgentStatus.FAILED
-        and terminal.error == "failed"
-        and terminal.error_code == "operator_abort_with_unknown_outcome"
-        and observation is not None
-        and ambiguous
-        and len(ambiguous) == len(journals)
-        and any(
-            entry.operation_id == observation.operation_id
-            and entry.kind is observation.operation_kind
-            and entry.cycle_index == observation.cycle_index
-            for entry in ambiguous
-        )
-    )
-
-
 def _wire_integer(value: Any, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_WIRE_INTEGER:
         raise ValueError(f"{field_name} must be between 0 and {MAX_WIRE_INTEGER}")
@@ -1435,14 +2112,18 @@ def _positive_wire_integer(value: Any, field_name: str) -> int:
 
 
 def _required_string(payload: dict[str, Any], field_name: str) -> str:
-    value = payload.get(field_name)
+    if field_name not in payload:
+        raise ValueError(f"{field_name} is required")
+    value = payload[field_name]
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a string")
     return value
 
 
 def _required_integer(payload: dict[str, Any], field_name: str) -> int:
-    value = payload.get(field_name)
+    if field_name not in payload:
+        raise ValueError(f"{field_name} is required")
+    value = payload[field_name]
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{field_name} must be an integer")
     return value
@@ -1454,14 +2135,21 @@ def _required_boolean(
     *,
     default: bool | None = None,
 ) -> bool:
-    value = payload.get(field_name, default)
+    if field_name in payload:
+        value = payload[field_name]
+    elif default is not None:
+        value = default
+    else:
+        raise ValueError(f"{field_name} is required")
     if not isinstance(value, bool):
         raise ValueError(f"{field_name} must be a boolean")
     return value
 
 
 def _required_object(payload: dict[str, Any], field_name: str) -> dict[str, Any]:
-    value = payload.get(field_name)
+    if field_name not in payload:
+        raise ValueError(f"{field_name} is required")
+    value = payload[field_name]
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be an object")
     return value

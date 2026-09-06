@@ -70,6 +70,13 @@ class CompletionReason(StrEnum):
     BUDGET_EXHAUSTED = "budget_exhausted"
 
 
+def _agent_result_error_text(error: dict[str, Any] | None) -> str | None:
+    if error is None:
+        return None
+    value = error.get("message") or error.get("code")
+    return value if isinstance(value, str) else None
+
+
 def _validate_no_tool_policy(value: object, field_name: str) -> NoToolPolicy | None:
     if value is None:
         return None
@@ -1354,7 +1361,7 @@ class AgentResult:
     cycles: list[CycleRecord]
     final_answer: str | None = None
     wait_reason: str | None = None
-    error: str | None = None
+    error: dict[str, Any] | None = None
     shared_state: dict[str, Any] = field(default_factory=dict)
     token_usage: TaskTokenUsage = field(default_factory=TaskTokenUsage)
     completion_reason: CompletionReason | None = None
@@ -1363,8 +1370,40 @@ class AgentResult:
     budget_usage: BudgetUsageSnapshot | None = None
     budget_exhaustion: BudgetExhaustion | None = None
     checkpoint_key: str | None = None
-    resume_observation: ResumeObservation | None = None
+    resume_observations: list[ResumeObservation] = field(default_factory=list)
     error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.error is not None:
+            if isinstance(self.error, dict):
+                if set(self.error) != {"code", "message", "retryable"}:
+                    raise ValueError("AgentResult error object has missing or unknown fields")
+                if (
+                    not isinstance(self.error["code"], str)
+                    or not self.error["code"]
+                    or not isinstance(self.error["message"], str)
+                    or not self.error["message"]
+                    or not isinstance(self.error["retryable"], bool)
+                ):
+                    raise ValueError("AgentResult error object is invalid")
+            else:
+                raise TypeError("AgentResult error must be a typed error object or None")
+        if not isinstance(self.resume_observations, list) or not all(
+            isinstance(item, ResumeObservation) for item in self.resume_observations
+        ):
+            raise TypeError("AgentResult resume_observations must contain ResumeObservation values")
+        unique: dict[tuple[str, str, int], ResumeObservation] = {}
+        for observation in self.resume_observations:
+            key = (
+                observation.operation_id,
+                observation.operation_kind.value,
+                observation.cycle_index,
+            )
+            previous = unique.get(key)
+            if previous is not None and previous != observation:
+                raise ValueError("AgentResult resume_observations contains conflicting identities")
+            unique[key] = observation
+        self.resume_observations = [unique[key] for key in sorted(unique)]
 
     @property
     def todo_list(self) -> list[dict[str, Any]]:
@@ -1374,6 +1413,9 @@ class AgentResult:
         return []
 
     def to_dict(self) -> dict[str, Any]:
+        error = self.error
+        if error is not None and not isinstance(error, dict):
+            raise TypeError("AgentResult error must be a typed error object or None")
         payload = {
             "status": self.status.value,
             "completion_reason": self.completion_reason.value if self.completion_reason is not None else None,
@@ -1383,11 +1425,11 @@ class AgentResult:
             "cycles": [c.to_dict() for c in self.cycles],
             "final_answer": self.final_answer,
             "wait_reason": self.wait_reason,
-            "error": self.error,
+            "error": error,
             "shared_state": self.shared_state,
             "token_usage": self.token_usage.to_dict(),
             "checkpoint_key": self.checkpoint_key,
-            "resume_observation": (self.resume_observation.to_dict() if self.resume_observation is not None else None),
+            "resume_observations": [observation.to_dict() for observation in self.resume_observations],
         }
         if self.budget_usage is not None:
             payload["budget_usage"] = self.budget_usage.to_dict()
@@ -1412,7 +1454,7 @@ class AgentResult:
             "shared_state",
             "token_usage",
             "checkpoint_key",
-            "resume_observation",
+            "resume_observations",
         }
         optional_fields = {"budget_usage", "budget_exhaustion", "error_code"}
         if not isinstance(data, dict):
@@ -1450,16 +1492,29 @@ class AgentResult:
         checkpoint_key = data["checkpoint_key"]
         if checkpoint_key is not None and not isinstance(checkpoint_key, str):
             raise TypeError("AgentResult field 'checkpoint_key' must be a string or None")
-        resume_observation_raw = data["resume_observation"]
-        if resume_observation_raw is not None and not isinstance(resume_observation_raw, dict):
-            raise TypeError("AgentResult field 'resume_observation' must be an object or None")
+        resume_observations_raw = data["resume_observations"]
+        if not isinstance(resume_observations_raw, list):
+            raise TypeError("AgentResult field 'resume_observations' must be a list")
         error_code = data.get("error_code")
         if "error_code" in data and not isinstance(error_code, str):
             raise TypeError("AgentResult field 'error_code' must be a string")
-        for field_name in ("final_answer", "wait_reason", "error"):
+        for field_name in ("final_answer", "wait_reason"):
             value = data[field_name]
             if value is not None and not isinstance(value, str):
                 raise TypeError(f"AgentResult field {field_name!r} must be a string or None")
+        if isinstance(data["error"], dict):
+            if set(data["error"]) != {"code", "message", "retryable"}:
+                raise ValueError("AgentResult error object has missing or unknown fields")
+            if (
+                not isinstance(data["error"]["code"], str)
+                or not data["error"]["code"]
+                or not isinstance(data["error"]["message"], str)
+                or not data["error"]["message"]
+                or not isinstance(data["error"]["retryable"], bool)
+            ):
+                raise ValueError("AgentResult error object is invalid")
+        elif data["error"] is not None:
+            raise TypeError("AgentResult field 'error' must be a typed error object or None")
         if not isinstance(data["messages"], list):
             raise TypeError("AgentResult field 'messages' must be a list")
         if not isinstance(data["cycles"], list):
@@ -1482,9 +1537,7 @@ class AgentResult:
             budget_usage=(BudgetUsageSnapshot.from_dict(budget_usage_raw) if budget_usage_raw is not None else None),
             budget_exhaustion=(BudgetExhaustion.from_dict(budget_exhaustion_raw) if budget_exhaustion_raw is not None else None),
             checkpoint_key=checkpoint_key,
-            resume_observation=(
-                ResumeObservation.from_dict(resume_observation_raw) if resume_observation_raw is not None else None
-            ),
+            resume_observations=[ResumeObservation.from_dict(item) for item in resume_observations_raw],
             error_code=error_code,
         )
         if result.to_dict() != data:

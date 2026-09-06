@@ -5,15 +5,16 @@ import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
-from vv_agent.checkpoint import CheckpointConfig, CheckpointError, ResumePolicy
+from vv_agent.checkpoint import CheckpointConfig, CheckpointError, OperationState, ResumePolicy
 from vv_agent.runtime.backends.distributed import DistributedRunHandle
-from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict
+from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict, checkpoint_to_dict
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.controller import (
@@ -28,9 +29,11 @@ from vv_agent.runtime.controller import (
     sanitize_host_prompt,
 )
 from vv_agent.runtime.engine import AgentRuntime
+from vv_agent.runtime.state import OperationJournalEntry
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.redis import RedisCheckpointStore
 from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
+from vv_agent.types import AgentStatus
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
 SetOfStrings = set[str]
@@ -41,18 +44,6 @@ def _checkpoint(key: str) -> Any:
     payload = next(case["payload"] for case in fixture["valid_cases"] if case["name"] == "minimal_running")
     payload = dict(payload)
     payload["checkpoint_key"] = key
-    return checkpoint_from_dict(payload)
-
-
-def _reconciliation_checkpoint(key: str) -> Any:
-    fixture = json.loads((FIXTURE_DIR / "checkpoint_codec.json").read_text(encoding="utf-8"))
-    payload = next(
-        case["payload"] for case in fixture["valid_cases"] if case["name"] == "reconciliation_required_retains_ambiguous_journal"
-    )
-    payload = dict(payload)
-    payload["checkpoint_key"] = key
-    payload["revision"] = 0
-    payload["resume_attempt"] = 1
     return checkpoint_from_dict(payload)
 
 
@@ -88,17 +79,23 @@ def _redis_store() -> RedisCheckpointStore:
         def multi(self) -> None:
             self.transaction = True
 
-        def set(self, key: str, value: str) -> None:
+        def set(self, key: str, value: str, *, nx: bool = False) -> None:
             if self.transaction:
-                self.commands.append(("set", key, value))
+                self.commands.append(("set_nx" if nx else "set", key, value))
             else:
-                self.client.set(key, value)
+                self.client.set(key, value, nx=nx)
 
         def sadd(self, key: str, value: str) -> None:
             if self.transaction:
                 self.commands.append(("sadd", key, value))
             else:
                 self.client.sadd(key, value)
+
+        def srem(self, key: str, value: str) -> None:
+            if self.transaction:
+                self.commands.append(("srem", key, value))
+            else:
+                self.client.srem(key, value)
 
         def delete(self, key: str) -> None:
             if self.transaction:
@@ -109,12 +106,15 @@ def _redis_store() -> RedisCheckpointStore:
         def execute(self) -> list[object]:
             result: list[object] = []
             for kind, key, value in self.commands:
-                if kind == "set":
+                if kind in {"set", "set_nx"}:
                     assert value is not None
-                    result.append(self.client.set(key, value))
+                    result.append(self.client.set(key, value, nx=kind == "set_nx"))
                 elif kind == "sadd":
                     assert value is not None
                     result.append(self.client.sadd(key, value))
+                elif kind == "srem":
+                    assert value is not None
+                    result.append(self.client.srem(key, value))
                 else:
                     result.append(self.client.delete(key))
             self.commands.clear()
@@ -140,6 +140,15 @@ def _redis_store() -> RedisCheckpointStore:
             before = len(members)
             members.add(value)
             return int(len(members) != before)
+
+        def srem(self, key: str, value: str) -> int:
+            members = self.sets.get(key)
+            if members is None or value not in members:
+                return 0
+            members.remove(value)
+            if not members:
+                self.sets.pop(key, None)
+            return 1
 
         def smembers(self, key: str) -> SetOfStrings:
             return set(self.sets.get(key, set()))
@@ -202,6 +211,41 @@ def _admit_host(store: Any, key: str = "controller-run") -> tuple[Any, HostInter
         ),
     )
     return checkpoint, request, outcome
+
+
+@pytest.mark.parametrize("store_kind", ["fake", "real"])
+def test_redis_claim_ignores_foreign_resolved_host_record(store_kind: str) -> None:
+    if store_kind == "real":
+        redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+        if not redis_url:
+            pytest.skip("set VV_AGENT_TEST_REDIS_URL for live Redis")
+        store: Any = RedisCheckpointStore(redis_url)
+    else:
+        store = _redis_store()
+    foreign_key = f"redis-foreign-record-{uuid4().hex}"
+    target_key = f"redis-foreign-target-{uuid4().hex}"
+    _foreign_checkpoint, request, _outcome = _admit_host(store, foreign_key)
+    target = _checkpoint(target_key)
+    assert store.create_checkpoint(target)
+    command = _host_response_command(store, request, key=foreign_key, command_id=f"foreign-command-{uuid4().hex}")
+    assert store.resolve_controller_command(command).kind == "applied"
+    record_key = store._host_record_key(foreign_key, request.interaction_id)  # type: ignore[attr-defined]
+    target_record_set_key = store._host_record_set_key(target_key)  # type: ignore[attr-defined]
+    store._client.sadd(target_record_set_key, record_key)  # type: ignore[attr-defined]
+    try:
+        claimed = store.claim_checkpoint(
+            target_key,
+            1,
+            claim_token="target-owner",
+            lease_expires_at_ms=10_000,
+            now_ms=1,
+            claim_mode="continue",
+        )
+        assert claimed is not None
+    finally:
+        store._client.srem(target_record_set_key, record_key)  # type: ignore[attr-defined]
+        store.delete_checkpoint(target_key)
+        store.delete_checkpoint(foreign_key)
 
 
 def _host_response_command(store: Any, request: HostInteractionRequest, *, key: str, command_id: str) -> ControllerCommand:
@@ -432,6 +476,22 @@ def test_host_response_constructor_sanitizes_and_from_dict_rejects_unsanitized()
         HostInteractionResponse.from_dict(persisted)
 
 
+def test_host_request_constructor_sanitizes_and_from_dict_rejects_unsanitized() -> None:
+    prompt = "Approve sk-request-123 at https://example.invalid/request"
+    request = HostInteractionRequest(
+        interaction_id="request-interaction",
+        logical_cycle=1,
+        operation_id="request-operation",
+        tool_call_id="request-tool",
+        prompt=prompt,
+    )
+    assert request.prompt == sanitize_host_prompt(prompt)
+    persisted = request.to_dict()
+    persisted["prompt"] = prompt
+    with pytest.raises(ValueError, match="not sanitized"):
+        HostInteractionRequest.from_dict(persisted)
+
+
 def test_controller_wire_readers_reject_null_and_unknown_digest_fields() -> None:
     request = HostInteractionRequest(
         interaction_id="strict-request",
@@ -550,10 +610,191 @@ def test_notification_reconcile_replay_conflict_and_closed_state(store: Any) -> 
         )
 
 
+@pytest.mark.parametrize("operation", ["get", "claim", "complete", "reconcile"])
+@pytest.mark.parametrize("store_kind", ["fake", "real"])
+def test_redis_notification_payload_key_binding_fails_closed(operation: str, store_kind: str) -> None:
+    if store_kind == "real":
+        redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+        if not redis_url:
+            pytest.skip("set VV_AGENT_TEST_REDIS_URL for live Redis")
+        store: Any = RedisCheckpointStore(redis_url)
+    else:
+        store = _redis_store()
+    first_key = f"redis-notification-first-{uuid4().hex}"
+    second_key = f"redis-notification-second-{uuid4().hex}"
+    _first_checkpoint, _first_request, first_outcome = _admit_host(store, first_key)
+    _second_checkpoint, _second_request, second_outcome = _admit_host(store, second_key)
+    first_notification_key = store._host_notification_key(first_outcome.notification_id)  # type: ignore[attr-defined]
+    second_notification_key = store._host_notification_key(second_outcome.notification_id)  # type: ignore[attr-defined]
+    first_payload = store._client.get(first_notification_key)  # type: ignore[attr-defined]
+    second_payload = store._client.get(second_notification_key)  # type: ignore[attr-defined]
+    assert first_payload is not None and second_payload is not None
+    claim_attempt = 0
+    try:
+        if operation in {"complete", "reconcile"}:
+            claimed = store.claim_host_interaction_notification(
+                notification_id=first_outcome.notification_id,
+                payload_digest=first_outcome.notification_payload_digest,
+                claim_token="notification-binding-owner",
+                lease_expires_at_ms=10_000,
+                now_ms=1,
+            )
+            assert claimed is not None
+            claim_attempt = int(claimed["attempt"])
+        if operation == "reconcile":
+            ambiguous = store.complete_host_interaction_notification(
+                notification_id=first_outcome.notification_id,
+                payload_digest=first_outcome.notification_payload_digest,
+                claim_token="notification-binding-owner",
+                attempt=claim_attempt,
+                outcome="ambiguous",
+                now_ms=2,
+            )
+            assert ambiguous is not None
+        store._client.set(first_notification_key, second_payload)  # type: ignore[attr-defined]
+        store._client.set(second_notification_key, first_payload)  # type: ignore[attr-defined]
+        swapped = (store._client.get(first_notification_key), store._client.get(second_notification_key))  # type: ignore[attr-defined]
+        with pytest.raises(CheckpointError) as error:
+            if operation == "get":
+                store.get_host_interaction_notification(first_outcome.notification_id)
+            elif operation == "claim":
+                store.claim_host_interaction_notification(
+                    notification_id=first_outcome.notification_id,
+                    payload_digest=first_outcome.notification_payload_digest,
+                    claim_token="notification-binding-owner",
+                    lease_expires_at_ms=10_000,
+                    now_ms=1,
+                )
+            elif operation == "complete":
+                store.complete_host_interaction_notification(
+                    notification_id=first_outcome.notification_id,
+                    payload_digest=first_outcome.notification_payload_digest,
+                    claim_token="notification-binding-owner",
+                    attempt=claim_attempt,
+                    outcome="delivered",
+                    now_ms=3,
+                )
+            else:
+                store.reconcile_host_interaction_notification(
+                    notification_id=first_outcome.notification_id,
+                    payload_digest=first_outcome.notification_payload_digest,
+                    outcome="retry",
+                    now_ms=3,
+                )
+        assert error.value.code == "host_interaction_conflict"
+        assert (store._client.get(first_notification_key), store._client.get(second_notification_key)) == swapped  # type: ignore[attr-defined]
+    finally:
+        store._client.set(first_notification_key, first_payload)  # type: ignore[attr-defined]
+        store._client.set(second_notification_key, second_payload)  # type: ignore[attr-defined]
+        store.delete_checkpoint(first_key)
+        store.delete_checkpoint(second_key)
+
+
+@pytest.mark.parametrize("store_kind", ["fake", "real"])
+def test_redis_host_replay_payload_key_binding_fails_closed(store_kind: str) -> None:
+    if store_kind == "real":
+        redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+        if not redis_url:
+            pytest.skip("set VV_AGENT_TEST_REDIS_URL for live Redis")
+        store: Any = RedisCheckpointStore(redis_url)
+    else:
+        store = _redis_store()
+    first_key = f"redis-host-replay-first-{uuid4().hex}"
+    second_key = f"redis-host-replay-second-{uuid4().hex}"
+    _first_checkpoint, first_request, first_outcome = _admit_host(store, first_key)
+    _second_checkpoint, _second_request, second_outcome = _admit_host(store, second_key)
+    first_record_key = store._host_record_key(first_key, first_request.interaction_id)  # type: ignore[attr-defined]
+    second_record_key = store._host_record_key(second_key, _second_request.interaction_id)  # type: ignore[attr-defined]
+    first_notification_key = store._host_notification_key(first_outcome.notification_id)  # type: ignore[attr-defined]
+    second_notification_key = store._host_notification_key(second_outcome.notification_id)  # type: ignore[attr-defined]
+    first_record = store._client.get(first_record_key)  # type: ignore[attr-defined]
+    second_record = store._client.get(second_record_key)  # type: ignore[attr-defined]
+    first_notification = store._client.get(first_notification_key)  # type: ignore[attr-defined]
+    second_notification = store._client.get(second_notification_key)  # type: ignore[attr-defined]
+    assert all(value is not None for value in (first_record, second_record, first_notification, second_notification))
+    context = HostInteractionAdmissionContext(
+        checkpoint_key=first_key,
+        claim_token="worker-claim",
+        expected_revision=first_outcome.checkpoint_revision - 1,
+        claimed_cycle=1,
+        now_ms=1,
+        lease_expires_at_ms=10_000,
+    )
+    try:
+        for swap_records, swap_notifications in ((True, False), (False, True)):
+            store._client.set(first_record_key, second_record if swap_records else first_record)  # type: ignore[attr-defined]
+            store._client.set(second_record_key, first_record if swap_records else second_record)  # type: ignore[attr-defined]
+            store._client.set(  # type: ignore[attr-defined]
+                first_notification_key,
+                second_notification if swap_notifications else first_notification,
+            )
+            store._client.set(  # type: ignore[attr-defined]
+                second_notification_key,
+                first_notification if swap_notifications else second_notification,
+            )
+            before = (
+                store._client.get(first_record_key),  # type: ignore[attr-defined]
+                store._client.get(second_record_key),  # type: ignore[attr-defined]
+                store._client.get(first_notification_key),  # type: ignore[attr-defined]
+                store._client.get(second_notification_key),  # type: ignore[attr-defined]
+            )
+            with pytest.raises(CheckpointError) as error:
+                store.produce_host_interaction(first_request, admission_context=context)
+            assert error.value.code == "host_interaction_conflict"
+            after = (
+                store._client.get(first_record_key),  # type: ignore[attr-defined]
+                store._client.get(second_record_key),  # type: ignore[attr-defined]
+                store._client.get(first_notification_key),  # type: ignore[attr-defined]
+                store._client.get(second_notification_key),  # type: ignore[attr-defined]
+            )
+            assert after == before
+    finally:
+        store._client.set(first_record_key, first_record)  # type: ignore[attr-defined]
+        store._client.set(second_record_key, second_record)  # type: ignore[attr-defined]
+        store._client.set(first_notification_key, first_notification)  # type: ignore[attr-defined]
+        store._client.set(second_notification_key, second_notification)  # type: ignore[attr-defined]
+        store.delete_checkpoint(first_key)
+        store.delete_checkpoint(second_key)
+
+
 def test_abort_admits_from_reconciliation_and_replays_terminal_result(store: Any) -> None:
     key = "controller-abort"
-    checkpoint = _reconciliation_checkpoint(key)
+    checkpoint = _checkpoint(key)
     assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        key,
+        1,
+        claim_token="abort-owner",
+        lease_expires_at_ms=10_000,
+        now_ms=1,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    claimed.tool_journal = [
+        OperationJournalEntry.from_dict(
+            {
+                "kind": "tool",
+                "operation_id": "op_abort_tool",
+                "cycle_index": 1,
+                "attempt": 1,
+                "state": OperationState.AMBIGUOUS.value,
+                "request_digest": "a" * 64,
+                "idempotency_key": "idem_abort_tool",
+                "tool_call_id": "call_abort_tool",
+                "tool_name": "write_record",
+                "arguments": {"record_id": "42", "value": "approved"},
+                "idempotency_support": "unknown",
+                "result": None,
+                "error": None,
+            }
+        )
+    ]
+    claimed.status = AgentStatus.RECONCILIATION_REQUIRED
+    assert store.suspend_checkpoint(
+        claimed,
+        claim_token="abort-owner",
+        expected_revision=claimed.revision,
+    )
     current = store.load_checkpoint(key)
     assert current is not None
     command = ControllerCommand(
@@ -568,14 +809,83 @@ def test_abort_admits_from_reconciliation_and_replays_terminal_result(store: Any
     assert first.receipt is not None and first.receipt.resulting_status == "failed"
     terminal = store.load_checkpoint(key)
     assert terminal is not None and terminal.terminal_result is not None
-    assert terminal.terminal_result.error == "failed"
-    assert terminal.terminal_result.error_code == "operator_abort_with_unknown_outcome"
+    assert terminal.terminal_result.error == {
+        "code": "operator_abort_with_unknown_outcome",
+        "message": "Operator accepted that the external outcome is unknown.",
+        "retryable": False,
+    }
+    assert terminal.terminal_result.error_code is None
     failed_events = [entry.event for entry in terminal.event_outbox if entry.event.get("type") == "run_failed"]
     assert failed_events and failed_events[-1]["error"] == "failed"
     assert failed_events[-1]["metadata"]["error_code"] == "operator_abort_with_unknown_outcome"
+    lifecycle_types = [
+        entry.event["type"]
+        for entry in terminal.event_outbox
+        if entry.event["type"] in {"cycle_aborted", "run_state_changed", "run_failed", "run_cancelled"}
+    ]
+    assert lifecycle_types[-3:] == ["cycle_aborted", "run_state_changed", "run_failed"]
     replay = store.resolve_controller_command(command)
     assert replay.kind == "replayed"
     assert replay.receipt == first.receipt
+
+
+def test_distinct_live_cancel_after_signal_is_applied_noop(store: Any) -> None:
+    key = "controller-live-cancel-noop"
+    checkpoint = _checkpoint(key)
+    assert store.create_checkpoint(checkpoint)
+    now_ms = int(time.time() * 1000)
+    claimed = store.claim_checkpoint(
+        key,
+        1,
+        claim_token="worker-claim",
+        lease_expires_at_ms=now_ms + 10_000,
+        now_ms=now_ms,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    first_command = ControllerCommand(
+        command_id="live-cancel-first",
+        handle=DistributedRunHandle(key, claimed.root_run_id, claimed.trace_id),
+        resume_attempt=claimed.resume_attempt,
+        expected_revision=claimed.revision,
+        command={"kind": "cancel"},
+    )
+    first = store.resolve_controller_command(first_command)
+    assert first.kind == "applied"
+    after_first = store.load_checkpoint(key)
+    assert after_first is not None and after_first.cancel_requested is True
+    assert after_first.claim_token == "worker-claim"
+    assert len(after_first.event_outbox) == len(claimed.event_outbox) + 1
+    cancel_event = after_first.event_outbox[-1].event
+    assert cancel_event["type"] == "run_state_changed"
+    assert cancel_event["cancel_requested"] == {"from": False, "to": True}
+    assert "cancel_requested" not in cancel_event.get("metadata", {})
+
+    second_command = ControllerCommand(
+        command_id="live-cancel-second",
+        handle=DistributedRunHandle(key, claimed.root_run_id, claimed.trace_id),
+        resume_attempt=after_first.resume_attempt,
+        expected_revision=after_first.revision,
+        command={"kind": "cancel"},
+    )
+    second = store.resolve_controller_command(second_command)
+    assert second.kind == "applied"
+    assert second.receipt is not None
+    assert second.receipt.outbox_action == "none"
+    assert second.receipt.resulting_revision == after_first.revision
+    after_second = store.load_checkpoint(key)
+    assert after_second is not None
+    assert checkpoint_to_dict(after_second) == checkpoint_to_dict(after_first)
+    assert len(after_second.event_outbox) == len(after_first.event_outbox)
+    if isinstance(store, InMemoryCheckpointStore):
+        assert store._controller_command_outboxes["live-cancel-second"]["delivered_at_ms"] is None  # type: ignore[attr-defined]
+
+    replay = store.resolve_controller_command(second_command)
+    assert replay.kind == "replayed"
+    assert replay.receipt == second.receipt
+    after_replay = store.load_checkpoint(key)
+    assert after_replay is not None
+    assert checkpoint_to_dict(after_replay) == checkpoint_to_dict(after_second)
 
 
 def test_host_request_notification_is_sanitized_and_replay_is_zero_write(store: Any) -> None:
@@ -738,15 +1048,44 @@ def test_host_record_reaper_requires_the_checkpoint_execution_owner(store: Any) 
     assert store.resolve_controller_command(command).kind == "applied"
     current = store.load_checkpoint(checkpoint.checkpoint_key)
     assert current is not None and current.claim_token is None
-    claim = store.claim_checkpoint(
-        checkpoint.checkpoint_key,
-        current.cycle_index + 1,
-        claim_token="checkpoint-owner",
-        lease_expires_at_ms=10,
-        now_ms=1,
-        claim_mode="continue",
-    )
-    assert claim is not None
+    with pytest.raises(CheckpointError) as barrier:
+        store.claim_checkpoint(
+            checkpoint.checkpoint_key,
+            current.cycle_index + 1,
+            claim_token="checkpoint-owner",
+            lease_expires_at_ms=10,
+            now_ms=1,
+            claim_mode="recovery",
+        )
+    assert barrier.value.code == "host_interaction_recovery_required"
+    claim = deepcopy(current)
+    claim.claim_token = "checkpoint-owner"
+    claim.claimed_cycle = current.cycle_index + 1
+    claim.lease_expires_at_ms = 10
+    claim.status = AgentStatus.RUNNING
+    if isinstance(store, InMemoryCheckpointStore):
+        store._store[checkpoint.checkpoint_key] = deepcopy(claim)  # type: ignore[attr-defined]
+    elif isinstance(store, SqliteCheckpointStore):
+        store._conn.execute(  # type: ignore[attr-defined]
+            "UPDATE checkpoints SET status = ?, claim_token = ?, claimed_cycle = ?, lease_expires_at_ms = ? "
+            "WHERE checkpoint_key = ?",
+            (
+                AgentStatus.RUNNING.value,
+                claim.claim_token,
+                claim.claimed_cycle,
+                claim.lease_expires_at_ms,
+                checkpoint.checkpoint_key,
+            ),
+        )
+        store._conn.commit()  # type: ignore[attr-defined]
+    else:
+        from vv_agent.runtime.stores.redis import _checkpoint_to_storage
+
+        payload, lease = _checkpoint_to_storage(claim)
+        data_key, lease_key = store._keys(checkpoint.checkpoint_key)  # type: ignore[attr-defined]
+        store._client.set(data_key, payload)  # type: ignore[attr-defined]
+        assert lease is not None
+        store._client.set(lease_key, str(lease))  # type: ignore[attr-defined]
     if isinstance(store, InMemoryCheckpointStore):
         stored_checkpoint = store._store[checkpoint.checkpoint_key]  # type: ignore[attr-defined]
         stored_record = store._host_interaction_records[(checkpoint.checkpoint_key, request.interaction_id)]  # type: ignore[attr-defined]
@@ -886,6 +1225,7 @@ def test_controller_recovery_wake_has_owner_attempt_and_ambiguity_lifecycle(stor
         now_ms=2,
     )
     assert ambiguous is not None and ambiguous["outbox_state"] == "ambiguous"
+    assert store.reap_controller_command_wakes("wake-lifecycle", 20_000) == []
     retried = store.reconcile_controller_command_wake(
         command_id=command.command_id,
         command_digest=command.command_digest or "",
@@ -915,7 +1255,8 @@ def test_controller_recovery_wake_reaper_finds_expired_outbox(store: Any) -> Non
         now_ms=1,
     )
     assert claimed is not None and claimed["outbox_state"] == "claimed"
-    rows = store.reap_controller_command_wakes(now_ms=11)
+    assert store.reap_controller_command_wakes("other-checkpoint", 11) == []
+    rows = store.reap_controller_command_wakes(checkpoint.checkpoint_key, 11)
     assert len(rows) == 1
     assert rows[0]["command_id"] == command.command_id
     assert rows[0]["outbox_state"] == "pending"

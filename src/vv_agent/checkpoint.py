@@ -138,6 +138,7 @@ class AmbiguousModelPolicy(StrEnum):
 class AmbiguousToolPolicy(StrEnum):
     REQUIRE_RECONCILIATION = "require_reconciliation"
     RETRY_IDEMPOTENT_ONLY = "retry_idempotent_only"
+    SURFACE_TO_MODEL = "surface_to_model"
 
 
 class ToolIdempotency(StrEnum):
@@ -379,8 +380,8 @@ class CheckpointConfig:
     store_ref: dict[str, str] | None = None
     key: str | None = None
     resume_policy: ResumePolicy = ResumePolicy.NEW
-    ambiguous_model_policy: AmbiguousModelPolicy = AmbiguousModelPolicy.REQUIRE_RECONCILIATION
-    ambiguous_tool_policy: AmbiguousToolPolicy = AmbiguousToolPolicy.REQUIRE_RECONCILIATION
+    ambiguous_model_policy: AmbiguousModelPolicy = AmbiguousModelPolicy.RETRY_WITH_DUPLICATE_RISK
+    ambiguous_tool_policy: AmbiguousToolPolicy = AmbiguousToolPolicy.SURFACE_TO_MODEL
     required_extension_namespaces: list[str] = field(default_factory=list)
     max_extension_state_bytes: int = DEFAULT_MAX_EXTENSION_STATE_BYTES
     credential_slots: list[str] = field(default_factory=list)
@@ -751,6 +752,7 @@ def _validate_run_definition_shape(definition: dict[str, Any]) -> None:
     if checkpoint_policy["ambiguous_tool_policy"] not in {
         "require_reconciliation",
         "retry_idempotent_only",
+        "surface_to_model",
     }:
         raise ValueError("run_definition.checkpoint_policy.ambiguous_tool_policy is invalid")
     _definition_integer(

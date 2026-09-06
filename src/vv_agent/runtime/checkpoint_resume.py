@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, NoReturn
 
 from vv_agent.budget import BudgetUsageSnapshot
 from vv_agent.checkpoint import (
@@ -21,14 +21,21 @@ from vv_agent.checkpoint import (
     OperationState,
     ReconciliationDecision,
     ReconciliationDecisionKind,
+    ReconciliationError,
     ReconciliationProvider,
     ResumeObservation,
     ResumePolicy,
     ToolIdempotency,
+    canonical_json_sha256,
     compute_operation_request_digest,
     compute_run_definition_digest,
 )
-from vv_agent.deferred import AcceptDeferredDecision, _is_ambiguous_tool_error
+from vv_agent.deferred import (
+    AcceptDeferredDecision,
+    ToolCallOutcome,
+    _is_ambiguous_tool_error,
+    validate_definitive_result,
+)
 from vv_agent.event_store import IdempotentRunEventStore, RunEventStore
 from vv_agent.events import (
     CheckpointCreatedEvent,
@@ -38,10 +45,13 @@ from vv_agent.events import (
     OperationReplayedEvent,
     ReconciliationRequiredEvent,
     ReconciliationResolvedEvent,
+    RunCancelledEvent,
     RunEvent,
+    ToolCallCompletedEvent,
     event_from_dict,
 )
 from vv_agent.llm.base import LlmRequest
+from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY
 from vv_agent.runtime.controller import HostInteractionAdmissionContext
 from vv_agent.runtime.model_calls import (
     ModelCallCoordinator,
@@ -52,6 +62,7 @@ from vv_agent.runtime.model_calls import (
     model_error_code,
 )
 from vv_agent.runtime.state import (
+    TOOL_UNKNOWN_OUTCOME_MESSAGE,
     Checkpoint,
     CheckpointStore,
     ClaimMode,
@@ -59,11 +70,16 @@ from vv_agent.runtime.state import (
     ExtensionStateEntry,
     OperationError,
     OperationJournalEntry,
+    RenewOutcome,
+    _terminal_abort_reason,
+    compute_tool_identity_key,
+    operation_error_from_tool_result,
 )
 from vv_agent.runtime.token_usage import normalize_token_usage, summarize_task_token_usage
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
+    CompletionReason,
     CycleRecord,
     LLMResponse,
     Message,
@@ -71,12 +87,52 @@ from vv_agent.types import (
     TaskTokenUsage,
     TokenUsage,
     ToolCall,
+    ToolDirective,
     ToolExecutionResult,
     ToolResultStatus,
+    _agent_result_error_text,
+    _last_assistant_output,
 )
 
 DEFAULT_CHECKPOINT_LEASE_MS = 5 * 60 * 1000
 _DECIMAL_OPERATION_SUFFIX_RE = re.compile(r"^[0-9]+$")
+
+
+def _checkpoint_control_result(
+    error: CheckpointError,
+    *,
+    messages: list[Message],
+    cycles: list[CycleRecord],
+    shared_state: dict[str, Any],
+    token_usage: TaskTokenUsage,
+    budget_usage: BudgetUsageSnapshot | None = None,
+) -> AgentResult | None:
+    terminal = {
+        "checkpoint_cancel_requested": (
+            "cancelled_with_unknown_outcome",
+            CompletionReason.CANCELLED,
+            "Cancellation was accepted while the external outcome remained unknown.",
+        ),
+        "checkpoint_lease_lost": (
+            "lease_lost_with_unknown_outcome",
+            CompletionReason.FAILED,
+            "Checkpoint lease was lost while the external outcome remained unknown.",
+        ),
+    }.get(error.code)
+    if terminal is None:
+        return None
+    error_code, completion_reason, message = terminal
+    return AgentResult(
+        status=AgentStatus.FAILED,
+        completion_reason=completion_reason,
+        partial_output=_last_assistant_output(cycles),
+        messages=messages,
+        cycles=cycles,
+        error={"code": error_code, "message": message, "retryable": False},
+        shared_state=shared_state,
+        token_usage=token_usage,
+        budget_usage=budget_usage,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +264,11 @@ class CheckpointResumeController:
             )
         self._owned_claim_token = claim_token
         self.lease_duration_ms = lease_duration_ms
-        self._renew_claim_before_dispatch()
+        try:
+            self._renew_claim_before_dispatch()
+        except CheckpointError as exc:
+            if exc.code != "checkpoint_cancel_requested":
+                raise
         self._start_heartbeat()
 
     def admit_terminal_candidate(
@@ -374,6 +434,18 @@ class CheckpointResumeController:
             return replay
         now_ms = self._now_ms()
         if existing.claim_token is not None and (existing.lease_expires_at_ms or 0) > now_ms:
+            if (
+                self._first_claim_is_recovery
+                and existing.claim_token.startswith("host-response:")
+                and existing.claimed_cycle == existing.cycle_index + 1
+            ):
+                self.checkpoint = existing
+                self._owned_claim_token = existing.claim_token
+                self._active_claim_mode = "recovery"
+                self._start_heartbeat()
+                self._first_claim_is_recovery = False
+                self._restore_extensions(existing)
+                return None
             raise CheckpointError(
                 f"checkpoint key {key!r} has a live claim",
                 code="checkpoint_claim_active",
@@ -450,7 +522,22 @@ class CheckpointResumeController:
     ) -> tuple[list[Message], list[CycleRecord], dict[str, Any], int]:
         checkpoint = self._require_checkpoint()
         if not self._created:
-            messages[:] = deepcopy(checkpoint.messages)
+            durable_messages = deepcopy(checkpoint.messages)
+            # Approval resume may have a receipt-backed tool message before terminal transcript finalization.
+            replay_suffix = messages[len(durable_messages) :]
+            retain_replay_suffix = (
+                len(replay_suffix) == 1
+                and replay_suffix[0].role == "tool"
+                and messages[: len(durable_messages)] == durable_messages
+            )
+            if retain_replay_suffix:
+                retain_replay_suffix = self._is_journal_proven_tool_suffix(
+                    checkpoint=checkpoint,
+                    candidate=replay_suffix[0],
+                )
+            messages[:] = durable_messages
+            if retain_replay_suffix:
+                messages.extend(deepcopy(replay_suffix))
             cycles[:] = deepcopy(checkpoint.cycles)
             shared_state.clear()
             shared_state.update(deepcopy(checkpoint.shared_state))
@@ -461,6 +548,50 @@ class CheckpointResumeController:
         if self._model_accounting is not None:
             self._model_accounting.ledger.replace(checkpoint.model_calls)
         return messages, cycles, shared_state, checkpoint.cycle_index + 1
+
+    def _is_journal_proven_tool_suffix(self, *, checkpoint: Checkpoint, candidate: Message) -> bool:
+        if candidate.role != "tool" or not isinstance(candidate.tool_call_id, str) or not candidate.tool_call_id:
+            return False
+        cycle_index = checkpoint.claimed_cycle
+        if cycle_index is None:
+            cycle_index = checkpoint.cycle_index + 1
+        try:
+            entry = self._find_tool_call(cycle_index=cycle_index, tool_call_id=candidate.tool_call_id)
+        except CheckpointError:
+            return False
+        if entry is None:
+            return False
+        if entry.state is OperationState.SUCCEEDED:
+            if not isinstance(entry.result, dict) or entry.result_digest is None:
+                return False
+            try:
+                result = ToolExecutionResult.from_dict(entry.result)
+                if result.status_code is not ToolResultStatus.SUCCESS or result.to_dict() != entry.result:
+                    return False
+                if canonical_json_sha256(result.to_dict(), "tool result") != entry.result_digest:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif entry.state is OperationState.FAILED:
+            if entry.result is None or entry.result_digest is None:
+                return False
+            try:
+                result = ToolExecutionResult.from_dict(entry.result)
+            except (TypeError, ValueError):
+                return False
+            if result.status_code is not ToolResultStatus.ERROR or result.to_dict() != entry.result:
+                return False
+            if canonical_json_sha256(result.to_dict(), "tool result") != entry.result_digest:
+                return False
+        else:
+            return False
+        expected_message = result.to_tool_message()
+        if result.artifact is not None:
+            expected_message = replace(
+                expected_message,
+                metadata={**expected_message.metadata, EXCERPT_METADATA_KEY: result.content},
+            )
+        return result.tool_call_id == candidate.tool_call_id and expected_message == candidate
 
     def deferred_pending_result(
         self,
@@ -779,7 +910,27 @@ class CheckpointResumeController:
         self._ensure_claim(cycle_index)
         entry = self._find_tool_call(cycle_index=cycle_index, tool_call_id=call.id)
         if entry is not None and entry.state is OperationState.SUCCEEDED:
-            assert entry.result is not None
+            if entry.result is None or entry.result_digest is None:
+                raise CheckpointError(
+                    "durable succeeded tool operation has no recoverable result",
+                    code="checkpoint_journal_integrity_mismatch",
+                )
+            try:
+                replay_result = ToolExecutionResult.from_dict(entry.result)
+            except (TypeError, ValueError) as exc:
+                raise CheckpointError(
+                    "durable succeeded tool operation result is invalid",
+                    code="checkpoint_journal_integrity_mismatch",
+                ) from exc
+            if (
+                replay_result.status_code is not ToolResultStatus.SUCCESS
+                or replay_result.to_dict() != entry.result
+                or canonical_json_sha256(replay_result.to_dict(), "tool result") != entry.result_digest
+            ):
+                raise CheckpointError(
+                    "durable succeeded tool operation result digest is invalid",
+                    code="checkpoint_journal_integrity_mismatch",
+                )
             self._emit_operation_replayed(entry)
             return ToolOperationPlan(
                 idempotency_key=idempotency_key,
@@ -787,13 +938,30 @@ class CheckpointResumeController:
                 request_digest=entry.request_digest,
                 idempotency_support=idempotency_support,
                 attempt=entry.attempt,
-                replay_result=ToolExecutionResult.from_dict(entry.result),
+                replay_result=replay_result,
             )
         if entry is not None and entry.state is OperationState.FAILED:
-            error = entry.error or OperationError(
-                code="tool_operation_failed",
-                message="durable tool operation failed",
-            )
+            if entry.result is None or entry.result_digest is None:
+                raise CheckpointError(
+                    "durable failed tool operation has no recoverable result",
+                    code="checkpoint_journal_integrity_mismatch",
+                )
+            try:
+                replay_result = ToolExecutionResult.from_dict(entry.result)
+            except (TypeError, ValueError) as exc:
+                raise CheckpointError(
+                    "durable failed tool operation result is invalid",
+                    code="checkpoint_journal_integrity_mismatch",
+                ) from exc
+            if (
+                replay_result.status_code is not ToolResultStatus.ERROR
+                or replay_result.to_dict() != entry.result
+                or canonical_json_sha256(replay_result.to_dict(), "tool result") != entry.result_digest
+            ):
+                raise CheckpointError(
+                    "durable failed tool operation result digest is invalid",
+                    code="checkpoint_journal_integrity_mismatch",
+                )
             self._emit_operation_replayed(entry)
             return ToolOperationPlan(
                 idempotency_key=idempotency_key,
@@ -801,12 +969,7 @@ class CheckpointResumeController:
                 request_digest=entry.request_digest,
                 idempotency_support=idempotency_support,
                 attempt=entry.attempt,
-                replay_result=ToolExecutionResult(
-                    tool_call_id=call.id,
-                    content=error.message,
-                    status_code=ToolResultStatus.ERROR,
-                    error_code=error.code,
-                ),
+                replay_result=replay_result,
             )
         if entry is None:
             entry = OperationJournalEntry(
@@ -859,36 +1022,105 @@ class CheckpointResumeController:
         entry = self._find_tool_call(cycle_index=cycle_index, tool_call_id=call.id)
         if entry is None:
             return
+        if result.tool_call_id != entry.tool_call_id:
+            raise CheckpointError(
+                "tool result tool_call_id does not match its durable journal entry",
+                code="tool_receipt_identity_invalid",
+            )
+        if entry.state is OperationState.PLANNED and result.error_code == "tool_approval_required":
+            return
+        if entry.state not in {OperationState.PLANNED, OperationState.STARTED, OperationState.AMBIGUOUS}:
+            return
+        if result.status_code is ToolResultStatus.WAIT_RESPONSE and result.directive is ToolDirective.WAIT_USER:
+            return
+        receipt_result = result
         if entry.state is OperationState.PLANNED:
-            if result.error_code == "tool_approval_required":
+            validate_definitive_result(receipt_result)
+            checkpoint = self._require_checkpoint()
+            if receipt_result.status_code is ToolResultStatus.SUCCESS:
+                checkpoint.tool_journal = [item for item in checkpoint.tool_journal if item is not entry]
+                self._progress()
                 return
-            entry.state = OperationState.FAILED
-            entry.error = OperationError(
-                code=result.error_code or "tool_short_circuited",
-                message=result.content or "tool invocation was short-circuited",
-                retryable=False,
+            identity_key = compute_tool_identity_key(
+                self.checkpoint_key,
+                entry.operation_id,
+                entry.attempt,
+                entry.tool_call_id or call.id,
+                entry.request_digest,
+            )
+            entry.identity_key = identity_key
+            entry.result_digest = canonical_json_sha256(receipt_result.to_dict(), "tool result")
+            entry.resume_observation = None
+            entry.deferred_handle = None
+            if receipt_result.status_code is ToolResultStatus.SUCCESS:
+                entry.state = OperationState.SUCCEEDED
+                entry.result = receipt_result.to_dict()
+                entry.error = None
+            else:
+                entry.state = OperationState.FAILED
+                entry.result = receipt_result.to_dict()
+                entry.error = operation_error_from_tool_result(receipt_result)
+            self._queue_outbox_event(
+                checkpoint,
+                ToolCallCompletedEvent(
+                    run_id=self.run_id,
+                    trace_id=self.trace_id,
+                    cycle_index=entry.cycle_index,
+                    tool_call_id=entry.tool_call_id or call.id,
+                    tool_name=entry.tool_name or call.name,
+                    operation_id=entry.operation_id,
+                    attempt=entry.attempt,
+                    status=receipt_result.status_code.value.lower(),
+                    directive=receipt_result.directive.value,
+                    error_code=receipt_result.error_code,
+                    execution_started=False,
+                    duration_ms=None,
+                    checkpoint_key=checkpoint.checkpoint_key,
+                    event_id=f"evt_receipt_{identity_key}",
+                ),
             )
             self._progress()
             return
-        if entry.state is not OperationState.STARTED:
-            return
-        if _is_ambiguous_tool_error(result):
+        if _is_ambiguous_tool_error(receipt_result):
             entry.state = OperationState.AMBIGUOUS
             self._progress()
             self._suspend_for(entry)
-        if result.status_code is ToolResultStatus.SUCCESS or result.status_code is ToolResultStatus.WAIT_RESPONSE:
-            entry.state = OperationState.SUCCEEDED
-            entry.result = result.to_dict()
-            entry.error = None
-        else:
-            entry.state = OperationState.FAILED
-            entry.result = None
-            entry.error = OperationError(
-                code=result.error_code or "tool_operation_failed",
-                message=result.content or "tool operation failed",
-                retryable=bool(result.metadata.get("retryable")),
+        if receipt_result.status_code in {ToolResultStatus.SUCCESS, ToolResultStatus.ERROR}:
+            checkpoint = self._require_checkpoint()
+            claim_token = checkpoint.claim_token
+            claimed_cycle = checkpoint.claimed_cycle
+            if claim_token is None or claimed_cycle is None:
+                raise CheckpointError(
+                    "checkpoint tool receipt requires an active claim",
+                    code="checkpoint_claim_active",
+                )
+            recorded = self.store.record_tool_receipt(
+                checkpoint,
+                operation_id=entry.operation_id,
+                attempt=entry.attempt,
+                tool_call_id=entry.tool_call_id or call.id,
+                request_digest=entry.request_digest,
+                result=receipt_result,
+                claim_token=claim_token,
+                expected_revision=checkpoint.revision,
+                claimed_cycle=claimed_cycle,
             )
+            if not recorded:
+                raise CheckpointError(
+                    "checkpoint tool receipt lost its claim",
+                    code="checkpoint_store_conflict",
+                )
+            authoritative = self.store.load_checkpoint(self.checkpoint_key)
+            if authoritative is None:
+                raise CheckpointError(
+                    "checkpoint disappeared after tool receipt",
+                    code="checkpoint_not_found",
+                )
+            self.checkpoint = authoritative
+            return
+        entry.state = OperationState.AMBIGUOUS
         self._progress()
+        self._suspend_for(entry)
 
     def commit_cycle(
         self,
@@ -900,7 +1132,15 @@ class CheckpointResumeController:
     ) -> None:
         checkpoint = self._require_checkpoint()
         if checkpoint.claim_token is None:
-            return
+            raise CheckpointError(
+                "checkpoint cycle commit requires an active claim",
+                code="checkpoint_claim_active",
+            )
+        if checkpoint.cancel_requested:
+            raise CheckpointError(
+                "checkpoint cycle commit is not valid after cancellation",
+                code="checkpoint_cancel_requested",
+            )
         if not cycles or cycles[-1].index != cycle_index:
             raise CheckpointError(
                 "cannot commit a checkpoint without the completed cycle record",
@@ -908,9 +1148,7 @@ class CheckpointResumeController:
             )
         self._assert_heartbeat()
         self._refresh_snapshot(messages=messages, cycles=cycles, shared_state=shared_state)
-        checkpoint.cycle_index = cycle_index
         checkpoint.status = AgentStatus.RUNNING
-        revision = checkpoint.revision
         claim_token = checkpoint.claim_token
         self._assert_heartbeat()
         if self._owned_claim_token != claim_token:
@@ -918,11 +1156,27 @@ class CheckpointResumeController:
                 "checkpoint cycle commit requires the locally owned claim",
                 code="checkpoint_claim_active",
             )
+        self._progress()
+        self._deliver_pending_outbox()
+        checkpoint.cycle_index = cycle_index
+        revision = checkpoint.revision
         if not self.store.commit_checkpoint(
             checkpoint,
             claim_token=claim_token,
             expected_revision=revision,
         ):
+            authoritative = self.store.load_checkpoint(checkpoint.checkpoint_key)
+            if (
+                authoritative is not None
+                and authoritative.claim_token == claim_token
+                and authoritative.claimed_cycle == cycle_index
+                and authoritative.cancel_requested
+            ):
+                checkpoint.cancel_requested = True
+                raise CheckpointError(
+                    "checkpoint cycle commit is not valid after cancellation",
+                    code="checkpoint_cancel_requested",
+                )
             raise CheckpointError(
                 "checkpoint cycle commit lost its claim",
                 code="checkpoint_store_conflict",
@@ -955,8 +1209,44 @@ class CheckpointResumeController:
             self._acknowledge_terminal()
             return deepcopy(checkpoint.terminal_result)
         self.checkpoint = checkpoint
+        if checkpoint.cancel_requested and _terminal_abort_reason(result) is None:
+            cancelled = _checkpoint_control_result(
+                CheckpointError(
+                    "checkpoint cancellation requested",
+                    code="checkpoint_cancel_requested",
+                ),
+                messages=deepcopy(result.messages),
+                cycles=deepcopy(result.cycles),
+                shared_state=deepcopy(result.shared_state),
+                token_usage=summarize_task_token_usage(checkpoint.model_calls),
+                budget_usage=deepcopy(result.budget_usage),
+            )
+            assert cancelled is not None
+            result = cancelled
+            if terminal_event is not None and terminal_event.type != "run_cancelled":
+                reason = _agent_result_error_text(result.error)
+                terminal_event = RunCancelledEvent(
+                    run_id=terminal_event.run_id,
+                    trace_id=terminal_event.trace_id,
+                    reason=str(reason or "run cancelled"),
+                    completion_reason=CompletionReason.CANCELLED,
+                    partial_output=result.partial_output,
+                    budget_usage=result.budget_usage,
+                    budget_exhaustion=result.budget_exhaustion,
+                    cycle_index=terminal_event.cycle_index,
+                    agent_name=terminal_event.agent_name,
+                    session_id=terminal_event.session_id,
+                    parent_event_id=terminal_event.parent_event_id,
+                    parent_run_id=terminal_event.parent_run_id,
+                    created_at=terminal_event.created_at,
+                    metadata=terminal_event.metadata,
+                )
         unresolved = self._unresolved_operation(checkpoint)
-        if unresolved is not None and not self._is_operator_abort_result(result):
+        if (
+            unresolved is not None
+            and not (result.status is AgentStatus.WAIT_USER and unresolved.kind is OperationKind.TOOL)
+            and _terminal_abort_reason(result) is None
+        ):
             raise CheckpointError(
                 "checkpoint terminal finalization has an unresolved operation",
                 code="checkpoint_terminal_unresolved_operation",
@@ -966,21 +1256,53 @@ class CheckpointResumeController:
         terminal.token_usage = summarize_task_token_usage(checkpoint.model_calls)
         checkpoint.status = terminal.status
         checkpoint.terminal_result = terminal
-        preserve_ambiguity = bool(
-            self._is_operator_abort_result(terminal)
+        control_reason = _terminal_abort_reason(terminal)
+        preserve_control_tools = bool(
+            control_reason is not None
             and any(
-                entry.state is OperationState.AMBIGUOUS for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
+                entry.state
+                in {
+                    OperationState.PLANNED,
+                    OperationState.STARTED,
+                    OperationState.DEFERRED,
+                    OperationState.AMBIGUOUS,
+                }
+                for entry in checkpoint.tool_journal
             )
         )
-        if not preserve_ambiguity:
+        if control_reason is None:
             checkpoint.model_call_journal = []
             checkpoint.tool_journal = []
+        else:
+            checkpoint.model_call_journal = [
+                entry
+                for entry in checkpoint.model_call_journal
+                if entry.state
+                not in {
+                    OperationState.PLANNED,
+                    OperationState.STARTED,
+                    OperationState.DEFERRED,
+                    OperationState.AMBIGUOUS,
+                }
+            ]
+            if not preserve_control_tools:
+                checkpoint.tool_journal = []
         checkpoint.budget_usage = deepcopy(terminal.budget_usage)
         checkpoint.messages = deepcopy(terminal.messages)
         checkpoint.cycles = deepcopy(terminal.cycles)
         checkpoint.shared_state = deepcopy(terminal.shared_state)
         self._snapshot_extensions(checkpoint)
-        checkpoint.event_outbox = [entry for entry in checkpoint.event_outbox if entry.state == "pending"]
+        if control_reason is None:
+            checkpoint.event_outbox = [
+                entry
+                for entry in checkpoint.event_outbox
+                if entry.state == "pending"
+                or (
+                    terminal.status is AgentStatus.WAIT_USER
+                    and entry.event.get("type") == "tool_call_completed"
+                    and entry.event.get("status") == ToolResultStatus.WAIT_RESPONSE.value.lower()
+                )
+            ]
         for event in self._pending_preterminal_events:
             self._queue_outbox_event(checkpoint, event)
         if terminal_event is not None:
@@ -1027,12 +1349,10 @@ class CheckpointResumeController:
         self._pending_preterminal_events.clear()
         self._deliver_pending_outbox()
         self._acknowledge_terminal()
-        result.checkpoint_key = checkpoint.checkpoint_key
-        result.token_usage = summarize_task_token_usage(authoritative.model_calls)
-        return result
+        return deepcopy(authoritative.terminal_result)
 
     def prepare_terminal(self, result: AgentResult) -> AgentResult:
-        if result.status is AgentStatus.RECONCILIATION_REQUIRED or self._is_operator_abort_result(result):
+        if result.status is AgentStatus.RECONCILIATION_REQUIRED or _terminal_abort_reason(result) is not None:
             return result
         checkpoint = self.store.load_checkpoint(self.checkpoint_key)
         if checkpoint is None:
@@ -1044,7 +1364,7 @@ class CheckpointResumeController:
         if checkpoint.terminal_result is not None:
             return deepcopy(checkpoint.terminal_result)
         unresolved = self._unresolved_operation(checkpoint)
-        if unresolved is None:
+        if unresolved is None or (result.status is AgentStatus.WAIT_USER and unresolved.kind is OperationKind.TOOL):
             return result
         if unresolved.state is OperationState.STARTED:
             unresolved.state = OperationState.AMBIGUOUS
@@ -1060,7 +1380,13 @@ class CheckpointResumeController:
             str(event.cycle_index or 0),
         )
         candidate = event_from_dict(payload)
-        checkpoint = self._require_checkpoint()
+        checkpoint = self.store.load_checkpoint(self.checkpoint_key)
+        if checkpoint is None:
+            raise CheckpointError(
+                "checkpoint disappeared before preterminal event persistence",
+                code="checkpoint_not_found",
+            )
+        self.checkpoint = checkpoint
         if checkpoint.claim_token is not None:
             if self._owned_claim_token != checkpoint.claim_token:
                 raise CheckpointError(
@@ -1082,15 +1408,6 @@ class CheckpointResumeController:
             None,
         )
         return unresolved
-
-    @staticmethod
-    def _is_operator_abort_result(result: AgentResult) -> bool:
-        return bool(
-            result.status is AgentStatus.FAILED
-            and result.error == "failed"
-            and result.error_code == "operator_abort_with_unknown_outcome"
-            and result.resume_observation is not None
-        )
 
     def _new_checkpoint(self, key: str) -> Checkpoint:
         checkpoint = Checkpoint(
@@ -1189,6 +1506,8 @@ class CheckpointResumeController:
         for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]:
             if entry.state is not OperationState.AMBIGUOUS:
                 continue
+            if entry.kind is OperationKind.TOOL:
+                entry.resume_observation = None
             observation = self._observation(entry)
             self._emit_ambiguous(entry, observation)
             decision = self._reconciliation_decision(entry, observation)
@@ -1222,7 +1541,24 @@ class CheckpointResumeController:
                 )
             return
 
-        for entry, observation, decision in pending:
+        for stale_entry, observation, decision in pending:
+            checkpoint = self._require_checkpoint()
+            entry = next(
+                (
+                    candidate
+                    for candidate in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
+                    if candidate.kind is stale_entry.kind
+                    and candidate.operation_id == stale_entry.operation_id
+                    and candidate.attempt == stale_entry.attempt
+                    and candidate.request_digest == stale_entry.request_digest
+                ),
+                None,
+            )
+            if entry is None:
+                raise CheckpointError(
+                    "checkpoint reconciliation operation is no longer present",
+                    code="checkpoint_store_conflict",
+                )
             if decision.kind is ReconciliationDecisionKind.DEFER:
                 self._suspend_for(
                     entry,
@@ -1237,19 +1573,58 @@ class CheckpointResumeController:
                 entry.response = None
                 entry.result = None
                 entry.error = None
+                entry.identity_key = None
+                entry.result_digest = None
+                entry.resume_observation = None
+                entry.deferred_handle = None
             elif decision.kind is ReconciliationDecisionKind.REPLAY_SUCCESS:
-                entry.state = OperationState.SUCCEEDED
-                entry.response = deepcopy(decision.response)
-                entry.result = deepcopy(decision.result)
-                entry.error = None
+                if entry.kind is OperationKind.TOOL:
+                    assert decision.result is not None
+                    entry.resume_observation = None
+                    call = ToolCall(
+                        id=entry.tool_call_id or "",
+                        name=entry.tool_name or "tool",
+                        arguments=deepcopy(entry.arguments or {}),
+                    )
+                    self.finish_tool(
+                        cycle_index=entry.cycle_index,
+                        call=call,
+                        result=ToolExecutionResult.from_dict(decision.result),
+                    )
+                else:
+                    entry.state = OperationState.SUCCEEDED
+                    entry.response = deepcopy(decision.response)
+                    entry.result = deepcopy(decision.result)
+                    entry.error = None
             elif decision.kind is ReconciliationDecisionKind.RECORD_FAILURE:
                 assert decision.error is not None
-                entry.state = OperationState.FAILED
-                entry.error = OperationError(
-                    code=decision.error.code,
-                    message=decision.error.message,
-                    retryable=decision.error.retryable,
-                )
+                if entry.kind is OperationKind.TOOL:
+                    call = ToolCall(
+                        id=entry.tool_call_id or "",
+                        name=entry.tool_name or "tool",
+                        arguments=deepcopy(entry.arguments or {}),
+                    )
+                    if decision.error.code == "tool_outcome_unknown":
+                        entry.resume_observation = observation
+                    else:
+                        entry.resume_observation = None
+                    self.finish_tool(
+                        cycle_index=entry.cycle_index,
+                        call=call,
+                        result=ToolExecutionResult(
+                            tool_call_id=call.id,
+                            content=decision.error.message,
+                            status_code=ToolResultStatus.ERROR,
+                            error_code=decision.error.code,
+                        ),
+                    )
+                else:
+                    entry.state = OperationState.FAILED
+                    entry.error = OperationError(
+                        code=decision.error.code,
+                        message=decision.error.message,
+                        retryable=decision.error.retryable,
+                    )
             elif decision.kind is ReconciliationDecisionKind.ABORT:
                 self._abort_unknown_operation(entry, observation, decision)
             self._progress()
@@ -1286,6 +1661,7 @@ class CheckpointResumeController:
         if (
             entry.kind is OperationKind.MODEL
             and self.config.ambiguous_model_policy is AmbiguousModelPolicy.RETRY_WITH_DUPLICATE_RISK
+            and entry.attempt < 2
         ):
             self._emit(
                 ModelRetryDuplicateRiskEvent(
@@ -1310,6 +1686,15 @@ class CheckpointResumeController:
             and entry.idempotency_support is ToolIdempotency.SUPPORTED
         ):
             return ReconciliationDecision(ReconciliationDecisionKind.RETRY)
+        if entry.kind is OperationKind.TOOL and self.config.ambiguous_tool_policy is AmbiguousToolPolicy.SURFACE_TO_MODEL:
+            return ReconciliationDecision(
+                ReconciliationDecisionKind.RECORD_FAILURE,
+                error=ReconciliationError(
+                    code="tool_outcome_unknown",
+                    message=TOOL_UNKNOWN_OUTCOME_MESSAGE,
+                    retryable=False,
+                ),
+            )
         return ReconciliationDecision(ReconciliationDecisionKind.DEFER)
 
     def _suspend_for(
@@ -1318,7 +1703,7 @@ class CheckpointResumeController:
         *,
         observation: ResumeObservation | None = None,
         ambiguity_emitted: bool = False,
-    ) -> None:
+    ) -> NoReturn:
         checkpoint = self._require_checkpoint()
         observation = observation or self._observation(entry)
         if not ambiguity_emitted:
@@ -1341,6 +1726,8 @@ class CheckpointResumeController:
             )
         )
         checkpoint.status = AgentStatus.RECONCILIATION_REQUIRED
+        if entry.kind is OperationKind.TOOL:
+            entry.resume_observation = None
         revision = checkpoint.revision
         claim_token = checkpoint.claim_token
         if claim_token is None or not self.store.suspend_checkpoint(
@@ -1367,9 +1754,101 @@ class CheckpointResumeController:
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
             checkpoint_key=checkpoint.checkpoint_key,
-            resume_observation=observation,
+            resume_observations=[observation],
         )
         raise CheckpointReconciliationRequired(result)
+
+    def _suspend_incomplete_deferred_batch(
+        self,
+        outcomes: list[tuple[ToolCall, ToolCallOutcome]],
+    ) -> NoReturn:
+        """Reconcile the unclassified part of an incomplete deferred batch."""
+        checkpoint = self._require_checkpoint()
+        claimed_cycle = checkpoint.claimed_cycle
+        if checkpoint.claim_token is None or claimed_cycle is None:
+            raise CheckpointError(
+                "incomplete deferred batch reconciliation requires an active claim",
+                code="checkpoint_claim_active",
+            )
+
+        covered: set[tuple[str, int, str | None, str, int]] = set()
+        for _call, outcome in outcomes:
+            if outcome.kind != "deferred" or outcome.handle is None:
+                continue
+            handle = outcome.handle
+            entry = next(
+                (
+                    candidate
+                    for candidate in checkpoint.tool_journal
+                    if candidate.cycle_index == claimed_cycle
+                    and candidate.state is OperationState.STARTED
+                    and candidate.operation_id == handle.operation_id
+                    and candidate.attempt == handle.attempt
+                    and candidate.request_digest == handle.request_digest
+                ),
+                None,
+            )
+            if entry is not None:
+                covered.add(
+                    (
+                        entry.operation_id,
+                        entry.attempt,
+                        entry.tool_call_id,
+                        entry.request_digest,
+                        entry.cycle_index,
+                    )
+                )
+
+        unclassified = [
+            entry
+            for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
+            if entry.cycle_index == claimed_cycle
+            and entry.state is OperationState.STARTED
+            and (
+                entry.operation_id,
+                entry.attempt,
+                entry.tool_call_id,
+                entry.request_digest,
+                entry.cycle_index,
+            )
+            not in covered
+        ]
+        if not unclassified:
+            raise CheckpointError(
+                "deferred batch admission failed without an unclassified operation",
+                code="checkpoint_store_conflict",
+            )
+
+        for entry in unclassified:
+            entry.state = OperationState.AMBIGUOUS
+            if entry.kind is OperationKind.MODEL:
+                accounting = self._require_model_accounting()
+                identity = self._identity_from_model_entry(entry)
+                terminal = accounting.failed_terminal(
+                    identity,
+                    error_code="model_outcome_ambiguous",
+                    ambiguous=True,
+                    event_id=self._stable_event_id(
+                        "model_call_failed",
+                        identity.operation_id,
+                        str(identity.attempt),
+                    ),
+                )
+                self._commit_model_terminal(entry, terminal, accounting=accounting)
+
+        observations: list[ResumeObservation] = []
+        for entry in unclassified:
+            if entry.kind is OperationKind.TOOL:
+                entry.resume_observation = None
+            observation = self._observation(entry)
+            observations.append(observation)
+            self._emit_ambiguous(entry, observation)
+
+        self._suspend_for(
+            unclassified[0],
+            observation=observations[0],
+            ambiguity_emitted=True,
+        )
 
     def _abort_unknown_operation(
         self,
@@ -1382,13 +1861,16 @@ class CheckpointResumeController:
             status=AgentStatus.FAILED,
             messages=deepcopy(checkpoint.messages),
             cycles=deepcopy(checkpoint.cycles),
-            error="failed",
-            error_code="operator_abort_with_unknown_outcome",
+            error={
+                "code": "operator_abort_with_unknown_outcome",
+                "message": "Operator accepted that the external outcome is unknown.",
+                "retryable": False,
+            },
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
             checkpoint_key=checkpoint.checkpoint_key,
-            resume_observation=observation,
+            resume_observations=[observation],
         )
         if checkpoint.claim_token is None:
             raise CheckpointError(
@@ -1600,14 +2082,17 @@ class CheckpointResumeController:
         cycle_index: int,
         tool_call_id: str,
     ) -> OperationJournalEntry | None:
-        return next(
-            (
-                entry
-                for entry in self._require_checkpoint().tool_journal
-                if entry.cycle_index == cycle_index and entry.tool_call_id == tool_call_id
-            ),
-            None,
-        )
+        matches = [
+            entry
+            for entry in self._require_checkpoint().tool_journal
+            if entry.cycle_index == cycle_index and entry.tool_call_id == tool_call_id
+        ]
+        if len(matches) > 1:
+            raise CheckpointError(
+                "tool call id is reused by conflicting durable operations",
+                code="checkpoint_journal_integrity_mismatch",
+            )
+        return matches[0] if matches else None
 
     def _observation(self, entry: OperationJournalEntry) -> ResumeObservation:
         if entry.kind is OperationKind.MODEL:
@@ -1691,10 +2176,21 @@ class CheckpointResumeController:
             return
         existing.verify_payload()
         if existing.payload_digest != candidate.payload_digest:
+            if CheckpointResumeController._stable_recovery_event_payload_matches(existing.event, candidate.event):
+                return
             raise CheckpointError(
                 f"checkpoint event id {event.event_id!r} has conflicting payload bytes",
                 code="event_identity_conflict",
             )
+
+    @staticmethod
+    def _stable_recovery_event_payload_matches(
+        existing: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> bool:
+        existing_without_timestamp = {key: value for key, value in existing.items() if key != "created_at"}
+        candidate_without_timestamp = {key: value for key, value in candidate.items() if key != "created_at"}
+        return existing_without_timestamp == candidate_without_timestamp
 
     def _deliver_pending_outbox(self) -> None:
         checkpoint = self._require_checkpoint()
@@ -1867,18 +2363,23 @@ class CheckpointResumeController:
                 message="checkpoint lease renewal returned after its local expiry",
             )
             return False
-        if not renewed:
+        if renewed.outcome is RenewOutcome.CLAIM_LOST:
             self._lose_local_claim(
                 claim_token=claim_token,
                 checkpoint=checkpoint,
                 message="checkpoint lease renewal lost its claim",
             )
             return False
-        renewed_lease = now_ms + self.lease_duration_ms
+        renewed_lease = renewed.lease_expires_at_ms
+        assert renewed_lease is not None
         checkpoint.lease_expires_at_ms = renewed_lease
         current = self.checkpoint
         if current is not None and current.checkpoint_key == checkpoint.checkpoint_key and current.claim_token == claim_token:
             current.lease_expires_at_ms = renewed_lease
+            if renewed.outcome is RenewOutcome.CANCEL_REQUESTED:
+                current.cancel_requested = True
+        if renewed.outcome is RenewOutcome.CANCEL_REQUESTED:
+            checkpoint.cancel_requested = True
         return True
 
     def _stop_heartbeat(self) -> None:
@@ -1923,8 +2424,18 @@ class CheckpointResumeController:
                 now_ms=now_ms,
             )
         except Exception as exc:
+            if self._local_claim_is_live(checkpoint, claim_token, self._now_ms()):
+                raise CheckpointError(
+                    f"checkpoint lease renewal is temporarily unavailable: {exc}",
+                    code="checkpoint_store_conflict",
+                ) from exc
+            self._lose_local_claim(
+                claim_token=claim_token,
+                checkpoint=checkpoint,
+                message=f"checkpoint lease renewal failed after lease expiry: {exc}",
+            )
             raise CheckpointError(
-                f"checkpoint lease renewal failed before external dispatch: {exc}",
+                f"checkpoint lease renewal failed after lease expiry: {exc}",
                 code="checkpoint_lease_lost",
             ) from exc
         returned_at_ms = self._now_ms()
@@ -1938,7 +2449,7 @@ class CheckpointResumeController:
                 "checkpoint lease renewal returned after its local expiry before external dispatch",
                 code="checkpoint_lease_lost",
             )
-        if not renewed:
+        if renewed.outcome is RenewOutcome.CLAIM_LOST:
             self._lose_local_claim(
                 claim_token=claim_token,
                 checkpoint=checkpoint,
@@ -1948,7 +2459,13 @@ class CheckpointResumeController:
                 "checkpoint lease renewal lost its claim before external dispatch",
                 code="checkpoint_lease_lost",
             )
-        checkpoint.lease_expires_at_ms = now_ms + self.lease_duration_ms
+        checkpoint.lease_expires_at_ms = renewed.lease_expires_at_ms
+        if renewed.outcome is RenewOutcome.CANCEL_REQUESTED:
+            checkpoint.cancel_requested = True
+            raise CheckpointError(
+                "checkpoint cancellation requested before external dispatch",
+                code="checkpoint_cancel_requested",
+            )
 
     def _assert_heartbeat(self) -> None:
         if self._heartbeat_error is not None:

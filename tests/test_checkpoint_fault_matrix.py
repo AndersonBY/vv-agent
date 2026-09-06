@@ -22,12 +22,12 @@ from vv_agent import (
     ToolContext,
     function_tool,
 )
-from vv_agent.checkpoint import CheckpointError, OperationState, ResumePolicy
+from vv_agent.checkpoint import AmbiguousToolPolicy, CheckpointError, OperationState, ResumePolicy
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent, CheckpointStore
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
-from vv_agent.runtime.state import Checkpoint
+from vv_agent.runtime.state import Checkpoint, CheckpointRenewal, RenewOutcome
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
@@ -137,6 +137,7 @@ def _config(
             key=key,
             resume_policy=ResumePolicy.RESUME_IF_PRESENT,
             store=store,
+            ambiguous_tool_policy=AmbiguousToolPolicy.REQUIRE_RECONCILIATION,
             capability_refs=capability_refs or {},
         ),
     )
@@ -160,11 +161,21 @@ class _HeartbeatStore(InMemoryCheckpointStore):
         claim_token: str,
         lease_expires_at_ms: int,
         now_ms: int,
-    ) -> bool:
+    ) -> CheckpointRenewal:
         self.renew_calls += 1
         if self.mode == "transient" and self.renew_calls == 1:
             raise RuntimeError("store unavailable")
-        return self.mode != "false"
+        if self.mode == "false":
+            return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=0)
+        if self.mode == "cancel":
+            return CheckpointRenewal(
+                outcome=RenewOutcome.CANCEL_REQUESTED,
+                lease_expires_at_ms=lease_expires_at_ms,
+            )
+        return CheckpointRenewal(
+            outcome=RenewOutcome.RENEWED,
+            lease_expires_at_ms=lease_expires_at_ms,
+        )
 
 
 def _heartbeat_controller(store: InMemoryCheckpointStore, key: str) -> tuple[CheckpointResumeController, Checkpoint]:
@@ -198,6 +209,20 @@ def test_heartbeat_retries_transient_store_error_only_while_local_lease_is_live(
     assert claimed.lease_expires_at_ms == 2_000
 
 
+def test_heartbeat_keeps_live_claim_while_propagating_cancel_request() -> None:
+    store = _HeartbeatStore("cancel")
+    controller, claimed = _heartbeat_controller(store, "heartbeat-cancel")
+
+    assert CheckpointResumeController._heartbeat_tick(controller, claimed, "heartbeat-claim")
+    assert claimed.cancel_requested
+    assert claimed.claim_token == "heartbeat-claim"
+    assert controller._owned_claim_token == "heartbeat-claim"
+    assert controller._heartbeat_error is None
+
+    assert CheckpointResumeController._heartbeat_tick(controller, claimed, "heartbeat-claim")
+    assert store.renew_calls == 2
+
+
 @pytest.mark.parametrize("mode", ["false", "expired"])
 def test_heartbeat_false_or_expired_local_lease_drops_claim_without_retry(
     mode: str,
@@ -221,6 +246,20 @@ def test_expired_local_claim_rejects_progress_and_dispatch(method: str, monkeypa
     with pytest.raises(CheckpointError, match="checkpoint lease") as error:
         getattr(CheckpointResumeController, method)(controller)
     assert (error.value.code, store.renew_calls) == ("checkpoint_lease_lost", 0)
+
+
+def test_dispatch_transient_renewal_failure_preserves_claim_for_retry() -> None:
+    store = _HeartbeatStore("transient")
+    controller, claimed = _heartbeat_controller(store, "heartbeat-dispatch-transient")
+
+    with pytest.raises(CheckpointError) as error:
+        controller._renew_claim_before_dispatch()
+
+    assert error.value.code == "checkpoint_store_conflict"
+    assert claimed.claim_token == "heartbeat-claim"
+    assert controller._owned_claim_token == "heartbeat-claim"
+    controller._renew_claim_before_dispatch()
+    assert store.renew_calls == 2
 
 
 def test_renewal_return_after_known_expiry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -615,7 +654,7 @@ def test_sigkill_after_tool_side_effect_requires_reconciliation(
         from pathlib import Path
 
         from vv_agent import Agent, CheckpointConfig, RunConfig, Runner, ToolIdempotency, function_tool
-        from vv_agent.checkpoint import ResumePolicy
+        from vv_agent.checkpoint import AmbiguousToolPolicy, ResumePolicy
         from vv_agent.llm import ScriptedLLM
         from vv_agent.model import ScriptedModelProvider
         from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
@@ -655,6 +694,7 @@ def test_sigkill_after_tool_side_effect_requires_reconciliation(
                 checkpoint_config=CheckpointConfig(
                     key="sigkill-case",
                     resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    ambiguous_tool_policy=AmbiguousToolPolicy.REQUIRE_RECONCILIATION,
                     store=SqliteCheckpointStore(database),
                 ),
             ),

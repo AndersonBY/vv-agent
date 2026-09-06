@@ -81,7 +81,9 @@ class TestThreadBackend:
         ctx = ExecutionContext(cancellation_token=token)
         result = runtime.run(_make_task(no_tool_policy="continue"), ctx=ctx)
         assert result.status == AgentStatus.FAILED
-        assert "cancelled" in (result.error or "").lower()
+        assert result.error is not None
+        assert result.error["code"] == "cancelled"
+        assert "cancelled" in result.error["message"].lower()
 
     def test_parallel_map(self):
         backend = ThreadBackend(max_workers=4)

@@ -4,10 +4,13 @@ The normative cross-language behavior lives in
 `vv-agent-contract/docs/checkpoint-resume.md`. This document maps that contract
 to the Python implementation and shows the supported public entry point.
 
+The current public API inventory is `vv-agent-public-api-v7`/schema 7. The
+`AgentResult` result-public wire remains v6.
+
 ## Opt In
 
 Durable execution is disabled unless a `CheckpointConfig` is attached to the
-run. Enabled records require `schema_version=vv-agent.checkpoint.v8` and
+run. Enabled records require `schema_version=vv-agent.checkpoint.v10` and
 `run_definition_schema=vv-agent.run-definition.v5`; no other record shape is
 read or repaired.
 
@@ -92,6 +95,9 @@ and `ambiguous`.
   decision and emits an explicit duplicate-cost-risk event.
 - A tool retry requires both `retry_idempotent_only` and a tool declaration of
   `ToolIdempotency.SUPPORTED`; the same idempotency key is reused.
+- The default `surface_to_model` tool policy closes an ambiguous tool with the
+  typed `tool_outcome_unknown` failure and exposes that unknown outcome to the
+  model without claiming a definitive external failure.
 - Unknown or unsupported tool idempotency never causes a silent retry.
 
 The typed `tool_call_planned`, `tool_call_started`, and `tool_call_completed`
@@ -100,6 +106,22 @@ approval short-circuit can have planned plus completed telemetry without a
 started journal operation; a crash after the started boundary can leave
 telemetry incomplete. Journal receipts and reconciliation remain authoritative
 for replay, ambiguity, and duplicate-risk decisions.
+
+Every definitive ordinary or deferred tool receipt derives its event ID as
+`evt_receipt_<identity_key>`, where `identity_key` is the lowercase SHA-256 of
+the RFC 8785 UTF-8 closed operation identity. Same-result replays retain that
+event identity and its authoritative timestamp; ordinary receipt conflicts are
+typed `tool_receipt_conflict` zero-write outcomes, while deferred resolution
+conflicts are typed `deferred_resolution_conflict` zero-write outcomes.
+
+Definitive `ERROR` receipts persist the complete canonical `ToolExecutionResult`
+and its `result_digest`, including metadata, directive, and legal artifact or
+cursor recovery fields. `OperationError` is only the normalized projection of
+that result. Recovery verifies the result and digest, then reconstructs the
+tool message from `journal.result`; it never guesses metadata or directive from
+the projection. Ordinary failed entries do not carry `resume_observation`.
+`tool_outcome_unknown` retains the observation alongside its complete `ERROR`
+result, while synthetic `tool_cancelled` closures remain resultless.
 
 Without a safe decision, the public result is
 `AgentStatus.RECONCILIATION_REQUIRED`. It has no completion reason and does not
@@ -118,13 +140,12 @@ outside the checkpoint contract. Without a durable checkpoint the factory
 fails closed with an ordinary `ToolExecutionResult(ERROR)` using
 `error_code="deferred_requires_checkpoint"` before provider work.
 
-The runner collects one model-tool batch while holding its claim, then calls
-`admit_deferred_batch` once. The compare-and-swap persists all completed
-receipts, deferred handles, lifecycle events, and the deferred barrier before
-releasing the claim. A deferred call contributes no model-visible tool result
-message or `ToolExecutionResult` status. Mixed completed/deferred batches are
-all-or-none; completed `SUCCESS` and `ERROR` outcomes become `succeeded` and
-`failed` journal entries respectively.
+The runner records each ordinary definitive `SUCCESS` or `ERROR` through
+`record_tool_receipt` immediately, preserving the active claim and advancing
+the revision once per receipt. `admit_deferred_batch` then accepts only the
+still-deferred outcomes, writes their handles and events atomically, and
+releases the claim once. A deferred call contributes no model-visible tool
+result message or `ToolExecutionResult` status.
 
 The public callback is deliberately revision-free:
 
@@ -182,7 +203,7 @@ Terminal records remain replayable after acknowledgement. Session and event
 stores reject reuse of the same identity with different payload bytes.
 
 Distributed workers accept only `vv-agent.distributed-run.v5` and return only
-the closed tagged `vv-agent.distributed-worker-response.v3` object: `pending`, `committed`,
+the closed tagged `vv-agent.distributed-worker-response.v4` object: `pending`, `committed`,
 `terminal_candidate`, or `terminal_replay`. The response is an observation, so
 the scheduler reloads the authoritative checkpoint after every response,
 timeout, or transport error. A candidate still needs controller-side terminal
@@ -223,7 +244,7 @@ worker; durable cross-process approval continuation remains a separate protocol.
 
 ## Scope And Limits
 
-Checkpoint v8 provides durable resume, deferred barriers, host-interaction recovery, and explicit ambiguity. It does not make
+Checkpoint v10 provides durable resume, deferred barriers, host-interaction recovery, and explicit ambiguity. It does not make
 an arbitrary external API exactly-once, recover a provider response that was
 never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,

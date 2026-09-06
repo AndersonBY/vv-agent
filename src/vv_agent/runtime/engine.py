@@ -49,6 +49,7 @@ from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.runtime.checkpoint_resume import (
     CheckpointReconciliationRequired,
     CheckpointResumeController,
+    _checkpoint_control_result,
 )
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.controller import DistributedBackend, HostInteractionOutcome, HostInteractionRequest
@@ -97,6 +98,7 @@ from vv_agent.types import (
     ToolCall,
     ToolDirective,
     ToolExecutionResult,
+    _agent_result_error_text,
     _last_assistant_output,
     _trim_portable_whitespace,
 )
@@ -547,7 +549,11 @@ class AgentRuntime:
                     completion_reason=CompletionReason.CANCELLED,
                     messages=messages,
                     cycles=[],
-                    error=runtime_ctx.cancellation_token.reason or "Operation was cancelled",
+                    error={
+                        "code": "cancelled",
+                        "message": runtime_ctx.cancellation_token.reason or "Operation was cancelled",
+                        "retryable": False,
+                    },
                     shared_state=shared,
                     token_usage=runtime_ctx.model_call_ledger.usage(),
                     budget_usage=budget_controller.snapshot,
@@ -673,7 +679,7 @@ class AgentRuntime:
                 "run_cancelled",
                 ctx=runtime_ctx,
                 cycle=len(result.cycles) or None,
-                reason=self._preview_text(result.error or "Operation was cancelled"),
+                reason=self._preview_text(_agent_result_error_text(result.error) or "Operation was cancelled"),
                 completion_reason=result.completion_reason.value,
                 partial_output=self._preview_text(result.partial_output or ""),
             )
@@ -686,7 +692,7 @@ class AgentRuntime:
                 ctx=runtime_ctx,
                 cycle=len(result.cycles),
                 final_answer=self._preview_text(result.final_answer or ""),
-                error=self._preview_text(result.error or ""),
+                error=self._preview_text(_agent_result_error_text(result.error) or ""),
                 completion_reason=result.completion_reason.value,
                 partial_output=self._preview_text(result.partial_output or ""),
             )
@@ -756,7 +762,26 @@ class AgentRuntime:
                     partial_output=_last_assistant_output(cycles),
                     messages=messages,
                     cycles=cycles,
-                    error=reason or "Operation was cancelled",
+                    error={"code": "cancelled", "message": reason or "Operation was cancelled", "retryable": False},
+                    shared_state=shared,
+                    token_usage=self._task_token_usage(ctx),
+                    budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
+                )
+
+            def checkpoint_control_result(
+                error: CheckpointError,
+                cycle_record: CycleRecord | None = None,
+            ) -> AgentResult | None:
+                if error.code not in {"checkpoint_cancel_requested", "checkpoint_lease_lost"}:
+                    return None
+                if cycle_record is not None:
+                    cycles.append(cycle_record)
+                if budget_controller is not None:
+                    budget_controller.tool_batch_complete(cycle_index, operation_failed=True)
+                return _checkpoint_control_result(
+                    error,
+                    messages=messages,
+                    cycles=cycles,
                     shared_state=shared,
                     token_usage=self._task_token_usage(ctx),
                     budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
@@ -836,6 +861,24 @@ class AgentRuntime:
                 )
             except CheckpointReconciliationRequired:
                 raise
+            except CheckpointError as exc:
+                control_result = checkpoint_control_result(exc)
+                if control_result is None:
+                    checkpoint_controller = (
+                        ctx.metadata.get("_vv_agent_checkpoint_controller") if isinstance(ctx, ExecutionContext) else None
+                    )
+                    if exc.code == "checkpoint_not_claimable" and isinstance(checkpoint_controller, CheckpointResumeController):
+                        deferred_result = checkpoint_controller.deferred_pending_result(
+                            messages=messages,
+                            cycles=cycles,
+                            shared_state=shared,
+                            token_usage=self._task_token_usage(ctx),
+                            budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
+                        )
+                        if deferred_result is not None:
+                            return deferred_result
+                    raise
+                return control_result
             except ModelCallBudgetExhausted as exc:
                 if budget_controller is None:
                     raise AssertionError("model call budget exhaustion requires a budget controller") from exc
@@ -871,7 +914,11 @@ class AgentRuntime:
                     partial_output=_last_assistant_output(cycles),
                     messages=messages,
                     cycles=cycles,
-                    error=f"LLM call failed in cycle {cycle_index}: {exc}",
+                    error={
+                        "code": "cancelled" if cancelled else "agent_failed",
+                        "message": f"LLM call failed in cycle {cycle_index}: {exc}",
+                        "retryable": False,
+                    },
                     shared_state=shared,
                     token_usage=self._task_token_usage(ctx),
                     budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
@@ -993,11 +1040,16 @@ class AgentRuntime:
                         partial_output=_last_assistant_output(cycles),
                         messages=messages,
                         cycles=cycles,
-                        error=str(exc),
+                        error={"code": "agent_failed", "message": str(exc), "retryable": False},
                         shared_state=shared,
                         token_usage=self._task_token_usage(ctx),
                         budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
                     )
+                except CheckpointError as exc:
+                    control_result = checkpoint_control_result(exc)
+                    if control_result is None:
+                        raise
+                    return control_result
                 except _ConfiguredSubTaskCancelledError as exc:
                     cycles.append(cycle_record)
                     if budget_controller is not None:
@@ -1370,7 +1422,7 @@ class AgentRuntime:
             partial_output=_last_assistant_output(cycles),
             messages=messages,
             cycles=cycles,
-            error=error,
+            error={"code": "agent_failed", "message": error, "retryable": False},
             shared_state=shared_state,
             token_usage=AgentRuntime._task_token_usage(ctx),
             budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
@@ -1422,7 +1474,7 @@ class AgentRuntime:
             cycles=cycles,
             final_answer=None,
             wait_reason=None,
-            error="Run budget exhausted.",
+            error={"code": "run_budget_exhausted", "message": "Run budget exhausted.", "retryable": False},
             shared_state=shared_state,
             token_usage=AgentRuntime._task_token_usage(controller.ctx),
             budget_usage=controller.snapshot,
@@ -2418,7 +2470,7 @@ class AgentRuntime:
                         status=sub_result.status,
                         final_answer=sub_result.final_answer,
                         wait_reason=sub_result.wait_reason,
-                        error=sub_result.error,
+                        error=_agent_result_error_text(sub_result.error),
                         error_code=("sub_task_failed" if sub_result.status == AgentStatus.FAILED else None),
                         completion_reason=sub_result.completion_reason,
                         completion_tool_name=sub_result.completion_tool_name,
@@ -2542,7 +2594,7 @@ class AgentRuntime:
             status=sub_run.result.status,
             final_answer=sub_run.result.final_answer,
             wait_reason=sub_run.result.wait_reason,
-            error=sub_run.result.error,
+            error=_agent_result_error_text(sub_run.result.error),
             error_code=("sub_task_failed" if sub_run.result.status == AgentStatus.FAILED else None),
             completion_reason=sub_run.result.completion_reason,
             completion_tool_name=sub_run.result.completion_tool_name,

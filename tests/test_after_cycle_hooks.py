@@ -262,7 +262,11 @@ def test_after_cycle_stop_is_always_non_success(tmp_path: Path) -> None:
     assert result.status is AgentStatus.FAILED
     assert result.completion_reason is CompletionReason.FAILED
     assert result.final_answer is None
-    assert result.error == "host.policy_stop: Host policy stopped this run."
+    assert result.error == {
+        "code": "agent_failed",
+        "message": "host.policy_stop: Host policy stopped this run.",
+        "retryable": False,
+    }
     assert "after_cycle_stopped" in events
     assert "run_completed" not in events
 
@@ -318,7 +322,8 @@ def test_after_cycle_steer_cannot_cross_wait_or_max_cycle(tmp_path: Path) -> Non
         assert result.status is AgentStatus.FAILED
         assert result.completion_reason is CompletionReason.FAILED
         assert result.error is not None
-        assert result.error.startswith("after_cycle_steer_unavailable:")
+        assert result.error["code"] == "agent_failed"
+        assert result.error["message"].startswith("after_cycle_steer_unavailable:")
 
 
 def test_after_cycle_invalid_durable_control_state_fails_before_model(
@@ -353,7 +358,8 @@ def test_after_cycle_invalid_durable_control_state_fails_before_model(
 
     assert result.status is AgentStatus.FAILED
     assert result.error is not None
-    assert result.error.startswith("after_cycle_control_state_invalid:")
+    assert result.error["code"] == "agent_failed"
+    assert result.error["message"].startswith("after_cycle_control_state_invalid:")
     assert model_calls == 0
 
 
@@ -449,4 +455,5 @@ def test_after_cycle_snapshot_is_detached_and_composition_overflow_is_typed(
     )
     assert overflow.status is AgentStatus.FAILED
     assert overflow.error is not None
-    assert overflow.error.startswith("after_cycle_decision_invalid:")
+    assert overflow.error["code"] == "agent_failed"
+    assert overflow.error["message"].startswith("after_cycle_decision_invalid:")

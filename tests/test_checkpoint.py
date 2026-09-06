@@ -2,27 +2,33 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import sqlite3
 from collections.abc import Callable, Set
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from threading import Barrier, Lock, Thread
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
 from vv_agent.checkpoint import (
+    AmbiguousModelPolicy,
     CheckpointConfig,
     CheckpointError,
     CheckpointExtension,
     EventCursor,
     OperationKind,
     OperationState,
+    ReconciliationDecisionKind,
     ResumeObservation,
     ResumePolicy,
     ToolIdempotency,
     canonical_json_bytes,
+    canonical_json_sha256,
     compute_event_payload_digest,
     compute_operation_request_digest,
     compute_run_definition_digest,
@@ -31,10 +37,16 @@ from vv_agent.checkpoint import (
 from vv_agent.events import (
     CheckpointCreatedEvent,
     CheckpointResumedEvent,
+    CycleAbortedEvent,
     ModelCallCompletedEvent,
     ModelCallFailedEvent,
     ModelCallStartedEvent,
+    OperationAmbiguousEvent,
+    OperationReplayedEvent,
+    ReconciliationRequiredEvent,
+    RunCancelledEvent,
     RunFailedEvent,
+    RunStateChangedEvent,
 )
 from vv_agent.runtime.checkpoint_codec import (
     _strict_json_loads,
@@ -44,13 +56,15 @@ from vv_agent.runtime.checkpoint_codec import (
     checkpoint_to_json,
     validate_extension_state_size,
 )
-from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
+from vv_agent.runtime.checkpoint_resume import CheckpointReconciliationRequired, CheckpointResumeController
 from vv_agent.runtime.state import (
     Checkpoint,
     CheckpointConflictError,
     CheckpointStore,
     EventOutboxEntry,
+    OperationError,
     OperationJournalEntry,
+    compute_tool_identity_key,
 )
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.redis import RedisCheckpointStore
@@ -60,11 +74,16 @@ from vv_agent.types import (
     AgentResult,
     AgentStatus,
     CompletionReason,
+    CycleRecord,
     Message,
     ModelCallRecord,
     ModelCallStatus,
     TokenUsage,
     ToolArtifactRef,
+    ToolCall,
+    ToolDirective,
+    ToolExecutionResult,
+    ToolResultStatus,
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "parity"
@@ -153,17 +172,23 @@ class _FakeRedisPipeline:
     def multi(self) -> None:
         self._transaction = True
 
-    def set(self, key: str, value: str) -> None:
+    def set(self, key: str, value: str, *, nx: bool = False) -> None:
         if self._transaction:
-            self._commands.append(("set", key, value))
+            self._commands.append(("set_nx" if nx else "set", key, value))
         else:
-            self._client.set(key, value)
+            self._client.set(key, value, nx=nx)
 
     def sadd(self, key: str, value: str) -> None:
         if self._transaction:
             self._commands.append(("sadd", key, value))
         else:
             self._client.sadd(key, value)
+
+    def srem(self, key: str, value: str) -> None:
+        if self._transaction:
+            self._commands.append(("srem", key, value))
+        else:
+            self._client.srem(key, value)
 
     def delete(self, key: str) -> None:
         if self._transaction:
@@ -174,12 +199,15 @@ class _FakeRedisPipeline:
     def execute(self) -> list[object]:
         results: list[object] = []
         for command, key, value in self._commands:
-            if command == "set":
+            if command in {"set", "set_nx"}:
                 assert value is not None
-                results.append(self._client.set(key, value))
+                results.append(self._client.set(key, value, nx=command == "set_nx"))
             elif command == "sadd":
                 assert value is not None
                 results.append(self._client.sadd(key, value))
+            elif command == "srem":
+                assert value is not None
+                results.append(self._client.srem(key, value))
             else:
                 results.append(self._client.delete(key))
         self._transaction = False
@@ -188,6 +216,7 @@ class _FakeRedisPipeline:
 
 
 class _FakeRedisClient:
+    fail_once: bool
     injected: bool
     second_receipt_key: str
     second_receipt_payload: str
@@ -213,6 +242,15 @@ class _FakeRedisClient:
         before = len(members)
         members.add(value)
         return int(len(members) != before)
+
+    def srem(self, key: str, value: str) -> int:
+        members = self._sets.get(key)
+        if members is None or value not in members:
+            return 0
+        members.remove(value)
+        if not members:
+            self._sets.pop(key, None)
+        return 1
 
     def smembers(self, key: str) -> Set[str]:
         return set(self._sets.get(key, set()))
@@ -242,8 +280,32 @@ def _redis_store() -> RedisCheckpointStore:
     return store
 
 
+def test_redis_create_transaction_failure_leaves_no_half_state() -> None:
+    class FailingPipeline(_FakeRedisPipeline):
+        def execute(self) -> list[object]:
+            raise RuntimeError("injected EXEC failure")
+
+    class FailingClient(_FakeRedisClient):
+        def pipeline(self) -> FailingPipeline:
+            return FailingPipeline(self)
+
+    store = RedisCheckpointStore.__new__(RedisCheckpointStore)
+    store._watch_error = _FakeWatchError
+    store._client = FailingClient()
+    checkpoint = _minimal_checkpoint(key="redis-create-exec-failure")
+    data_key, lease_key = store._keys(checkpoint.checkpoint_key)  # type: ignore[attr-defined]
+    store._client.set(lease_key, "orphan-lease")  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="injected EXEC failure"):
+        store.create_checkpoint(checkpoint)
+
+    assert store._client.get(data_key) is None  # type: ignore[attr-defined]
+    assert store._client.get(lease_key) == "orphan-lease"  # type: ignore[attr-defined]
+
+
 def _fixture(name: str) -> dict[str, Any]:
-    return _strict_json_loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+    text = (FIXTURE_DIR / name).read_text(encoding="utf-8")
+    return json.loads(text) if name == "checkpoint_store.json" else _strict_json_loads(text)
 
 
 def _codec_case(name: str) -> dict[str, Any]:
@@ -255,6 +317,37 @@ def _minimal_checkpoint(*, key: str = "fresh") -> Checkpoint:
     payload = _codec_case("minimal_running")
     payload["checkpoint_key"] = key
     return checkpoint_from_dict(payload)
+
+
+@pytest.mark.parametrize("field_name", ["active_host_interaction", "suspended_origin"])
+def test_checkpoint_rejects_unsanitized_host_prompt(field_name: str) -> None:
+    from vv_agent.runtime.controller import HostInteractionRequest
+
+    request = HostInteractionRequest(
+        interaction_id="unsanitized-interaction",
+        logical_cycle=1,
+        operation_id="unsanitized-operation",
+        tool_call_id="unsanitized-tool",
+        prompt="Approve sk-state-123 at https://example.invalid/state",
+    )
+    request_payload = request.to_dict()
+    request_payload["prompt"] = "Approve sk-state-123 at https://example.invalid/state"
+    payload = checkpoint_to_dict(_minimal_checkpoint(key=f"unsanitized-{field_name}"))
+    if field_name == "active_host_interaction":
+        payload["status"] = AgentStatus.HOST_INTERACTION.value
+        payload["active_host_interaction"] = request_payload
+        payload["suspended_origin"] = None
+    else:
+        payload["status"] = AgentStatus.SUSPENDED.value
+        payload["active_host_interaction"] = None
+        payload["suspended_origin"] = {
+            "status": AgentStatus.HOST_INTERACTION.value,
+            "active_host_interaction": request_payload,
+        }
+
+    with pytest.raises(CheckpointError) as error:
+        checkpoint_from_dict(payload)
+    assert error.value.code == "host_interaction_fields_invalid"
 
 
 def _checkpoint_created_event(*, event_id: str, checkpoint: Checkpoint) -> dict[str, Any]:
@@ -275,6 +368,260 @@ def _store(store_kind: str, tmp_path: Path, name: str) -> Any:
     if store_kind == "sqlite":
         return SqliteCheckpointStore(tmp_path / f"{name}.sqlite3")
     return _redis_store()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_create_rejects_cancel_requested_before_any_store_write(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"cancelled-create-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"cancelled-create-{store_kind}")
+    checkpoint.cancel_requested = True
+
+    with pytest.raises(CheckpointError) as error:
+        store.create_checkpoint(checkpoint)
+
+    assert error.value.code == "checkpoint_initial_invalid"
+    assert store.load_checkpoint(checkpoint.checkpoint_key) is None
+    if store_kind == "redis":
+        data_key, lease_key = store._keys(checkpoint.checkpoint_key)  # type: ignore[attr-defined]
+        assert store._client.get(data_key) is None  # type: ignore[attr-defined]
+        assert store._client.get(lease_key) is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(not os.getenv("VV_AGENT_TEST_REDIS_URL"), reason="set VV_AGENT_TEST_REDIS_URL for live Redis")
+def test_real_redis_create_rejects_cancelled_random_key_before_write() -> None:
+    store = RedisCheckpointStore(os.environ["VV_AGENT_TEST_REDIS_URL"])
+    checkpoint = _minimal_checkpoint(key=f"real-redis-cancelled-create-{uuid4().hex}")
+    checkpoint.cancel_requested = True
+    data_key, lease_key = store._keys(checkpoint.checkpoint_key)  # type: ignore[attr-defined]
+
+    store._client.delete(data_key, lease_key)  # type: ignore[attr-defined]
+    store._client.set(lease_key, "orphan-lease")  # type: ignore[attr-defined]
+    try:
+        with pytest.raises(CheckpointError) as error:
+            store.create_checkpoint(checkpoint)
+        assert error.value.code == "checkpoint_initial_invalid"
+        assert store._client.get(data_key) is None  # type: ignore[attr-defined]
+        assert store._client.get(lease_key) == "orphan-lease"  # type: ignore[attr-defined]
+    finally:
+        store.delete_checkpoint(checkpoint.checkpoint_key)
+
+
+@pytest.mark.parametrize("store_kind", ["fake", "real"])
+def test_redis_checkpoint_payload_key_binding_fails_closed(store_kind: str) -> None:
+    if store_kind == "real":
+        redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+        if not redis_url:
+            pytest.skip("set VV_AGENT_TEST_REDIS_URL for live Redis")
+        store: Any = RedisCheckpointStore(redis_url)
+    else:
+        store = _redis_store()
+    first_key = f"redis-payload-first-{uuid4().hex}"
+    second_key = f"redis-payload-second-{uuid4().hex}"
+    first = _minimal_checkpoint(key=first_key)
+    second = _minimal_checkpoint(key=second_key)
+    assert store.create_checkpoint(first)
+    assert store.create_checkpoint(second)
+    first_data_key, first_lease_key = store._keys(first_key)  # type: ignore[attr-defined]
+    second_data_key, second_lease_key = store._keys(second_key)  # type: ignore[attr-defined]
+    first_payload = store._client.get(first_data_key)  # type: ignore[attr-defined]
+    second_payload = store._client.get(second_data_key)  # type: ignore[attr-defined]
+    assert first_payload is not None and second_payload is not None
+
+    try:
+        store._client.set(first_data_key, second_payload)  # type: ignore[attr-defined]
+        store._client.set(second_data_key, first_payload)  # type: ignore[attr-defined]
+        before = (
+            store._client.get(first_data_key),  # type: ignore[attr-defined]
+            store._client.get(second_data_key),  # type: ignore[attr-defined]
+            store._client.get(first_lease_key),  # type: ignore[attr-defined]
+            store._client.get(second_lease_key),  # type: ignore[attr-defined]
+        )
+        with pytest.raises(CheckpointError) as load_error:
+            store.load_checkpoint(first_key)
+        assert load_error.value.code == "checkpoint_store_conflict"
+        with pytest.raises(CheckpointError) as claim_error:
+            store.claim_checkpoint(
+                first_key,
+                1,
+                claim_token="payload-swap-owner",
+                lease_expires_at_ms=10_000,
+                now_ms=1,
+                claim_mode="continue",
+            )
+        assert claim_error.value.code == "checkpoint_store_conflict"
+        after = (
+            store._client.get(first_data_key),  # type: ignore[attr-defined]
+            store._client.get(second_data_key),  # type: ignore[attr-defined]
+            store._client.get(first_lease_key),  # type: ignore[attr-defined]
+            store._client.get(second_lease_key),  # type: ignore[attr-defined]
+        )
+        assert after == before
+    finally:
+        store._client.set(first_data_key, first_payload)  # type: ignore[attr-defined]
+        store._client.set(second_data_key, second_payload)  # type: ignore[attr-defined]
+        store.delete_checkpoint(first_key)
+        store.delete_checkpoint(second_key)
+
+
+@pytest.mark.parametrize("store_kind", ["fake", "real"])
+def test_redis_delete_rejects_foreign_deferred_index_member(store_kind: str) -> None:
+    from vv_agent.deferred import DeferredResolutionReceipt, DeferredToolHandle
+    from vv_agent.runtime.stores.redis import _receipt_to_storage
+
+    if store_kind == "real":
+        redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+        if not redis_url:
+            pytest.skip("set VV_AGENT_TEST_REDIS_URL for live Redis")
+        store: Any = RedisCheckpointStore(redis_url)
+    else:
+        store = _redis_store()
+    first_key = f"redis-delete-first-{uuid4().hex}"
+    second_key = f"redis-delete-second-{uuid4().hex}"
+    first = _minimal_checkpoint(key=first_key)
+    second = _minimal_checkpoint(key=second_key)
+    assert store.create_checkpoint(first)
+    assert store.create_checkpoint(second)
+    handle = DeferredToolHandle(
+        checkpoint_key=second_key,
+        operation_id="foreign-delete-operation",
+        attempt=1,
+        request_digest="c" * 64,
+    )
+    result = ToolExecutionResult(
+        tool_call_id="foreign-delete-call",
+        content="accepted",
+        status_code=ToolResultStatus.SUCCESS,
+    )
+    receipt = DeferredResolutionReceipt(
+        handle=handle,
+        result=result,
+        result_digest=canonical_json_sha256(result.to_dict(), "deferred result"),
+        event_id=(
+            "evt_receipt_"
+            + compute_tool_identity_key(
+                handle.checkpoint_key,
+                handle.operation_id,
+                handle.attempt,
+                result.tool_call_id,
+                handle.request_digest,
+            )
+        ),
+        event_payload_digest="d" * 64,
+        receipt_status="succeeded",
+    )
+    receipt_key = store._receipt_key(handle.key)  # type: ignore[attr-defined]
+    first_set_key = store._receipt_set_key(first_key)  # type: ignore[attr-defined]
+    first_data_key, first_lease_key = store._keys(first_key)  # type: ignore[attr-defined]
+    try:
+        store._client.set(receipt_key, _receipt_to_storage(receipt))  # type: ignore[attr-defined]
+        store._client.sadd(first_set_key, receipt_key)  # type: ignore[attr-defined]
+        before = (
+            store._client.get(first_data_key),  # type: ignore[attr-defined]
+            store._client.get(first_lease_key),  # type: ignore[attr-defined]
+            set(store._client.smembers(first_set_key)),  # type: ignore[attr-defined]
+            store._client.get(receipt_key),  # type: ignore[attr-defined]
+        )
+        with pytest.raises(CheckpointError) as error:
+            store.delete_checkpoint(first_key)
+        assert error.value.code == "checkpoint_store_conflict"
+        after = (
+            store._client.get(first_data_key),  # type: ignore[attr-defined]
+            store._client.get(first_lease_key),  # type: ignore[attr-defined]
+            set(store._client.smembers(first_set_key)),  # type: ignore[attr-defined]
+            store._client.get(receipt_key),  # type: ignore[attr-defined]
+        )
+        assert after == before
+    finally:
+        store._client.srem(first_set_key, receipt_key)  # type: ignore[attr-defined]
+        store._client.delete(receipt_key)  # type: ignore[attr-defined]
+        store.delete_checkpoint(first_key)
+        store.delete_checkpoint(second_key)
+
+
+def _invalid_initial_checkpoint(field_name: str) -> Checkpoint:
+    checkpoint = _minimal_checkpoint(key=f"invalid-initial-{field_name}")
+    if field_name == "revision":
+        checkpoint.revision = 1
+    elif field_name == "resume_attempt":
+        checkpoint.resume_attempt = 2
+    elif field_name == "claim":
+        checkpoint.claim_token = "owner"
+        checkpoint.claimed_cycle = 1
+        checkpoint.lease_expires_at_ms = 100
+    elif field_name == "terminal":
+        checkpoint.status = AgentStatus.COMPLETED
+        checkpoint.terminal_result = AgentResult(
+            status=AgentStatus.COMPLETED,
+            messages=[],
+            cycles=[],
+            completion_reason=CompletionReason.NO_TOOL_FINISH,
+            final_answer="done",
+            checkpoint_key=checkpoint.checkpoint_key,
+        )
+    elif field_name == "host":
+        request = {
+            "schema_version": "vv-agent.host-interaction-request.v1",
+            "interaction_id": "interaction-create",
+            "logical_cycle": 1,
+            "operation_id": "op-host-create",
+            "tool_call_id": "call-host-create",
+            "prompt": "Choose an option.",
+        }
+        request["request_digest"] = canonical_json_sha256(request, "host interaction request")
+        checkpoint.status = AgentStatus.HOST_INTERACTION
+        checkpoint.active_host_interaction = request
+    elif field_name == "suspended":
+        checkpoint.status = AgentStatus.SUSPENDED
+        checkpoint.suspended_origin = {"status": "running", "active_host_interaction": None}
+    elif field_name == "outbox":
+        event = RunStateChangedEvent(
+            run_id=checkpoint.root_run_id,
+            trace_id=checkpoint.trace_id,
+            state="running",
+            cycle_index=1,
+            event_id="evt-invalid-create",
+        ).to_dict()
+        checkpoint.event_outbox = [EventOutboxEntry.pending("evt-invalid-create", event)]
+    elif field_name == "cursor":
+        checkpoint.event_cursor = EventCursor(
+            store_ref={"id": "events.test", "version": "1"},
+            value={"sequence": 1},
+            last_event_id="evt-cursor",
+        )
+    elif field_name == "journal":
+        entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+        entry.cycle_index = 1
+        checkpoint.tool_journal = [entry]
+    else:
+        raise AssertionError(field_name)
+    return checkpoint
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["revision", "resume_attempt", "claim", "terminal", "host", "suspended", "outbox", "cursor", "journal"],
+)
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_create_rejects_every_non_initial_state_before_store_write(
+    field_name: str,
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"initial-invalid-{field_name}-{store_kind}")
+    checkpoint = _invalid_initial_checkpoint(field_name)
+
+    with pytest.raises(CheckpointError) as error:
+        store.create_checkpoint(checkpoint)
+
+    assert error.value.code == "checkpoint_initial_invalid"
+    assert store.load_checkpoint(checkpoint.checkpoint_key) is None
+    if store_kind == "redis":
+        data_key, lease_key = store._keys(checkpoint.checkpoint_key)  # type: ignore[attr-defined]
+        assert store._client.get(data_key) is None  # type: ignore[attr-defined]
+        assert store._client.get(lease_key) is None  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
@@ -322,9 +669,352 @@ def test_tool_batch_outbox_preflight_rejects_without_active_claim(
     )
 
 
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_progress_merges_authoritative_and_caller_event_outbox(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"progress-outbox-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"progress-outbox-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    authoritative_event = RunStateChangedEvent(
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        state="cancel_requested",
+        cycle_index=1,
+        event_id="evt-controller-cancel",
+    ).to_dict()
+    claimed.event_outbox = [EventOutboxEntry.pending("evt-controller-cancel", authoritative_event)]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert claimed is not None
+    caller_event = RunStateChangedEvent(
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        state="running",
+        cycle_index=1,
+        event_id="evt-caller-progress",
+    ).to_dict()
+    claimed.event_outbox = [EventOutboxEntry.pending("evt-caller-progress", caller_event)]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    persisted = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert persisted is not None
+    assert [entry.event_id for entry in persisted.event_outbox] == ["evt-controller-cancel", "evt-caller-progress"]
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_claimed_terminal_cas_preserves_authoritative_cancel_cursor_and_events(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"terminal-authority-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"terminal-authority-{store_kind}")
+    first = EventOutboxEntry.pending(
+        "evt-authoritative",
+        _checkpoint_created_event(event_id="evt-authoritative", checkpoint=checkpoint),
+    )
+    checkpoint.event_outbox = [first]
+    assert store.create_checkpoint(checkpoint)
+    cursor = EventCursor(
+        store_ref={"id": "events.test", "version": "1"},
+        value={"sequence": 1},
+        last_event_id=first.event_id,
+    )
+    assert store.record_event_delivery(
+        checkpoint.checkpoint_key,
+        event_id=first.event_id,
+        payload_digest=first.payload_digest,
+        cursor=cursor,
+        expected_revision=0,
+        claim_token=None,
+    )
+    current = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert current is not None
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner-authority",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+
+    cancelled = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert cancelled is not None
+    cancelled.cancel_requested = True
+    if store_kind == "memory":
+        store._store[checkpoint.checkpoint_key] = cancelled  # type: ignore[attr-defined]
+    elif store_kind == "sqlite":
+        with store._lock, store._conn:  # type: ignore[attr-defined]
+            store._conn.execute(  # type: ignore[attr-defined]
+                "UPDATE checkpoints SET cancel_requested = 1 WHERE checkpoint_key = ?",
+                (checkpoint.checkpoint_key,),
+            )
+    else:
+        from vv_agent.runtime.stores.redis import _checkpoint_to_storage
+
+        payload, lease = _checkpoint_to_storage(cancelled)
+        data_key, lease_key = store._keys(checkpoint.checkpoint_key)  # type: ignore[attr-defined]
+        store._client.set(data_key, payload)  # type: ignore[attr-defined]
+        if lease is not None:
+            store._client.set(lease_key, str(lease))  # type: ignore[attr-defined]
+
+    candidate = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert candidate is not None
+    candidate.status = AgentStatus.FAILED
+    candidate.terminal_result = AgentResult(
+        status=AgentStatus.FAILED,
+        messages=candidate.messages,
+        cycles=candidate.cycles,
+        error={"code": "agent_failed", "message": "terminal failure", "retryable": False},
+        completion_reason=CompletionReason.FAILED,
+        checkpoint_key=candidate.checkpoint_key,
+    )
+    second_event = RunFailedEvent(
+        run_id=candidate.root_run_id,
+        trace_id=candidate.trace_id,
+        error="terminal failure",
+        cycle_index=candidate.cycle_index,
+        event_id="evt-candidate-terminal",
+    ).to_dict()
+    candidate.event_outbox.append(EventOutboxEntry.pending(second_event["event_id"], second_event))
+    assert store.finalize_claimed_checkpoint(
+        candidate,
+        claim_token="owner-authority",
+        expected_revision=candidate.revision,
+    )
+
+    terminal = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert terminal is not None
+    assert terminal.cancel_requested
+    assert terminal.event_cursor == cursor
+    assert [entry.event_id for entry in terminal.event_outbox] == [first.event_id, "evt-candidate-terminal"]
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_unclaimed_terminal_cas_preserves_authoritative_cancel_cursor_and_events(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"unclaimed-terminal-authority-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"unclaimed-terminal-authority-{store_kind}")
+    first = EventOutboxEntry.pending(
+        "evt-unclaimed-authoritative",
+        _checkpoint_created_event(event_id="evt-unclaimed-authoritative", checkpoint=checkpoint),
+    )
+    checkpoint.event_outbox = [first]
+    assert store.create_checkpoint(checkpoint)
+    cursor = EventCursor(
+        store_ref={"id": "events.test", "version": "1"},
+        value={"sequence": 1},
+        last_event_id=first.event_id,
+    )
+    assert store.record_event_delivery(
+        checkpoint.checkpoint_key,
+        event_id=first.event_id,
+        payload_digest=first.payload_digest,
+        cursor=cursor,
+        expected_revision=0,
+        claim_token=None,
+    )
+    current = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert current is not None
+    current.cancel_requested = True
+    if store_kind == "memory":
+        store._store[checkpoint.checkpoint_key] = current  # type: ignore[attr-defined]
+    elif store_kind == "sqlite":
+        with store._lock, store._conn:  # type: ignore[attr-defined]
+            store._conn.execute(  # type: ignore[attr-defined]
+                "UPDATE checkpoints SET cancel_requested = 1 WHERE checkpoint_key = ?",
+                (checkpoint.checkpoint_key,),
+            )
+    else:
+        from vv_agent.runtime.stores.redis import _checkpoint_to_storage
+
+        payload, lease = _checkpoint_to_storage(current)
+        data_key, lease_key = store._keys(checkpoint.checkpoint_key)  # type: ignore[attr-defined]
+        store._client.set(data_key, payload)  # type: ignore[attr-defined]
+        if lease is not None:
+            store._client.set(lease_key, str(lease))  # type: ignore[attr-defined]
+
+    candidate = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert candidate is not None
+    candidate.status = AgentStatus.FAILED
+    candidate.terminal_result = AgentResult(
+        status=AgentStatus.FAILED,
+        messages=candidate.messages,
+        cycles=candidate.cycles,
+        error={"code": "agent_failed", "message": "terminal failure", "retryable": False},
+        completion_reason=CompletionReason.FAILED,
+        checkpoint_key=candidate.checkpoint_key,
+    )
+    second_event = RunFailedEvent(
+        run_id=candidate.root_run_id,
+        trace_id=candidate.trace_id,
+        error="terminal failure",
+        cycle_index=candidate.cycle_index,
+        event_id="evt-unclaimed-candidate-terminal",
+    ).to_dict()
+    candidate.event_outbox.append(EventOutboxEntry.pending(second_event["event_id"], second_event))
+    assert store.finalize_checkpoint(candidate, expected_revision=candidate.revision)
+
+    terminal = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert terminal is not None
+    assert terminal.cancel_requested
+    assert terminal.event_cursor == cursor
+    assert [entry.event_id for entry in terminal.event_outbox] == [
+        first.event_id,
+        "evt-unclaimed-candidate-terminal",
+    ]
+
+
 def _journal_case(name: str) -> dict[str, Any]:
     fixture = _fixture("operation_journal.json")
     return deepcopy(next(case["entry"] for case in fixture["valid_entries"] if case["name"] == name))
+
+
+@pytest.mark.parametrize(
+    "vector_name",
+    ["error_custom_metadata_non_default_directive", "error_truncated_artifact", "error_truncated_cursor"],
+)
+def test_failed_tool_receipt_keeps_complete_result_and_projection(
+    vector_name: str,
+) -> None:
+    fixture = _fixture("operation_journal.json")
+    vector = next(item for item in fixture["receipt_identity"]["result_digest_vectors"] if item["name"] == vector_name)
+    result = ToolExecutionResult.from_dict(vector["wire"])
+    payload = _journal_case("tool_failed")
+    payload.update(
+        {
+            "tool_call_id": result.tool_call_id,
+            "result": result.to_dict(),
+            "result_digest": vector["rfc8785_sha256"],
+            "error": {
+                "code": result.error_code or "tool_operation_failed",
+                "message": result.content or "tool operation failed",
+                "retryable": result.metadata.get("retryable", False),
+            },
+        }
+    )
+
+    entry = OperationJournalEntry.from_dict(payload)
+
+    assert entry.result == result.to_dict()
+    assert entry.result_digest == vector["rfc8785_sha256"]
+    assert entry.error == OperationError(
+        code=result.error_code or "tool_operation_failed",
+        message=result.content or "tool operation failed",
+        retryable=result.metadata.get("retryable", False),
+    )
+
+
+def test_failed_tool_receipt_uses_projection_fallback_for_empty_error_code() -> None:
+    result = ToolExecutionResult(
+        tool_call_id="call-projection-fallback",
+        content="provider rejected without a typed code",
+        status_code=ToolResultStatus.ERROR,
+        error_code="",
+    )
+    payload = _journal_case("tool_failed")
+    payload.update(
+        {
+            "tool_call_id": result.tool_call_id,
+            "result": result.to_dict(),
+            "result_digest": canonical_json_sha256(result.to_dict(), "tool result"),
+            "error": {
+                "code": "tool_operation_failed",
+                "message": result.content,
+                "retryable": False,
+            },
+        }
+    )
+
+    entry = OperationJournalEntry.from_dict(payload)
+
+    assert result.to_dict()["error_code"] == ""
+    assert entry.error == OperationError(
+        code="tool_operation_failed",
+        message=result.content,
+        retryable=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "vector_name",
+    ["error_custom_metadata_non_default_directive", "error_truncated_artifact", "error_truncated_cursor"],
+)
+def test_failed_tool_receipt_recovery_replays_exact_result_without_dispatch(
+    vector_name: str,
+) -> None:
+    fixture = _fixture("operation_journal.json")
+    vector = next(item for item in fixture["receipt_identity"]["result_digest_vectors"] if item["name"] == vector_name)
+    result = ToolExecutionResult.from_dict(vector["wire"])
+    key = f"failed-replay-{vector_name}"
+    store = InMemoryCheckpointStore()
+    seed = _minimal_checkpoint(key=key)
+    first = CheckpointResumeController(
+        config=CheckpointConfig(store=store, key=key, resume_policy=ResumePolicy.RESUME_IF_PRESENT),
+        task_id=seed.task_id,
+        run_id=seed.root_run_id,
+        trace_id=seed.trace_id,
+        run_definition=deepcopy(seed.run_definition),
+        run_definition_digest=seed.run_definition_digest,
+        initial_messages=[],
+        initial_shared_state={},
+        initial_budget_usage=None,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+    )
+    call = ToolCall(id=result.tool_call_id, name="write_record", arguments={})
+    try:
+        assert first.admit() is None
+        first.plan_tool(cycle_index=1, call=call, idempotency_support=ToolIdempotency.UNKNOWN)
+        first.tool_started(cycle_index=1, call=call)
+        first.finish_tool(cycle_index=1, call=call, result=result)
+        retained = store.load_checkpoint(key)
+        assert retained is not None
+        assert retained.tool_journal[0].result == result.to_dict()
+        assert retained.tool_journal[0].result_digest == vector["rfc8785_sha256"]
+    finally:
+        first.close()
+
+    with store._lock:
+        store._store[key].lease_expires_at_ms = 1
+
+    second = CheckpointResumeController(
+        config=CheckpointConfig(store=store, key=key, resume_policy=ResumePolicy.RESUME_IF_PRESENT),
+        task_id=seed.task_id,
+        run_id=seed.root_run_id,
+        trace_id=seed.trace_id,
+        run_definition=deepcopy(seed.run_definition),
+        run_definition_digest=seed.run_definition_digest,
+        initial_messages=[],
+        initial_shared_state={},
+        initial_budget_usage=None,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+    )
+    try:
+        assert second.admit() is None
+        plan = second.plan_tool(cycle_index=1, call=call, idempotency_support=ToolIdempotency.UNKNOWN)
+        assert plan.replay_result is not None
+        assert plan.replay_result.to_dict() == result.to_dict()
+        assert plan.replay_result.directive is result.directive
+    finally:
+        second.close()
+        store.delete_checkpoint(key)
 
 
 def _model_event_kwargs(checkpoint: Checkpoint, journal: OperationJournalEntry) -> dict[str, Any]:
@@ -503,6 +1193,37 @@ def test_checkpoint_and_operation_receipt_preserve_bounded_tool_result_fields() 
     assert entry.to_dict() == expected_receipt
 
 
+def test_cycle_aborted_follows_live_cancel_signal_before_terminal_event() -> None:
+    from vv_agent.runtime.state import _append_cycle_aborted_event
+
+    checkpoint = _minimal_checkpoint(key="cycle-aborted-live-cancel-order")
+    live_cancel = RunStateChangedEvent(
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        state="running",
+        cancel_requested={"from": False, "to": True},
+        event_id="evt-live-cancel",
+    ).to_dict()
+    terminal = RunCancelledEvent(
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        reason="cancelled",
+        event_id="evt-run-cancelled",
+    ).to_dict()
+    checkpoint.event_outbox = [
+        EventOutboxEntry.pending("evt-live-cancel", live_cancel),
+        EventOutboxEntry.pending("evt-run-cancelled", terminal),
+    ]
+
+    _append_cycle_aborted_event(checkpoint, logical_cycle=1, reason="cancelled")
+
+    assert [entry.event["type"] for entry in checkpoint.event_outbox] == [
+        "run_state_changed",
+        "cycle_aborted",
+        "run_cancelled",
+    ]
+
+
 def test_checkpoint_round_trip_restores_jcs_large_float_through_codec_and_sqlite(
     tmp_path: Path,
 ) -> None:
@@ -637,6 +1358,7 @@ def test_checkpoint_resume_rejects_definition_mismatch_before_claim(
 def test_checkpoint_invalid_fixture_cases_have_stable_codes() -> None:
     fixture = _fixture("checkpoint_codec.json")
     expected_codes = {
+        "old_v9_schema_is_rejected_forward_only": "checkpoint_schema_unsupported",
         "unknown_schema": "checkpoint_schema_unsupported",
         "blank_checkpoint_key": "checkpoint_key_invalid",
         "bad_definition_digest": "checkpoint_definition_digest_invalid",
@@ -648,7 +1370,8 @@ def test_checkpoint_invalid_fixture_cases_have_stable_codes() -> None:
         "unknown_required_extension": "checkpoint_required_extension_unavailable",
         "invalid_extension_namespace": "checkpoint_extension_namespace_invalid",
         "unknown_top_level_is_rejected": "checkpoint_unknown_field",
-        "old_v7_schema_is_rejected_forward_only": "checkpoint_schema_unsupported",
+        "cancel_requested_not_boolean": "checkpoint_status_invalid",
+        "terminal_result_with_active_tool_journal_is_invalid": "checkpoint_status_invalid",
     }
     for case in fixture["invalid_cases"]:
         registered = [] if case["name"] == "unknown_required_extension" else None
@@ -766,12 +1489,93 @@ def test_operation_journal_invalid_cases_have_stable_codes() -> None:
             if "remove" in mutation:
                 entry.pop(mutation["remove"])
             if "replace" in mutation:
-                entry.update(mutation["replace"])
+                for field_name, replacement in mutation["replace"].items():
+                    target = entry
+                    parts = field_name.split(".")
+                    for part in parts[:-1]:
+                        target = target[part]
+                    target[parts[-1]] = replacement
+            if "add" in mutation:
+                entry.update(mutation["add"])
         else:
             entry = case["entry"]
         with pytest.raises(CheckpointError) as error:
             OperationJournalEntry.from_dict(entry)
         assert error.value.code == case["error_code"], case["name"]
+
+
+@pytest.mark.parametrize(
+    ("journal_case", "mutation", "error_code"),
+    [
+        ("tool_started", ("remove", "result"), "operation_kind_fields_invalid"),
+        ("tool_started", ("remove", "idempotency_key"), "operation_kind_fields_invalid"),
+        ("tool_failed", ("null", "result"), "operation_result_required"),
+        ("tool_failed_tool_cancelled_closure", ("remove", "result"), "operation_result_required"),
+        (
+            "tool_failed_tool_cancelled_closure",
+            ("null", "result_digest"),
+            "operation_closure_receipt_forbidden",
+        ),
+        ("tool_succeeded", ("null", "result_digest"), "operation_result_digest_required"),
+        ("model_planned", ("remove", "response"), "operation_kind_fields_invalid"),
+        ("model_planned", ("null", "call_id"), "model_identity_invalid"),
+        ("tool_started", ("add", "future_field"), "operation_entry_unknown_field"),
+        ("model_planned", ("add", "future_field"), "operation_entry_unknown_field"),
+        ("tool_failed_tool_cancelled_closure", ("add", "future_field"), "operation_entry_unknown_field"),
+    ],
+)
+def test_operation_journal_reader_rejects_missing_null_and_unknown_fields(
+    journal_case: str,
+    mutation: tuple[str, str],
+    error_code: str,
+) -> None:
+    entry = _journal_case(journal_case)
+    action, field_name = mutation
+    if action == "remove":
+        entry.pop(field_name)
+    elif action == "null":
+        entry[field_name] = None
+    else:
+        entry[field_name] = True
+
+    with pytest.raises(CheckpointError) as error:
+        OperationJournalEntry.from_dict(entry)
+    assert error.value.code == error_code
+
+
+@pytest.mark.parametrize(
+    ("journal_case", "state", "error_code"),
+    [
+        ("tool_planned", "planned", "operation_receipt_unexpected"),
+        ("tool_started", "started", "operation_receipt_unexpected"),
+        ("tool_started", "ambiguous", "operation_receipt_unexpected"),
+        ("tool_deferred", "deferred", "operation_deferred_fields_invalid"),
+    ],
+)
+def test_active_tool_journal_reader_rejects_resume_observation(
+    journal_case: str,
+    state: str,
+    error_code: str,
+) -> None:
+    entry = _journal_case(journal_case)
+    entry["state"] = state
+    entry["resume_observation"] = _journal_case("tool_failed_tool_cancelled_closure")["resume_observation"]
+
+    with pytest.raises(CheckpointError) as error:
+        OperationJournalEntry.from_dict(entry)
+
+    assert error.value.code == error_code
+
+
+def test_closed_tool_cancelled_journal_reader_accepts_resume_observation() -> None:
+    entry = _journal_case("tool_failed_tool_cancelled_closure")
+
+    decoded = OperationJournalEntry.from_dict(entry)
+
+    assert decoded.error is not None
+    assert decoded.error.code == "tool_cancelled"
+    assert decoded.resume_observation is not None
+    assert decoded.to_dict() == entry
 
 
 @pytest.mark.parametrize(
@@ -1089,6 +1893,730 @@ def test_progress_and_heartbeat_preserve_claim_and_journal(
     assert persisted.shared_state["progress"] == "started"
 
 
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_live_cancel_preserves_owner_progress_and_one_tool_receipt(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"live-cancel-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"live-cancel-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    entry.cycle_index = 1
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+
+    current = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert current is not None
+    current.cancel_requested = True
+    if store_kind == "memory":
+        store._store[checkpoint.checkpoint_key] = current  # type: ignore[attr-defined]
+    elif store_kind == "sqlite":
+        with store._lock, store._conn:  # type: ignore[attr-defined]
+            store._conn.execute(  # type: ignore[attr-defined]
+                "UPDATE checkpoints SET cancel_requested = 1 WHERE checkpoint_key = ?",
+                (checkpoint.checkpoint_key,),
+            )
+    else:
+        from vv_agent.runtime.stores.redis import _checkpoint_to_storage
+
+        payload, lease = _checkpoint_to_storage(current)
+        data_key, lease_key = store._keys(checkpoint.checkpoint_key)  # type: ignore[attr-defined]
+        store._client.set(data_key, payload)  # type: ignore[attr-defined]
+        if lease is not None:
+            store._client.set(lease_key, str(lease))  # type: ignore[attr-defined]
+
+    claimed.shared_state["after_cancel"] = True
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    result = ToolExecutionResult(
+        tool_call_id=entry.tool_call_id or "call-tool",
+        content="done",
+        status_code=ToolResultStatus.SUCCESS,
+    )
+    assert store.record_tool_receipt(
+        claimed,
+        operation_id=entry.operation_id,
+        attempt=entry.attempt,
+        tool_call_id=entry.tool_call_id or "call-tool",
+        request_digest=entry.request_digest,
+        result=result,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    persisted = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert persisted is not None
+    assert persisted.cancel_requested
+    assert persisted.tool_journal[0].state is OperationState.SUCCEEDED
+    revision = persisted.revision
+    assert store.record_tool_receipt(
+        claimed,
+        operation_id=entry.operation_id,
+        attempt=entry.attempt,
+        tool_call_id=entry.tool_call_id or "call-tool",
+        request_digest=entry.request_digest,
+        result=result,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    replayed = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert replayed is not None and replayed.revision == revision
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_record_tool_receipt_rejects_planned_operation(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"planned-receipt-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"planned-receipt-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_planned"))
+    entry.cycle_index = 1
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    result = ToolExecutionResult(
+        tool_call_id=entry.tool_call_id or "call-1",
+        content="Tool is not allowed for this run.",
+        status_code=ToolResultStatus.ERROR,
+        error_code="tool_not_allowed",
+    )
+    assert not store.record_tool_receipt(
+        claimed,
+        operation_id=entry.operation_id,
+        attempt=entry.attempt,
+        tool_call_id=entry.tool_call_id or "call-1",
+        request_digest=entry.request_digest,
+        result=result,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    persisted = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert persisted is not None
+    planned = persisted.tool_journal[0]
+    assert planned.state is OperationState.PLANNED
+    assert planned.identity_key is None
+    assert planned.result_digest is None
+    assert planned.error is None
+    completed = [event.event for event in persisted.event_outbox if event.event.get("type") == "tool_call_completed"]
+    assert completed == []
+
+
+@pytest.mark.parametrize("journal_state", [OperationState.PLANNED, OperationState.STARTED, OperationState.AMBIGUOUS])
+def test_finish_tool_rejects_mismatched_result_before_any_write(journal_state: OperationState) -> None:
+    key = f"finish-tool-identity-{journal_state.value}"
+    store = InMemoryCheckpointStore()
+    checkpoint = _minimal_checkpoint(key=key)
+    assert store.create_checkpoint(checkpoint)
+    controller = CheckpointResumeController(
+        config=CheckpointConfig(
+            store=store,
+            key=key,
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+        ),
+        task_id=checkpoint.task_id,
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        run_definition=deepcopy(checkpoint.run_definition),
+        run_definition_digest=checkpoint.run_definition_digest,
+        initial_messages=[],
+        initial_shared_state={},
+        initial_budget_usage=None,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+    )
+    call = ToolCall(id="call-finish-tool", name="write_record", arguments={})
+    try:
+        assert controller.admit() is None
+        controller.plan_tool(
+            cycle_index=1,
+            call=call,
+            idempotency_support=ToolIdempotency.UNKNOWN,
+        )
+        entry = controller._find_tool_call(cycle_index=1, tool_call_id=call.id)
+        assert entry is not None
+        if journal_state is not OperationState.PLANNED:
+            controller.tool_started(cycle_index=1, call=call)
+        if journal_state is OperationState.AMBIGUOUS:
+            entry = controller._find_tool_call(cycle_index=1, tool_call_id=call.id)
+            assert entry is not None
+            entry.state = OperationState.AMBIGUOUS
+            controller._progress()
+        before = store.load_checkpoint(key)
+        assert before is not None
+        before_wire = checkpoint_to_dict(before)
+
+        with pytest.raises(CheckpointError) as error:
+            controller.finish_tool(
+                cycle_index=1,
+                call=call,
+                result=ToolExecutionResult(
+                    tool_call_id="call-wrong-finish-tool",
+                    content="rejected",
+                    status_code=ToolResultStatus.ERROR,
+                    error_code="provider_rejected",
+                ),
+            )
+
+        assert error.value.code == "tool_receipt_identity_invalid"
+        after = store.load_checkpoint(key)
+        assert after is not None
+        assert checkpoint_to_dict(after) == before_wire
+    finally:
+        controller.close()
+        store.delete_checkpoint(key)
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_record_tool_receipt_rejects_result_identity_before_planned_short_circuit(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"mismatched-receipt-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"mismatched-receipt-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_planned"))
+    entry.cycle_index = 1
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    before = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert before is not None
+    before_payload = checkpoint_to_dict(before)
+
+    with pytest.raises(CheckpointError) as error:
+        store.record_tool_receipt(
+            claimed,
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            tool_call_id=entry.tool_call_id or "call-planned",
+            request_digest=entry.request_digest,
+            result=ToolExecutionResult(
+                tool_call_id="call-does-not-match",
+                content="wrong identity",
+                status_code=ToolResultStatus.ERROR,
+                error_code="tool_not_allowed",
+            ),
+            claim_token="owner",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+        )
+
+    assert error.value.code == "tool_receipt_identity_invalid"
+    after = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert after is not None
+    assert checkpoint_to_dict(after) == before_payload
+
+
+@pytest.mark.parametrize(
+    ("claim_token", "expected_revision", "expected_code"),
+    [
+        ("", 2, "checkpoint_claim_required"),
+        ("stale-owner", 2, "checkpoint_claim_conflict"),
+        ("owner", 1, "checkpoint_revision_conflict"),
+    ],
+)
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_record_tool_receipt_identity_miss_rejects_typed_without_write(
+    store_kind: str,
+    claim_token: str,
+    expected_revision: int,
+    expected_code: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"receipt-identity-miss-{store_kind}-{expected_code}")
+    checkpoint = _minimal_checkpoint(key=f"receipt-identity-miss-{store_kind}-{expected_code}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    entry.cycle_index = 1
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    result = ToolExecutionResult(
+        tool_call_id=entry.tool_call_id or "call-identity-miss",
+        content="written",
+        status_code=ToolResultStatus.SUCCESS,
+    )
+    before = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert before is not None
+    before_payload = checkpoint_to_dict(before)
+
+    with pytest.raises(CheckpointError) as error:
+        store.record_tool_receipt(
+            claimed,
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            tool_call_id=entry.tool_call_id or "call-identity-miss",
+            request_digest=entry.request_digest,
+            result=result,
+            claim_token=claim_token,
+            expected_revision=expected_revision,
+            claimed_cycle=1,
+        )
+
+    assert error.value.code == expected_code
+    after = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert after is not None
+    assert checkpoint_to_dict(after) == before_payload
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_tool_outcome_unknown_receipt_replay_preserves_digest_and_zero_writes(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"unknown-receipt-replay-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"unknown-receipt-replay-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_unknown_idempotency"))
+    entry.cycle_index = 1
+    entry.state = OperationState.AMBIGUOUS
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    observation = ResumeObservation(
+        operation_id=entry.operation_id,
+        operation_kind=OperationKind.TOOL,
+        cycle_index=entry.cycle_index,
+        risk="unknown_tool_side_effect",
+        idempotency_support=entry.idempotency_support,
+    )
+    claimed.tool_journal[0].resume_observation = observation
+    result = ToolExecutionResult(
+        tool_call_id=entry.tool_call_id or "call-2",
+        content="The tool outcome is unknown.",
+        status_code=ToolResultStatus.ERROR,
+        error_code="tool_outcome_unknown",
+    )
+    digest = canonical_json_sha256(result.to_dict(), "tool result")
+    assert store.record_tool_receipt(
+        claimed,
+        operation_id=entry.operation_id,
+        attempt=entry.attempt,
+        tool_call_id=entry.tool_call_id or "call-2",
+        request_digest=entry.request_digest,
+        result=result,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    persisted = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert persisted is not None
+    assert persisted.tool_journal[0].state is OperationState.FAILED
+    assert persisted.tool_journal[0].result == result.to_dict()
+    assert persisted.tool_journal[0].result_digest == digest
+    assert persisted.tool_journal[0].resume_observation == observation
+    revision = persisted.revision
+    events = tuple(entry.event_id for entry in persisted.event_outbox)
+
+    assert store.record_tool_receipt(
+        claimed,
+        operation_id=entry.operation_id,
+        attempt=entry.attempt,
+        tool_call_id=entry.tool_call_id or "call-2",
+        request_digest=entry.request_digest,
+        result=result,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    replayed = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert replayed is not None
+    assert replayed.revision == revision
+    assert tuple(entry.event_id for entry in replayed.event_outbox) == events
+
+    conflict = replace(result, content="A different unknown outcome.")
+    with pytest.raises(CheckpointError) as error:
+        store.record_tool_receipt(
+            claimed,
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            tool_call_id=entry.tool_call_id or "call-2",
+            request_digest=entry.request_digest,
+            result=conflict,
+            claim_token="owner",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+        )
+    assert error.value.code == "tool_receipt_conflict"
+    unchanged = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert unchanged is not None
+    assert unchanged.revision == revision
+    assert tuple(entry.event_id for entry in unchanged.event_outbox) == events
+
+
+@pytest.mark.parametrize("source_case", ["missing_observation", "wrong_cycle", "wrong_observation"])
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_tool_outcome_unknown_receipt_rejects_incomplete_observation_without_write(
+    source_case: str,
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"unknown-receipt-observation-{source_case}-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"unknown-receipt-observation-{source_case}-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_unknown_idempotency"))
+    entry.cycle_index = 1
+    entry.state = OperationState.AMBIGUOUS
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    claimed.tool_journal[0].resume_observation = ResumeObservation(
+        operation_id=entry.operation_id,
+        operation_kind=OperationKind.TOOL,
+        cycle_index=entry.cycle_index,
+        risk="unknown_tool_side_effect",
+        idempotency_support=entry.idempotency_support,
+    )
+    if source_case == "missing_observation":
+        claimed.tool_journal[0].resume_observation = None
+    elif source_case == "wrong_cycle":
+        claimed.tool_journal[0].cycle_index += 1
+    else:
+        assert claimed.tool_journal[0].resume_observation is not None
+        claimed.tool_journal[0].resume_observation = replace(
+            claimed.tool_journal[0].resume_observation,
+            operation_id="op-wrong-observation",
+        )
+
+    result = ToolExecutionResult(
+        tool_call_id=entry.tool_call_id or "call-2",
+        content="The tool outcome is unknown.",
+        status_code=ToolResultStatus.ERROR,
+        error_code="tool_outcome_unknown",
+    )
+    before = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert before is not None
+    before_payload = checkpoint_to_dict(before)
+
+    with pytest.raises(CheckpointError) as error:
+        store.record_tool_receipt(
+            claimed,
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            tool_call_id=entry.tool_call_id or "call-2",
+            request_digest=entry.request_digest,
+            result=result,
+            claim_token="owner",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+        )
+
+    assert error.value.code == "checkpoint_journal_integrity_mismatch"
+    after = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert after is not None
+    assert checkpoint_to_dict(after) == before_payload
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_tool_receipt_mutates_the_full_journal_identity(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"receipt-identity-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"receipt-identity-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    first = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    second = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    for candidate, call_id, digest in ((first, "call-first", "a" * 64), (second, "call-second", "b" * 64)):
+        candidate.cycle_index = 1
+        candidate.operation_id = "same-operation"
+        candidate.tool_call_id = call_id
+        candidate.request_digest = digest
+    claimed.tool_journal = [first, second]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    result = ToolExecutionResult(
+        tool_call_id="call-second",
+        content="done",
+        status_code=ToolResultStatus.SUCCESS,
+    )
+    assert store.record_tool_receipt(
+        claimed,
+        operation_id="same-operation",
+        attempt=1,
+        tool_call_id="call-second",
+        request_digest="b" * 64,
+        result=result,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    persisted = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert persisted is not None
+    assert [entry.state for entry in persisted.tool_journal] == [OperationState.STARTED, OperationState.SUCCEEDED]
+
+
+def test_checkpoint_codec_rejects_tampered_terminal_tool_identity() -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint = _minimal_checkpoint(key="codec-terminal-tool-identity")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    entry.cycle_index = 1
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    assert store.record_tool_receipt(
+        claimed,
+        operation_id=entry.operation_id,
+        attempt=entry.attempt,
+        tool_call_id=entry.tool_call_id or "call-codec",
+        request_digest=entry.request_digest,
+        result=ToolExecutionResult(
+            tool_call_id=entry.tool_call_id or "call-codec",
+            content="done",
+            status_code=ToolResultStatus.SUCCESS,
+        ),
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    persisted = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert persisted is not None
+    payload = checkpoint_to_dict(persisted)
+
+    identity_tampered = deepcopy(payload)
+    identity_tampered["tool_journal"][0]["identity_key"] = "0" * 64
+    with pytest.raises(CheckpointError) as identity_error:
+        checkpoint_from_dict(identity_tampered)
+    assert identity_error.value.code == "tool_receipt_identity_invalid"
+
+    result_tampered = deepcopy(payload)
+    result_tampered["tool_journal"][0]["result"]["tool_call_id"] = "call-tampered"
+    result_tampered["tool_journal"][0]["result_digest"] = canonical_json_sha256(
+        result_tampered["tool_journal"][0]["result"],
+        "tool result",
+    )
+    with pytest.raises(CheckpointError) as result_error:
+        checkpoint_from_dict(result_tampered)
+    assert result_error.value.code == "tool_receipt_identity_invalid"
+
+    event_tampered = deepcopy(payload)
+    receipt_event = next(item for item in event_tampered["event_outbox"] if item["event"]["type"] == "tool_call_completed")
+    receipt_event_id = "evt_receipt_" + ("f" * 64)
+    receipt_event["event_id"] = receipt_event_id
+    receipt_event["event"]["event_id"] = receipt_event_id
+    receipt_event["payload_digest"] = compute_event_payload_digest(receipt_event["event"])
+    with pytest.raises(CheckpointError) as event_error:
+        checkpoint_from_dict(event_tampered)
+    assert event_error.value.code == "tool_receipt_identity_invalid"
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_cross_cycle_tool_call_id_uses_distinct_receipt_event_identity(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"cross-cycle-tool-call-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"cross-cycle-tool-call-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+
+    first_claim = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert first_claim is not None
+    first_entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    first_entry.cycle_index = 1
+    first_entry.operation_id = "operation-cycle-one"
+    first_entry.tool_call_id = "reused-tool-call"
+    first_entry.request_digest = "a" * 64
+    first_claim.tool_journal = [first_entry]
+    assert store.progress_checkpoint(first_claim, claim_token="owner", expected_revision=first_claim.revision)
+    first_claim.revision += 1
+    assert store.record_tool_receipt(
+        first_claim,
+        operation_id=first_entry.operation_id,
+        attempt=first_entry.attempt,
+        tool_call_id=first_entry.tool_call_id or "reused-tool-call",
+        request_digest=first_entry.request_digest,
+        result=ToolExecutionResult(
+            tool_call_id="reused-tool-call",
+            content="cycle one",
+            status_code=ToolResultStatus.SUCCESS,
+        ),
+        claim_token="owner",
+        expected_revision=first_claim.revision,
+        claimed_cycle=1,
+    )
+    first_done = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert first_done is not None
+    first_done.cycle_index = 1
+    assert store.commit_checkpoint(
+        first_done,
+        claim_token="owner",
+        expected_revision=first_done.revision,
+    )
+
+    second_claim = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        2,
+        claim_token="owner-two",
+        lease_expires_at_ms=400,
+        now_ms=300,
+        claim_mode="continue",
+    )
+    assert second_claim is not None
+    second_entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    second_entry.cycle_index = 2
+    second_entry.operation_id = "operation-cycle-two"
+    second_entry.tool_call_id = "reused-tool-call"
+    second_entry.request_digest = "b" * 64
+    second_claim.tool_journal = [second_entry]
+    assert store.progress_checkpoint(second_claim, claim_token="owner-two", expected_revision=second_claim.revision)
+    second_claim.revision += 1
+    assert store.record_tool_receipt(
+        second_claim,
+        operation_id=second_entry.operation_id,
+        attempt=second_entry.attempt,
+        tool_call_id=second_entry.tool_call_id or "reused-tool-call",
+        request_digest=second_entry.request_digest,
+        result=ToolExecutionResult(
+            tool_call_id="reused-tool-call",
+            content="cycle two",
+            status_code=ToolResultStatus.SUCCESS,
+        ),
+        claim_token="owner-two",
+        expected_revision=second_claim.revision,
+        claimed_cycle=2,
+    )
+    after = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert after is not None
+    completed = [entry for entry in after.tool_journal if entry.state is OperationState.SUCCEEDED]
+    assert len(completed) == 1
+    identity = compute_tool_identity_key(
+        checkpoint.checkpoint_key,
+        second_entry.operation_id,
+        second_entry.attempt,
+        second_entry.tool_call_id or "reused-tool-call",
+        second_entry.request_digest,
+    )
+    receipt_events = [entry.event_id for entry in after.event_outbox if entry.event.get("type") == "tool_call_completed"]
+    assert receipt_events[-1] == f"evt_receipt_{identity}"
+
+
+def test_tool_call_id_reuse_within_cycle_is_a_typed_journal_conflict() -> None:
+    first = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    second = deepcopy(first)
+    first.cycle_index = second.cycle_index = 1
+    first.operation_id = "operation-first"
+    second.operation_id = "operation-second"
+    second.request_digest = "b" * 64
+    checkpoint = _minimal_checkpoint(key="tool-call-id-conflict")
+    checkpoint.tool_journal = [first, second]
+    controller = object.__new__(CheckpointResumeController)
+    controller.checkpoint = checkpoint
+
+    with pytest.raises(CheckpointError) as error:
+        controller._find_tool_call(cycle_index=1, tool_call_id=first.tool_call_id or "call-1")
+    assert error.value.code == "checkpoint_journal_integrity_mismatch"
+
+
+def test_default_model_retry_stops_after_the_first_attempt() -> None:
+    entry = OperationJournalEntry.from_dict(_journal_case("model_ambiguous"))
+    entry.attempt = 2
+    controller = object.__new__(CheckpointResumeController)
+    controller.config = CheckpointConfig(
+        store=InMemoryCheckpointStore(),
+        key="model-retry-cap",
+        ambiguous_model_policy=AmbiguousModelPolicy.RETRY_WITH_DUPLICATE_RISK,
+    )
+    controller.reconciliation_provider = None
+    observation = ResumeObservation(
+        operation_id=entry.operation_id,
+        operation_kind=OperationKind.MODEL,
+        cycle_index=entry.cycle_index,
+        risk="duplicate_model_request_and_cost",
+        idempotency_support=None,
+    )
+
+    decision = controller._reconciliation_decision(entry, observation)
+
+    assert decision.kind is ReconciliationDecisionKind.DEFER
+
+
 def test_memory_terminal_acknowledgement_rejects_active_claim() -> None:
     store = InMemoryCheckpointStore()
     checkpoint = _minimal_checkpoint(key="terminal-active-claim")
@@ -1247,6 +2775,251 @@ def test_cycle_commit_finalize_and_acknowledgement_are_separate(
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_cycle_commit_retains_only_pending_outbox_entries(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"commit-pending-outbox-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"commit-pending-outbox-{store_kind}")
+    created = EventOutboxEntry.pending(
+        "evt-commit-created",
+        _checkpoint_created_event(event_id="evt-commit-created", checkpoint=checkpoint),
+    )
+    checkpoint.event_outbox = [created]
+    assert store.create_checkpoint(checkpoint)
+    cursor = EventCursor(
+        store_ref={"id": "events.test", "version": "1"},
+        value={"sequence": 1},
+        last_event_id=created.event_id,
+    )
+    assert store.record_event_delivery(
+        checkpoint.checkpoint_key,
+        event_id=created.event_id,
+        payload_digest=created.payload_digest,
+        cursor=cursor,
+        expected_revision=0,
+        claim_token=None,
+    )
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    pending_event = RunStateChangedEvent(
+        run_id=claimed.root_run_id,
+        trace_id=claimed.trace_id,
+        state="running",
+        cycle_index=1,
+        event_id="evt-commit-pending",
+    ).to_dict()
+    claimed.event_outbox.append(EventOutboxEntry.pending("evt-commit-pending", pending_event))
+    claimed.cycle_index = 1
+    claimed.status = AgentStatus.RUNNING
+    assert store.commit_checkpoint(
+        claimed,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+    )
+    committed = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert committed is not None
+    assert [entry.event_id for entry in committed.event_outbox] == ["evt-commit-pending"]
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_controller_cycle_commit_delivers_outbox_before_releasing_claim(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"controller-commit-delivery-{store_kind}")
+    seed = _minimal_checkpoint(key=f"controller-commit-delivery-{store_kind}")
+    attempts: list[str] = []
+    fail_once = True
+
+    def event_sink(event: Any) -> None:
+        nonlocal fail_once
+        if event.event_id != "evt-controller-commit-delivery":
+            return
+        attempts.append(event.event_id)
+        if fail_once:
+            fail_once = False
+            raise RuntimeError("trusted sink unavailable")
+
+    controller = CheckpointResumeController(
+        config=CheckpointConfig(
+            store=store,
+            key=seed.checkpoint_key,
+            resume_policy=ResumePolicy.NEW,
+        ),
+        task_id=seed.task_id,
+        run_id=seed.root_run_id,
+        trace_id=seed.trace_id,
+        run_definition=seed.run_definition,
+        run_definition_digest=seed.run_definition_digest,
+        initial_messages=seed.messages,
+        initial_shared_state=seed.shared_state,
+        initial_budget_usage=seed.budget_usage,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=event_sink,
+    )
+    messages: list[Message] = []
+    cycles: list[CycleRecord] = []
+    shared_state: dict[str, Any] = {}
+    try:
+        assert controller.admit() is None
+        controller.bind_runtime_state(messages=messages, cycles=cycles, shared_state=shared_state)
+        controller._ensure_claim(1)
+        checkpoint = controller._require_checkpoint()
+        controller._queue_outbox_event(
+            checkpoint,
+            RunStateChangedEvent(
+                run_id=seed.root_run_id,
+                trace_id=seed.trace_id,
+                state="running",
+                cycle_index=1,
+                event_id="evt-controller-commit-delivery",
+            ),
+        )
+        cycles.append(CycleRecord(index=1, assistant_message="finished"))
+
+        with pytest.raises(RuntimeError, match="trusted sink unavailable"):
+            controller.commit_cycle(
+                cycle_index=1,
+                messages=messages,
+                cycles=cycles,
+                shared_state=shared_state,
+            )
+
+        retained = store.load_checkpoint(seed.checkpoint_key)
+        assert retained is not None
+        assert retained.claim_token is not None
+        assert retained.claimed_cycle == 1
+        assert retained.status is AgentStatus.RUNNING
+        assert any(
+            entry.event_id == "evt-controller-commit-delivery" and entry.state == "pending" for entry in retained.event_outbox
+        )
+
+        controller.commit_cycle(
+            cycle_index=1,
+            messages=messages,
+            cycles=cycles,
+            shared_state=shared_state,
+        )
+        committed = store.load_checkpoint(seed.checkpoint_key)
+        assert committed is not None
+        assert committed.claim_token is None
+        assert committed.claimed_cycle is None
+        assert committed.cycle_index == 1
+        assert committed.event_outbox == []
+        assert attempts == ["evt-controller-commit-delivery", "evt-controller-commit-delivery"]
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_cross_cycle_tool_call_id_reuse_succeeds_after_delivery(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, f"cross-cycle-tool-call-delivered-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"cross-cycle-tool-call-delivered-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    first_claim = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert first_claim is not None
+    first_entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    first_entry.cycle_index = 1
+    first_entry.operation_id = "operation-cycle-one-delivered"
+    first_entry.tool_call_id = "reused-tool-call-delivered"
+    first_entry.request_digest = "a" * 64
+    first_claim.tool_journal = [first_entry]
+    assert store.progress_checkpoint(first_claim, claim_token="owner", expected_revision=first_claim.revision)
+    first_claim.revision += 1
+    assert store.record_tool_receipt(
+        first_claim,
+        operation_id=first_entry.operation_id,
+        attempt=first_entry.attempt,
+        tool_call_id=first_entry.tool_call_id or "reused-tool-call-delivered",
+        request_digest=first_entry.request_digest,
+        result=ToolExecutionResult(
+            tool_call_id="reused-tool-call-delivered",
+            content="cycle one",
+            status_code=ToolResultStatus.SUCCESS,
+        ),
+        claim_token="owner",
+        expected_revision=first_claim.revision,
+        claimed_cycle=1,
+    )
+    pending = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert pending is not None
+    completed_event = next(entry for entry in pending.event_outbox if entry.event.get("type") == "tool_call_completed")
+    cursor = EventCursor(
+        store_ref={"id": "events.cross-cycle", "version": "1"},
+        value={"sequence": 1},
+        last_event_id=completed_event.event_id,
+    )
+    assert store.record_event_delivery(
+        checkpoint.checkpoint_key,
+        event_id=completed_event.event_id,
+        payload_digest=completed_event.payload_digest,
+        cursor=cursor,
+        expected_revision=pending.revision,
+        claim_token="owner",
+    )
+    delivered = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert delivered is not None
+    delivered.cycle_index = 1
+    assert store.commit_checkpoint(
+        delivered,
+        claim_token="owner",
+        expected_revision=delivered.revision,
+    )
+
+    second_claim = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        2,
+        claim_token="owner-two",
+        lease_expires_at_ms=400,
+        now_ms=300,
+        claim_mode="continue",
+    )
+    assert second_claim is not None
+    second_entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    second_entry.cycle_index = 2
+    second_entry.operation_id = "operation-cycle-two-delivered"
+    second_entry.tool_call_id = "reused-tool-call-delivered"
+    second_entry.request_digest = "b" * 64
+    second_claim.tool_journal = [second_entry]
+    assert store.progress_checkpoint(second_claim, claim_token="owner-two", expected_revision=second_claim.revision)
+    second_claim.revision += 1
+    assert store.record_tool_receipt(
+        second_claim,
+        operation_id=second_entry.operation_id,
+        attempt=second_entry.attempt,
+        tool_call_id=second_entry.tool_call_id or "reused-tool-call-delivered",
+        request_digest=second_entry.request_digest,
+        result=ToolExecutionResult(
+            tool_call_id="reused-tool-call-delivered",
+            content="cycle two",
+            status_code=ToolResultStatus.SUCCESS,
+        ),
+        claim_token="owner-two",
+        expected_revision=second_claim.revision,
+        claimed_cycle=2,
+    )
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
 def test_cycle_commit_rejects_model_journal_without_atomic_accounting(
     store_kind: str,
     tmp_path: Path,
@@ -1299,7 +3072,7 @@ def test_claimed_terminal_rejects_model_journal_without_atomic_accounting(
         status=AgentStatus.FAILED,
         messages=claimed.messages,
         cycles=claimed.cycles,
-        error="failed after model dispatch",
+        error={"code": "agent_failed", "message": "failed after model dispatch", "retryable": False},
         completion_reason=CompletionReason.FAILED,
         checkpoint_key=claimed.checkpoint_key,
     )
@@ -1320,36 +3093,119 @@ def test_operator_abort_finalize_preserves_ambiguous_evidence(
     tmp_path: Path,
 ) -> None:
     store = _store(store_kind, tmp_path, "operator-abort")
-    checkpoint = checkpoint_from_dict(_codec_case("reconciliation_required_retains_ambiguous_journal"))
-    checkpoint.checkpoint_key = f"abort-{store_kind}"
-    checkpoint.resume_attempt = 1
-    checkpoint.revision = 0
+    checkpoint = _minimal_checkpoint(key=f"abort-{store_kind}")
     assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    ambiguous = OperationJournalEntry.from_dict(_journal_case("tool_unknown_idempotency"))
+    ambiguous.cycle_index = 1
+    ambiguous.state = OperationState.AMBIGUOUS
+    claimed.tool_journal = [ambiguous]
+    claimed.status = AgentStatus.RECONCILIATION_REQUIRED
+    assert store.suspend_checkpoint(
+        claimed,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+    )
+    checkpoint = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert checkpoint is not None
 
     checkpoint.status = AgentStatus.FAILED
     checkpoint.terminal_result = AgentResult(
         status=AgentStatus.FAILED,
         messages=checkpoint.messages,
         cycles=checkpoint.cycles,
-        error="failed",
-        error_code="operator_abort_with_unknown_outcome",
+        error={
+            "code": "operator_abort_with_unknown_outcome",
+            "message": "Operator accepted that the external outcome is unknown.",
+            "retryable": False,
+        },
         completion_reason=CompletionReason.FAILED,
         checkpoint_key=checkpoint.checkpoint_key,
-        resume_observation=ResumeObservation(
-            operation_id=checkpoint.tool_journal[0].operation_id,
-            operation_kind=OperationKind.TOOL,
-            cycle_index=2,
-            risk="unknown external tool outcome",
-            idempotency_support=ToolIdempotency.UNKNOWN,
-        ),
+        resume_observations=[
+            ResumeObservation(
+                operation_id=checkpoint.tool_journal[0].operation_id,
+                operation_kind=OperationKind.TOOL,
+                cycle_index=1,
+                risk="unknown external tool outcome",
+                idempotency_support=ToolIdempotency.UNKNOWN,
+            )
+        ],
     )
-    assert store.finalize_checkpoint(checkpoint, expected_revision=0)
+    assert store.finalize_checkpoint(checkpoint, expected_revision=checkpoint.revision)
     terminal = store.load_checkpoint(checkpoint.checkpoint_key)
     assert terminal is not None
     assert terminal.status is AgentStatus.FAILED
-    assert terminal.tool_journal[0].state is OperationState.AMBIGUOUS
+    assert terminal.tool_journal[0].state is OperationState.FAILED
     assert terminal.terminal_result is not None
-    assert terminal.terminal_result.resume_observation is not None
+    assert terminal.terminal_result.resume_observations
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_claimed_cycle_aborted_replay_reuses_durable_event_payload(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store = _store(store_kind, tmp_path, "cycle-aborted-replay")
+    checkpoint = _minimal_checkpoint(key=f"cycle-aborted-replay-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_unknown_idempotency"))
+    entry.cycle_index = 1
+    entry.state = OperationState.STARTED
+    claimed.tool_journal = [entry]
+    cycle_event = CycleAbortedEvent(
+        run_id=claimed.root_run_id,
+        trace_id=claimed.trace_id,
+        cycle_index=0,
+        logical_cycle=1,
+        reason="cancelled",
+        event_id="evt_cycle_aborted_cancelled",
+        created_at=111.0,
+    ).to_dict()
+    claimed.event_outbox = [EventOutboxEntry.pending(cycle_event["event_id"], cycle_event)]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+
+    candidate = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert candidate is not None
+    candidate.status = AgentStatus.FAILED
+    candidate.terminal_result = AgentResult(
+        status=AgentStatus.FAILED,
+        messages=candidate.messages,
+        cycles=candidate.cycles,
+        error={
+            "code": "cancelled_with_unknown_outcome",
+            "message": "Cancellation was accepted while the external outcome remained unknown.",
+            "retryable": False,
+        },
+        completion_reason=CompletionReason.CANCELLED,
+        checkpoint_key=candidate.checkpoint_key,
+    )
+    assert store.finalize_claimed_checkpoint(
+        candidate,
+        claim_token="owner",
+        expected_revision=candidate.revision,
+    )
+
+    terminal = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert terminal is not None
+    retained = next(entry.event for entry in terminal.event_outbox if entry.event_id == cycle_event["event_id"])
+    assert retained == cycle_event
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
@@ -1377,7 +3233,7 @@ def test_claimed_terminal_finalize_clears_claim_and_ordinary_journal(
         status=AgentStatus.FAILED,
         messages=claimed.messages,
         cycles=claimed.cycles,
-        error="definitive model rejection",
+        error={"code": "agent_failed", "message": "definitive model rejection", "retryable": False},
         completion_reason=CompletionReason.FAILED,
         checkpoint_key=claimed.checkpoint_key,
     )
@@ -1429,11 +3285,14 @@ def test_claimed_operator_abort_preserves_ambiguous_journal(
         status=AgentStatus.FAILED,
         messages=claimed.messages,
         cycles=claimed.cycles,
-        error="failed",
-        error_code="operator_abort_with_unknown_outcome",
+        error={
+            "code": "operator_abort_with_unknown_outcome",
+            "message": "Operator accepted that the external outcome is unknown.",
+            "retryable": False,
+        },
         completion_reason=CompletionReason.FAILED,
         checkpoint_key=claimed.checkpoint_key,
-        resume_observation=observation,
+        resume_observations=[observation],
     )
 
     assert store.finalize_claimed_checkpoint(
@@ -1445,7 +3304,87 @@ def test_claimed_operator_abort_preserves_ambiguous_journal(
     assert terminal is not None
     assert terminal.claim_token is None
     assert len(terminal.tool_journal) == 1
-    assert terminal.tool_journal[0].state is OperationState.AMBIGUOUS
+    assert terminal.tool_journal[0].state is OperationState.FAILED
+
+
+def test_redis_claimed_finalize_retries_from_an_unmodified_candidate() -> None:
+    class RetryPipeline(_FakeRedisPipeline):
+        def execute(self) -> list[object]:
+            if not self._client.fail_once:
+                self._client.fail_once = True
+                self._commands.clear()
+                self._transaction = False
+                raise _FakeWatchError()
+            return super().execute()
+
+    class RetryClient(_FakeRedisClient):
+        fail_once: bool
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_once = False
+
+        def pipeline(self) -> RetryPipeline:
+            return RetryPipeline(self)
+
+    store = RedisCheckpointStore.__new__(RedisCheckpointStore)
+    store._watch_error = _FakeWatchError
+    store._client = RetryClient()
+    checkpoint = _minimal_checkpoint(key="redis-finalize-retry")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_unknown_idempotency"))
+    entry.cycle_index = 1
+    entry.state = OperationState.AMBIGUOUS
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+
+    candidate = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert candidate is not None
+    candidate.status = AgentStatus.FAILED
+    candidate.terminal_result = AgentResult(
+        status=AgentStatus.FAILED,
+        messages=candidate.messages,
+        cycles=candidate.cycles,
+        error={
+            "code": "operator_abort_with_unknown_outcome",
+            "message": "Operator accepted that the external outcome is unknown.",
+            "retryable": False,
+        },
+        completion_reason=CompletionReason.FAILED,
+        checkpoint_key=candidate.checkpoint_key,
+        resume_observations=[
+            ResumeObservation(
+                operation_id=entry.operation_id,
+                operation_kind=OperationKind.TOOL,
+                cycle_index=entry.cycle_index,
+                risk="operator abort with unknown outcome",
+                idempotency_support=entry.idempotency_support,
+            )
+        ],
+    )
+    assert candidate.tool_journal[0].state is OperationState.AMBIGUOUS
+
+    assert store.finalize_claimed_checkpoint(
+        candidate,
+        claim_token="owner",
+        expected_revision=candidate.revision,
+    )
+    assert candidate.tool_journal[0].state is OperationState.AMBIGUOUS
+    terminal = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert terminal is not None and terminal.terminal_result is not None
+    assert terminal.tool_journal[0].state is OperationState.FAILED
+    assert terminal.tool_journal[0].error is not None
+    assert terminal.tool_journal[0].error.code == "tool_cancelled"
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
@@ -1527,7 +3466,7 @@ def test_event_delivery_cas_preserves_claim_and_terminal(
         status=AgentStatus.FAILED,
         messages=delivered.messages,
         cycles=delivered.cycles,
-        error="terminal",
+        error={"code": "agent_failed", "message": "terminal", "retryable": False},
         completion_reason=CompletionReason.FAILED,
         checkpoint_key=delivered.checkpoint_key,
     )
@@ -1587,6 +3526,130 @@ def test_event_outbox_rejects_partial_unknown_and_mismatched_current_events() ->
 
     with pytest.raises(CheckpointError) as error:
         EventOutboxEntry.pending("evt-other", current)
+    assert error.value.code == "event_identity_conflict"
+
+
+@pytest.mark.parametrize("event_type", ["operation_ambiguous", "operation_replayed", "reconciliation_required"])
+def test_recovery_event_replay_reuses_existing_payload_timestamp(event_type: str) -> None:
+    checkpoint = _minimal_checkpoint(key=f"recovery-event-{event_type}")
+    event_id = f"evt-{event_type}"
+    common: dict[str, Any] = {
+        "run_id": checkpoint.root_run_id,
+        "trace_id": checkpoint.trace_id,
+        "checkpoint_key": checkpoint.checkpoint_key,
+        "operation_id": "op-recovery",
+        "operation_kind": OperationKind.TOOL,
+        "cycle_index": 1,
+        "event_id": event_id,
+    }
+    conflicting_common: dict[str, Any] = {**common, "operation_id": "op-other"}
+    observation = ResumeObservation(
+        operation_id="op-recovery",
+        operation_kind=OperationKind.TOOL,
+        cycle_index=1,
+        risk="unknown_tool_side_effect",
+        idempotency_support=ToolIdempotency.UNKNOWN,
+    )
+    conflicting_observation = replace(observation, operation_id="op-other")
+    if event_type == "operation_ambiguous":
+        first_event = OperationAmbiguousEvent(
+            **common,
+            risk="unknown_tool_side_effect",
+            idempotency_support=ToolIdempotency.UNKNOWN,
+            created_at=100.0,
+        )
+        replay_event = OperationAmbiguousEvent(
+            **common,
+            risk="unknown_tool_side_effect",
+            idempotency_support=ToolIdempotency.UNKNOWN,
+            created_at=200.0,
+        )
+        conflicting_event = OperationAmbiguousEvent(
+            **conflicting_common,
+            risk="unknown_tool_side_effect",
+            idempotency_support=ToolIdempotency.UNKNOWN,
+            created_at=200.0,
+        )
+    elif event_type == "operation_replayed":
+        first_event = OperationReplayedEvent(
+            **common,
+            receipt_state=OperationState.FAILED,
+            created_at=100.0,
+        )
+        replay_event = OperationReplayedEvent(
+            **common,
+            receipt_state=OperationState.FAILED,
+            created_at=200.0,
+        )
+        conflicting_event = OperationReplayedEvent(
+            **conflicting_common,
+            receipt_state=OperationState.FAILED,
+            created_at=200.0,
+        )
+    else:
+        first_event = ReconciliationRequiredEvent(
+            **common,
+            interruption_reason="resume_requires_reconciliation",
+            resume_observation=observation,
+            created_at=100.0,
+        )
+        replay_event = ReconciliationRequiredEvent(
+            **common,
+            interruption_reason="resume_requires_reconciliation",
+            resume_observation=observation,
+            created_at=200.0,
+        )
+        conflicting_event = ReconciliationRequiredEvent(
+            **conflicting_common,
+            interruption_reason="resume_requires_reconciliation",
+            resume_observation=conflicting_observation,
+            created_at=200.0,
+        )
+    checkpoint.event_outbox = [EventOutboxEntry.pending(event_id, first_event.to_dict())]
+
+    CheckpointResumeController._queue_outbox_event(checkpoint, replay_event)
+
+    assert len(checkpoint.event_outbox) == 1
+    assert checkpoint.event_outbox[0].event == first_event.to_dict()
+    with pytest.raises(CheckpointError) as error:
+        CheckpointResumeController._queue_outbox_event(checkpoint, conflicting_event)
+    assert error.value.code == "event_identity_conflict"
+
+
+def test_stable_event_replay_reuses_authoritative_timestamp_for_any_event_type() -> None:
+    checkpoint = _minimal_checkpoint(key="stable-event-generic")
+    first = RunStateChangedEvent(
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        state="running",
+        cycle_index=1,
+        event_id="evt-stable-generic",
+        created_at=100.0,
+    )
+    replay = RunStateChangedEvent(
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        state="running",
+        cycle_index=1,
+        event_id="evt-stable-generic",
+        created_at=200.0,
+    )
+    conflict = RunStateChangedEvent(
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        state="cancel_requested",
+        cycle_index=1,
+        event_id="evt-stable-generic",
+        created_at=200.0,
+    )
+    checkpoint.event_outbox = [EventOutboxEntry.pending(first.event_id, first.to_dict())]
+
+    CheckpointResumeController._queue_outbox_event(checkpoint, replay)
+
+    assert len(checkpoint.event_outbox) == 1
+    assert checkpoint.event_outbox[0].event == first.to_dict()
+    with pytest.raises(CheckpointError) as error:
+        CheckpointResumeController._queue_outbox_event(checkpoint, conflict)
     assert error.value.code == "event_identity_conflict"
 
 
@@ -1931,9 +3994,102 @@ def test_redis_key_vectors_match_contract() -> None:
         )
 
 
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_accept_deferred_batch_replays_identity_before_revision_and_claim_fences(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    from vv_agent import AcceptDeferredDecision, DeferredToolHandle, ToolCallOutcome
+    from vv_agent.types import ToolCall
+
+    key = f"deferred-replay-fences-{store_kind}"
+    store = _store(store_kind, tmp_path, key)
+    checkpoint = _minimal_checkpoint(key=key)
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=10_000,
+        now_ms=1,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    handle = DeferredToolHandle(
+        checkpoint_key=key,
+        operation_id="op_tool_cycle_1_call_1",
+        attempt=1,
+        request_digest="a" * 64,
+    )
+    claimed.tool_journal.append(
+        OperationJournalEntry(
+            kind=OperationKind.TOOL,
+            operation_id=handle.operation_id,
+            cycle_index=1,
+            attempt=handle.attempt,
+            state=OperationState.STARTED,
+            request_digest=handle.request_digest,
+            tool_call_id="call-defer",
+            tool_name="defer",
+            arguments={},
+            idempotency_key="idem-defer",
+            idempotency_support=ToolIdempotency.SUPPORTED,
+        )
+    )
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    assert store.admit_deferred_batch(
+        claimed,
+        outcomes=[
+            (
+                ToolCall(id="call-defer", name="defer", arguments={}),
+                ToolCallOutcome.Deferred(handle),
+            )
+        ],
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+    )
+    admitted = store.load_checkpoint(key)
+    assert admitted is not None
+    before = checkpoint_to_dict(admitted)
+
+    stale = deepcopy(admitted)
+    stale.revision -= 1
+    stale.run_definition_digest = "f" * 64
+    assert store.accept_deferred_batch(
+        stale,
+        decisions=[AcceptDeferredDecision(handle=handle)],
+        claim_token="expired-owner",
+        expected_revision=stale.revision,
+        claimed_cycle=1,
+    )
+    retained = store.load_checkpoint(key)
+    assert retained is not None
+    assert checkpoint_to_dict(retained) == before
+
+    wrong_handle = DeferredToolHandle(
+        checkpoint_key=key,
+        operation_id=handle.operation_id,
+        attempt=handle.attempt,
+        request_digest="b" * 64,
+    )
+    assert not store.accept_deferred_batch(
+        stale,
+        decisions=[AcceptDeferredDecision(handle=wrong_handle)],
+        claim_token="expired-owner",
+        expected_revision=stale.revision,
+        claimed_cycle=1,
+    )
+    retained_after_rejection = store.load_checkpoint(key)
+    assert retained_after_rejection is not None
+    assert checkpoint_to_dict(retained_after_rejection) == before
+
+
 def test_redis_cleanup_retries_when_resolution_adds_receipt_after_smembers() -> None:
     from vv_agent.checkpoint import canonical_json_sha256
     from vv_agent.deferred import DeferredResolutionReceipt, DeferredToolHandle
+    from vv_agent.runtime.state import compute_tool_identity_key
     from vv_agent.runtime.stores.redis import _receipt_to_storage
     from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
@@ -1973,7 +4129,16 @@ def test_redis_cleanup_retries_when_resolution_adds_receipt_after_smembers() -> 
             handle=handle,
             result=result,
             result_digest=canonical_json_sha256(result.to_dict(), "deferred result"),
-            event_id=f"evt_{operation_id}",
+            event_id=(
+                "evt_receipt_"
+                + compute_tool_identity_key(
+                    handle.checkpoint_key,
+                    handle.operation_id,
+                    handle.attempt,
+                    result.tool_call_id,
+                    handle.request_digest,
+                )
+            ),
             event_payload_digest="a" * 64,
             receipt_status="succeeded",
         )
@@ -1999,6 +4164,221 @@ def test_redis_cleanup_retries_when_resolution_adds_receipt_after_smembers() -> 
     assert second_key not in client._values
     assert receipt_set_key not in client._sets
     assert first_handle.checkpoint_key == "redis-cleanup-race"
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_deferred_failed_tombstone_replays_complete_result_without_writes(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    from vv_agent import DeferredToolHandle, ToolCallOutcome
+
+    key = f"deferred-failed-tombstone-{store_kind}"
+    handle = DeferredToolHandle(
+        checkpoint_key=key,
+        operation_id="op_tool_cycle_1_call_failed_deferred",
+        attempt=1,
+        request_digest="a" * 64,
+    )
+    result = ToolExecutionResult(
+        tool_call_id="call-failed-deferred",
+        content="provider rejected",
+        status_code=ToolResultStatus.ERROR,
+        directive=ToolDirective.WAIT_USER,
+        error_code="provider_rejected",
+        metadata={"provider": "gateway", "retryable": False},
+    )
+    store = _store(store_kind, tmp_path, key)
+    try:
+        checkpoint = _minimal_checkpoint(key=key)
+        assert store.create_checkpoint(checkpoint)
+        claimed = store.claim_checkpoint(
+            key,
+            1,
+            claim_token="owner",
+            lease_expires_at_ms=200,
+            now_ms=100,
+            claim_mode="continue",
+        )
+        assert claimed is not None
+        entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+        entry.operation_id = handle.operation_id
+        entry.request_digest = handle.request_digest
+        entry.tool_call_id = result.tool_call_id
+        entry.tool_name = "remote_write"
+        claimed.tool_journal = [entry]
+        assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+        claimed.revision += 1
+        assert store.admit_deferred_batch(
+            claimed,
+            outcomes=[
+                (
+                    ToolCall(id=result.tool_call_id, name="remote_write", arguments={}),
+                    ToolCallOutcome.Deferred(handle),
+                )
+            ],
+            claim_token="owner",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+        )
+
+        decision = store.resolve_deferred(handle, result)
+
+        assert decision.kind == "applied_ready"
+        assert decision.receipt is not None
+        assert decision.receipt.result.to_dict() == result.to_dict()
+        assert decision.receipt.result_digest == canonical_json_sha256(result.to_dict(), "deferred result")
+        persisted = store.load_checkpoint(key)
+        assert persisted is not None
+        failed = persisted.tool_journal[0]
+        assert failed.state is OperationState.FAILED
+        assert failed.result == result.to_dict()
+        assert failed.result_digest == decision.receipt.result_digest
+        assert failed.error == OperationError(
+            code="provider_rejected",
+            message="provider rejected",
+            retryable=False,
+        )
+        revision = persisted.revision
+        event_ids = tuple(item.event_id for item in persisted.event_outbox)
+
+        replay = store.resolve_deferred(handle, result)
+
+        assert replay.kind == "replayed"
+        assert replay.receipt is not None
+        assert replay.receipt.to_dict() == decision.receipt.to_dict()
+        replayed = store.load_checkpoint(key)
+        assert replayed is not None
+        assert replayed.revision == revision
+        assert tuple(item.event_id for item in replayed.event_outbox) == event_ids
+    finally:
+        store.delete_checkpoint(key)
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_deferred_receipt_index_tamper_is_rejected_without_checkpoint_write(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    from vv_agent.deferred import DeferredResolutionReceipt, DeferredToolHandle, ToolCallOutcome
+    from vv_agent.runtime.stores.redis import _strict_json_loads
+    from vv_agent.types import ToolCall
+
+    key = f"deferred-receipt-tamper-{store_kind}"
+    store = _store(store_kind, tmp_path, key)
+    handle = DeferredToolHandle(
+        checkpoint_key=key,
+        operation_id="op_tool_cycle_1_call_defer",
+        attempt=1,
+        request_digest="a" * 64,
+    )
+    result = ToolExecutionResult(
+        tool_call_id="call-defer",
+        content="accepted",
+        status_code=ToolResultStatus.SUCCESS,
+    )
+    tampered_receipt_payload: str | None = None
+    wrong_checkpoint_key: str | None = None
+    try:
+        checkpoint = _minimal_checkpoint(key=key)
+        assert store.create_checkpoint(checkpoint)
+        claimed = store.claim_checkpoint(
+            key,
+            1,
+            claim_token="owner",
+            lease_expires_at_ms=200,
+            now_ms=100,
+            claim_mode="continue",
+        )
+        assert claimed is not None
+        entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+        entry.cycle_index = 1
+        entry.operation_id = handle.operation_id
+        entry.request_digest = handle.request_digest
+        entry.tool_call_id = result.tool_call_id
+        claimed.tool_journal = [entry]
+        assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+        claimed.revision += 1
+        assert store.admit_deferred_batch(
+            claimed,
+            outcomes=[
+                (
+                    ToolCall(id=result.tool_call_id, name=entry.tool_name or "defer", arguments={}),
+                    ToolCallOutcome.Deferred(handle),
+                )
+            ],
+            claim_token="owner",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+        )
+        decision = store.resolve_deferred(handle, result)
+        assert decision.kind == "applied_ready"
+        before = store.load_checkpoint(key)
+        assert before is not None
+        before_wire = checkpoint_to_dict(before)
+
+        if store_kind == "memory":
+            with store._lock:  # type: ignore[attr-defined]
+                receipt = store._deferred_receipts[handle.key]  # type: ignore[attr-defined]
+                wrong_handle = DeferredToolHandle(
+                    checkpoint_key=key,
+                    operation_id=handle.operation_id,
+                    attempt=handle.attempt,
+                    request_digest="b" * 64,
+                )
+                wrong_identity = compute_tool_identity_key(
+                    wrong_handle.checkpoint_key,
+                    wrong_handle.operation_id,
+                    wrong_handle.attempt,
+                    result.tool_call_id,
+                    wrong_handle.request_digest,
+                )
+                store._deferred_receipts[handle.key] = DeferredResolutionReceipt(  # type: ignore[attr-defined]
+                    handle=wrong_handle,
+                    result=result,
+                    result_digest=receipt.result_digest,
+                    event_id=f"evt_receipt_{wrong_identity}",
+                    event_payload_digest=receipt.event_payload_digest,
+                    receipt_status="succeeded",
+                )
+        elif store_kind == "sqlite":
+            wrong_checkpoint_key = f"{key}-wrong"
+            assert store.create_checkpoint(_minimal_checkpoint(key=wrong_checkpoint_key))
+            with store._lock, store._conn:  # type: ignore[attr-defined]
+                store._conn.execute(  # type: ignore[attr-defined]
+                    "UPDATE deferred_resolution_receipts SET checkpoint_key = ? WHERE handle_key = ?",
+                    (wrong_checkpoint_key, handle.key),
+                )
+        else:
+            receipt_key = store._receipt_key(handle.key)  # type: ignore[attr-defined]
+            tampered_receipt_payload = store._client.get(receipt_key)  # type: ignore[attr-defined]
+            assert tampered_receipt_payload is not None
+            payload = _strict_json_loads(tampered_receipt_payload)
+            payload["handle"]["checkpoint_key"] = "wrong-checkpoint"
+            store._client.set(  # type: ignore[attr-defined]
+                receipt_key,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            )
+
+        with pytest.raises(ValueError, match="deferred_receipt_identity_invalid"):
+            store.resolve_deferred(handle, result)
+        after = store.load_checkpoint(key)
+        assert after is not None
+        assert checkpoint_to_dict(after) == before_wire
+    finally:
+        if store_kind == "memory" and handle.key in store._deferred_receipts:  # type: ignore[attr-defined]
+            store._deferred_receipts.pop(handle.key, None)  # type: ignore[attr-defined]
+        elif store_kind == "sqlite":
+            with store._lock, store._conn:  # type: ignore[attr-defined]
+                store._conn.execute(
+                    "DELETE FROM deferred_resolution_receipts WHERE handle_key = ?",
+                    (handle.key,),
+                )
+        elif tampered_receipt_payload is not None:
+            store._client.set(store._receipt_key(handle.key), tampered_receipt_payload)  # type: ignore[attr-defined]
+        if wrong_checkpoint_key is not None:
+            store.delete_checkpoint(wrong_checkpoint_key)
+        store.delete_checkpoint(key)
 
 
 def test_redis_resolution_retries_to_receipt_replay_after_concurrent_winner() -> None:
@@ -2116,3 +4496,97 @@ def test_cross_runtime_sqlite_probe_from_environment() -> None:
         assert checkpoint.run_definition_digest == compute_run_definition_digest(checkpoint.run_definition)
         return
     raise AssertionError(f"unknown cross-runtime mode: {mode}")
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_incomplete_deferred_batch_reconciles_unclassified_wait_user_across_stores(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    from vv_agent.deferred import DeferredToolHandle, ToolCallOutcome
+
+    key = f"incomplete-deferred-wait-user-{store_kind}"
+    store = _store(store_kind, tmp_path, key)
+    seed = _minimal_checkpoint(key=key)
+    controller = CheckpointResumeController(
+        config=CheckpointConfig(store=store, key=key, resume_policy=ResumePolicy.NEW),
+        task_id=seed.task_id,
+        run_id=seed.root_run_id,
+        trace_id=seed.trace_id,
+        run_definition=deepcopy(seed.run_definition),
+        run_definition_digest=seed.run_definition_digest,
+        initial_messages=[],
+        initial_shared_state={},
+        initial_budget_usage=None,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+    )
+    defer_call = ToolCall(id="call-defer", name="defer", arguments={})
+    wait_call = ToolCall(id="call-wait", name="wait_user", arguments={})
+    try:
+        assert controller.admit() is None
+        controller._ensure_claim(1)
+        deferred_plan = controller.plan_tool(
+            cycle_index=1,
+            call=defer_call,
+            idempotency_support=ToolIdempotency.SUPPORTED,
+        )
+        controller.tool_started(cycle_index=1, call=defer_call)
+        controller.plan_tool(
+            cycle_index=1,
+            call=wait_call,
+            idempotency_support=ToolIdempotency.UNKNOWN,
+        )
+        controller.tool_started(cycle_index=1, call=wait_call)
+        checkpoint = controller._require_checkpoint()
+        handle = DeferredToolHandle(
+            checkpoint_key=key,
+            operation_id=deferred_plan.operation_id,
+            attempt=deferred_plan.attempt,
+            request_digest=deferred_plan.request_digest,
+        )
+        outcomes = [(defer_call, ToolCallOutcome.Deferred(handle))]
+
+        with pytest.raises(CheckpointError) as admission_error:
+            store.admit_deferred_batch(
+                checkpoint,
+                outcomes=outcomes,
+                claim_token=checkpoint.claim_token or "",
+                expected_revision=checkpoint.revision,
+                claimed_cycle=checkpoint.claimed_cycle or 1,
+            )
+        assert admission_error.value.code == "deferred_batch_incomplete"
+
+        with pytest.raises(CheckpointReconciliationRequired):
+            controller._suspend_incomplete_deferred_batch(outcomes)
+
+        retained = store.load_checkpoint(key)
+        assert retained is not None
+        assert retained.status is AgentStatus.RECONCILIATION_REQUIRED
+        assert retained.claim_token is None
+        assert [entry.state for entry in retained.tool_journal] == [OperationState.STARTED, OperationState.AMBIGUOUS]
+        assert retained.tool_journal[0].deferred_handle is None
+        decision = store.resolve_deferred(
+            handle,
+            ToolExecutionResult(
+                tool_call_id="call-defer",
+                content="accepted",
+                status_code=ToolResultStatus.SUCCESS,
+            ),
+        )
+        assert decision.kind == "not_admitted"
+
+        recovered = store.claim_checkpoint(
+            key,
+            1,
+            claim_token="recovery-owner",
+            lease_expires_at_ms=10_000,
+            now_ms=1,
+            claim_mode="recovery",
+        )
+        assert recovered is not None
+        assert recovered.claim_token == "recovery-owner"
+    finally:
+        controller.close()
+        store.delete_checkpoint(key)

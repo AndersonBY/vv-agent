@@ -35,7 +35,7 @@ from vv_agent.tools.metadata import (
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, SubAgentConfig, ToolArtifactRef
 
 DISTRIBUTED_RUN_SCHEMA_VERSION = "vv-agent.distributed-run.v5"
-DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION = "vv-agent.distributed-worker-response.v3"
+DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION = "vv-agent.distributed-worker-response.v4"
 DEFAULT_TOOLSET_ID = "vv-agent.builtin-tools"
 DEFAULT_TOOLSET_VERSION = "1"
 DEFAULT_TOOLSET_SCHEMA_DIGEST = "d266963bff5d4dc90f4fd4c9897381aa589375078f0c08c23af474e27f6b0269"

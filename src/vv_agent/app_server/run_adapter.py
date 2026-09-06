@@ -701,10 +701,10 @@ class RunAdapter:
             checkpoint = self._load_result_checkpoint(started, result)
             if checkpoint is not None:
                 payload["checkpoint"] = self._checkpoint_summary(checkpoint).to_dict()
-            if result.resume_observation is not None:
-                payload["interruption"] = self._interruption_summary(result.resume_observation).to_dict()
+            if result.resume_observations:
+                payload["interruption"] = self._interruption_summary(result.resume_observations[0]).to_dict()
             if status == "failed":
-                result_error = result.raw_result.error or result.raw_result.wait_reason or "Turn failed"
+                result_error = self._result_error_text(result.raw_result.error, result.raw_result.wait_reason)
                 payload["error"] = result_error
             self._store.update_turn(
                 started.turn.turn_id,
@@ -824,7 +824,7 @@ class RunAdapter:
         status = self._turn_status(result.status)
         error = None
         if status == "failed":
-            error = result.raw_result.error or result.raw_result.wait_reason or "Turn failed"
+            error = self._result_error_text(result.raw_result.error, result.raw_result.wait_reason)
         return TurnResumeResponse(
             thread_id=thread_id,
             turn_id=turn_id,
@@ -838,9 +838,7 @@ class RunAdapter:
                 (result.wait_reason or "deferred_pending") if result.status is AgentStatus.DEFERRED else result.wait_reason
             ),
             checkpoint=self._checkpoint_summary(checkpoint),
-            interruption=(
-                self._interruption_summary(result.resume_observation) if result.resume_observation is not None else None
-            ),
+            interruption=(self._interruption_summary(result.resume_observations[0]) if result.resume_observations else None),
             error=error,
         )
 
@@ -860,6 +858,13 @@ class RunAdapter:
         if isinstance(error, CheckpointError):
             return f"Checkpoint resume failed ({error.code})"
         return "Checkpoint resume failed"
+
+    @staticmethod
+    def _result_error_text(error: dict[str, Any] | None, wait_reason: str | None = None) -> str:
+        value = error.get("message") or error.get("code") if error is not None else None
+        if isinstance(value, str) and value:
+            return value
+        return wait_reason or "Turn failed"
 
     @staticmethod
     def _load_result_checkpoint(started: StartedTurn, result: RunResult) -> Checkpoint | None:

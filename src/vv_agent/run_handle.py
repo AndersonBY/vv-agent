@@ -11,7 +11,7 @@ from vv_agent.events import RunEvent
 from vv_agent.result import RunResult, RunState
 from vv_agent.run_config import RunConfig
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
-from vv_agent.types import AgentStatus
+from vv_agent.types import AgentStatus, _agent_result_error_text
 
 ApprovalInput = ApprovalDecision | str
 RunHandleStatus = Literal[
@@ -266,12 +266,12 @@ class RunHandle:
                         status="cancelled",
                         done=True,
                         cancelled=True,
-                        error=self._result.raw_result.error,
+                        error=self._error_text(self._result.raw_result.error),
                     )
                 return RunHandleState(
                     status=self._status_from_result(self._result.status),
                     done=True,
-                    error=self._result.raw_result.error,
+                    error=self._error_text(self._result.raw_result.error),
                 )
         if not self.done():
             return RunHandleState(
@@ -295,8 +295,12 @@ class RunHandle:
         return (
             result.status == AgentStatus.FAILED
             and self._cancellation_token.cancelled
-            and "cancel" in (result.raw_result.error or "").lower()
+            and "cancel" in (self._error_text(result.raw_result.error) or "").lower()
         )
+
+    @staticmethod
+    def _error_text(error: dict[str, Any] | None) -> str | None:
+        return _agent_result_error_text(error)
 
     def _event_stream_done(self) -> bool:
         return self._done_event.is_set() and not self._active_sub_run_ids

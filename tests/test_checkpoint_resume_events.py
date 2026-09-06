@@ -9,6 +9,7 @@ from vv_agent.deferred import DeferredToolHandle
 from vv_agent.events import (
     CheckpointCreatedEvent,
     CheckpointResumedEvent,
+    CycleAbortedEvent,
     ModelRetryDuplicateRiskEvent,
     OperationAmbiguousEvent,
     OperationReplayedEvent,
@@ -44,6 +45,7 @@ def test_resume_event_fixture_round_trips_through_typed_producers() -> None:
         ToolCallCompletedEvent,
         ReconciliationResolvedEvent,
         ToolCallDeferredEvent,
+        CycleAbortedEvent,
     )
 
     for payload, expected_type in zip(_fixture_events(), expected_types, strict=True):

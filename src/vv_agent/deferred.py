@@ -265,6 +265,7 @@ class DeferredResolutionReceipt:
     handle_key: str | None = None
 
     def __post_init__(self) -> None:
+        from vv_agent.runtime.state import compute_tool_identity_key
         from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
         if not isinstance(self.handle, DeferredToolHandle):
@@ -276,6 +277,15 @@ class DeferredResolutionReceipt:
             raise ValueError("deferred_resolution_result_invalid")
         if self.result.tool_call_id.strip() == "":
             raise ValueError("deferred_resolution_result_invalid")
+        expected_event_id = "evt_receipt_" + compute_tool_identity_key(
+            self.handle.checkpoint_key,
+            self.handle.operation_id,
+            self.handle.attempt,
+            self.result.tool_call_id,
+            self.handle.request_digest,
+        )
+        if self.event_id != expected_event_id:
+            raise ValueError("deferred_receipt_identity_invalid")
         expected_digest = canonical_json_sha256(self.result.to_dict(), "deferred result")
         if self.result_digest != expected_digest:
             raise ValueError("deferred_receipt_result_digest_invalid")

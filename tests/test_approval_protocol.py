@@ -115,7 +115,11 @@ def test_approval_provider_failure_fails_run_without_faking_a_denial() -> None:
     )
 
     assert result.status == AgentStatus.FAILED
-    assert result.raw_result.error == "approval provider unavailable"
+    assert result.raw_result.error == {
+        "code": "agent_failed",
+        "message": "approval provider unavailable",
+        "retryable": False,
+    }
     assert calls == []
     assert provider.request_id
     assert broker.pending_request(provider.request_id) is None

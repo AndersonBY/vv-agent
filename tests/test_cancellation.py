@@ -124,7 +124,9 @@ class TestCancellationInRuntime:
         ctx = ExecutionContext(cancellation_token=token)
         result = runtime.run(task, ctx=ctx)
         assert result.status == AgentStatus.FAILED
-        assert "cancelled" in (result.error or "").lower()
+        assert result.error is not None
+        assert result.error["code"] == "cancelled"
+        assert "cancelled" in result.error["message"].lower()
 
     def test_cancel_between_cycles(self):
         from vv_agent.llm.scripted import ScriptedLLM
@@ -160,7 +162,9 @@ class TestCancellationInRuntime:
 
         result = runtime.run(task, ctx=ctx, before_cycle_messages=cancel_on_cycle_2)
         assert result.status == AgentStatus.FAILED
-        assert "cancelled" in (result.error or "").lower()
+        assert result.error is not None
+        assert result.error["code"] == "cancelled"
+        assert "cancelled" in result.error["message"].lower()
 
 
 def test_runner_emits_one_cancelled_terminal_event(tmp_path) -> None:

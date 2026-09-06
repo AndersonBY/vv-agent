@@ -143,7 +143,7 @@ def _manager_result(
         messages=[],
         cycles=[],
         final_answer="done" if status == AgentStatus.COMPLETED else None,
-        error=error,
+        error=({"code": "agent_failed", "message": error, "retryable": False} if error is not None else None),
         shared_state={"todo_list": []},
     )
 
@@ -225,8 +225,8 @@ def _normalize_sub_event(event: SubRunStartedEvent | SubRunCompletedEvent) -> di
 def test_configured_sub_agent_shared_fixtures_use_one_current_version() -> None:
     assert _contract()["version"] == "v2"
     # The configured-sub-agent wire has its own v2 schema; emitted RunEvent
-    # payloads follow the current shared event v4 discriminator.
-    assert all(event["version"] == "v4" for event in _event_contract())
+    # payloads follow the current shared event v5 discriminator.
+    assert all(event["version"] == "v5" for event in _event_contract())
 
 
 def test_portable_workspace_regex_cases_match_shared_contract() -> None:
@@ -2758,7 +2758,11 @@ def test_parent_cancellation_reaches_sync_configured_sub_agent(tmp_path: Path) -
     parent_result = holder.get("result")
     assert parent_result is not None
     assert parent_result.status == AgentStatus.FAILED
-    assert parent_result.error == "Operation was cancelled"
+    assert parent_result.error == {
+        "code": "cancelled",
+        "message": "Operation was cancelled",
+        "retryable": False,
+    }
     create_payload = json.loads(parent_result.cycles[0].tool_results[0].content)
     assert create_payload["status"] == AgentStatus.FAILED.value
     pair = _sub_events(events)
@@ -2917,7 +2921,11 @@ def test_parent_cancellation_reaches_batch_configured_sub_agent_workers(tmp_path
     parent_result = holder.get("result")
     assert parent_result is not None
     assert parent_result.status == AgentStatus.FAILED
-    assert parent_result.error == "Operation was cancelled"
+    assert parent_result.error == {
+        "code": "cancelled",
+        "message": "Operation was cancelled",
+        "retryable": False,
+    }
     create_payload = json.loads(parent_result.cycles[0].tool_results[0].content)
     assert all(item["status"] == AgentStatus.FAILED.value for item in create_payload["details"]["results"])
     grouped: dict[str, list[str]] = {}
@@ -3547,7 +3555,8 @@ def test_configured_sub_agent_continuation_replays_complete_prior_turn(tmp_path:
     failed_completed = lifecycle[5]
     assert isinstance(failed_completed, SubRunCompletedEvent)
     assert failed_completed.status == AgentStatus.FAILED.value
-    assert failed_completed.error is not None and "continuation failed" in failed_completed.error
+    assert isinstance(failed_completed.error, str)
+    assert failed_completed.error == failed_record.outcome.error
     assert all(event.trace_id == "trace-parity" for event in lifecycle)
     assert all(event.parent_run_id == "parent-run" for event in lifecycle)
     assert all(event.parent_tool_call_id == "delegate" for event in lifecycle)

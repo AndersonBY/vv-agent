@@ -40,9 +40,11 @@ from vv_agent.deferred import (
     _is_ambiguous_tool_error,
     validate_definitive_result,
 )
+from vv_agent.events import ToolCallCompletedEvent
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime.checkpoint_codec import checkpoint_to_dict
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
+from vv_agent.runtime.state import compute_tool_identity_key
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.types import LLMResponse, ToolCall, ToolResultStatus
 from vv_agent.workspace import MemoryWorkspaceBackend
@@ -180,6 +182,61 @@ def test_checkpointed_non_definitive_tool_outcome_uses_normal_wait_user_lifecycl
     assert checkpoint.terminal_result is not None
     assert checkpoint.claim_token is None
     assert checkpoint.tool_journal == []
+    assert sum(event.event.get("type") == "tool_call_completed" for event in checkpoint.event_outbox) == 1
+    completed = [event for event in result.events if isinstance(event, ToolCallCompletedEvent)]
+    assert len(completed) == 1
+    assert completed[0].execution_started is True
+    assert completed[0].status == "wait_response"
+    assert completed[0].directive == "wait_user"
+
+
+def test_incomplete_deferred_batch_reconciles_unclassified_wait_user() -> None:
+    store = InMemoryCheckpointStore()
+    handles: list[DeferredToolHandle] = []
+
+    @function_tool(name="defer_first", params_json_schema=_EMPTY_SCHEMA)
+    def defer_first(context: ToolContext) -> ToolCallOutcome:
+        outcome = context.defer()
+        assert outcome.handle is not None
+        handles.append(outcome.handle)
+        return outcome
+
+    @function_tool(name="wait_for_user", params_json_schema=_EMPTY_SCHEMA)
+    def wait_for_user(_context: ToolContext) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            tool_call_id="",
+            content="Choose an option.",
+            status_code=ToolResultStatus.SUCCESS,
+            directive=ToolDirective.WAIT_USER,
+        )
+
+    result, checkpoint = _run_checkpointed_tools(
+        store,
+        "incomplete-deferred-wait-user",
+        [defer_first, wait_for_user],
+        [
+            ToolCall(id="call-defer", name="defer_first", arguments={}),
+            ToolCall(id="call-wait", name="wait_for_user", arguments={}),
+        ],
+    )
+
+    assert result.status is AgentStatus.RECONCILIATION_REQUIRED
+    assert checkpoint is not None
+    assert checkpoint.status is AgentStatus.RECONCILIATION_REQUIRED
+    assert checkpoint.claim_token is None
+    assert [entry.state.value for entry in checkpoint.tool_journal] == ["started", "ambiguous"]
+    assert checkpoint.tool_journal[0].deferred_handle is None
+    assert handles
+
+    decision = store.resolve_deferred(
+        handles[0],
+        ToolExecutionResult(
+            tool_call_id="call-defer",
+            content="accepted",
+            status_code=ToolResultStatus.SUCCESS,
+        ),
+    )
+    assert decision.kind == "not_admitted"
 
 
 @pytest.mark.parametrize(
@@ -264,7 +321,7 @@ def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -
     store = InMemoryCheckpointStore()
     before = _deferred_checkpoint(store, handle, admit=False)
     assert before is not None
-    with pytest.raises(DeferredResolutionResultInvalid):
+    with pytest.raises(CheckpointError, match="deferred admission accepts deferred outcomes only") as caught:
         store.admit_deferred_batch(
             before,
             outcomes=[(ToolCall(id="call-defer", name="defer", arguments={}), ToolCallOutcome.Completed(result))],
@@ -272,10 +329,11 @@ def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -
             expected_revision=before.revision,
             claimed_cycle=1,
         )
+    assert caught.value.code == "deferred_admission_completed_outcome_invalid"
     after = store.load_checkpoint(handle.checkpoint_key)
     assert after is not None and checkpoint_to_dict(after) == checkpoint_to_dict(before)
 
-    with pytest.raises(DeferredResolutionResultInvalid) as caught:
+    with pytest.raises(CheckpointError, match="deferred admission accepts deferred outcomes only") as caught:
         store.admit_deferred_batch(
             before,
             outcomes=[
@@ -288,7 +346,7 @@ def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -
             expected_revision=before.revision,
             claimed_cycle=1,
         )
-    assert caught.value.code == "tool_result_invalid"
+    assert caught.value.code == "deferred_admission_completed_outcome_invalid"
     after = store.load_checkpoint(handle.checkpoint_key)
     assert after is not None and checkpoint_to_dict(after) == checkpoint_to_dict(before)
 
@@ -301,7 +359,7 @@ def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -
         ("tool_connection_lost", {}, False),
         ("tool_execution_failed", {}, False),
         ("tool_orchestrator_error", {}, False),
-        ("tool_execution_failed", {"definitive_outcome": True}, True),
+        ("tool_execution_failed", {"definitive_outcome": True}, False),
     ],
 )
 def test_mixed_deferred_and_ambiguous_admission_is_atomic(
@@ -366,7 +424,7 @@ def test_mixed_deferred_and_ambiguous_admission_is_atomic(
         ]
         return
 
-    with pytest.raises(DeferredResolutionResultInvalid):
+    with pytest.raises(CheckpointError, match="deferred admission accepts deferred outcomes only") as caught:
         store.admit_deferred_batch(
             before,
             outcomes=outcomes,
@@ -374,6 +432,7 @@ def test_mixed_deferred_and_ambiguous_admission_is_atomic(
             expected_revision=before.revision,
             claimed_cycle=1,
         )
+    assert caught.value.code == "deferred_admission_completed_outcome_invalid"
     after = store.load_checkpoint(deferred_handle.checkpoint_key)
     assert after is not None
     assert checkpoint_to_dict(after) == before_wire
@@ -723,11 +782,11 @@ def test_runner_admits_mixed_batch_once_and_projects_no_deferred_tool_message() 
         "tool_call_started",
         "tool_call_planned",
         "tool_call_started",
-        "tool_call_deferred",
         "tool_call_completed",
+        "tool_call_deferred",
     ]
     completed_event = next(event for event in checkpoint.event_outbox if event.event["type"] == "tool_call_completed")
-    assert "checkpoint_key" not in completed_event.event
+    assert completed_event.event["checkpoint_key"] == checkpoint.checkpoint_key
     completed_event.verify_payload()
     assert all(message.tool_call_id != "call-defer" for message in result.raw_result.messages)
 
@@ -774,6 +833,15 @@ def test_deferred_resolution_is_receipt_first_and_concurrent_same_result_replays
     replayed_checkpoint = store.load_checkpoint(handle.checkpoint_key)
     assert replayed_checkpoint is not None
     assert replayed_checkpoint.revision == revision
+    receipt_event = next(event for event in replayed_checkpoint.event_outbox if event.event.get("type") == "tool_call_completed")
+    identity_key = compute_tool_identity_key(
+        handle.checkpoint_key,
+        handle.operation_id,
+        handle.attempt,
+        "call-defer",
+        handle.request_digest,
+    )
+    assert receipt_event.event_id == f"evt_receipt_{identity_key}"
 
     with pytest.raises(DeferredResolutionConflict):
         store.resolve_deferred(
@@ -864,6 +932,11 @@ def test_resolution_producer_matches_contract_receipt_and_event_jcs_goldens(monk
     assert completed_event.event == event_golden["value"]
     assert compute_event_payload_digest(completed_event.event) == canonical["event_payload_digest"]
     completed_event.verify_payload()
+
+    tampered = decision.receipt.to_dict()
+    tampered["event_id"] = "evt_receipt_" + "0" * 64
+    with pytest.raises(ValueError, match="deferred_receipt_identity_invalid"):
+        type(decision.receipt).from_dict(tampered)
 
 
 def test_recovery_accepts_deferred_batch_under_recovery_claim_without_model_dispatch() -> None:

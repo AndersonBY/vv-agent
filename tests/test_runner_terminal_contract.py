@@ -114,7 +114,11 @@ def test_output_guardrail_block_short_circuits_and_owns_final_terminal() -> None
     assert result.status == AgentStatus(expected["status"])
     assert result.final_output == expected["error"]
     assert result.raw_result.final_answer is None
-    assert result.raw_result.error == expected["error"]
+    assert result.raw_result.error == {
+        "code": "agent_failed",
+        "message": expected["error"],
+        "retryable": False,
+    }
     assert result.completion_reason == CompletionReason(expected["completion_reason"])
     assert result.partial_output == expected["partial_output"]
     assert result.events[-1].to_dict()["completion_reason"] == expected["completion_reason"]
@@ -200,7 +204,8 @@ def test_cancellation_reason_precedes_output_guardrail_failure() -> None:
 
     assert result.status == AgentStatus.FAILED
     assert result.completion_reason == CompletionReason.CANCELLED
-    assert result.final_output == result.raw_result.error
+    assert result.raw_result.error is not None
+    assert result.final_output == result.raw_result.error["message"]
     assert "cancel" in str(result.final_output).lower()
     assert guardrail_calls == 0
     assert result.events[-1].type == "run_cancelled"
@@ -247,7 +252,11 @@ def test_budget_exhaustion_emits_observation_before_the_only_terminal() -> None:
     assert result.completion_reason == CompletionReason(expected["completion_reason"])
     assert result.completion_tool_name == expected["completion_tool_name"]
     assert result.partial_output == expected["partial_output"]
-    assert result.raw_result.error == expected["error"]
+    assert result.raw_result.error == {
+        "code": "run_budget_exhausted",
+        "message": expected["error"],
+        "retryable": False,
+    }
     assert result.budget_usage is not None
     assert result.budget_exhaustion is not None
     assert terminals[0].to_dict()["budget_usage"] == result.budget_usage.to_dict()

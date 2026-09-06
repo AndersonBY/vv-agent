@@ -19,8 +19,18 @@
       "artifact",
       "cursor"
     ],
+    "metadata": {
+      "retryable": "boolean when present and retained in the canonical result"
+    },
     "optional_fields_omitted_when_absent": true,
     "optional_fields_reject_null": true,
+    "canonical_writer_normalization": {
+      "writer": "strict ToolExecutionResult typed writer",
+      "omit_empty_optional_fields": [
+        "metadata"
+      ],
+      "include_present_optional_fields_after_normalization": true
+    },
     "unknown_fields": "reject",
     "content": "bounded_model_visible_text",
     "status_values": [
@@ -185,6 +195,11 @@
         "expected_message": "first output\n... output omitted; full text in artifact ...\nlast output\n{\"vv_agent_recovery\":{\"artifact\":{\"encoding\":\"utf-8\",\"media_type\":\"text/plain\",\"path\":\".vv-agent/artifacts/task-7/call-bash-0123456789abcdef.txt\",\"sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"size_bytes\":100000},\"original_bytes\":100000,\"truncated\":true,\"truncation_reason\":\"output_limit\",\"visible_bytes\":70}}"
       },
       {
+        "name": "truncated_error",
+        "result_ref": "truncated_error",
+        "expected_message": "error output\n{\"vv_agent_recovery\":{\"artifact\":{\"encoding\":\"utf-8\",\"media_type\":\"text/plain\",\"path\":\".vv-agent/artifacts/task-7/error-output.txt\",\"sha256\":\"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\",\"size_bytes\":100},\"original_bytes\":100,\"truncated\":true,\"truncation_reason\":\"output_limit\",\"visible_bytes\":12}}"
+      },
+      {
         "name": "truncated_read",
         "result_ref": "truncated_read",
         "expected_message": "bounded source slice\n{\"vv_agent_recovery\":{\"cursor\":{\"kind\":\"read_file\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"sha256\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"},\"original_bytes\":50000,\"truncated\":true,\"truncation_reason\":\"read_limit\",\"visible_bytes\":20}}"
@@ -275,6 +290,28 @@
         "path": "logs/output.txt",
         "offset_chars": 20,
         "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+      }
+    },
+    "truncated_error": {
+      "tool_call_id": "call-error",
+      "content": "error output",
+      "status_code": "ERROR",
+      "directive": "wait_user",
+      "error_code": "provider_rejected",
+      "metadata": {
+        "provider": "gateway",
+        "retryable": false
+      },
+      "truncated": true,
+      "truncation_reason": "output_limit",
+      "original_bytes": 100,
+      "visible_bytes": 12,
+      "artifact": {
+        "path": ".vv-agent/artifacts/task-7/error-output.txt",
+        "media_type": "text/plain",
+        "encoding": "utf-8",
+        "size_bytes": 100,
+        "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
       }
     }
   },

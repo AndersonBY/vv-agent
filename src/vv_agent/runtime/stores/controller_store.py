@@ -1,4 +1,4 @@
-"""Shared v8 controller/host-interaction CAS logic for checkpoint stores.
+"""Shared v9 controller/host-interaction CAS logic for checkpoint stores.
 
 The mixin is intentionally storage-neutral: a concrete store supplies its
 authoritative checkpoint dictionary and lock.  SQLite/Redis adapters may use
@@ -45,7 +45,12 @@ from vv_agent.runtime.controller import (
     validate_host_interaction_notification,
     validate_host_interaction_record,
 )
-from vv_agent.runtime.state import EventOutboxEntry, validate_checkpoint
+from vv_agent.runtime.state import (
+    EventOutboxEntry,
+    prepare_claimed_terminal,
+    prepare_unclaimed_terminal,
+    validate_checkpoint,
+)
 from vv_agent.runtime.token_usage import summarize_task_token_usage
 from vv_agent.types import AgentResult, AgentStatus, CompletionReason, Message
 
@@ -58,7 +63,7 @@ _RECOVERY_LEASE_DURATION_MS = 60_000
 
 
 class ControllerStoreMixin:
-    """Implement v8 controller transitions over ``_store`` and ``_lock``.
+    """Implement v9 controller transitions over ``_store`` and ``_lock``.
 
     A concrete store should initialize the three index dictionaries with
     ``_init_controller_indexes``.  All public transitions are performed while
@@ -256,6 +261,13 @@ class ControllerStoreMixin:
                 return None
             return deepcopy(self._checked_notification(row))
 
+    def _find_resolved_pending_host_interaction(self, *, checkpoint_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            for (key, _interaction_id), record in self._host_interaction_records.items():
+                if key == checkpoint_key and record["state"] == "resolved_pending":
+                    return deepcopy(self._checked_host_record(record, checkpoint_key=checkpoint_key))
+        return None
+
     @staticmethod
     def _controller_wake_from_receipt(receipt: ControllerCommandReceipt) -> dict[str, Any]:
         return {
@@ -268,7 +280,7 @@ class ControllerStoreMixin:
             "attempt": receipt.outbox_attempt,
             "claim_token": None,
             "lease_expires_at_ms": None,
-            "delivered_at_ms": None if receipt.outbox_state != "delivered" else 0,
+            "delivered_at_ms": (None if receipt.outbox_action == "none" or receipt.outbox_state != "delivered" else 0),
             "last_error": None,
         }
 
@@ -498,18 +510,27 @@ class ControllerStoreMixin:
             raise _controller_error("controller command handle does not match checkpoint", "controller_command_stale")
         if current.terminal_result is not None:
             raise _controller_error("controller command cannot rewrite a committed terminal", "controller_command_terminal")
-        if current.claim_token is not None:
-            raise _controller_error("controller command cannot clear a live execution claim", "controller_command_claim_active")
+        if current.claim_token is not None and command.kind != "cancel":
+            claim_expired = (current.lease_expires_at_ms or 0) <= self._lease_now_ms(None)
+            if command.kind != "suspend" or not claim_expired:
+                raise _controller_error(
+                    "controller command cannot clear a live execution claim", "controller_command_claim_active"
+                )
         journals = [*current.model_call_journal, *current.tool_journal]
         if command.kind != "abort" and (
             current.status is AgentStatus.RECONCILIATION_REQUIRED
-            or any(entry.state is OperationState.AMBIGUOUS for entry in journals)
+            or (
+                any(entry.state is OperationState.AMBIGUOUS for entry in journals)
+                and not (command.kind == "cancel" and current.claim_token is not None)
+            )
         ):
             raise _controller_error(
                 "controller command is blocked by an unresolved external effect",
                 "controller_command_ambiguity_requires_reconciliation",
             )
-        if current.status is AgentStatus.DEFERRED or any(entry.state is OperationState.DEFERRED for entry in journals):
+        if (command.kind != "cancel" or current.claim_token is None) and (
+            current.status is AgentStatus.DEFERRED or any(entry.state is OperationState.DEFERRED for entry in journals)
+        ):
             raise _controller_error(
                 "controller command is blocked by a deferred effect",
                 "controller_command_deferred_pending",
@@ -526,7 +547,11 @@ class ControllerStoreMixin:
         cancelled: bool = False,
         error: str | None = None,
         error_code: str | None = None,
+        cancel_transition: bool = False,
     ) -> None:
+        metadata: dict[str, Any] = {}
+        if error_code is not None:
+            metadata["error_code"] = error_code
         common: dict[str, Any] = {
             "run_id": checkpoint.root_run_id,
             "trace_id": checkpoint.trace_id,
@@ -535,9 +560,15 @@ class ControllerStoreMixin:
             "cycle_index": checkpoint.cycle_index,
             "event_id": None,
             "created_at": None,
-            "metadata": {"error_code": error_code} if error_code is not None else None,
+            "metadata": metadata or None,
         }
-        events: list[dict[str, Any]] = [RunStateChangedEvent(state=state, **common).to_dict()]
+        events: list[dict[str, Any]] = [
+            RunStateChangedEvent(
+                state=state,
+                cancel_requested={"from": False, "to": True} if cancel_transition else None,
+                **common,
+            ).to_dict()
+        ]
         if cancelled:
             events.append(RunCancelledEvent(reason="cancelled", completion_reason=CompletionReason.CANCELLED, **common).to_dict())
         elif error is not None:
@@ -561,22 +592,20 @@ class ControllerStoreMixin:
         checkpoint: Any,
         *,
         reason: CompletionReason,
-        error: str | None,
-        error_code: str | None,
-        resume_observation: ResumeObservation | None = None,
+        error: dict[str, Any] | None,
+        resume_observations: list[ResumeObservation] | None = None,
     ) -> AgentResult:
         return AgentResult(
             status=AgentStatus.FAILED,
             messages=deepcopy(checkpoint.messages),
             cycles=deepcopy(checkpoint.cycles),
             final_answer=None,
-            error=error,
-            error_code=error_code,
+            error=deepcopy(error),
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             completion_reason=reason,
             checkpoint_key=checkpoint.checkpoint_key,
-            resume_observation=resume_observation,
+            resume_observations=resume_observations or [],
         )
 
     def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
@@ -714,21 +743,73 @@ class ControllerStoreMixin:
                 self._append_resume_event(checkpoint)
                 resulting_status = checkpoint.status.value
             elif kind == "cancel":
-                checkpoint.terminal_result = self._terminal_result(
-                    checkpoint,
-                    reason=CompletionReason.CANCELLED,
-                    error="cancelled",
-                    error_code="cancelled",
-                )
-                checkpoint.status = AgentStatus.FAILED
-                checkpoint.active_host_interaction = None
-                checkpoint.suspended_origin = None
-                checkpoint.claim_token = None
-                checkpoint.claimed_cycle = None
-                checkpoint.lease_expires_at_ms = None
-                checkpoint.revision += 1
-                self._append_control_events(checkpoint, state=AgentStatus.FAILED.value, cancelled=True)
-                resulting_status = AgentStatus.FAILED.value
+                if checkpoint.claim_token is not None:
+                    claim_expired = (checkpoint.lease_expires_at_ms or 0) <= self._lease_now_ms(None)
+                    if not claim_expired:
+                        cancel_transition = not checkpoint.cancel_requested
+                        checkpoint.cancel_requested = True
+                        if cancel_transition:
+                            self._append_control_events(
+                                checkpoint,
+                                state=checkpoint.status.value,
+                                cancelled=False,
+                                cancel_transition=True,
+                            )
+                        resulting_status = checkpoint.status.value
+                    else:
+                        recovery_claim = f"controller-recovery-{command_value.command_id}"
+                        authority = clone_checkpoint(checkpoint)
+                        authority.resume_attempt += 1
+                        authority.claim_token = recovery_claim
+                        authority.claimed_cycle = checkpoint.claimed_cycle
+                        authority.lease_expires_at_ms = self._lease_now_ms(None) + _RECOVERY_LEASE_DURATION_MS
+                        authority.cancel_requested = True
+                        terminal_candidate = clone_checkpoint(authority)
+                        terminal_candidate.terminal_result = self._terminal_result(
+                            authority,
+                            reason=CompletionReason.CANCELLED,
+                            error={
+                                "code": "cancelled_with_unknown_outcome",
+                                "message": "Cancellation was accepted while the external outcome remained unknown.",
+                                "retryable": False,
+                            },
+                        )
+                        terminal_candidate.status = AgentStatus.FAILED
+                        terminal_candidate.active_host_interaction = None
+                        terminal_candidate.suspended_origin = None
+                        checkpoint = prepare_claimed_terminal(
+                            authority,
+                            terminal_candidate,
+                            claim_token=recovery_claim,
+                            expected_revision=authority.revision,
+                        )
+                        if checkpoint is None:
+                            raise _controller_error(
+                                "expired claim cancellation lost its recovery fence",
+                                "controller_command_stale",
+                            )
+                        self._append_control_events(checkpoint, state=AgentStatus.FAILED.value, cancelled=True)
+                        resulting_status = AgentStatus.FAILED.value
+                else:
+                    checkpoint.terminal_result = self._terminal_result(
+                        checkpoint,
+                        reason=CompletionReason.CANCELLED,
+                        error={
+                            "code": "cancelled_with_unknown_outcome",
+                            "message": "Cancellation was accepted while the external outcome remained unknown.",
+                            "retryable": False,
+                        },
+                    )
+                    checkpoint.status = AgentStatus.FAILED
+                    checkpoint.active_host_interaction = None
+                    checkpoint.suspended_origin = None
+                    checkpoint.claim_token = None
+                    checkpoint.claimed_cycle = None
+                    checkpoint.lease_expires_at_ms = None
+                    checkpoint = prepare_unclaimed_terminal(checkpoint)
+                    checkpoint.revision += 1
+                    self._append_control_events(checkpoint, state=AgentStatus.FAILED.value, cancelled=True)
+                    resulting_status = AgentStatus.FAILED.value
             elif kind == "abort":
                 if checkpoint.status is not AgentStatus.RECONCILIATION_REQUIRED:
                     raise _controller_error("abort requires reconciliation_required", "controller_command_stale")
@@ -752,14 +833,18 @@ class ControllerStoreMixin:
                 checkpoint.terminal_result = self._terminal_result(
                     checkpoint,
                     reason=CompletionReason.FAILED,
-                    error="failed",
-                    error_code="operator_abort_with_unknown_outcome",
-                    resume_observation=observation,
+                    error={
+                        "code": "operator_abort_with_unknown_outcome",
+                        "message": "Operator accepted that the external outcome is unknown.",
+                        "retryable": False,
+                    },
+                    resume_observations=[observation],
                 )
                 checkpoint.status = AgentStatus.FAILED
                 checkpoint.claim_token = None
                 checkpoint.claimed_cycle = None
                 checkpoint.lease_expires_at_ms = None
+                checkpoint = prepare_unclaimed_terminal(checkpoint)
                 checkpoint.revision += 1
                 self._append_control_events(
                     checkpoint,
@@ -935,7 +1020,7 @@ class ControllerStoreMixin:
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
-    def reap_controller_command_wake(self, *, command_id: str, now_ms: int) -> dict[str, Any] | None:
+    def _reap_controller_command_wake(self, *, command_id: str, now_ms: int) -> dict[str, Any] | None:
         """Return one wake to pending after an expired claim; never retry ambiguous."""
         with self._lock:
             receipt = self._controller_command_receipts.get(command_id)
@@ -951,21 +1036,25 @@ class ControllerStoreMixin:
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
-    def reap_controller_command_wakes(self, *, now_ms: int) -> list[dict[str, Any]]:
+    def reap_controller_command_wakes(self, checkpoint_key: str, now_ms: int) -> list[dict[str, Any]]:
         with self._lock:
-            command_ids = tuple(sorted(self._controller_command_receipts))
+            candidates = sorted(
+                (
+                    receipt.expected_revision,
+                    command_id,
+                )
+                for command_id, receipt in self._controller_command_receipts.items()
+                if receipt.handle.checkpoint_key == checkpoint_key
+                and (row := self._ensure_controller_wake(receipt))["outbox_action"] == "recovery_dispatch"
+                and (
+                    row["outbox_state"] == "pending"
+                    or (row["outbox_state"] == "claimed" and int(row["lease_expires_at_ms"] or 0) <= now_ms)
+                )
+            )
         rows: list[dict[str, Any]] = []
-        for command_id in command_ids:
-            row = self.reap_controller_command_wake(command_id=command_id, now_ms=now_ms)
-            if (
-                row is not None
-                and row["outbox_action"] == "recovery_dispatch"
-                and row["outbox_state"]
-                in {
-                    "pending",
-                    "ambiguous",
-                }
-            ):
+        for _expected_revision, command_id in candidates:
+            row = self._reap_controller_command_wake(command_id=command_id, now_ms=now_ms)
+            if row is not None and row["outbox_action"] == "recovery_dispatch" and row["outbox_state"] == "pending":
                 rows.append(row)
         return rows
 

@@ -26,7 +26,7 @@ from vv_agent.types import CompletionReason, ModelCallOperation, TokenUsage
 if TYPE_CHECKING:
     from vv_agent.tools.metadata import ToolMetadata
 
-RUN_EVENT_VERSION = "v4"
+RUN_EVENT_VERSION = "v5"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
 MemoryCompactTrigger = Literal["micro_threshold", "full_threshold", "prompt_too_long"]
 MemoryCompactMode = Literal["none", "micro", "structural", "summary", "emergency"]
@@ -95,6 +95,7 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "run_started": frozenset({"input"}),
     "agent_started": frozenset(),
     "cycle_started": frozenset(),
+    "cycle_aborted": frozenset({"logical_cycle", "reason"}),
     "model_call_started": frozenset({"call_id", "operation_id", "attempt", "operation", "backend", "model"}),
     "model_call_completed": frozenset({"call_id", "operation_id", "attempt", "operation", "backend", "model", "usage"}),
     "model_call_failed": frozenset(
@@ -110,7 +111,7 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
             "error_code",
         }
     ),
-    "run_state_changed": frozenset({"state"}),
+    "run_state_changed": frozenset({"state", "cancel_requested"}),
     "host_interaction_requested": frozenset(
         {
             "checkpoint_key",
@@ -244,6 +245,7 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
 }
 _EVENT_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     "run_started": frozenset({"input"}),
+    "cycle_aborted": frozenset({"cycle_index", "logical_cycle", "reason"}),
     "model_call_started": frozenset({"call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model"}),
     "model_call_completed": frozenset(
         {"call_id", "operation_id", "attempt", "operation", "cycle_index", "backend", "model", "usage"}
@@ -706,6 +708,57 @@ class CycleStartedEvent(RunEvent):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CycleAbortedEvent(RunEvent):
+    logical_cycle: int = 1
+    reason: str = "cancelled"
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        cycle_index: int,
+        logical_cycle: int,
+        reason: str,
+        agent_name: str | None = None,
+        session_id: str | None = None,
+        parent_event_id: str | None = None,
+        parent_run_id: str | None = None,
+        event_id: str | None = None,
+        created_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if isinstance(cycle_index, bool) or not isinstance(cycle_index, int) or cycle_index < 0:
+            raise ValueError("cycle_aborted cycle_index must be a non-negative integer")
+        if isinstance(logical_cycle, bool) or not isinstance(logical_cycle, int) or logical_cycle != cycle_index + 1:
+            raise ValueError("cycle_aborted logical_cycle must equal cycle_index + 1")
+        if reason not in {"cancelled", "lease_lost", "operator_abort"}:
+            raise ValueError("cycle_aborted reason is invalid")
+        _set_run_event_fields(
+            self,
+            type="cycle_aborted",
+            run_id=run_id,
+            trace_id=trace_id,
+            cycle_index=cycle_index,
+            agent_name=agent_name,
+            session_id=session_id,
+            parent_event_id=parent_event_id,
+            parent_run_id=parent_run_id,
+            event_id=event_id,
+            created_at=created_at,
+            metadata=metadata,
+        )
+        object.__setattr__(self, "logical_cycle", logical_cycle)
+        object.__setattr__(self, "reason", reason)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = RunEvent.to_dict(self)
+        payload["logical_cycle"] = self.logical_cycle
+        payload["reason"] = self.reason
+        return payload
+
+
 def _set_model_call_fields(
     event: RunEvent,
     *,
@@ -872,6 +925,7 @@ class ModelCallFailedEvent(ModelCallStartedEvent):
 @dataclass(frozen=True, slots=True)
 class RunStateChangedEvent(RunEvent):
     state: str = ""
+    cancel_requested: dict[str, bool] | None = None
 
     def __init__(
         self,
@@ -887,7 +941,12 @@ class RunStateChangedEvent(RunEvent):
         event_id: str | None = None,
         created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
+        cancel_requested: dict[str, bool] | None = None,
     ) -> None:
+        if metadata is not None and "cancel_requested" in metadata:
+            raise ValueError("Run event cancel_requested must be a top-level field")
+        if cancel_requested is not None:
+            cancel_requested = _cancel_requested_transition(cancel_requested)
         _set_run_event_fields(
             self,
             type="run_state_changed",
@@ -903,10 +962,13 @@ class RunStateChangedEvent(RunEvent):
             metadata=metadata,
         )
         object.__setattr__(self, "state", state)
+        object.__setattr__(self, "cancel_requested", cancel_requested)
 
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         payload["state"] = self.state
+        if self.cancel_requested is not None:
+            payload["cancel_requested"] = dict(self.cancel_requested)
         return payload
 
 
@@ -1783,9 +1845,8 @@ class ToolCallCompletedEvent(RunEvent):
         object.__setattr__(self, "error_code", error_code_value)
         object.__setattr__(self, "execution_started", execution_started_value)
         object.__setattr__(self, "duration_ms", duration_ms_value)
-        # Keep the optional v4 identity fields present on every concrete
-        # instance so ``to_dict`` is total for both legacy-shaped callers and
-        # current operation-aware events.
+        # Keep the optional v5 identity fields present on every concrete
+        # instance so ``to_dict`` remains total for operation-aware events.
         object.__setattr__(self, "operation_id", None)
         object.__setattr__(self, "attempt", None)
         if operation_id is not None:
@@ -1801,10 +1862,9 @@ class ToolCallCompletedEvent(RunEvent):
     def to_dict(self) -> dict[str, Any]:
         payload = RunEvent.to_dict(self)
         if self.operation_id is not None:
-            # v4 operation-aware tool events use the contract's identity
-            # fields before the terminal result fields.  Keep the v3-shaped
-            # order for ordinary tool completions so existing canonical
-            # stream fixtures remain byte-stable.
+            # Operation-aware tool events place identity fields before their
+            # terminal result fields; ordinary completions retain their
+            # canonical field order.
             payload["tool_call_id"] = self.tool_call_id
             payload["tool_name"] = self.tool_name
             payload["operation_id"] = self.operation_id
@@ -2593,8 +2653,7 @@ class RunFailedEvent(RunEvent):
             payload["completion_reason"] = self.completion_reason.value
         if self.completion_tool_name is not None or self.budget_usage is not None:
             payload["completion_tool_name"] = self.completion_tool_name
-        if self.partial_output is not None or self.budget_usage is not None:
-            payload["partial_output"] = self.partial_output
+        payload["partial_output"] = self.partial_output
         if self.budget_usage is not None:
             payload["budget_usage"] = self.budget_usage.to_dict()
         if self.budget_exhaustion is not None:
@@ -2654,8 +2713,7 @@ class RunCancelledEvent(RunEvent):
         payload["reason"] = self.reason
         if self.completion_reason is not None:
             payload["completion_reason"] = self.completion_reason.value
-        if self.partial_output is not None:
-            payload["partial_output"] = self.partial_output
+        payload["partial_output"] = self.partial_output
         if self.budget_usage is not None:
             payload["budget_usage"] = self.budget_usage.to_dict()
         if self.budget_exhaustion is not None:
@@ -3033,6 +3091,14 @@ def _required_event_text(value: Any, field_name: str) -> str:
     return value
 
 
+def _cancel_requested_transition(value: Any) -> dict[str, bool]:
+    if not isinstance(value, dict) or set(value) != {"from", "to"}:
+        raise ValueError("Run event cancel_requested must contain exactly from and to")
+    if value["from"] is not False or value["to"] is not True:
+        raise ValueError("Run event cancel_requested must transition from false to true")
+    return {"from": False, "to": True}
+
+
 def _positive_event_integer(value: Any, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _JSON_SAFE_INTEGER_MAX:
         raise ValueError(f"Run event {field_name} must be a positive JSON-safe integer")
@@ -3109,9 +3175,20 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
     cycle_index = payload.get("cycle_index")
     if cycle_index is not None and (isinstance(cycle_index, bool) or not isinstance(cycle_index, int) or cycle_index < 0):
         raise ValueError("Run event cycle_index must be a non-negative integer or null")
+    if payload["type"] == "cycle_aborted":
+        if cycle_index is None or payload.get("logical_cycle") != cycle_index + 1:
+            raise ValueError("Run event cycle_aborted logical_cycle must equal cycle_index + 1")
+        if payload.get("reason") not in {"cancelled", "lease_lost", "operator_abort"}:
+            raise ValueError("Run event cycle_aborted reason is invalid")
 
     if "metadata" in payload and not isinstance(payload["metadata"], dict):
         raise ValueError("Run event metadata must be an object")
+    if payload["type"] == "run_state_changed":
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict) and "cancel_requested" in metadata:
+            raise ValueError("Run event cancel_requested must be a top-level field")
+        if "cancel_requested" in payload:
+            _cancel_requested_transition(payload["cancel_requested"])
     if payload["type"] == "diagnostic":
         _diagnostic_level(payload.get("level"))
         _required_event_text(payload.get("code"), "code")
@@ -3365,6 +3442,12 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
         return AgentStartedEvent(**_with_cycle_and_agent(payload, common))
     if event_type == "cycle_started":
         return CycleStartedEvent(**_with_cycle_and_agent(payload, common))
+    if event_type == "cycle_aborted":
+        return CycleAbortedEvent(
+            logical_cycle=payload["logical_cycle"],
+            reason=payload["reason"],
+            **_with_cycle_and_agent(payload, common),
+        )
     if event_type == "model_call_started":
         return ModelCallStartedEvent(
             call_id=payload["call_id"],
@@ -3402,6 +3485,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
     if event_type == "run_state_changed":
         return RunStateChangedEvent(
             state=str(payload.get("state") or ""),
+            cancel_requested=payload.get("cancel_requested"),
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "host_interaction_requested":
