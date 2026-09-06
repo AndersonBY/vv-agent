@@ -21,6 +21,13 @@
     ],
     "optional_fields_omitted_when_absent": true,
     "optional_fields_reject_null": true,
+    "canonical_writer_normalization": {
+      "writer": "strict ToolExecutionResult typed writer",
+      "omit_empty_optional_fields": [
+        "metadata"
+      ],
+      "include_present_optional_fields_after_normalization": true
+    },
     "unknown_fields": "reject",
     "content": "bounded_model_visible_text",
     "status_values": [
