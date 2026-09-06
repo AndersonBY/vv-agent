@@ -1449,6 +1449,7 @@ class RedisCheckpointStore:
                     )
                     if record_key is not None:
                         pipe.watch(record_key)
+                    lease_now_ms = _redis_server_now_ms(pipe)
                     helper = InMemoryCheckpointStore()
                     helper._store[checkpoint_key] = current  # type: ignore[attr-defined]
                     if record_key is not None:
@@ -1460,7 +1461,7 @@ class RedisCheckpointStore:
                                 expected_key=record_key,
                             )
                             helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
-                    receipt = helper.admit_controller_command(command_value)
+                    receipt = helper._admit_controller_command(command_value, lease_now_ms=lease_now_ms)  # type: ignore[attr-defined]
                     updated = helper._store[checkpoint_key]  # type: ignore[attr-defined]
                     staged = None
                     if record_key is not None:

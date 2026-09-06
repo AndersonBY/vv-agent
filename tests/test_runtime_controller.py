@@ -73,6 +73,9 @@ def _redis_store() -> RedisCheckpointStore:
         def get(self, key: str) -> str | None:
             return self.client.get(key)
 
+        def time(self) -> tuple[int, int]:
+            return self.client.time()
+
         def smembers(self, key: str) -> SetOfStrings:
             return self.client.smembers(key)
 
@@ -125,6 +128,7 @@ def _redis_store() -> RedisCheckpointStore:
         def __init__(self) -> None:
             self.values: dict[str, str] = {}
             self.sets: dict[str, SetOfStrings] = {}
+            self.server_now_ms = 0
 
         def set(self, key: str, value: str, *, nx: bool = False) -> bool:
             if nx and key in self.values:
@@ -163,7 +167,7 @@ def _redis_store() -> RedisCheckpointStore:
             return [key for key in self.values if key.startswith(pattern.removesuffix("*"))]
 
         def time(self) -> tuple[int, int]:
-            return 0, 0
+            return self.server_now_ms // 1000, (self.server_now_ms % 1000) * 1000
 
     store = RedisCheckpointStore.__new__(RedisCheckpointStore)
     store._watch_error = WatchError
@@ -1332,6 +1336,71 @@ def test_control_variants_are_admitted_by_all_stores(store: Any, kind: str) -> N
     stored = store.get_controller_command(command.command_id)
     assert stored is not None
     assert stored.command_digest == command.command_digest
+
+
+def test_redis_controller_admission_keeps_live_claim_with_fast_process_clock() -> None:
+    store = _redis_store()
+    key = f"redis-live-claim-{uuid4().hex}"
+    process_now_ms = time.time_ns() // 1_000_000
+    redis_now_ms = process_now_ms - 300_000
+    store._client.server_now_ms = redis_now_ms  # type: ignore[attr-defined]
+    assert store.create_checkpoint(_checkpoint(key))
+    claimed = store.claim_checkpoint(
+        key,
+        1,
+        claim_token="live-claim",
+        lease_expires_at_ms=redis_now_ms + 60_000,
+        now_ms=redis_now_ms,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    current = store.load_checkpoint(key)
+    assert current is not None
+    command = ControllerCommand(
+        command_id="live-claim-command",
+        handle=DistributedRunHandle(key, current.root_run_id, current.trace_id),
+        resume_attempt=current.resume_attempt,
+        expected_revision=current.revision,
+        command={"kind": "suspend"},
+    )
+    with pytest.raises(CheckpointError) as error:
+        store.admit_controller_command(command)
+    assert error.value.code == "controller_command_claim_active"
+    current = store.load_checkpoint(key)
+    assert current is not None and current.claim_token == "live-claim"
+    store.delete_checkpoint(key)
+
+
+def test_redis_controller_admission_recovers_expired_claim_from_redis_time() -> None:
+    store = _redis_store()
+    key = f"redis-expired-claim-{uuid4().hex}"
+    process_now_ms = time.time_ns() // 1_000_000
+    redis_now_ms = process_now_ms + 300_000
+    store._client.server_now_ms = redis_now_ms  # type: ignore[attr-defined]
+    assert store.create_checkpoint(_checkpoint(key))
+    claimed = store.claim_checkpoint(
+        key,
+        1,
+        claim_token="expired-claim",
+        lease_expires_at_ms=redis_now_ms - 1,
+        now_ms=redis_now_ms - 60_000,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    current = store.load_checkpoint(key)
+    assert current is not None
+    command = ControllerCommand(
+        command_id="expired-claim-command",
+        handle=DistributedRunHandle(key, current.root_run_id, current.trace_id),
+        resume_attempt=current.resume_attempt,
+        expected_revision=current.revision,
+        command={"kind": "cancel"},
+    )
+    receipt = store.admit_controller_command(command)
+    assert receipt.resulting_status == "failed"
+    current = store.load_checkpoint(key)
+    assert current is not None and current.claim_token is None and current.terminal_result is not None
+    store.delete_checkpoint(key)
 
 
 def test_real_redis_controller_cas_replay_and_notification_ambiguity() -> None:
