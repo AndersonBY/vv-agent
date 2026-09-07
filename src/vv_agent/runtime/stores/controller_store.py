@@ -1113,6 +1113,14 @@ class ControllerStoreMixin:
             )
         except (TypeError, ValueError) as exc:
             raise _controller_error(str(exc), "host_interaction_recovery_stale") from exc
+        return self._claim_and_consume_host_interaction_response(envelope_value, lease_now_ms=None)
+
+    def _claim_and_consume_host_interaction_response(
+        self,
+        envelope_value: HostInteractionRecoveryEnvelope,
+        *,
+        lease_now_ms: int | None,
+    ) -> HostInteractionRecoveryResult:
         record_id = envelope_value.record_id
         checkpoint_key = envelope_value.checkpoint_key
         with self._lock:
@@ -1203,7 +1211,7 @@ class ControllerStoreMixin:
             snapshot.revision += 1
             snapshot.claim_token = f"host-response:{record_id}:{record['attempt'] + 1}"
             snapshot.claimed_cycle = snapshot.cycle_index + 1
-            now_ms = time.time_ns() // 1_000_000
+            now_ms = self._lease_now_ms(lease_now_ms)
             snapshot.lease_expires_at_ms = now_ms + _RECOVERY_LEASE_DURATION_MS
             snapshot.status = AgentStatus.RUNNING
             snapshot.messages.append(Message(role="user", content=resolved_response.response["content"]))

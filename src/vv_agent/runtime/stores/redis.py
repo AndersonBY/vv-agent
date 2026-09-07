@@ -1877,10 +1877,14 @@ class RedisCheckpointStore:
                         expected_checkpoint_key=checkpoint_key,
                         expected_key=record_key,
                     )
+                    lease_now_ms = _redis_server_now_ms(pipe) if record["state"] == "resolved_pending" else None
                     helper = InMemoryCheckpointStore()
                     helper._store[checkpoint_key] = current  # type: ignore[attr-defined]
                     helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
-                    result = helper.claim_and_consume_host_interaction_response(envelope_value.to_dict())
+                    result = helper._claim_and_consume_host_interaction_response(  # type: ignore[attr-defined]
+                        envelope_value,
+                        lease_now_ms=lease_now_ms,
+                    )
                     updated = helper._store[checkpoint_key]  # type: ignore[attr-defined]
                     if result.kind != "applied":
                         pipe.unwatch()
