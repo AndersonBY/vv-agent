@@ -1838,6 +1838,8 @@ class Runner:
                 if checkpoint_controller is not None:
                     checkpoint_controller.close()
                 raise
+        if checkpoint_controller is not None and checkpoint_controller.terminal_replay is not None:
+            terminal_replayed = True
         output_coercion_error: Exception | None = None
         try:
             if checkpoint_controller is not None and not terminal_replayed:

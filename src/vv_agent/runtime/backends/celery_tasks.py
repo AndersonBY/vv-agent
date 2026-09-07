@@ -529,10 +529,41 @@ def _run_single_cycle(
         registry=capability_registry,
         extensions=extensions,
     )
+    runtime_config = config.to_runtime_config(
+        store=store,
+        capability_refs=existing.run_definition["capability_refs"],
+    )
+    controller = CheckpointResumeController(
+        config=runtime_config,
+        task_id=task.task_id,
+        run_id=str(envelope.root_run_id),
+        trace_id=str(envelope.trace_id),
+        run_definition=existing.run_definition,
+        run_definition_digest=existing.run_definition_digest,
+        initial_messages=existing.messages,
+        initial_shared_state=existing.shared_state,
+        initial_budget_usage=existing.budget_usage,
+        extensions=extensions,
+        reconciliation_provider=reconciliation_provider,
+        event_sink=event_sink,
+        event_store=event_store,
+        lease_duration_ms=envelope.lease_duration_ms,
+        preloaded_checkpoint=existing,
+    )
     if existing.terminal_result is not None:
+        try:
+            replayed = controller.admit()
+            if replayed is None:
+                raise CheckpointError(
+                    "durable terminal checkpoint did not produce a replay",
+                    code="checkpoint_store_conflict",
+                )
+            retained = store.load_checkpoint(config.key)
+        finally:
+            controller.close()
         return DistributedWorkerResponse.terminal_replay(
-            checkpoint_revision=existing.revision,
-            result=existing.terminal_result,
+            checkpoint_revision=(retained.revision if retained is not None else existing.revision),
+            result=replayed,
         )
     if existing.cycle_index >= envelope.cycle_index:
         if existing.cycle_index != envelope.cycle_index or existing.claim_token is not None:
@@ -581,27 +612,6 @@ def _run_single_cycle(
     if isinstance(run_context, RunContext):
         run_context.run_id = envelope.root_run_id
 
-    runtime_config = config.to_runtime_config(
-        store=store,
-        capability_refs=existing.run_definition["capability_refs"],
-    )
-    controller = CheckpointResumeController(
-        config=runtime_config,
-        task_id=task.task_id,
-        run_id=str(envelope.root_run_id),
-        trace_id=str(envelope.trace_id),
-        run_definition=existing.run_definition,
-        run_definition_digest=existing.run_definition_digest,
-        initial_messages=existing.messages,
-        initial_shared_state=existing.shared_state,
-        initial_budget_usage=existing.budget_usage,
-        extensions=extensions,
-        reconciliation_provider=reconciliation_provider,
-        event_sink=event_sink,
-        event_store=event_store,
-        lease_duration_ms=envelope.lease_duration_ms,
-        preloaded_checkpoint=existing,
-    )
     if claim_mode == "recovery":
         controller.set_next_claim_mode(claim_mode)
     replayed = controller.admit()

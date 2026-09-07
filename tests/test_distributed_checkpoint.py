@@ -53,6 +53,7 @@ from vv_agent.runtime.backends.distributed import (
 from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.compiler import AgentCompiler
+from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.controller import ControllerCommand, HostInteractionAdmissionContext, HostInteractionRequest
 from vv_agent.runtime.run_definition import build_run_definition
 from vv_agent.runtime.state import CheckpointRenewal
@@ -331,6 +332,98 @@ class _ImmediateApp:
         key = envelope["checkpoint_config"]["key"]
         self.worker_snapshots.append(self.store.load_checkpoint(key))
         return _ImmediateResult(result)
+
+
+class _FailOnceTerminalDeliveryStore(InMemoryCheckpointStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_terminal_delivery = True
+
+    def record_event_delivery(
+        self,
+        checkpoint_key: str,
+        *,
+        event_id: str,
+        payload_digest: str,
+        cursor: Any,
+        expected_revision: int,
+        claim_token: str | None,
+    ) -> bool:
+        checkpoint = self.load_checkpoint(checkpoint_key)
+        if self.fail_next_terminal_delivery and checkpoint is not None and checkpoint.terminal_result is not None:
+            self.fail_next_terminal_delivery = False
+            raise RuntimeError("terminal event delivery crash")
+        return super().record_event_delivery(
+            checkpoint_key,
+            event_id=event_id,
+            payload_digest=payload_digest,
+            cursor=cursor,
+            expected_revision=expected_revision,
+            claim_token=claim_token,
+        )
+
+
+def _terminal_replay_window(
+    tmp_path: Path,
+) -> tuple[_FailOnceTerminalDeliveryStore, DistributedCapabilityRegistry, CeleryBackend, dict[str, Any], list[int]]:
+    store = _FailOnceTerminalDeliveryStore()
+    checkpoint_ref = CapabilityRef("checkpoint.terminal-replay-repair", "1")
+    llm_ref = CapabilityRef("llm.terminal-replay-repair", "1")
+    model_calls = [0]
+
+    def worker_complete(_request: Any) -> LLMResponse:
+        model_calls[0] += 1
+        return LLMResponse(content="worker answer")
+
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[worker_complete]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(
+            llm_client_ref=llm_ref,
+            checkpoint_store_ref=checkpoint_ref,
+        ),
+    )
+    app = _ImmediateApp(registry=registry, store=store)
+    backend = CeleryBackend(
+        celery_app=app,
+        runtime_recipe=recipe,
+        dispatch_timeout_seconds=5,
+    )
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=1,
+        no_tool_policy="finish",
+        checkpoint_config=CheckpointConfig(
+            key="terminal-replay-repair",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="terminal event delivery crash"):
+        Runner.run_sync(
+            Agent(
+                name="terminal-replay-repair-agent",
+                instructions="Return one answer.",
+                model="test-model",
+            ),
+            "answer",
+            run_config=run_config,
+        )
+
+    checkpoint = store.load_checkpoint("terminal-replay-repair")
+    assert checkpoint is not None
+    assert checkpoint.terminal_result is not None
+    assert checkpoint.terminal_acknowledged is False
+    assert any(entry.state == "pending" for entry in checkpoint.event_outbox)
+    assert len(app.envelopes) == 1
+    return store, registry, backend, app.envelopes[0], model_calls
 
 
 class _EnqueueOnlyResult:
@@ -2359,6 +2452,96 @@ def test_celery_returns_candidate_then_runner_owns_terminal_order(
     assert terminal.terminal_acknowledged
     assert all(entry.state == "delivered" for entry in terminal.event_outbox)
     assert len(session.get_items()) > 0
+
+
+def test_celery_worker_terminal_replay_repairs_pending_delivery_without_model_calls(tmp_path: Path) -> None:
+    store, registry, _backend, envelope, model_calls = _terminal_replay_window(tmp_path)
+    before = store.load_checkpoint("terminal-replay-repair")
+    assert before is not None
+    event_ids = tuple(entry.event_id for entry in before.event_outbox)
+
+    first = DistributedWorkerResponse.from_dict(
+        run_single_cycle(
+            envelope_dict=envelope,
+            capability_registry=registry,
+        )
+    )
+
+    assert first.response_type == "terminal_replay"
+    assert first.result is not None
+    assert first.result.final_answer == "worker answer"
+    repaired = store.load_checkpoint("terminal-replay-repair")
+    assert repaired is not None
+    assert first.checkpoint_revision == repaired.revision
+    assert repaired.claim_token is None
+    assert repaired.terminal_acknowledged
+    assert all(entry.state == "delivered" for entry in repaired.event_outbox)
+    assert tuple(entry.event_id for entry in repaired.event_outbox) == event_ids
+    assert model_calls == [1]
+
+    second = DistributedWorkerResponse.from_dict(
+        run_single_cycle(
+            envelope_dict=envelope,
+            capability_registry=registry,
+        )
+    )
+    assert second.response_type == "terminal_replay"
+    assert second.checkpoint_revision == repaired.revision
+    replayed = store.load_checkpoint("terminal-replay-repair")
+    assert replayed is not None
+    assert replayed.revision == repaired.revision
+    assert tuple(entry.event_id for entry in replayed.event_outbox) == event_ids
+    assert model_calls == [1]
+
+
+def test_celery_local_terminal_replay_repairs_pending_delivery_without_model_calls(tmp_path: Path) -> None:
+    store, _registry, backend, envelope, model_calls = _terminal_replay_window(tmp_path)
+    checkpoint = store.load_checkpoint("terminal-replay-repair")
+    assert checkpoint is not None
+    assert checkpoint.terminal_result is not None
+    event_ids = tuple(entry.event_id for entry in checkpoint.event_outbox)
+    controller = CheckpointResumeController(
+        config=CheckpointConfig(
+            store=store,
+            key=checkpoint.checkpoint_key,
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+        ),
+        task_id=checkpoint.task_id,
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        run_definition=checkpoint.run_definition,
+        run_definition_digest=checkpoint.run_definition_digest,
+        initial_messages=checkpoint.messages,
+        initial_shared_state=checkpoint.shared_state,
+        initial_budget_usage=checkpoint.budget_usage,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+        preloaded_checkpoint=checkpoint,
+    )
+    controller.checkpoint = checkpoint
+    decoded = DistributedRunEnvelope.from_dict(envelope)
+    try:
+        replay = backend.execute_local(
+            task=decoded.task,
+            initial_messages=[],
+            shared_state={},
+            cycle_executor=lambda *_args: None,
+            ctx=ExecutionContext(metadata={"_vv_agent_checkpoint_controller": controller}),
+            max_cycles=decoded.task.max_cycles,
+        )
+    finally:
+        controller.close()
+
+    assert replay.final_answer == "worker answer"
+    replayed = store.load_checkpoint("terminal-replay-repair")
+    assert replayed is not None
+    assert replayed.revision == checkpoint.revision + 2
+    assert replayed.claim_token is None
+    assert replayed.terminal_acknowledged
+    assert all(entry.state == "delivered" for entry in replayed.event_outbox)
+    assert tuple(entry.event_id for entry in replayed.event_outbox) == event_ids
+    assert model_calls == [1]
 
 
 @pytest.mark.parametrize(

@@ -1009,8 +1009,14 @@ class CeleryBackend:
                     "distributed terminal replay does not match the durable checkpoint",
                     code="checkpoint_store_conflict",
                 )
-            checkpoint_controller.checkpoint = checkpoint
-            return deepcopy(checkpoint.terminal_result)
+            checkpoint_controller.preloaded_checkpoint = deepcopy(checkpoint)
+            replayed = checkpoint_controller.admit()
+            if replayed is None:
+                raise CheckpointError(
+                    "durable terminal checkpoint did not produce a replay",
+                    code="checkpoint_store_conflict",
+                )
+            return replayed
         if response.response_type != "terminal_candidate":
             raise CheckpointError(
                 "distributed worker returned a terminal without candidate semantics",
