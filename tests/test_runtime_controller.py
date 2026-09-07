@@ -129,6 +129,7 @@ def _redis_store() -> RedisCheckpointStore:
             self.values: dict[str, str] = {}
             self.sets: dict[str, SetOfStrings] = {}
             self.server_now_ms = 0
+            self.fail_time = False
 
         def set(self, key: str, value: str, *, nx: bool = False) -> bool:
             if nx and key in self.values:
@@ -167,6 +168,8 @@ def _redis_store() -> RedisCheckpointStore:
             return [key for key in self.values if key.startswith(pattern.removesuffix("*"))]
 
         def time(self) -> tuple[int, int]:
+            if self.fail_time:
+                raise RuntimeError("fake Redis TIME unavailable")
             return self.server_now_ms // 1000, (self.server_now_ms % 1000) * 1000
 
     store = RedisCheckpointStore.__new__(RedisCheckpointStore)
@@ -1286,6 +1289,68 @@ def test_host_response_recovery_dual_worker_one_revision(tmp_path: Path, store_k
     assert {result.kind for result in results} == {"applied", "replayed"}
     current = store.load_checkpoint(f"recovery-race-{store_kind}")
     assert current is not None and current.revision == envelope["expected_revision"] + 1
+
+
+@pytest.mark.parametrize(
+    "server_offset_ms",
+    [pytest.param(120_000, id="process-clock-slow"), pytest.param(-120_000, id="process-clock-fast")],
+)
+def test_redis_host_response_recovery_uses_server_time_for_lease(server_offset_ms: int) -> None:
+    store = _redis_store()
+    key = f"redis-recovery-clock-{server_offset_ms}"
+    _checkpoint_value, request, outcome = _admit_host(store, key)
+    command = _host_response_command(store, request, key=key, command_id=f"recovery-clock-{server_offset_ms}")
+    assert store.resolve_controller_command(command).kind == "applied"
+
+    process_now_ms = time.time_ns() // 1_000_000
+    redis_now_ms = process_now_ms + server_offset_ms
+    store._client.server_now_ms = redis_now_ms  # type: ignore[attr-defined]
+    envelope = _recovery_envelope(store, request, outcome, key=key, command_id=command.command_id)
+
+    before = store.load_checkpoint(key)
+    assert before is not None
+    with pytest.raises(CheckpointError):
+        store.claim_and_consume_host_interaction_response({**envelope, "expected_revision": envelope["expected_revision"] + 1})
+    unchanged = store.load_checkpoint(key)
+    assert unchanged is not None and unchanged.revision == before.revision
+
+    consumed = store.claim_and_consume_host_interaction_response(envelope)
+    assert consumed.kind == "applied"
+    current = store.load_checkpoint(key)
+    assert current is not None
+    assert current.lease_expires_at_ms == redis_now_ms + 60_000
+    revision = current.revision
+
+    replay = store.claim_and_consume_host_interaction_response(envelope)
+    assert replay.kind == "replayed"
+    replayed = store.load_checkpoint(key)
+    assert replayed is not None
+    assert replayed.revision == revision
+    assert replayed.lease_expires_at_ms == current.lease_expires_at_ms
+
+
+def test_redis_host_response_recovery_replay_skips_server_time() -> None:
+    store = _redis_store()
+    key = "redis-recovery-replay-without-time"
+    _checkpoint_value, request, outcome = _admit_host(store, key)
+    command = _host_response_command(store, request, key=key, command_id="recovery-replay-without-time")
+    assert store.resolve_controller_command(command).kind == "applied"
+    process_now_ms = time.time_ns() // 1_000_000
+    store._client.server_now_ms = process_now_ms  # type: ignore[attr-defined]
+    envelope = _recovery_envelope(store, request, outcome, key=key, command_id=command.command_id)
+
+    consumed = store.claim_and_consume_host_interaction_response(envelope)
+    assert consumed.kind == "applied"
+    current = store.load_checkpoint(key)
+    assert current is not None
+    store._client.fail_time = True  # type: ignore[attr-defined]
+
+    replay = store.claim_and_consume_host_interaction_response(envelope)
+    assert replay.kind == "replayed"
+    replayed = store.load_checkpoint(key)
+    assert replayed is not None
+    assert replayed.revision == current.revision
+    assert replayed.lease_expires_at_ms == current.lease_expires_at_ms
 
 
 def test_notification_owner_attempt_cas_rejects_stale_completion(store: Any) -> None:
