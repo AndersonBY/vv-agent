@@ -187,7 +187,12 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     return _redis_store()
 
 
-def _admit_host(store: Any, key: str = "controller-run") -> tuple[Any, HostInteractionRequest, Any]:
+def _admit_host(
+    store: Any,
+    key: str = "controller-run",
+    *,
+    prompt: str = "Approve sk-test-123 at https://example.invalid/run?secret=abc",
+) -> tuple[Any, HostInteractionRequest, Any]:
     checkpoint = _checkpoint(key)
     assert store.create_checkpoint(checkpoint)
     claimed = store.claim_checkpoint(
@@ -204,7 +209,7 @@ def _admit_host(store: Any, key: str = "controller-run") -> tuple[Any, HostInter
         logical_cycle=1,
         operation_id="operation-1",
         tool_call_id="tool-1",
-        prompt="Approve sk-test-123 at https://example.invalid/run?secret=abc",
+        prompt=prompt,
     )
     outcome = store.produce_host_interaction(
         request,
@@ -1630,5 +1635,80 @@ def test_real_redis_controller_cas_replay_and_notification_ambiguity() -> None:
             now_ms=4,
         )
         assert retried is not None and retried["outbox_state"] == "pending"
+    finally:
+        store.delete_checkpoint(key)
+
+
+def test_cross_runtime_redis_probe_from_environment() -> None:
+    mode = os.environ.get("VV_AGENT_CROSS_REDIS_MODE")
+    if mode is None:
+        pytest.skip("set VV_AGENT_CROSS_REDIS_MODE to write_python or read_python")
+    if mode not in {"write_python", "read_python"}:
+        pytest.fail(f"unsupported VV_AGENT_CROSS_REDIS_MODE: {mode}")
+    redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+    env_file_name = os.environ.get("VV_AGENT_CROSS_REDIS_ENV_FILE")
+    if not redis_url or not env_file_name:
+        pytest.fail("VV_AGENT_TEST_REDIS_URL and VV_AGENT_CROSS_REDIS_ENV_FILE are required")
+
+    store = RedisCheckpointStore(redis_url)
+    env_file = Path(env_file_name)
+    if mode == "write_python":
+        key = f"cross-runtime-redis-{uuid4().hex}"
+        try:
+            _checkpoint_value, request, outcome = _admit_host(store, key, prompt="Cross-language host prompt")
+            command = _host_response_command(
+                store,
+                request,
+                key=key,
+                command_id=f"cross-runtime-command-{uuid4().hex}",
+            )
+            resolution = store.resolve_controller_command(command)
+            assert resolution.kind == "applied"
+            assert resolution.receipt is not None and resolution.receipt.outbox_state == "pending"
+            notification = store.get_host_interaction_notification(outcome.notification_id)
+            assert notification is not None and notification["outbox_state"] == "pending"
+            assert request.request_digest is not None
+            env_file.write_text(
+                "\n".join(
+                    (
+                        f"VV_AGENT_CROSS_REDIS_CHECKPOINT_KEY={key}",
+                        f"VV_AGENT_CROSS_REDIS_INTERACTION_ID={request.interaction_id}",
+                        f"VV_AGENT_CROSS_REDIS_NOTIFICATION_ID={outcome.notification_id}",
+                        f"VV_AGENT_CROSS_REDIS_COMMAND_ID={command.command_id}",
+                        f"VV_AGENT_CROSS_REDIS_REQUEST_DIGEST={request.request_digest}",
+                        f"VV_AGENT_CROSS_REDIS_NOTIFICATION_DIGEST={outcome.notification_payload_digest}",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except BaseException:
+            store.delete_checkpoint(key)
+            raise
+        return
+
+    key = os.environ["VV_AGENT_CROSS_REDIS_CHECKPOINT_KEY"]
+    notification_id = os.environ["VV_AGENT_CROSS_REDIS_NOTIFICATION_ID"]
+    command_id = os.environ["VV_AGENT_CROSS_REDIS_COMMAND_ID"]
+    interaction_id = os.environ["VV_AGENT_CROSS_REDIS_INTERACTION_ID"]
+    try:
+        before_replay = store.load_checkpoint(key)
+        assert before_replay is not None
+        assert before_replay.checkpoint_key == key
+        notification = store.get_host_interaction_notification(notification_id)
+        assert notification is not None
+        assert notification["checkpoint_key"] == key
+        assert notification["payload"]["interaction_id"] == interaction_id
+        assert notification["outbox_state"] == "delivered"
+        command = store.get_controller_command(command_id)
+        assert command is not None
+        receipt = store.get_controller_command_receipt(command_id)
+        assert receipt is not None
+        replay = store.resolve_controller_command(command)
+        assert replay.kind == "replayed"
+        assert replay.receipt == receipt
+        after_replay = store.load_checkpoint(key)
+        assert after_replay is not None
+        assert checkpoint_to_dict(before_replay) == checkpoint_to_dict(after_replay)
     finally:
         store.delete_checkpoint(key)
