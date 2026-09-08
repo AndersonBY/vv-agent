@@ -166,6 +166,9 @@ class _FakeRedisPipeline:
     def get(self, key: str) -> str | None:
         return self._client.get(key)
 
+    def mget(self, keys: list[str]) -> list[str | None]:
+        return self._client.mget(keys)
+
     def smembers(self, key: str) -> Set[str]:
         return self._client.smembers(key)
 

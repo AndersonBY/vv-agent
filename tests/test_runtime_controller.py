@@ -72,6 +72,9 @@ def _redis_store() -> RedisCheckpointStore:
         def get(self, key: str) -> str | None:
             return self.client.get(key)
 
+        def mget(self, keys: list[str]) -> list[str | None]:
+            return self.client.mget(keys)
+
         def time(self) -> tuple[int, int]:
             return self.client.time()
 
@@ -901,6 +904,31 @@ def test_distinct_live_cancel_after_signal_is_applied_noop(store: Any) -> None:
     after_replay = store.load_checkpoint(key)
     assert after_replay is not None
     assert checkpoint_to_dict(after_replay) == checkpoint_to_dict(after_second)
+
+
+def test_redis_host_admission_and_replay_use_atomic_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _redis_store()
+    original_get = store._client.get
+
+    def get(key: str) -> str | None:
+        assert key not in store._keys("atomic-host") or original_get(key) is None
+        return original_get(key)
+
+    monkeypatch.setattr(store._client, "get", get)
+    checkpoint, request, outcome = _admit_host(store, "atomic-host")
+    replay = store.produce_host_interaction(
+        request,
+        admission_context=HostInteractionAdmissionContext(
+            checkpoint_key=checkpoint.checkpoint_key,
+            claim_token="worker-claim",
+            expected_revision=outcome.checkpoint_revision - 1,
+            claimed_cycle=1,
+            now_ms=1,
+            lease_expires_at_ms=10_000,
+        ),
+    )
+    assert replay.status == "replayed"
+    assert replay.checkpoint_revision == outcome.checkpoint_revision
 
 
 def test_host_request_notification_preserves_content_and_replay_is_zero_write(store: Any) -> None:
