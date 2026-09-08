@@ -31,7 +31,6 @@ from vv_agent.runtime.controller import (
     derive_controller_command_id,
     derive_host_interaction_notification_id,
     derive_host_interaction_record_id,
-    sanitize_host_prompt,
 )
 from vv_agent.runtime.state import Checkpoint
 from vv_agent.types import AgentStatus, Message
@@ -252,7 +251,7 @@ class RunAdapter:
                 "kind": "respond",
                 "message": {
                     "role": "user",
-                    "content": sanitize_host_prompt(message["content"]),
+                    "content": message["content"],
                 },
             }
         else:
@@ -352,13 +351,7 @@ class RunAdapter:
                 if isinstance(row, dict) and isinstance(row.get("payload"), dict):
                     prompt_value = row["payload"].get("prompt")
                     if isinstance(prompt_value, str):
-                        sanitized_prompt = sanitize_host_prompt(prompt_value)
-                        # A strict store should already have persisted the
-                        # sanitized projection.  Fail closed if a custom or
-                        # tampered adapter returns a raw prompt instead of
-                        # creating a second public normalization path.
-                        if sanitized_prompt == prompt_value:
-                            prompt = sanitized_prompt
+                        prompt = prompt_value
             if isinstance(prompt, str):
                 # The notification outbox is the sole public prompt source.
                 # The checkpoint request is authoritative framework state, not
@@ -649,11 +642,8 @@ class RunAdapter:
         prompt = row["payload"].get("prompt")
         if not isinstance(prompt, str):
             return projection
-        sanitized_prompt = sanitize_host_prompt(prompt)
-        if sanitized_prompt != prompt:
-            return projection
         params = dict(projection.notification_params)
-        params["prompt"] = sanitized_prompt
+        params["prompt"] = prompt
         return replace(projection, notification_params=params)
 
     def _complete_turn(

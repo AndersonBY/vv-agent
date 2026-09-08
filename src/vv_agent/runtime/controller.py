@@ -9,7 +9,6 @@ derivation.
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -36,24 +35,6 @@ _MAX_ID_BYTES = 512
 _MAX_CONTENT_BYTES = 65536
 _MAX_WIRE_INTEGER = (1 << 53) - 1
 _SHA256_FIELDS = frozenset({"request_digest", "response_digest", "command_digest", "notification_payload_digest"})
-_CREDENTIAL_PATTERN = re.compile(
-    r"\bBearer\s+[A-Za-z0-9._~+/=-]+"
-    r"|\b(?:sk|pk)[-_][A-Za-z0-9._~-]+"
-    r"|\b(?:token|secret|password|api[_-]?key|authorization)\s*(?:[:=]|\s+)\s*"
-    r"(?:bearer\s+)?[A-Za-z0-9._~+/=-]+",
-    re.IGNORECASE,
-)
-_LOCATOR_PATTERN = re.compile(r"https?://[^\s]+", re.IGNORECASE)
-
-
-def sanitize_host_prompt(prompt: str) -> str:
-    """Create the public notification projection without credentials/locators."""
-    # Remove complete locators first.  Query strings commonly contain
-    # ``token=``/``secret=`` and replacing the credential fragment first would
-    # leave part of the URL after the locator substitution.
-    sanitized = _LOCATOR_PATTERN.sub("[external locator redacted]", _content(prompt, "prompt"))
-    sanitized = _CREDENTIAL_PATTERN.sub("[credential redacted]", sanitized)
-    return sanitized
 
 
 def derive_controller_command_id(thread_id: str, turn_id: str, action_id: str) -> str:
@@ -127,11 +108,6 @@ def derive_host_response_digest(
 ) -> str:
     """Hash the complete resolved response without its derived digest."""
     response_value = _response(response)
-    # The Rust constructor applies the public host-text policy before it
-    # computes the response digest.  Keep this helper safe for callers that
-    # construct a response from an untrusted/public value instead of relying
-    # on the controller admission path to normalize it first.
-    response_value["content"] = sanitize_host_prompt(response_value["content"])
     return canonical_json_sha256(
         {
             "command_id": _text(command_id, "command_id"),
@@ -279,7 +255,7 @@ class HostInteractionRequest:
         operation_id = _text(self.operation_id, "operation_id")
         tool_call_id = _text(self.tool_call_id, "tool_call_id")
         logical_cycle = _integer(self.logical_cycle, "logical_cycle", minimum=1)
-        prompt = _content(sanitize_host_prompt(self.prompt), "prompt")
+        prompt = _content(self.prompt, "prompt")
         object.__setattr__(self, "interaction_id", interaction_id)
         object.__setattr__(self, "operation_id", operation_id)
         object.__setattr__(self, "tool_call_id", tool_call_id)
@@ -324,8 +300,6 @@ class HostInteractionRequest:
             raise ValueError("unsupported host interaction request schema")
         request_digest = _digest(payload["request_digest"], "request_digest")
         prompt = _content(payload["prompt"], "prompt")
-        if sanitize_host_prompt(prompt) != prompt:
-            raise ValueError("host interaction request prompt is not sanitized")
         return cls(
             interaction_id=payload["interaction_id"],
             logical_cycle=payload["logical_cycle"],
@@ -357,7 +331,6 @@ class HostInteractionResponse:
         object.__setattr__(self, "request_digest", _digest(self.request_digest, "request_digest"))
         object.__setattr__(self, "command_id", _text(self.command_id, "command_id"))
         response = _response(self.response)
-        response["content"] = sanitize_host_prompt(response["content"])
         object.__setattr__(self, "response", response)
         expected = derive_host_response_digest(
             interaction_id=self.interaction_id,
@@ -407,8 +380,6 @@ class HostInteractionResponse:
         if payload["schema_version"] != HOST_RESPONSE_SCHEMA:
             raise ValueError("unsupported host interaction response schema")
         raw_response = _response(payload["response"])
-        if sanitize_host_prompt(raw_response["content"]) != raw_response["content"]:
-            raise ValueError("resolved host interaction response is not sanitized")
         response_digest = _digest(payload["response_digest"], "response_digest")
         return cls(
             interaction_id=payload["interaction_id"],
@@ -577,8 +548,6 @@ def validate_host_interaction_record(
         if response is None or response_digest is None or command_id is None or resolved_revision is None:
             raise ValueError("resolved host interaction record is incomplete")
         parsed_response = HostInteractionResponse.from_dict(response)
-        if sanitize_host_prompt(parsed_response.response["content"]) != parsed_response.response["content"]:
-            raise ValueError("resolved host interaction response is not sanitized")
         if (
             parsed_response.interaction_id != request.interaction_id
             or parsed_response.logical_cycle != request.logical_cycle
@@ -610,7 +579,7 @@ def validate_host_interaction_notification(
     notification_id: str | None = None,
     record_id: str | None = None,
 ) -> dict[str, Any]:
-    """Strictly decode the independent, sanitized UI notification payload."""
+    """Strictly decode the independent UI notification payload."""
 
     if not isinstance(payload, Mapping):
         raise ValueError("host interaction notification must be an object")
@@ -639,9 +608,7 @@ def validate_host_interaction_notification(
     _integer(payload["logical_cycle"], "logical_cycle", minimum=1)
     if payload["status"] != "host_interaction" or payload["wait_reason"] != "host_interaction":
         raise ValueError("host interaction notification status or wait_reason is invalid")
-    prompt = _content(payload["prompt"], "prompt")
-    if sanitize_host_prompt(prompt) != prompt:
-        raise ValueError("host interaction notification prompt is not sanitized")
+    _content(payload["prompt"], "prompt")
     return dict(payload)
 
 
@@ -730,9 +697,6 @@ def _command_payload(command: Mapping[str, Any]) -> dict[str, Any]:
             "host interaction response command",
         )
         response = _response(command["response"])
-        # Normalize before the command digest is derived so credentials and
-        # transport locators cannot cross the durable controller CAS boundary.
-        response["content"] = sanitize_host_prompt(response["content"])
         return {
             "kind": kind,
             "interaction_id": _text(command["interaction_id"], "interaction_id"),

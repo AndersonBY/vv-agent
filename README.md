@@ -6,18 +6,26 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current package release is `0.14.3`. This repository's `HEAD` locks
-language-neutral Contract `12.0.0`. Paired Python/Rust adoption is
-`verified`; the central support matrix is the source for adoption status. This
-repository keeps a Python-idiomatic API.
+The current package release is `0.15.0`. This repository's `HEAD` locks
+language-neutral Contract `13.0.0`. The central support matrix records paired Python/Rust
+adoption and verification. This repository keeps a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.14.3"
+python -m pip install "vv-agent==0.15.0"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
 integrations are needed. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
+
+### 0.15.0 Highlights
+
+- Host prompts and responses preserve original application content across
+  checkpoints, notifications, and model recovery.
+- Distributed terminal decisions, unknown tool receipts, and unsupported
+  idempotency requests follow the same Python/Rust contract.
+- Frozen finalization uses persisted definitions; Redis checkpoint reads use
+  one atomic snapshot.
 
 ### 0.14.3 Highlights
 

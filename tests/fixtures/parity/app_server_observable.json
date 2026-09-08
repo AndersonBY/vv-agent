@@ -1102,7 +1102,7 @@
     },
     "hostPromptProjection": {
       "fields": ["status", "waitReason", "prompt"],
-      "prompt": "sanitized credential-redacted display text only",
+      "prompt": "unmodified prompt text",
       "readSurface": {
         "method": "thread/status",
         "notification": "thread/status/changed",
@@ -1126,19 +1126,6 @@
         "leaseOwner"
       ],
       "unknown_fields": "reject"
-    },
-    "credentialSanitizer": {
-      "schema": "vv-agent.host-prompt-sanitizer.v1",
-      "input": {
-        "prompt": "Approve token sk-test-123 at https://example.invalid/run?secret=abc"
-      },
-      "output": {
-        "prompt": "Approve [credential redacted] at [external locator redacted]"
-      },
-      "removes": ["credential", "external locator", "transport metadata"],
-      "maxUtf8Bytes": 65536,
-      "idempotent": true,
-      "strict_unknown_fields": "reject"
     },
     "frameworkReceipt": {
       "type": "ControllerCommandReceipt",

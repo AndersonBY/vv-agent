@@ -837,13 +837,16 @@ def test_runner_checkpoint_terminal_replay_reuses_validated_failure() -> None:
     assert not any(event.type in {"run_completed", "run_failed"} for event in replay.events)
 
 
-def test_runner_injects_stable_tool_idempotency_key_and_replay_does_not_repeat_effect() -> None:
+@pytest.mark.parametrize("idempotency", ["supported", "unsupported", "unknown"])
+def test_runner_injects_stable_tool_idempotency_key_and_replay_does_not_repeat_effect(idempotency: str) -> None:
     store = InMemoryCheckpointStore()
-    effects: list[tuple[str, str]] = []
+    effects: list[tuple[str | None, str]] = []
 
-    @function_tool(name="write_record", tool_metadata={"idempotency": "supported"})
+    @function_tool(name="write_record", tool_metadata={"idempotency": idempotency})
     def write_record(context: ToolContext, value: str) -> str:
-        assert context.idempotency_key is not None
+        checkpoint = store.load_checkpoint("tool-replay")
+        assert checkpoint is not None
+        assert checkpoint.tool_journal[0].idempotency_key == context.idempotency_key
         effects.append((context.idempotency_key, value))
         return "written"
 
@@ -874,7 +877,11 @@ def test_runner_injects_stable_tool_idempotency_key_and_replay_does_not_repeat_e
     first = Runner.run_sync(agent, "write 42", run_config=config)
     assert first.status is AgentStatus.COMPLETED
     assert len(effects) == 1
-    assert effects[0][0].startswith("idem_")
+    key = effects[0][0]
+    if idempotency == "unsupported":
+        assert key is None
+    else:
+        assert key is not None and key.startswith("idem_")
 
     replay = Runner.run_sync(
         agent,

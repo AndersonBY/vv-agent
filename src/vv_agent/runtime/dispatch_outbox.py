@@ -113,16 +113,18 @@ class DispatchOutboxRecord:
 
     @classmethod
     def pending(cls, envelope: Mapping[str, Any]) -> DispatchOutboxRecord:
-        canonical = _validate_envelope(envelope)
-        return cls(
-            schema_version=DISPATCH_OUTBOX_SCHEMA,
-            dispatch_id=_text(canonical["job_id"], "dispatch_id"),
-            checkpoint_key=_text(canonical["checkpoint_config"]["key"], "checkpoint_key"),
-            cycle_index=_integer(canonical["cycle_index"], "cycle_index", minimum=1),
-            envelope=canonical,
-            envelope_digest=dispatch_envelope_digest(canonical),
-            state="pending",
-        )
+        try:
+            return cls(
+                schema_version=DISPATCH_OUTBOX_SCHEMA,
+                dispatch_id=envelope["job_id"],
+                checkpoint_key=envelope["checkpoint_config"]["key"],
+                cycle_index=envelope["cycle_index"],
+                envelope=dict(envelope),
+                envelope_digest=canonical_json_sha256(_identity_payload(envelope), "distributed dispatch identity"),
+                state="pending",
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise _error("dispatch outbox envelope is invalid", "dispatch_outbox_conflict") from exc
 
     def __post_init__(self) -> None:
         if self.schema_version != DISPATCH_OUTBOX_SCHEMA:
@@ -136,7 +138,7 @@ class DispatchOutboxRecord:
         if cycle_index != envelope["cycle_index"]:
             raise _error("dispatch outbox cycle conflicts with envelope", "dispatch_outbox_conflict")
         digest = _digest(self.envelope_digest, "envelope_digest")
-        if digest != dispatch_envelope_digest(envelope):
+        if digest != canonical_json_sha256(_identity_payload(envelope), "distributed dispatch identity"):
             raise _error("dispatch outbox envelope digest conflicts", "dispatch_outbox_conflict")
         if self.state not in {"pending", "claimed", "delivered", "ambiguous"}:
             raise _error("dispatch outbox state is invalid", "dispatch_outbox_conflict")

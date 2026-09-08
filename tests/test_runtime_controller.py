@@ -26,7 +26,6 @@ from vv_agent.runtime.controller import (
     HostInteractionResponse,
     derive_controller_command_id,
     derive_host_response_digest,
-    sanitize_host_prompt,
 )
 from vv_agent.runtime.engine import AgentRuntime
 from vv_agent.runtime.state import OperationJournalEntry
@@ -139,6 +138,9 @@ def _redis_store() -> RedisCheckpointStore:
 
         def get(self, key: str) -> str | None:
             return self.values.get(key)
+
+        def mget(self, keys: list[str]) -> list[str | None]:
+            return [self.values.get(key) for key in keys]
 
         def sadd(self, key: str, value: str) -> int:
             members = self.sets.setdefault(key, set())
@@ -459,7 +461,7 @@ def test_host_producer_reads_authoritative_renewed_lease() -> None:
     assert controller.checkpoint.lease_expires_at_ms == renewed_lease
 
 
-def test_host_response_constructor_sanitizes_and_from_dict_rejects_unsanitized() -> None:
+def test_host_response_preserves_content_and_rejects_digest_drift() -> None:
     request_digest = "a" * 64
     content = "Approve sk-response-456 at https://example.invalid/next"
     response = HostInteractionResponse(
@@ -471,8 +473,7 @@ def test_host_response_constructor_sanitizes_and_from_dict_rejects_unsanitized()
         command_id="response-command",
         response={"role": "user", "content": content},
     )
-    expected_content = sanitize_host_prompt(content)
-    assert response.response["content"] == expected_content
+    assert response.response["content"] == content
     assert response.response_digest == derive_host_response_digest(
         interaction_id=response.interaction_id,
         logical_cycle=response.logical_cycle,
@@ -483,12 +484,13 @@ def test_host_response_constructor_sanitizes_and_from_dict_rejects_unsanitized()
         response=response.response,
     )
     persisted = response.to_dict()
-    persisted["response"] = {"role": "user", "content": content}
-    with pytest.raises(ValueError, match="not sanitized"):
+    assert HostInteractionResponse.from_dict(persisted) == response
+    persisted["response"] = {"role": "user", "content": content + " changed"}
+    with pytest.raises(ValueError, match="response_digest"):
         HostInteractionResponse.from_dict(persisted)
 
 
-def test_host_request_constructor_sanitizes_and_from_dict_rejects_unsanitized() -> None:
+def test_host_request_preserves_content_and_rejects_digest_drift() -> None:
     prompt = "Approve sk-request-123 at https://example.invalid/request"
     request = HostInteractionRequest(
         interaction_id="request-interaction",
@@ -497,10 +499,11 @@ def test_host_request_constructor_sanitizes_and_from_dict_rejects_unsanitized() 
         tool_call_id="request-tool",
         prompt=prompt,
     )
-    assert request.prompt == sanitize_host_prompt(prompt)
+    assert request.prompt == prompt
     persisted = request.to_dict()
-    persisted["prompt"] = prompt
-    with pytest.raises(ValueError, match="not sanitized"):
+    assert HostInteractionRequest.from_dict(persisted) == request
+    persisted["prompt"] = prompt + " changed"
+    with pytest.raises(ValueError, match="request_digest"):
         HostInteractionRequest.from_dict(persisted)
 
 
@@ -900,11 +903,11 @@ def test_distinct_live_cancel_after_signal_is_applied_noop(store: Any) -> None:
     assert checkpoint_to_dict(after_replay) == checkpoint_to_dict(after_second)
 
 
-def test_host_request_notification_is_sanitized_and_replay_is_zero_write(store: Any) -> None:
+def test_host_request_notification_preserves_content_and_replay_is_zero_write(store: Any) -> None:
     checkpoint, request, outcome = _admit_host(store)
     stored = store.load_checkpoint(checkpoint.checkpoint_key)
     assert stored is not None and stored.active_host_interaction is not None
-    assert stored.active_host_interaction["prompt"] == "Approve [credential redacted] at [external locator redacted]"
+    assert stored.active_host_interaction["prompt"] == "Approve sk-test-123 at https://example.invalid/run?secret=abc"
     replay = store.produce_host_interaction(
         request,
         admission_context=HostInteractionAdmissionContext(
@@ -927,8 +930,7 @@ def test_host_request_notification_is_sanitized_and_replay_is_zero_write(store: 
     )
     assert notification is not None
     prompt = notification["payload"]["prompt"]
-    assert "sk-test" not in prompt
-    assert "example.invalid" not in prompt
+    assert prompt == request.prompt
 
 
 def test_host_producer_outcome_stays_pending_after_notification_delivery(store: Any) -> None:
@@ -963,15 +965,6 @@ def test_host_producer_outcome_stays_pending_after_notification_delivery(store: 
     )
     assert replay.status == "replayed"
     assert replay.outbox_state == "pending"
-
-
-def test_host_notification_sanitizer_is_exact_and_idempotent() -> None:
-    from vv_agent.runtime.controller import sanitize_host_prompt
-
-    prompt = "Approve token sk-test-123 at https://example.invalid/run?secret=abc"
-    expected = "Approve [credential redacted] at [external locator redacted]"
-    assert sanitize_host_prompt(prompt) == expected
-    assert sanitize_host_prompt(expected) == expected
 
 
 def test_host_producer_rejects_expired_or_wrong_execution_claim_without_writes(store: Any) -> None:
@@ -1026,10 +1019,11 @@ def test_host_producer_rejects_expired_or_wrong_execution_claim_without_writes(s
     assert unchanged is not None and unchanged.revision == before.revision
 
 
-def test_host_response_recovery_is_strict_sanitized_and_replayable(store: Any) -> None:
+def test_host_response_recovery_preserves_content_and_is_replayable(store: Any) -> None:
     _checkpoint_value, request, outcome = _admit_host(store, "response-recovery")
     command = _host_response_command(store, request, key="response-recovery", command_id="response-command")
-    assert command.command["response"]["content"] == "Approved [credential redacted] at [external locator redacted]"
+    content = command.command["response"]["content"]
+    assert content == "Approved sk-response-456 at https://example.invalid/next"
     resolution = store.resolve_controller_command(command)
     assert resolution.kind == "applied"
     assert resolution.receipt is not None and resolution.receipt.outbox_action == "recovery_dispatch"
@@ -1047,7 +1041,7 @@ def test_host_response_recovery_is_strict_sanitized_and_replayable(store: Any) -
     after = store.load_checkpoint("response-recovery")
     assert after is not None
     assert after.claimed_cycle == after.cycle_index + 1
-    assert after.messages[-1].content == "Approved [credential redacted] at [external locator redacted]"
+    assert after.messages[-1].content == content
     revision = after.revision
     replay = store.claim_and_consume_host_interaction_response(envelope)
     assert replay.kind == "replayed"

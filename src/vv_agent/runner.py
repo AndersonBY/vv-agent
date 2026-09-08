@@ -349,6 +349,10 @@ class Runner:
         if checkpoint_config is None or checkpoint_config.key != decision.handle.checkpoint_key:
             raise ValueError("distributed finalization checkpoint does not match the run handle")
         effective_config = cls._effective_run_config(agent, run_config, runner_defaults=RunConfig())
+        effective_config = replace(
+            effective_config,
+            checkpoint_config=replace(checkpoint_config, resume_policy=ResumePolicy.REQUIRE_EXISTING),
+        )
         result = cls._run_single_agent(
             agent,
             input,
@@ -1513,10 +1517,11 @@ class Runner:
         for key in _TASK_TOOL_POLICY_METADATA_KEYS:
             if key in policy_metadata:
                 task.metadata[key] = policy_metadata[key]
-        task.extra_tool_names = [
-            *task.extra_tool_names,
-            *[name for name in registry.list_planner_extra_tool_names() if name not in task.extra_tool_names],
-        ]
+        if not checkpoint_resume:
+            task.extra_tool_names = [
+                *task.extra_tool_names,
+                *[name for name in registry.list_planner_extra_tool_names() if name not in task.extra_tool_names],
+            ]
         if frozen_definition is not None:
             assert preloaded_checkpoint is not None
             initial_messages = [Message.from_dict(item) for item in frozen_definition["initial_messages"]]

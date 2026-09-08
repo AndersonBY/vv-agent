@@ -304,6 +304,12 @@ class CeleryBackend:
                 result=deepcopy(checkpoint.terminal_result),
             )
 
+        if response is not None and response.response_type == "terminal_replay":
+            raise CheckpointError(
+                "distributed terminal replay has no matching durable terminal",
+                code="checkpoint_store_conflict",
+            )
+
         # ``pending`` is the existing worker response for a successfully
         # admitted deferred batch.  The authoritative checkpoint barrier is
         # the observation; never claim it or dispatch another cycle here.
@@ -341,12 +347,6 @@ class CeleryBackend:
                 action="wait",
                 handle=handle,
                 reason=DistributedWaitReason.SUSPENDED,
-            )
-
-        if response is not None and response.response_type == "terminal_replay":
-            raise CheckpointError(
-                "distributed terminal replay has no matching durable terminal",
-                code="checkpoint_store_conflict",
             )
 
         if response is not None and response.response_type == "terminal_candidate":

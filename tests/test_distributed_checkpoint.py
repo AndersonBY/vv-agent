@@ -62,6 +62,7 @@ from vv_agent.tools import (
     FunctionTool,
     ToolMetadata,
     ToolOutputText,
+    ToolRegistry,
     ToolSideEffect,
     build_default_registry,
 )
@@ -783,7 +784,11 @@ def test_celery_generic_execute_is_guarded_and_local_path_is_explicit() -> None:
     assert callable(backend.execute_local)
 
 
-def test_nonblocking_celery_start_and_terminal_finalize_never_wait_for_result(tmp_path: Path) -> None:
+@pytest.mark.parametrize("resume_policy", [ResumePolicy.NEW, ResumePolicy.RESUME_IF_PRESENT])
+@pytest.mark.parametrize("extra_finalizer_tool", [False, True])
+def test_nonblocking_celery_start_and_terminal_finalize_never_wait_for_result(
+    tmp_path: Path, resume_policy: ResumePolicy, extra_finalizer_tool: bool
+) -> None:
     store = InMemoryCheckpointStore()
     checkpoint_ref = CapabilityRef("checkpoint.nonblocking-terminal", "1")
     llm_ref = CapabilityRef("llm.nonblocking-terminal", "1")
@@ -813,17 +818,23 @@ def test_nonblocking_celery_start_and_terminal_finalize_never_wait_for_result(tm
         model="test-model",
         output_guardrails=[lambda _context, output: GuardrailResult.rewrite(f"guarded: {output}")],
     )
+    default_tools = build_default_registry()
+    finalizer_tools = ToolRegistry()
+    for name in default_tools.list_tool_names():
+        finalizer_tools.register_executor(default_tools.get_executor(name), planner_extra=name == "sub_task_status")
     run_config = RunConfig(
         model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        tool_registry_factory=lambda: finalizer_tools,
         execution_backend=backend,
         max_cycles=1,
         no_tool_policy="finish",
         checkpoint_config=CheckpointConfig(
             key="nonblocking-terminal",
-            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            resume_policy=resume_policy,
             store=store,
             capability_refs={
                 "output_guardrail:0": {"id": "guardrail.nonblocking-terminal", "version": "1"},
+                "tool_registry_factory": {"id": "tools.nonblocking-terminal", "version": "1"},
             },
         ),
     )
@@ -869,6 +880,17 @@ def test_nonblocking_celery_start_and_terminal_finalize_never_wait_for_result(tm
     assert decision.action == "finalize_required"
     assert DistributedAdvanceDecision.from_dict(decision.to_dict()) == decision
     assert len(app.envelopes) == 1
+    if extra_finalizer_tool:
+        finalizer_tools.register_executor(
+            FunctionToolExecutor(
+                FunctionTool(
+                    name="finalizer_local_tool",
+                    description="Read local host state.",
+                    params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                    on_invoke=lambda _context, _arguments: ToolOutputText(text="unused"),
+                )
+            )
+        )
     result = Runner.finalize_distributed(
         agent,
         "answer",
@@ -1224,6 +1246,13 @@ def test_nonblocking_celery_advance_waits_for_host_interaction_and_suspended_sta
     assert len(app.envelopes) == 1
     current = store.load_checkpoint("nonblocking-wait")
     assert current is not None
+    unmatched_replay = DistributedWorkerResponse.terminal_replay(
+        checkpoint_revision=current.revision,
+        result=AgentResult(status=AgentStatus.COMPLETED, messages=[], cycles=[], final_answer="Uncommitted"),
+    )
+    with pytest.raises(CheckpointError, match="no matching durable terminal"):
+        backend.advance(previous_envelope=envelope, outcome=unmatched_replay)
+    assert store.load_checkpoint("nonblocking-wait") == current
     suspend = ControllerCommand(
         command_id="suspend-wait",
         handle=DistributedRunHandle("nonblocking-wait", current.root_run_id, current.trace_id),
@@ -1238,6 +1267,11 @@ def test_nonblocking_celery_advance_waits_for_host_interaction_and_suspended_sta
     )
     assert suspended_wait.action == "wait"
     assert suspended_wait.reason == "suspended"
+    assert len(app.envelopes) == 1
+    current = store.load_checkpoint("nonblocking-wait")
+    with pytest.raises(CheckpointError, match="no matching durable terminal"):
+        backend.advance(previous_envelope=envelope, outcome=unmatched_replay)
+    assert store.load_checkpoint("nonblocking-wait") == current
     assert len(app.envelopes) == 1
 
 

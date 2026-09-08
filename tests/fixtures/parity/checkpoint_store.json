@@ -202,7 +202,7 @@
     "redis_key_prefix": "vv-agent:host-interaction-notification:",
     "checkpoint_set_prefix": "vv-agent:host-interaction-notifications-by-checkpoint:",
     "states": ["pending", "claimed", "delivered", "ambiguous", "aborted"],
-    "stores_strict_sanitized_payload": true,
+    "stores_strict_payload": true,
     "stores_payload_digest": true,
     "claim_fields": ["claim_token", "lease_expires_at_ms", "attempt"],
     "replay": {

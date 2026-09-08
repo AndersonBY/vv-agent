@@ -24,7 +24,6 @@ from vv_agent.checkpoint import (
     validate_sha256,
 )
 from vv_agent.deferred import DeferredResolveDecision, DeferredToolHandle
-from vv_agent.runtime.controller import sanitize_host_prompt
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -329,11 +328,16 @@ class OperationJournalEntry:
                         "tool idempotency support is invalid",
                         code="operation_kind_fields_invalid",
                     ) from exc
-            if self.idempotency_support is ToolIdempotency.SUPPORTED and (
+            if self.idempotency_support is ToolIdempotency.UNSUPPORTED and self.idempotency_key is not None:
+                raise CheckpointError(
+                    "unsupported tools must not carry an idempotency key",
+                    code="tool_idempotency_key_invalid",
+                )
+            if self.idempotency_support is not ToolIdempotency.UNSUPPORTED and (
                 not isinstance(self.idempotency_key, str) or not self.idempotency_key
             ):
                 raise CheckpointError(
-                    "idempotent tool journal entry requires idempotency_key",
+                    "supported or unknown tools require an idempotency key",
                     code="tool_idempotency_key_required",
                 )
             if self.response is not None:
@@ -1544,11 +1548,6 @@ def _validate_host_interaction_request(value: Any, field_name: str) -> None:
         raise CheckpointError(
             f"{field_name}.prompt is invalid",
             code="host_interaction_content_too_large" if isinstance(prompt, str) else "host_interaction_fields_invalid",
-        )
-    if sanitize_host_prompt(prompt) != prompt:
-        raise CheckpointError(
-            f"{field_name}.prompt is not sanitized",
-            code="host_interaction_fields_invalid",
         )
     request_digest = value.get("request_digest")
     if not isinstance(request_digest, str) or len(request_digest.encode("utf-8")) != 64:

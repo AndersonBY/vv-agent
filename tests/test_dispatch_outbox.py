@@ -5,6 +5,7 @@ import os
 import threading
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -15,7 +16,7 @@ import vv_agent.runtime as runtime_api
 from vv_agent.checkpoint import CheckpointError
 from vv_agent.runtime.backends.celery import CeleryBackend
 from vv_agent.runtime.backends.distributed import DistributedRunEnvelope, DistributedRunHandle
-from vv_agent.runtime.dispatch_outbox import DispatchOutboxRecord, DispatchOutboxStore
+from vv_agent.runtime.dispatch_outbox import DispatchOutboxRecord, DispatchOutboxStore, _validate_envelope, claim_dispatch
 from vv_agent.runtime.state import CheckpointStore
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.redis import RedisCheckpointStore
@@ -42,6 +43,25 @@ def _stores(tmp_path: Path) -> list[Any]:
         SqliteCheckpointStore(tmp_path / "dispatch-outbox.sqlite3"),
         _redis_store(),
     ]
+
+
+def test_dispatch_record_decodes_each_input_once_and_rejects_digest_drift() -> None:
+    payload = _strict_envelope().to_dict()
+    with patch("vv_agent.runtime.dispatch_outbox._validate_envelope", wraps=_validate_envelope) as decode:
+        pending = DispatchOutboxRecord.pending(payload)
+        assert decode.call_count == 1
+        claimed = claim_dispatch(pending, claim_token="owner", lease_expires_at_ms=200, now_ms=100)
+        assert decode.call_count == 2
+    assert claimed.record.envelope_digest == pending.envelope_digest
+    wire = claimed.record.to_dict()
+    wire["envelope"]["task"]["user_prompt"] = "changed request"
+    with pytest.raises(CheckpointError) as error:
+        DispatchOutboxRecord.from_dict(wire)
+    assert error.value.code == "dispatch_outbox_conflict"
+    payload["unknown"] = True
+    with pytest.raises(CheckpointError) as error:
+        DispatchOutboxRecord.pending(payload)
+    assert error.value.code == "dispatch_outbox_conflict"
 
 
 @pytest.mark.parametrize("store_index", [0, 1, 2])

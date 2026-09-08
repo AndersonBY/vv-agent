@@ -14,6 +14,7 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.constants import BASH_TOOL_NAME, FIND_FILES_TOOL_NAME, TASK_FINISH_TOOL_NAME
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.compiler import AgentCompiler
+from vv_agent.runtime.tool_planner import plan_tool_names
 from vv_agent.types import AgentTask, Message
 
 
@@ -194,10 +195,10 @@ def test_frozen_checkpoint_restores_computer_extra_tools_without_duplicate_built
 
     assert task.agent_type == "computer"
     assert task.use_workspace
-    assert task.extra_tool_names == ["lookup"]
-    assert TASK_FINISH_TOOL_NAME not in task.extra_tool_names
-    assert BASH_TOOL_NAME not in task.extra_tool_names
-    assert FIND_FILES_TOOL_NAME not in task.extra_tool_names
+    assert task.extra_tool_names == [TASK_FINISH_TOOL_NAME, BASH_TOOL_NAME, FIND_FILES_TOOL_NAME, "lookup"]
+    planned = plan_tool_names(task)
+    for name in task.extra_tool_names:
+        assert planned.count(name) == 1
 
 
 def test_frozen_checkpoint_restores_run_metadata_when_system_metadata_is_empty() -> None:

@@ -126,14 +126,8 @@ class RedisCheckpointStore:
 
     def load_checkpoint(self, checkpoint_key: str) -> Checkpoint | None:
         data_key, lease_key = self._keys(checkpoint_key)
-        for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
-            raw = self._client.get(data_key)
-            if raw is None:
-                return None
-            lease = self._client.get(lease_key)
-            if self._client.get(data_key) == raw and self._client.get(lease_key) == lease:
-                return _checkpoint_from_storage(raw, lease, checkpoint_key=checkpoint_key)
-        raise RuntimeError("redis checkpoint v10 load could not obtain a stable snapshot")
+        raw, lease = self._client.mget([data_key, lease_key])
+        return None if raw is None else _checkpoint_from_storage(raw, lease, checkpoint_key=checkpoint_key)
 
     def claim_checkpoint(
         self,

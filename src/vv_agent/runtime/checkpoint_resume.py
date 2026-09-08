@@ -137,7 +137,7 @@ def _checkpoint_control_result(
 
 @dataclass(frozen=True, slots=True)
 class ToolOperationPlan:
-    idempotency_key: str
+    idempotency_key: str | None
     operation_id: str
     request_digest: str
     idempotency_support: ToolIdempotency
@@ -879,9 +879,10 @@ class CheckpointResumeController:
         source_request_digest: str | None = None,
         source_idempotency_key: str | None = None,
     ) -> ToolOperationPlan:
-        idempotency_key = source_idempotency_key or self._tool_idempotency_key(
-            cycle_index,
-            call.id,
+        idempotency_key = (
+            None
+            if idempotency_support is ToolIdempotency.UNSUPPORTED
+            else source_idempotency_key or self._tool_idempotency_key(cycle_index, call.id)
         )
         projection = {
             "schema_version": "vv-agent.operation-request.v1",

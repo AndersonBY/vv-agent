@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `12.0.0` at revision
-`3e082ce2a850192e8b6f4dec6a14f1f06ccddef2`. Its immutable release artifact has
-SHA-256 `45d39c17c9bc1a883eaae2073f04afd7fb55d6d9e3076459aad8f37450618b7b`.
+`contract.lock.json` selects contract `13.0.0` at revision
+`d3a6fcf07222080baab3107f909cce6e9314c059`. Its canonical artifact has
+SHA-256 `0d41f707bdc195449d5d9f01dadf880c92fa0f45205679192a4a6c0874a942e8`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,9 +44,9 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v12.0.0/vv-agent-contract-12.0.0.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v12.0.0/vv-agent-contract-12.0.0.zip \
-  --revision 3e082ce2a850192e8b6f4dec6a14f1f06ccddef2
+  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v13.0.0/vv-agent-contract-13.0.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v13.0.0/vv-agent-contract-13.0.0.zip \
+  --revision d3a6fcf07222080baab3107f909cce6e9314c059
 ```
 
 ## Python Producer Map
@@ -182,6 +182,11 @@ own ambiguity and replay decisions.
 
 ### Persistence
 
+The tool planner emits a null idempotency key for `unsupported` and a stable
+key for `supported` or `unknown`; the journal reader enforces the same pairing.
+The key participates in the request digest but does not confer retry permission.
+Runner execution and replay coverage lives in `tests/test_checkpoint_runner.py`.
+
 Checkpoint records require `vv-agent.checkpoint.v10`; run definitions require
 `vv-agent.run-definition.v5`; distributed envelopes require
 `vv-agent.distributed-run.v5`. The frozen definition stores `prompt_bundle`,
@@ -217,6 +222,12 @@ result. The scheduler reloads the authoritative checkpoint after every response
 or transport failure. Public `AgentResult` readers require the complete current
 shape, reject unknown fields, and require absent optional fields to be omitted
 rather than encoded as null.
+
+`Runner.finalize_distributed` requires the decision's existing checkpoint even
+when the host supplies a `NEW` configuration. Frozen checkpoint compilation
+keeps its admitted tool names; current registry planner extras do not extend
+the run definition. The real start/worker/finalizer and duplicate-delivery
+checks live in `tests/test_distributed_checkpoint.py`.
 
 Definitive ordinary and deferred tool receipts derive one lowercase SHA-256
 `identity_key` from the RFC 8785 UTF-8 closed identity object containing

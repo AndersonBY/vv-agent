@@ -237,6 +237,9 @@ class _FakeRedisClient:
     def get(self, key: str) -> str | None:
         return self._values.get(key)
 
+    def mget(self, keys: list[str]) -> list[str | None]:
+        return [self._values.get(key) for key in keys]
+
     def sadd(self, key: str, value: str) -> int:
         members = self._sets.setdefault(key, set())
         before = len(members)
@@ -280,6 +283,32 @@ def _redis_store() -> RedisCheckpointStore:
     return store
 
 
+def test_redis_load_uses_one_atomic_checkpoint_and_lease_snapshot() -> None:
+    store = _redis_store()
+    checkpoint = _minimal_checkpoint(key="atomic-load")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    from unittest.mock import patch
+
+    with patch.object(store._client, "mget", wraps=store._client.mget) as snapshot:
+        with patch.object(store._client, "get", side_effect=AssertionError("non-atomic snapshot")):
+            loaded = store.load_checkpoint(checkpoint.checkpoint_key)
+        snapshot.assert_called_once_with(list(store._keys(checkpoint.checkpoint_key)))
+    assert loaded is not None
+    assert loaded.claim_token == "owner"
+    assert loaded.lease_expires_at_ms == 200
+    assert loaded.revision == claimed.revision
+    assert store.load_checkpoint("missing-atomic-load") is None
+
+
 def test_redis_create_transaction_failure_leaves_no_half_state() -> None:
     class FailingPipeline(_FakeRedisPipeline):
         def execute(self) -> list[object]:
@@ -320,7 +349,7 @@ def _minimal_checkpoint(*, key: str = "fresh") -> Checkpoint:
 
 
 @pytest.mark.parametrize("field_name", ["active_host_interaction", "suspended_origin"])
-def test_checkpoint_rejects_unsanitized_host_prompt(field_name: str) -> None:
+def test_checkpoint_preserves_host_prompt(field_name: str) -> None:
     from vv_agent.runtime.controller import HostInteractionRequest
 
     request = HostInteractionRequest(
@@ -345,9 +374,7 @@ def test_checkpoint_rejects_unsanitized_host_prompt(field_name: str) -> None:
             "active_host_interaction": request_payload,
         }
 
-    with pytest.raises(CheckpointError) as error:
-        checkpoint_from_dict(payload)
-    assert error.value.code == "host_interaction_fields_invalid"
+    assert checkpoint_to_dict(checkpoint_from_dict(payload)) == payload
 
 
 def _checkpoint_created_event(*, event_id: str, checkpoint: Checkpoint) -> dict[str, Any]:
@@ -367,6 +394,11 @@ def _store(store_kind: str, tmp_path: Path, name: str) -> Any:
         return InMemoryCheckpointStore()
     if store_kind == "sqlite":
         return SqliteCheckpointStore(tmp_path / f"{name}.sqlite3")
+    if store_kind == "real_redis":
+        redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+        if not redis_url:
+            pytest.skip("set VV_AGENT_TEST_REDIS_URL for live Redis")
+        return RedisCheckpointStore(redis_url)
     return _redis_store()
 
 
@@ -1478,6 +1510,23 @@ def test_operation_and_event_digest_golden_vectors() -> None:
     pending.verify_payload()
 
 
+@pytest.mark.parametrize(
+    ("support", "key", "error_code"),
+    [
+        ("unsupported", "idem_unexpected", "tool_idempotency_key_invalid"),
+        ("supported", None, "tool_idempotency_key_required"),
+        ("unknown", None, "tool_idempotency_key_required"),
+    ],
+)
+def test_tool_journal_idempotency_key_matches_support(support: str, key: str | None, error_code: str) -> None:
+    entry = _journal_case("tool_started")
+    entry["idempotency_support"] = support
+    entry["idempotency_key"] = key
+    with pytest.raises(CheckpointError) as error:
+        OperationJournalEntry.from_dict(entry)
+    assert error.value.code == error_code
+
+
 def test_operation_journal_invalid_cases_have_stable_codes() -> None:
     fixture = _fixture("operation_journal.json")
     for case in fixture["valid_entries"]:
@@ -2202,13 +2251,13 @@ def test_record_tool_receipt_identity_miss_rejects_typed_without_write(
     assert checkpoint_to_dict(after) == before_payload
 
 
-@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis", "real_redis"])
 def test_tool_outcome_unknown_receipt_replay_preserves_digest_and_zero_writes(
     store_kind: str,
     tmp_path: Path,
 ) -> None:
     store = _store(store_kind, tmp_path, f"unknown-receipt-replay-{store_kind}")
-    checkpoint = _minimal_checkpoint(key=f"unknown-receipt-replay-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"unknown-receipt-replay-{store_kind}-{uuid4().hex}")
     assert store.create_checkpoint(checkpoint)
     claimed = store.claim_checkpoint(
         checkpoint.checkpoint_key,
@@ -2294,17 +2343,18 @@ def test_tool_outcome_unknown_receipt_replay_preserves_digest_and_zero_writes(
     assert unchanged is not None
     assert unchanged.revision == revision
     assert tuple(entry.event_id for entry in unchanged.event_outbox) == events
+    store.delete_checkpoint(checkpoint.checkpoint_key)
 
 
-@pytest.mark.parametrize("source_case", ["missing_observation", "wrong_cycle", "wrong_observation"])
-@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+@pytest.mark.parametrize("source_case", ["started", "missing_observation", "wrong_cycle", "wrong_observation"])
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis", "real_redis"])
 def test_tool_outcome_unknown_receipt_rejects_incomplete_observation_without_write(
     source_case: str,
     store_kind: str,
     tmp_path: Path,
 ) -> None:
     store = _store(store_kind, tmp_path, f"unknown-receipt-observation-{source_case}-{store_kind}")
-    checkpoint = _minimal_checkpoint(key=f"unknown-receipt-observation-{source_case}-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"unknown-receipt-observation-{source_case}-{store_kind}-{uuid4().hex}")
     assert store.create_checkpoint(checkpoint)
     claimed = store.claim_checkpoint(
         checkpoint.checkpoint_key,
@@ -2317,7 +2367,7 @@ def test_tool_outcome_unknown_receipt_rejects_incomplete_observation_without_wri
     assert claimed is not None
     entry = OperationJournalEntry.from_dict(_journal_case("tool_unknown_idempotency"))
     entry.cycle_index = 1
-    entry.state = OperationState.AMBIGUOUS
+    entry.state = OperationState.STARTED if source_case == "started" else OperationState.AMBIGUOUS
     claimed.tool_journal = [entry]
     assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
     claimed.revision += 1
@@ -2328,7 +2378,7 @@ def test_tool_outcome_unknown_receipt_rejects_incomplete_observation_without_wri
         risk="unknown_tool_side_effect",
         idempotency_support=entry.idempotency_support,
     )
-    if source_case == "missing_observation":
+    if source_case in {"started", "missing_observation"}:
         claimed.tool_journal[0].resume_observation = None
     elif source_case == "wrong_cycle":
         claimed.tool_journal[0].cycle_index += 1
@@ -2366,6 +2416,7 @@ def test_tool_outcome_unknown_receipt_rejects_incomplete_observation_without_wri
     after = store.load_checkpoint(checkpoint.checkpoint_key)
     assert after is not None
     assert checkpoint_to_dict(after) == before_payload
+    store.delete_checkpoint(checkpoint.checkpoint_key)
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
@@ -4486,7 +4537,30 @@ def test_cross_runtime_sqlite_probe_from_environment() -> None:
         checkpoint = _minimal_checkpoint(key="python-wrote")
         checkpoint.messages = [Message(role="user", content="from Python")]
         checkpoint.shared_state = {"writer": "python", "format": "checkpoint"}
-        assert store.create_checkpoint(checkpoint)
+        controller = CheckpointResumeController(
+            config=CheckpointConfig(store=store, key="python-wrote", resume_policy=ResumePolicy.NEW),
+            task_id=checkpoint.task_id,
+            run_id=checkpoint.root_run_id,
+            trace_id=checkpoint.trace_id,
+            run_definition=checkpoint.run_definition,
+            run_definition_digest=checkpoint.run_definition_digest,
+            initial_messages=checkpoint.messages,
+            initial_shared_state=checkpoint.shared_state,
+            initial_budget_usage=None,
+            extensions=[],
+            reconciliation_provider=None,
+            event_sink=lambda _event: None,
+        )
+        try:
+            assert controller.admit() is None
+            plan = controller.plan_tool(
+                cycle_index=1,
+                call=ToolCall(id="cross-tool", name="unsafe_write", arguments={}),
+                idempotency_support=ToolIdempotency.UNSUPPORTED,
+            )
+            assert plan.idempotency_key is None
+        finally:
+            controller.close()
         return
     if mode == "read_rust":
         checkpoint = store.load_checkpoint("rust-wrote")
@@ -4494,6 +4568,16 @@ def test_cross_runtime_sqlite_probe_from_environment() -> None:
         assert checkpoint.messages == [Message(role="user", content="from Rust")]
         assert checkpoint.shared_state == {"format": "checkpoint", "writer": "rust"}
         assert checkpoint.run_definition_digest == compute_run_definition_digest(checkpoint.run_definition)
+        entry = checkpoint.tool_journal[0]
+        assert entry.idempotency_support is ToolIdempotency.UNSUPPORTED
+        assert entry.idempotency_key is None
+        entry.verify_request(
+            {
+                "schema_version": "vv-agent.operation-request.v1",
+                "kind": "tool",
+                "request": {"tool_call_id": "cross-tool", "tool_name": "unsafe_write", "arguments": {}, "idempotency_key": None},
+            }
+        )
         return
     raise AssertionError(f"unknown cross-runtime mode: {mode}")
 

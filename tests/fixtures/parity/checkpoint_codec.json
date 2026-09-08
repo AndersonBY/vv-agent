@@ -502,11 +502,10 @@
       ],
       "unknown_fields": "reject",
       "schema_version": "vv-agent.host-interaction-request.v1",
-      "prompt": "persist the complete credential-redacted strict request; digest-only persistence is invalid",
+      "prompt": "persist the complete strict request with unmodified prompt; digest-only persistence is invalid",
       "prompt_max_utf8_bytes": 65536,
       "content_policy": {
-        "credential_redacted": true,
-        "external_locator_forbidden": true,
+        "content_preserved": true,
         "transport_metadata_forbidden": true,
         "strict_codec_before_checkpoint_cas": true
       },
@@ -537,7 +536,7 @@
     "notification_outbox": {
       "schema": "vv-agent.host-interaction-notification.v1",
       "independent_table": "host_interaction_notification_outbox",
-      "strict_sanitized_payload": true,
+      "strict_payload": true,
       "payload_required_fields": [
         "schema_version",
         "notification_id",

@@ -230,7 +230,7 @@
         "response_digest": "lowercase_sha256",
         "event_outbox_entry_must_be_complete": true
       },
-      "prompt_and_response_digest": "strict credential-redacted UTF-8 content; max 65536 bytes",
+      "prompt_and_response_digest": "opaque UTF-8 content; max 65536 bytes",
       "unknown_fields": "reject"
     },
     "event_outbox": {

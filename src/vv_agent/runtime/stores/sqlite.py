@@ -35,7 +35,6 @@ from vv_agent.runtime.controller import (
     derive_controller_receipt_outbox_id,
     derive_host_interaction_notification_id,
     derive_host_interaction_record_id,
-    sanitize_host_prompt,
     validate_host_interaction_notification,
     validate_host_interaction_record,
 )
@@ -1080,7 +1079,7 @@ class SqliteCheckpointStore:
             "logical_cycle": request.logical_cycle,
             "status": "host_interaction",
             "wait_reason": "host_interaction",
-            "prompt": sanitize_host_prompt(request.prompt),
+            "prompt": request.prompt,
         }
 
     def _host_outcome(self, record: dict[str, Any], *, status: str, checkpoint_revision: int) -> HostInteractionOutcome:

@@ -1,5 +1,5 @@
 {
-  "contract_version": "12.0.0",
+  "contract_version": "13.0.0",
   "schema_version": "vv-agent.controller-command.v1",
   "scope": {
     "task_neutral": true,
@@ -191,7 +191,7 @@
           "role": "user",
           "content": "non_empty_utf8_string",
           "content_max_utf8_bytes": 65536,
-          "content_policy": "credential-redacted user message; no external locator or transport metadata",
+          "content_policy": "opaque user message content; no automatic redaction; closed message fields",
           "unknown_fields": "reject"
         },
         "identity_binding": [
@@ -278,8 +278,7 @@
       "prompt": "non_empty_utf8_string",
       "prompt_max_utf8_bytes": 65536,
       "content_policy": {
-        "credential_redacted": true,
-        "external_locator_forbidden": true,
+        "content_preserved": true,
         "transport_metadata_forbidden": true,
         "strict_codec_before_cas": true
       },
@@ -428,7 +427,7 @@
     "status": "host_interaction",
     "wait_reason": "host_interaction",
     "wait_reason_max_utf8_bytes": 512,
-    "prompt": "credential-redacted sanitized display text",
+    "prompt": "unmodified prompt text",
     "prompt_max_utf8_bytes": 65536,
     "required_storage_fields": [
       "notification_id",
@@ -1505,7 +1504,7 @@
     "interaction_table": "host_interaction_records",
     "notification_table": "host_interaction_notification_outbox",
     "interaction_table_strict_codec_responsibility": "SQLite stores JSON text and scalar state; vv-agent.host-interaction-record.v1 codec validates nested request/response before CAS",
-    "notification_table_strict_codec_responsibility": "SQLite stores JSON text and scalar lifecycle fields; vv-agent.host-interaction-notification.v1 codec validates sanitized payload and RFC8785 digest before CAS",
+    "notification_table_strict_codec_responsibility": "SQLite stores JSON text and scalar lifecycle fields; vv-agent.host-interaction-notification.v1 codec validates payload shape and RFC8785 digest before CAS",
     "interaction_record_full_request_and_response": true,
     "columns": [
       "command_id",
@@ -1706,7 +1705,7 @@
         "wait_reason",
         "prompt"
       ],
-      "prompt": "sanitized credential-redacted text",
+      "prompt": "unmodified prompt text",
       "read_surface": {
         "method": "thread/status",
         "notification": "thread/status/changed",
@@ -1731,17 +1730,6 @@
         "lease_owner"
       ],
       "unknown_fields": "reject"
-    },
-    "credential_sanitizer": {
-      "schema": "vv-agent.host-prompt-sanitizer.v1",
-      "input": {
-        "prompt": "Approve token sk-test-123 at https://example.invalid/run?secret=abc"
-      },
-      "output": {
-        "prompt": "Approve [credential redacted] at [external locator redacted]"
-      },
-      "max_utf8_bytes": 65536,
-      "idempotent": true
     },
     "framework_receipt_visibility": {
       "type": "ControllerCommandReceipt",

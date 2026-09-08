@@ -6,17 +6,23 @@
 
 ## 安装
 
-当前包版本为 `0.14.3`。本仓库 `HEAD` 锁定语言无关的 Contract `12.0.0`；Python/Rust
-配对采用状态为 `verified`，采用状态以中央 support matrix 为准。本实现保留
+当前包版本为 `0.15.0`。本仓库 `HEAD` 锁定语言无关的 Contract `13.0.0`；Python/Rust
+配对采用及验证状态以中央 support matrix 为准。本实现保留
 符合 Python 语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.14.3"
+python -m pip install "vv-agent==0.15.0"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
 `vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
+
+### 0.15.0 重点能力
+
+- Host prompt 与用户回复在 checkpoint、通知及模型恢复中保留原始业务内容。
+- 分布式终态决策、未知工具回执和不支持幂等的工具请求遵循同一 Python/Rust 契约。
+- Frozen finalization 使用持久化定义，Redis checkpoint 通过一次原子读取取得快照。
 
 ### 0.14.3 重点能力
 

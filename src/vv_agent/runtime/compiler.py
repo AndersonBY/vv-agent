@@ -8,7 +8,7 @@ from typing import Any, cast
 from vv_agent.agent import Agent, RunContext
 from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
-from vv_agent.constants import WORKSPACE_TOOLS, get_default_tool_schemas
+from vv_agent.constants import WORKSPACE_TOOLS
 from vv_agent.context_providers import (
     ContextFragment,
     ContextRequest,
@@ -303,8 +303,6 @@ class AgentCompiler:
             and isinstance((function := item["schema"].get("function")), dict)
             and isinstance(function.get("name"), str)
         ]
-        canonical_tool_names = set(get_default_tool_schemas())
-        stored_extra_tool_names = list(dict.fromkeys(name for name in stored_tool_names if name not in canonical_tool_names))
         handoff_tool_names = [transfer.tool_name for transfer in agent.handoffs if transfer.tool_name]
         return AgentTask(
             task_id=str(checkpoint.task_id),
@@ -324,7 +322,7 @@ class AgentCompiler:
             extra_tool_names=list(
                 dict.fromkeys(
                     [
-                        *stored_extra_tool_names,
+                        *stored_tool_names,
                         *[
                             tool.name
                             for tool in agent.tools

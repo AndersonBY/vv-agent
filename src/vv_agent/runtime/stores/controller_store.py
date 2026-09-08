@@ -41,7 +41,6 @@ from vv_agent.runtime.controller import (
     derive_host_interaction_notification_id,
     derive_host_interaction_record_id,
     derive_host_response_digest,
-    sanitize_host_prompt,
     validate_host_interaction_notification,
     validate_host_interaction_record,
 )
@@ -155,7 +154,7 @@ class ControllerStoreMixin:
             "logical_cycle": request.logical_cycle,
             "status": "host_interaction",
             "wait_reason": "host_interaction",
-            "prompt": sanitize_host_prompt(request.prompt),
+            "prompt": request.prompt,
         }
 
     @staticmethod
@@ -661,15 +660,7 @@ class ControllerStoreMixin:
                 if record["request_digest"] != active["request_digest"] or record["state"] != "active":
                     raise _controller_error("host interaction request digest conflicts", "host_interaction_conflict")
                 record = deepcopy(record)
-                raw_response = dict(command_payload["response"])
-                # The command digest authenticates the caller's closed wire,
-                # while the durable resolved response is the framework-owned
-                # model input.  Sanitize before this CAS so credentials and
-                # locators can never enter the recovery record or messages.
-                response_value = {
-                    "role": "user",
-                    "content": sanitize_host_prompt(raw_response["content"]),
-                }
+                response_value = dict(command_payload["response"])
                 response_digest = derive_host_response_digest(
                     interaction_id=active["interaction_id"],
                     logical_cycle=active["logical_cycle"],
