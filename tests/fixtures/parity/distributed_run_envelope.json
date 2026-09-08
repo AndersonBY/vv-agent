@@ -1,5 +1,14 @@
 {
   "schema_version": "vv-agent.distributed-run.v5",
+  "runtime_recipe_cases": [
+    {"name": "client_without_settings_file", "settings_file": "", "llm_client_ref": {"id": "llm.primary", "version": "2"}, "valid": true},
+    {"name": "client_with_settings_file", "settings_file": "/srv/settings.json", "llm_client_ref": {"id": "llm.primary", "version": "2"}, "valid": true},
+    {"name": "file_without_client", "settings_file": "/srv/settings.json", "llm_client_ref": null, "valid": true},
+    {"name": "empty_without_client", "settings_file": "", "llm_client_ref": null, "valid": false},
+    {"name": "blank_without_client", "settings_file": " \t", "llm_client_ref": null, "valid": false},
+    {"name": "null_file_with_client", "settings_file": null, "llm_client_ref": {"id": "llm.primary", "version": "2"}, "valid": false},
+    {"name": "number_file_with_client", "settings_file": 42, "llm_client_ref": {"id": "llm.primary", "version": "2"}, "valid": false}
+  ],
   "run_definition_schema_rules": {
     "writer_value": "vv-agent.run-definition.v5",
     "complete_definition_source": "embedded_run_definition_in_checkpoint",

@@ -380,7 +380,7 @@ def _terminal_replay_window(
     registry.register("checkpoint_store", checkpoint_ref, store)
     registry.register("llm_client", llm_ref, ScriptedLLM(steps=[worker_complete]))
     recipe = RuntimeRecipe(
-        settings_file=str(tmp_path / "unused-settings.py"),
+        settings_file="",
         backend="test",
         model="test-model",
         workspace=str(tmp_path / "workspace"),
@@ -610,6 +610,7 @@ def test_distributed_reader_rejects_unknown_field_at_every_closed_layer(
         ["task", "initial_messages", 0, "tool_calls", 0, "function", "arguments"],
         ["budget_limits", "max_total_tokens"],
         ["budget_limits", "max_host_cost", "currency"],
+        ["recipe", "settings_file"],
         ["recipe", "timeout_seconds"],
         ["recipe", "capabilities", "observer_refs"],
         ["recipe", "capabilities", "toolset_ref", "schema_digest"],
@@ -675,6 +676,18 @@ def test_distributed_fixture_round_trips_with_discriminator() -> None:
 
     assert envelope.schema_version == DISTRIBUTED_RUN_SCHEMA_VERSION
     assert envelope.to_dict() == canonical
+
+
+@pytest.mark.parametrize("case", _fixture()["runtime_recipe_cases"], ids=lambda case: case["name"])
+def test_distributed_recipe_settings_file_depends_on_client_reference(case: dict[str, Any]) -> None:
+    payload = copy.deepcopy(_fixture()["canonical_envelope"])
+    payload["recipe"]["settings_file"] = case["settings_file"]
+    payload["recipe"]["capabilities"]["llm_client_ref"] = case["llm_client_ref"]
+    if case["valid"]:
+        assert DistributedRunEnvelope.from_dict(payload).to_dict() == payload
+    else:
+        with pytest.raises(DistributedContractError):
+            DistributedRunEnvelope.from_dict(payload)
 
 
 def test_distributed_tool_policy_round_trips_metadata_denials() -> None:
@@ -1937,7 +1950,7 @@ def test_nonblocking_celery_resolves_recipe_before_first_enqueue(tmp_path: Path)
     backend = CeleryBackend(
         celery_app=app,
         runtime_recipe=RuntimeRecipe(
-            settings_file=str(tmp_path / "unused-settings.py"),
+            settings_file="",
             backend="test",
             model="test-model",
             workspace=str(tmp_path / "workspace"),

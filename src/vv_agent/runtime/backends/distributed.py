@@ -1491,7 +1491,11 @@ class RuntimeRecipe:
     capabilities: DistributedCapabilities = field(default_factory=DistributedCapabilities)
 
     def __post_init__(self) -> None:
-        for field_name in ("settings_file", "backend", "model", "workspace"):
+        if not isinstance(self.settings_file, str):
+            raise DistributedContractError("runtime_recipe.settings_file must be a string")
+        if self.capabilities.llm_client_ref is None and not self.settings_file.strip():
+            raise DistributedContractError("runtime_recipe.settings_file must be non-blank without llm_client_ref")
+        for field_name in ("backend", "model", "workspace"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise DistributedContractError(f"runtime_recipe.{field_name} must be a non-empty string")
@@ -1523,7 +1527,7 @@ class RuntimeRecipe:
         timeout = payload.get("timeout_seconds")
         log_preview_chars = payload.get("log_preview_chars")
         decoded = cls(
-            settings_file=_required_string(payload, "settings_file"),
+            settings_file=payload["settings_file"],
             backend=_required_string(payload, "backend"),
             model=_required_string(payload, "model"),
             workspace=_required_string(payload, "workspace"),

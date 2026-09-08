@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `13.0.0` at revision
-`d3a6fcf07222080baab3107f909cce6e9314c059`. Its canonical artifact has
-SHA-256 `0d41f707bdc195449d5d9f01dadf880c92fa0f45205679192a4a6c0874a942e8`.
+`contract.lock.json` selects contract `14.0.0` at revision
+`b873f57607cc99a2d3b95f58e61a1f74d9316001`. Its canonical artifact has
+SHA-256 `0109fb57c04d9a0a058e2bc8df28bc777464e70687c52d2af36e5dba60e9dd4c`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,9 +44,9 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v13.0.0/vv-agent-contract-13.0.0.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v13.0.0/vv-agent-contract-13.0.0.zip \
-  --revision d3a6fcf07222080baab3107f909cce6e9314c059
+  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v14.0.0/vv-agent-contract-14.0.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v14.0.0/vv-agent-contract-14.0.0.zip \
+  --revision b873f57607cc99a2d3b95f58e61a1f74d9316001
 ```
 
 ## Python Producer Map
@@ -181,6 +181,12 @@ The executor sequence is `tool_call_planned`, optional approval,
 own ambiguity and replay decisions.
 
 ### Persistence
+
+Distributed recipes accept `settings_file=""` when `llm_client_ref` provides
+the client. File-backed recipes still require a non-blank path; unresolved
+client references fail before enqueue or execution without file fallback.
+`tests/test_distributed_checkpoint.py` covers the canonical input matrix and
+real worker/finalizer replay without a settings file.
 
 The tool planner emits a null idempotency key for `unsupported` and a stable
 key for `supported` or `unknown`; the journal reader enforces the same pairing.
