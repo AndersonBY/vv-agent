@@ -146,11 +146,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key, record_set_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return None
-                    checkpoint = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    checkpoint = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     try:
                         check_claim(checkpoint, cycle_index, now_ms, claim_mode)
                     except ValueError as exc:
@@ -204,13 +204,13 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
                     current = _checkpoint_from_storage(
                         raw,
-                        self._client.get(lease_key),
+                        raw_lease,
                         checkpoint_key=checkpoint.checkpoint_key,
                     )
                     if (
@@ -254,11 +254,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -307,11 +307,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -373,11 +373,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -413,11 +413,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
                     candidate = deepcopy(checkpoint)
                     terminal = prepare_claimed_terminal(
                         current,
@@ -453,11 +453,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     delivered = prepare_event_delivery(
                         current,
                         event_id=event_id,
@@ -494,8 +494,7 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
-                    raw_lease = pipe.get(lease_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return CheckpointRenewal(outcome=RenewOutcome.CLAIM_LOST, revision=0)
@@ -539,11 +538,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
                     helper = InMemoryCheckpointStore()
                     helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
                     updated = helper.record_tool_receipt(
@@ -581,11 +580,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    checkpoint = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    checkpoint = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     if (
                         checkpoint.revision != expected_revision
                         or checkpoint.terminal_result is None
@@ -664,11 +663,11 @@ class RedisCheckpointStore:
                     record_keys = tuple(cleanup_member_key(key, "host record") for key in record_keys)
                     notification_keys = tuple(cleanup_member_key(key, "host notification") for key in notification_keys)
                     dispatch_keys = tuple(cleanup_member_key(key, "dispatch outbox") for key in dispatch_keys)
-                    raw_checkpoint = pipe.get(data_key)
+                    raw_checkpoint, raw_lease = pipe.mget([data_key, lease_key])
                     if raw_checkpoint is not None:
                         _checkpoint_from_storage(
                             raw_checkpoint,
-                            pipe.get(lease_key),
+                            raw_lease,
                             checkpoint_key=checkpoint_key,
                         )
                     if not receipt_keys:
@@ -878,13 +877,13 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key, outbox_key, index_key)
-                    raw_checkpoint = pipe.get(data_key)
+                    raw_checkpoint, raw_lease = pipe.mget([data_key, lease_key])
                     if raw_checkpoint is None:
                         pipe.unwatch()
                         raise CheckpointError("dispatch checkpoint was not found", code="checkpoint_not_found")
                     _checkpoint_from_storage(
                         raw_checkpoint,
-                        pipe.get(lease_key),
+                        raw_lease,
                         checkpoint_key=candidate.checkpoint_key,
                     )
                     raw = pipe.get(outbox_key)
@@ -1075,11 +1074,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
                     if (
                         current.revision != expected_revision
                         or checkpoint.revision != expected_revision
@@ -1125,11 +1124,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
                     helper = InMemoryCheckpointStore()
                     helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
                     if not helper.admit_deferred_batch(
@@ -1173,9 +1172,9 @@ class RedisCheckpointStore:
                         if receipt.handle.key != handle.key or receipt.handle_key != handle.key:
                             raise ValueError("deferred_receipt_identity_invalid")
                         helper._deferred_receipts[handle.key] = receipt  # type: ignore[attr-defined]
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is not None:
-                        current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=handle.checkpoint_key)
+                        current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=handle.checkpoint_key)
                         helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
                     decision = helper.resolve_deferred(handle, result)
                     if decision.kind in {"replayed", "not_admitted", "reconciliation_required"}:
@@ -1218,11 +1217,11 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         return False
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint.checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
                     helper = InMemoryCheckpointStore()
                     helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
                     if not helper.accept_deferred_batch(
@@ -1273,7 +1272,7 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key, record_key, notification_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         raise CheckpointError("host interaction checkpoint was not found", code="host_interaction_claim_required")
@@ -1301,7 +1300,7 @@ class RedisCheckpointStore:
                         try:
                             checkpoint = _checkpoint_from_storage(
                                 raw,
-                                pipe.get(lease_key),
+                                raw_lease,
                                 checkpoint_key=checkpoint_key,
                             )
                         except CheckpointError:
@@ -1329,7 +1328,7 @@ class RedisCheckpointStore:
                             checkpoint_revision=checkpoint.revision,
                         )
                     try:
-                        current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                        current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     except CheckpointError:
                         pipe.unwatch()
                         raise
@@ -1410,12 +1409,12 @@ class RedisCheckpointStore:
                             )
                         pipe.unwatch()
                         return receipt
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         raise CheckpointError("controller command checkpoint was not found", code="controller_command_stale")
                     try:
-                        current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                        current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     except CheckpointError:
                         pipe.unwatch()
                         raise
@@ -1858,14 +1857,14 @@ class RedisCheckpointStore:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
                 try:
                     pipe.watch(data_key, lease_key, record_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     raw_record = pipe.get(record_key)
                     if raw is None or raw_record is None:
                         pipe.unwatch()
                         raise CheckpointError(
                             "host interaction recovery record was not found", code="host_interaction_recovery_stale"
                         )
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     record = _host_record_from_storage(
                         raw_record,
                         expected_checkpoint_key=checkpoint_key,
@@ -1909,7 +1908,7 @@ class RedisCheckpointStore:
                 try:
                     index_key = self._host_record_set_key(checkpoint_key)
                     pipe.watch(data_key, lease_key, index_key)
-                    raw = pipe.get(data_key)
+                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     candidate_keys = tuple(pipe.smembers(index_key))
                     record_key: str | None = None
                     raw_record: str | bytes | None = None
@@ -1927,7 +1926,7 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return False
                     pipe.watch(record_key)
-                    current = _checkpoint_from_storage(raw, pipe.get(lease_key), checkpoint_key=checkpoint_key)
+                    current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     record = _host_record_from_storage(
                         raw_record,
                         expected_checkpoint_key=checkpoint_key,

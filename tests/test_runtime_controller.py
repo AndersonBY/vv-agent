@@ -72,6 +72,9 @@ def _redis_store() -> RedisCheckpointStore:
         def get(self, key: str) -> str | None:
             return self.client.get(key)
 
+        def mget(self, keys: list[str]) -> list[str | None]:
+            return self.client.mget(keys)
+
         def time(self) -> tuple[int, int]:
             return self.client.time()
 
