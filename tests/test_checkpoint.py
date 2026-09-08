@@ -286,6 +286,28 @@ def _redis_store() -> RedisCheckpointStore:
     return store
 
 
+def test_redis_claim_uses_one_atomic_checkpoint_and_lease_snapshot() -> None:
+    from unittest.mock import patch
+
+    store = _redis_store()
+    checkpoint = _minimal_checkpoint(key="atomic-claim")
+    assert store.create_checkpoint(checkpoint)
+    with patch.object(store._client, "mget", wraps=store._client.mget) as snapshot:
+        with patch.object(_FakeRedisPipeline, "get", side_effect=AssertionError("non-atomic snapshot")):
+            claimed = store.claim_checkpoint(
+                checkpoint.checkpoint_key,
+                1,
+                claim_token="owner",
+                lease_expires_at_ms=200,
+                now_ms=100,
+                claim_mode="continue",
+            )
+        snapshot.assert_called_once_with(list(store._keys(checkpoint.checkpoint_key)))
+    assert claimed is not None
+    assert claimed.claim_token == "owner"
+    assert claimed.lease_expires_at_ms == 200
+
+
 def test_redis_load_uses_one_atomic_checkpoint_and_lease_snapshot() -> None:
     store = _redis_store()
     checkpoint = _minimal_checkpoint(key="atomic-load")
