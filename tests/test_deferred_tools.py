@@ -918,8 +918,32 @@ def test_resolution_producer_matches_contract_receipt_and_event_jcs_goldens(monk
     # Freeze only the event clock; the event and receipt bytes still come from
     # the real store and typed event producers rather than a copied digest.
     monkeypatch.setattr("vv_agent.events.event_created_at", lambda: event_golden["value"]["created_at"])
+    from vv_agent.runtime.state import prepare_deferred_resolution
+
+    current = store.load_checkpoint(handle.checkpoint_key)
+    assert current is not None
+    original = checkpoint_to_dict(current)
+    prepared, resolution = prepare_deferred_resolution(
+        current,
+        None,
+        handle,
+        result,
+        created_at=event_golden["value"]["created_at"],
+    )
+    repeated, repeated_resolution = prepare_deferred_resolution(
+        current,
+        None,
+        handle,
+        result,
+        created_at=event_golden["value"]["created_at"],
+    )
+    assert prepared is not None and repeated is not None
+    assert checkpoint_to_dict(current) == original
+    assert checkpoint_to_dict(prepared) == checkpoint_to_dict(repeated)
+    assert resolution == repeated_resolution
     decision = store.resolve_deferred(handle, result)
 
+    assert decision == resolution
     assert decision.kind == "applied_ready"
     assert decision.receipt is not None
     assert decision.receipt.handle_key == canonical["handle_key"]

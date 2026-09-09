@@ -14,6 +14,7 @@ from dataclasses import replace
 from threading import RLock
 from typing import Any, Literal, cast
 
+import vv_agent.events as run_events
 from vv_agent.checkpoint import CheckpointError, EventCursor, canonical_json_bytes, canonical_json_sha256
 from vv_agent.deferred import DeferredResolutionReceipt, DeferredResolveDecision, DeferredToolHandle
 from vv_agent.runtime.checkpoint_codec import (
@@ -60,10 +61,23 @@ from vv_agent.runtime.state import (
     checkpoint_definition_matches,
     merge_event_outbox,
     prepare_claimed_terminal,
+    prepare_deferred_acceptance,
+    prepare_deferred_admission,
+    prepare_deferred_resolution,
     prepare_event_delivery,
+    prepare_tool_receipt,
     prepare_unclaimed_terminal,
     validate_checkpoint_creation,
     validate_model_journal_accounting,
+)
+from vv_agent.runtime.stores.controller_store import (
+    prepare_controller_command,
+    prepare_host_interaction,
+    prepare_host_response_consumption,
+    prepare_host_response_reap,
+    prepare_notification_claim,
+    prepare_notification_completion,
+    prepare_notification_reconciliation,
 )
 from vv_agent.types import AgentStatus
 
@@ -531,8 +545,6 @@ class RedisCheckpointStore:
         expected_revision: int,
         claimed_cycle: int,
     ) -> bool:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         data_key, lease_key = self._keys(checkpoint.checkpoint_key)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -543,9 +555,8 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return False
                     current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
-                    helper = InMemoryCheckpointStore()
-                    helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
-                    updated = helper.record_tool_receipt(
+                    authoritative = prepare_tool_receipt(
+                        current,
                         checkpoint,
                         operation_id=operation_id,
                         attempt=attempt,
@@ -555,11 +566,11 @@ class RedisCheckpointStore:
                         claim_token=claim_token,
                         expected_revision=expected_revision,
                         claimed_cycle=claimed_cycle,
+                        created_at=run_events.event_created_at(),
                     )
-                    authoritative = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
-                    if not updated or authoritative.revision == current.revision:
+                    if authoritative is None or authoritative is current:
                         pipe.unwatch()
-                        return updated
+                        return authoritative is not None
                     payload, _lease = _checkpoint_to_storage(authoritative)
                     pipe.multi()
                     pipe.set(data_key, payload)
@@ -1111,14 +1122,7 @@ class RedisCheckpointStore:
         expected_revision: int,
         claimed_cycle: int,
     ) -> bool:
-        """Atomically persist one mixed model-tool batch and its barrier.
-
-        The Python helper is only used to prepare a fully validated snapshot;
-        Redis WATCH/MULTI performs the authoritative compare-and-swap.  There
-        is deliberately no bounded outbox or receipt cardinality check here.
-        """
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
+        """Commit the prepared deferred batch and barrier with WATCH/MULTI."""
         data_key, lease_key = self._keys(checkpoint.checkpoint_key)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -1129,18 +1133,18 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return False
                     current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
-                    helper = InMemoryCheckpointStore()
-                    helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
-                    if not helper.admit_deferred_batch(
+                    updated = prepare_deferred_admission(
                         current,
+                        checkpoint,
                         outcomes=outcomes,
                         claim_token=claim_token,
                         expected_revision=expected_revision,
                         claimed_cycle=claimed_cycle,
-                    ):
+                        created_at=run_events.event_created_at(),
+                    )
+                    if updated is None:
                         pipe.unwatch()
                         return False
-                    updated = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
                     payload, _lease = _checkpoint_to_storage(updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
@@ -1156,8 +1160,6 @@ class RedisCheckpointStore:
 
     def resolve_deferred(self, handle: DeferredToolHandle, result: Any) -> DeferredResolveDecision:
         """Resolve one handle with a receipt-first Redis WATCH/MULTI CAS."""
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         data_key, lease_key = self._keys(handle.checkpoint_key)
         receipt_key = self._receipt_key(handle.key)
         receipt_set_key = self._receipt_set_key(handle.checkpoint_key)
@@ -1166,21 +1168,19 @@ class RedisCheckpointStore:
                 try:
                     pipe.watch(data_key, lease_key, receipt_key, receipt_set_key)
                     raw_receipt = pipe.get(receipt_key)
-                    helper = InMemoryCheckpointStore()
-                    if raw_receipt is not None:
-                        receipt = _receipt_from_storage(raw_receipt)
-                        if receipt.handle.key != handle.key or receipt.handle_key != handle.key:
-                            raise ValueError("deferred_receipt_identity_invalid")
-                        helper._deferred_receipts[handle.key] = receipt  # type: ignore[attr-defined]
+                    receipt = _receipt_from_storage(raw_receipt) if raw_receipt is not None else None
                     raw, raw_lease = pipe.mget([data_key, lease_key])
-                    if raw is not None:
-                        current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=handle.checkpoint_key)
-                        helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
-                    decision = helper.resolve_deferred(handle, result)
-                    if decision.kind in {"replayed", "not_admitted", "reconciliation_required"}:
+                    current = (
+                        _checkpoint_from_storage(raw, raw_lease, checkpoint_key=handle.checkpoint_key)
+                        if raw is not None
+                        else None
+                    )
+                    updated, decision = prepare_deferred_resolution(
+                        current, receipt, handle, result, created_at=run_events.event_created_at()
+                    )
+                    if updated is None:
                         pipe.unwatch()
                         return decision
-                    updated = helper._store[handle.checkpoint_key]  # type: ignore[attr-defined]
                     receipt = decision.receipt
                     assert receipt is not None
                     payload, _lease = _checkpoint_to_storage(updated)
@@ -1210,8 +1210,6 @@ class RedisCheckpointStore:
         expected_revision: int,
         claimed_cycle: int,
     ) -> bool:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         data_key, lease_key = self._keys(checkpoint.checkpoint_key)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -1222,21 +1220,21 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return False
                     current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint.checkpoint_key)
-                    helper = InMemoryCheckpointStore()
-                    helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
-                    if not helper.accept_deferred_batch(
+                    updated = prepare_deferred_acceptance(
                         current,
+                        checkpoint,
                         decisions=decisions,
                         claim_token=claim_token,
                         expected_revision=expected_revision,
                         claimed_cycle=claimed_cycle,
-                    ):
+                        created_at=run_events.event_created_at(),
+                    )
+                    if updated is None:
                         pipe.unwatch()
                         return False
-                    updated = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
                     # Exact repeat acceptance is a no-write replay and does
                     # not require another active recovery claim.
-                    if updated.revision == current.revision:
+                    if updated is current:
                         pipe.unwatch()
                         return True
                     payload, _lease = _checkpoint_to_storage(updated)
@@ -1256,8 +1254,6 @@ class RedisCheckpointStore:
         admission_context: HostInteractionAdmissionContext,
     ) -> HostInteractionOutcome:
         """Admit a host request and its UI notification in one Redis CAS."""
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         request_value = request if isinstance(request, HostInteractionRequest) else HostInteractionRequest.from_dict(request)
         admission_context.validate()
         if request_value.logical_cycle != admission_context.claimed_cycle:
@@ -1310,15 +1306,12 @@ class RedisCheckpointStore:
                             checkpoint_revision=checkpoint.revision,
                         )
                     current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
-                    helper = InMemoryCheckpointStore()
-                    helper._store[checkpoint_key] = current  # type: ignore[attr-defined]
-                    outcome = helper.produce_host_interaction(
+                    updated, record, notification, outcome = prepare_host_interaction(
+                        current,
                         request_value,
                         admission_context=admission_context,
+                        created_at=run_events.event_created_at(),
                     )
-                    updated = helper._store[checkpoint_key]  # type: ignore[attr-defined]
-                    record = helper._host_interaction_records[(checkpoint_key, request_value.interaction_id)]  # type: ignore[attr-defined]
-                    notification = helper._host_interaction_notifications[notification_id]  # type: ignore[attr-defined]
                     payload, lease = _checkpoint_to_storage(updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
@@ -1338,8 +1331,6 @@ class RedisCheckpointStore:
 
     def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
         """Admit one closed controller variant under checkpoint CAS."""
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
         checkpoint_key = command_value.handle.checkpoint_key
         data_key, lease_key = self._keys(checkpoint_key)
@@ -1418,8 +1409,7 @@ class RedisCheckpointStore:
                     if record_key is not None:
                         pipe.watch(record_key)
                     lease_now_ms = _redis_server_now_ms(pipe)
-                    helper = InMemoryCheckpointStore()
-                    helper._store[checkpoint_key] = current  # type: ignore[attr-defined]
+                    record = None
                     if record_key is not None:
                         raw_record = pipe.get(record_key)
                         if raw_record is not None:
@@ -1428,13 +1418,14 @@ class RedisCheckpointStore:
                                 expected_checkpoint_key=checkpoint_key,
                                 expected_key=record_key,
                             )
-                            helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
-                    receipt = helper._admit_controller_command(command_value, lease_now_ms=lease_now_ms)  # type: ignore[attr-defined]
-                    updated = helper._store[checkpoint_key]  # type: ignore[attr-defined]
-                    staged = None
-                    if record_key is not None:
-                        records = helper._host_interaction_records  # type: ignore[attr-defined]
-                        staged = next((row for row in records.values() if row["record_id"] == record_id), None)
+                    updated, staged, receipt = prepare_controller_command(
+                        current,
+                        record,
+                        command_value,
+                        now_ms=lease_now_ms,
+                        event_id=run_events.new_event_id(),
+                        created_at=run_events.event_created_at(),
+                    )
                     payload, lease = _checkpoint_to_storage(updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
@@ -1815,8 +1806,6 @@ class RedisCheckpointStore:
         return command
 
     def claim_and_consume_host_interaction_response(self, envelope: Mapping[str, Any]) -> HostInteractionRecoveryResult:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         try:
             envelope_value = (
                 envelope
@@ -1845,19 +1834,16 @@ class RedisCheckpointStore:
                         expected_checkpoint_key=checkpoint_key,
                         expected_key=record_key,
                     )
-                    lease_now_ms = _redis_server_now_ms(pipe) if record["state"] == "resolved_pending" else None
-                    helper = InMemoryCheckpointStore()
-                    helper._store[checkpoint_key] = current  # type: ignore[attr-defined]
-                    helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
-                    result = helper._claim_and_consume_host_interaction_response(  # type: ignore[attr-defined]
+                    updated, updated_record, result = prepare_host_response_consumption(
+                        current,
+                        record,
                         envelope_value,
-                        lease_now_ms=lease_now_ms,
+                        now_ms=_redis_server_now_ms(pipe) if record["state"] == "resolved_pending" else None,
+                        created_at=run_events.event_created_at(),
                     )
-                    updated = helper._store[checkpoint_key]  # type: ignore[attr-defined]
                     if result.kind != "applied":
                         pipe.unwatch()
                         return result
-                    updated_record = helper._host_interaction_records[(checkpoint_key, record["interaction_id"])]  # type: ignore[attr-defined]
                     payload, lease = _checkpoint_to_storage(updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
@@ -1873,8 +1859,6 @@ class RedisCheckpointStore:
         raise RuntimeError("redis host interaction recovery exceeded transaction retry limit")
 
     def reap_host_interaction_record(self, *, record_id: str, checkpoint_key: str, now_ms: int) -> bool:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         if isinstance(now_ms, bool) or not isinstance(now_ms, int) or now_ms < 0:
             raise CheckpointError("now_ms is invalid", code="host_interaction_claim_required")
         data_key, lease_key = self._keys(checkpoint_key)
@@ -1901,19 +1885,20 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return False
                     pipe.watch(record_key)
+                    raw_record = pipe.get(record_key)
+                    if raw_record is None:
+                        pipe.unwatch()
+                        return False
                     current = _checkpoint_from_storage(raw, raw_lease, checkpoint_key=checkpoint_key)
                     record = _host_record_from_storage(
                         raw_record,
                         expected_checkpoint_key=checkpoint_key,
                         expected_key=record_key,
                     )
-                    helper = InMemoryCheckpointStore()
-                    helper._store[checkpoint_key] = current  # type: ignore[attr-defined]
-                    helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
-                    if not helper.reap_host_interaction_record(record_id=record_id, checkpoint_key=checkpoint_key, now_ms=now_ms):
+                    updated_record = prepare_host_response_reap(current, record, checkpoint_key=checkpoint_key, now_ms=now_ms)
+                    if updated_record is None:
                         pipe.unwatch()
                         return False
-                    updated_record = helper._host_interaction_records[(checkpoint_key, record["interaction_id"])]  # type: ignore[attr-defined]
                     pipe.multi()
                     pipe.set(record_key, _host_record_to_storage(updated_record))
                     pipe.execute()
@@ -1931,8 +1916,6 @@ class RedisCheckpointStore:
         lease_expires_at_ms: int,
         now_ms: int,
     ) -> dict[str, Any] | None:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         notification_key = self._host_notification_key(notification_id)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -1943,11 +1926,8 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return None
                     row = _notification_from_storage(raw, expected_key=notification_key)
-                    before = deepcopy(row)
-                    helper = InMemoryCheckpointStore()
-                    helper._host_interaction_notifications[notification_id] = row  # type: ignore[attr-defined]
-                    result = helper.claim_host_interaction_notification(
-                        notification_id=notification_id,
+                    result = prepare_notification_claim(
+                        row,
                         payload_digest=payload_digest,
                         claim_token=claim_token,
                         lease_expires_at_ms=lease_expires_at_ms,
@@ -1956,7 +1936,7 @@ class RedisCheckpointStore:
                     if result is None:
                         pipe.unwatch()
                         return None
-                    if result == before:
+                    if result is row:
                         pipe.unwatch()
                         return result
                     pipe.multi()
@@ -1978,8 +1958,6 @@ class RedisCheckpointStore:
         now_ms: int,
         error: str | None = None,
     ) -> dict[str, Any] | None:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         notification_key = self._host_notification_key(notification_id)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -1990,11 +1968,8 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return None
                     row = _notification_from_storage(raw, expected_key=notification_key)
-                    before = deepcopy(row)
-                    helper = InMemoryCheckpointStore()
-                    helper._host_interaction_notifications[notification_id] = row  # type: ignore[attr-defined]
-                    result = helper.complete_host_interaction_notification(
-                        notification_id=notification_id,
+                    result = prepare_notification_completion(
+                        row,
                         payload_digest=payload_digest,
                         claim_token=claim_token,
                         attempt=attempt,
@@ -2002,7 +1977,7 @@ class RedisCheckpointStore:
                         now_ms=now_ms,
                         error=error,
                     )
-                    if result == before:
+                    if result is row:
                         pipe.unwatch()
                         return result
                     if result is None:
@@ -2025,8 +2000,6 @@ class RedisCheckpointStore:
         now_ms: int,
         abort_reason: str | None = None,
     ) -> dict[str, Any] | None:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         notification_key = self._host_notification_key(notification_id)
         with self._client.pipeline() as pipe:
             for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
@@ -2037,17 +2010,14 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return None
                     row = _notification_from_storage(raw, expected_key=notification_key)
-                    before = deepcopy(row)
-                    helper = InMemoryCheckpointStore()
-                    helper._host_interaction_notifications[notification_id] = row  # type: ignore[attr-defined]
-                    result = helper.reconcile_host_interaction_notification(
-                        notification_id=notification_id,
+                    result = prepare_notification_reconciliation(
+                        row,
                         payload_digest=payload_digest,
                         outcome=outcome,
                         now_ms=now_ms,
                         abort_reason=abort_reason,
                     )
-                    if result == before:
+                    if result is row:
                         pipe.unwatch()
                         return result
                     if result is None:

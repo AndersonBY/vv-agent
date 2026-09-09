@@ -23,7 +23,16 @@ from vv_agent.checkpoint import (
     validate_extension_namespace,
     validate_sha256,
 )
-from vv_agent.deferred import DeferredResolveDecision, DeferredToolHandle
+from vv_agent.deferred import (
+    DeferredCheckpointClaimed,
+    DeferredResolutionConflict,
+    DeferredResolutionReceipt,
+    DeferredResolutionStale,
+    DeferredResolveDecision,
+    DeferredToolHandle,
+    ToolCallOutcome,
+    validate_definitive_result,
+)
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -1918,7 +1927,13 @@ def _merge_resume_observations(
     return [merged[key] for key in sorted(merged)]
 
 
-def _append_cycle_aborted_event(checkpoint: Checkpoint, *, logical_cycle: int, reason: str) -> None:
+def _append_cycle_aborted_event(
+    checkpoint: Checkpoint,
+    *,
+    logical_cycle: int,
+    reason: str,
+    created_at: float | None = None,
+) -> None:
     from vv_agent.events import CycleAbortedEvent
 
     event = CycleAbortedEvent(
@@ -1928,6 +1943,7 @@ def _append_cycle_aborted_event(checkpoint: Checkpoint, *, logical_cycle: int, r
         logical_cycle=logical_cycle,
         reason=reason,
         event_id=f"evt_cycle_aborted_{reason}",
+        created_at=created_at,
     ).to_dict()
     existing = next((entry for entry in checkpoint.event_outbox if entry.event_id == event["event_id"]), None)
     if existing is not None:
@@ -1950,12 +1966,645 @@ def _append_cycle_aborted_event(checkpoint: Checkpoint, *, logical_cycle: int, r
     checkpoint.event_outbox.insert(terminal_index, entry)
 
 
+def prepare_tool_receipt(
+    current: Checkpoint | None,
+    checkpoint: Checkpoint,
+    *,
+    operation_id: str,
+    attempt: int,
+    tool_call_id: str,
+    request_digest: str,
+    result: ToolExecutionResult,
+    claim_token: str,
+    expected_revision: int,
+    claimed_cycle: int,
+    created_at: float,
+) -> Checkpoint | None:
+    from vv_agent.deferred import validate_definitive_result
+
+    validate_definitive_result(result)
+    if result.tool_call_id != tool_call_id:
+        raise CheckpointError(
+            "tool receipt result tool_call_id does not match the journal identity",
+            code="tool_receipt_identity_invalid",
+        )
+    from vv_agent.events import ToolCallCompletedEvent
+    from vv_agent.runtime.checkpoint_codec import clone_checkpoint
+
+    identity_key = compute_tool_identity_key(
+        checkpoint.checkpoint_key,
+        operation_id,
+        attempt,
+        tool_call_id,
+        request_digest,
+    )
+    result_digest = canonical_json_sha256(result.to_dict(), "tool result")
+    existing = (
+        next(
+            (entry for entry in current.tool_journal if entry.identity_key == identity_key),
+            None,
+        )
+        if current is not None
+        else None
+    )
+    if existing is not None:
+        if existing.result_digest == result_digest:
+            return current
+        raise CheckpointError(
+            "tool receipt conflicts with the retained identity",
+            code="tool_receipt_conflict",
+        )
+    if current is None:
+        return None
+    if current.claim_token is None or not claim_token:
+        raise CheckpointError(
+            "tool receipt requires an active claim",
+            code="checkpoint_claim_required",
+        )
+    if current.claim_token != claim_token or current.claimed_cycle != claimed_cycle:
+        raise CheckpointError(
+            "tool receipt claim does not match the checkpoint claim",
+            code="checkpoint_claim_conflict",
+        )
+    if current.revision != expected_revision or checkpoint.revision != expected_revision:
+        raise CheckpointError(
+            "tool receipt revision does not match the checkpoint revision",
+            code="checkpoint_revision_conflict",
+        )
+    if (
+        current.status is not AgentStatus.RUNNING
+        or current.terminal_result is not None
+        or not checkpoint_definition_matches(current, checkpoint)
+    ):
+        return None
+    entry = next(
+        (
+            item
+            for item in current.tool_journal
+            if item.operation_id == operation_id
+            and item.attempt == attempt
+            and item.tool_call_id == tool_call_id
+            and item.request_digest == request_digest
+            and item.cycle_index == claimed_cycle
+        ),
+        None,
+    )
+    if entry is None or entry.state not in {OperationState.STARTED, OperationState.AMBIGUOUS}:
+        return None
+    execution_started = entry.state in {OperationState.STARTED, OperationState.AMBIGUOUS}
+    snapshot = clone_checkpoint(current)
+    target = next(
+        item
+        for item in snapshot.tool_journal
+        if item.cycle_index == entry.cycle_index
+        and item.operation_id == entry.operation_id
+        and item.attempt == entry.attempt
+        and item.tool_call_id == entry.tool_call_id
+        and item.request_digest == entry.request_digest
+    )
+    target.identity_key = identity_key
+    target.result_digest = result_digest
+    source = next(
+        (
+            item
+            for item in checkpoint.tool_journal
+            if item.operation_id == entry.operation_id
+            and item.attempt == entry.attempt
+            and item.tool_call_id == entry.tool_call_id
+            and item.request_digest == entry.request_digest
+            and item.cycle_index == entry.cycle_index
+        ),
+        None,
+    )
+    if result.error_code == "tool_outcome_unknown":
+        observation = (
+            ResumeObservation(
+                operation_id=entry.operation_id,
+                operation_kind=entry.kind,
+                cycle_index=entry.cycle_index,
+                risk="unknown_tool_side_effect",
+                idempotency_support=entry.idempotency_support,
+            )
+            if source is not None
+            and source.kind is entry.kind
+            and source.state is OperationState.AMBIGUOUS
+            and source.resume_observation is not None
+            else None
+        )
+        if observation is None or source is None or source.resume_observation != observation:
+            raise CheckpointError(
+                "tool outcome observation does not match the authoritative operation",
+                code="checkpoint_journal_integrity_mismatch",
+            )
+        target.resume_observation = observation
+    else:
+        target.resume_observation = None
+    target.deferred_handle = None
+    if result.status_code.value == "SUCCESS":
+        target.state = OperationState.SUCCEEDED
+        target.result = result.to_dict()
+        target.error = None
+    else:
+        target.state = OperationState.FAILED
+        target.result = result.to_dict()
+        target.error = operation_error_from_tool_result(result)
+    event = ToolCallCompletedEvent(
+        run_id=snapshot.root_run_id,
+        trace_id=snapshot.trace_id,
+        cycle_index=target.cycle_index,
+        tool_call_id=target.tool_call_id or tool_call_id,
+        tool_name=target.tool_name or "tool",
+        operation_id=target.operation_id,
+        attempt=target.attempt,
+        status=result.status_code.value.lower(),
+        directive=result.directive.value,
+        error_code=result.error_code,
+        execution_started=execution_started,
+        duration_ms=None,
+        checkpoint_key=snapshot.checkpoint_key,
+        event_id=f"evt_receipt_{identity_key}",
+        created_at=created_at,
+    ).to_dict()
+    snapshot.event_outbox = merge_event_outbox(
+        snapshot.event_outbox,
+        [EventOutboxEntry.pending(event["event_id"], event)],
+    )
+    snapshot.revision = expected_revision + 1
+    validate_checkpoint(snapshot)
+    return snapshot
+
+
+def prepare_deferred_admission(
+    current: Checkpoint | None,
+    checkpoint: Checkpoint,
+    *,
+    outcomes: list[Any],
+    claim_token: str,
+    expected_revision: int,
+    claimed_cycle: int,
+    created_at: float,
+) -> Checkpoint | None:
+    """Atomically admit one ordered model-tool batch.
+
+    The store owns the only claim release for a deferred batch.  All
+    journal and lifecycle outbox mutations are prepared on a clone and
+    validated before replacing the authoritative record.
+    """
+    from vv_agent.events import ToolCallDeferredEvent
+    from vv_agent.runtime.checkpoint_codec import clone_checkpoint
+
+    if (
+        current is None
+        or current.revision != expected_revision
+        or current.claim_token != claim_token
+        or current.claimed_cycle != claimed_cycle
+        or checkpoint.revision != expected_revision
+    ):
+        return None
+    normalized = _normalize_batch_outcomes(outcomes)
+    if not normalized:
+        return None
+    if any(outcome.kind == "completed" for _call_id, outcome in normalized):
+        raise CheckpointError(
+            "deferred admission accepts deferred outcomes only",
+            code="deferred_admission_completed_outcome_invalid",
+        )
+    snapshot = clone_checkpoint(current)
+    covered: set[tuple[str, int, str | None, str, int]] = set()
+    for call_id, outcome in normalized:
+        handle = outcome.handle
+        assert handle is not None
+        entry = next(
+            (
+                item
+                for item in snapshot.tool_journal
+                if item.cycle_index == claimed_cycle
+                and item.operation_id == handle.operation_id
+                and item.attempt == handle.attempt
+                and item.request_digest == handle.request_digest
+            ),
+            None,
+        )
+        if entry is None or entry.cycle_index != claimed_cycle or entry.state is not OperationState.STARTED:
+            return None
+        identity = (
+            entry.operation_id,
+            entry.attempt,
+            entry.tool_call_id,
+            entry.request_digest,
+            entry.cycle_index,
+        )
+        if identity in covered:
+            return None
+        covered.add(identity)
+        if handle.checkpoint_key != snapshot.checkpoint_key:
+            return None
+        entry.state = OperationState.DEFERRED
+        entry.deferred_handle = handle
+        entry.result = None
+        entry.error = None
+        event = ToolCallDeferredEvent(
+            run_id=snapshot.root_run_id,
+            trace_id=snapshot.trace_id,
+            cycle_index=entry.cycle_index,
+            tool_call_id=entry.tool_call_id or call_id,
+            tool_name=entry.tool_name or "tool",
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            handle=handle,
+            execution_started=True,
+            duration_ms=None,
+            checkpoint_key=snapshot.checkpoint_key,
+            operation_kind="tool",
+            event_id=_stable_deferred_event_id(entry, "deferred"),
+            created_at=created_at,
+        ).to_dict()
+        snapshot.event_outbox = merge_event_outbox(snapshot.event_outbox, [EventOutboxEntry.pending(event["event_id"], event)])
+    # Admission is the all-or-none boundary for the complete started
+    # model-tool batch.  A missing started slot would otherwise leave
+    # an unclassified external operation behind a released claim.
+    if any(
+        entry.cycle_index == claimed_cycle
+        and entry.state is OperationState.STARTED
+        and (
+            entry.operation_id,
+            entry.attempt,
+            entry.tool_call_id,
+            entry.request_digest,
+            entry.cycle_index,
+        )
+        not in covered
+        for entry in [*snapshot.model_call_journal, *snapshot.tool_journal]
+    ):
+        raise CheckpointError(
+            "deferred batch must cover every started tool in the claimed cycle",
+            code="deferred_batch_incomplete",
+        )
+    snapshot.status = AgentStatus.DEFERRED
+    snapshot.claim_token = None
+    snapshot.claimed_cycle = None
+    snapshot.lease_expires_at_ms = None
+    snapshot.revision = expected_revision + 1
+    try:
+        validate_checkpoint(snapshot)
+    except Exception:
+        return None
+    return snapshot
+
+
+def prepare_deferred_resolution(
+    checkpoint: Checkpoint | None,
+    existing: DeferredResolutionReceipt | None,
+    handle: DeferredToolHandle,
+    result: ToolExecutionResult,
+    *,
+    created_at: float,
+) -> tuple[Checkpoint | None, DeferredResolveDecision]:
+    from vv_agent.events import ToolCallCompletedEvent
+    from vv_agent.runtime.checkpoint_codec import clone_checkpoint
+
+    validate_definitive_result(result)
+    if existing is not None:
+        if existing.handle.key != handle.key or existing.handle_key != handle.key:
+            raise ValueError("deferred_receipt_identity_invalid")
+        if existing.result.to_dict() != result.to_dict():
+            raise DeferredResolutionConflict()
+        return None, DeferredResolveDecision.Replayed(existing)
+    if checkpoint is None:
+        raise DeferredResolutionStale()
+    entry = next(
+        (
+            item
+            for item in checkpoint.tool_journal
+            if item.operation_id == handle.operation_id
+            and item.attempt == handle.attempt
+            and item.request_digest == handle.request_digest
+        ),
+        None,
+    )
+    if entry is None:
+        raise DeferredResolutionStale()
+    if entry.state is OperationState.STARTED:
+        return None, DeferredResolveDecision.NotAdmitted()
+    if entry.state is OperationState.AMBIGUOUS:
+        return None, DeferredResolveDecision.ReconciliationRequired()
+    if entry.state is not OperationState.DEFERRED or entry.deferred_handle != handle:
+        raise DeferredResolutionStale()
+    if checkpoint.claim_token is not None:
+        raise DeferredCheckpointClaimed()
+    if result.tool_call_id != entry.tool_call_id:
+        raise DeferredResolutionStale("deferred result tool_call_id does not match handle")
+    snapshot = clone_checkpoint(checkpoint)
+    target = next(
+        item
+        for item in snapshot.tool_journal
+        if item.cycle_index == entry.cycle_index
+        and item.operation_id == entry.operation_id
+        and item.attempt == entry.attempt
+        and item.tool_call_id == entry.tool_call_id
+        and item.request_digest == entry.request_digest
+    )
+    from vv_agent.checkpoint import canonical_json_sha256
+
+    identity_key = compute_tool_identity_key(
+        snapshot.checkpoint_key,
+        target.operation_id,
+        target.attempt,
+        target.tool_call_id or result.tool_call_id,
+        target.request_digest,
+    )
+    target.identity_key = identity_key
+    target.result_digest = canonical_json_sha256(result.to_dict(), "deferred result")
+
+    if result.status_code.value == "SUCCESS":
+        target.state = OperationState.SUCCEEDED
+        target.deferred_handle = None
+        target.result = result.to_dict()
+        target.error = None
+        receipt_status = "succeeded"
+    else:
+        target.state = OperationState.FAILED
+        target.deferred_handle = None
+        target.result = result.to_dict()
+        target.error = operation_error_from_tool_result(result)
+        receipt_status = "failed"
+    event = ToolCallCompletedEvent(
+        run_id=snapshot.root_run_id,
+        trace_id=snapshot.trace_id,
+        cycle_index=target.cycle_index,
+        tool_call_id=target.tool_call_id or result.tool_call_id,
+        tool_name=target.tool_name or "tool",
+        operation_id=target.operation_id,
+        attempt=target.attempt,
+        status=result.status_code.value.lower(),
+        directive=result.directive.value,
+        error_code=result.error_code,
+        execution_started=True,
+        duration_ms=None,
+        event_id=f"evt_receipt_{identity_key}",
+        created_at=created_at,
+    ).to_dict()
+    snapshot.event_outbox = merge_event_outbox(snapshot.event_outbox, [EventOutboxEntry.pending(event["event_id"], event)])
+    remaining = [item for item in snapshot.tool_journal if item.state is OperationState.DEFERRED]
+    snapshot.status = AgentStatus.DEFERRED if remaining else AgentStatus.RUNNING
+    snapshot.revision = checkpoint.revision + 1
+    receipt = DeferredResolutionReceipt(
+        handle=handle,
+        result=result,
+        result_digest=canonical_json_sha256(result.to_dict(), "deferred result"),
+        event_id=event["event_id"],
+        event_payload_digest=compute_event_payload_digest(event),
+        receipt_status=receipt_status,
+    )
+    validate_checkpoint(snapshot)
+    return snapshot, (
+        DeferredResolveDecision.AppliedReady(receipt) if not remaining else DeferredResolveDecision.AppliedWaiting(receipt)
+    )
+
+
+def prepare_deferred_acceptance(
+    current: Checkpoint | None,
+    checkpoint: Checkpoint,
+    *,
+    decisions: list[Any],
+    claim_token: str,
+    expected_revision: int,
+    claimed_cycle: int,
+    created_at: float,
+) -> Checkpoint | None:
+    from vv_agent.deferred import AcceptDeferredDecision
+    from vv_agent.events import RUN_EVENT_VERSION, ToolCallDeferredEvent
+    from vv_agent.runtime.checkpoint_codec import clone_checkpoint
+
+    if current is None:
+        return None
+    parsed = [d if isinstance(d, AcceptDeferredDecision) else AcceptDeferredDecision.from_dict(d) for d in decisions]
+    if not parsed:
+        return None
+
+    # This is a batch boundary, not a per-operation convenience
+    # method.  Reject duplicate handles and any decision set which
+    # does not cover the complete current-cycle ambiguity.  The
+    # controller performs the same aggregation before calling the
+    # store, but keeping the invariant here is essential for direct
+    # SQLite/Redis callers and for the all-or-none CAS contract.
+    decision_keys = [(item.handle.operation_id, item.handle.attempt, item.handle.request_digest) for item in parsed]
+    if len(decision_keys) != len(set(decision_keys)):
+        return None
+
+    # A repeated acceptance is an idempotent replay of the durable
+    # reconciliation/deferred identities.  It must not require a new
+    # claim or revision.  A mixed replay/new batch still needs the
+    # active recovery claim and is validated all-or-none below.
+    snapshot = clone_checkpoint(current)
+    if current.claimed_cycle is not None:
+        current_cycle = current.claimed_cycle
+    else:
+        # Admission leaves the checkpoint's committed cycle index at
+        # the prior completed cycle while the deferred barrier owns
+        # the just-executed cycle.  Replayed acceptance has no claim
+        # from which to recover that cycle, so derive it only from
+        # the exact deferred handles supplied by the caller.
+        decision_keys_set = set(decision_keys)
+        decision_cycles = {
+            item.cycle_index
+            for item in snapshot.tool_journal
+            if item.state is OperationState.DEFERRED
+            and (item.operation_id, item.attempt, item.request_digest) in decision_keys_set
+        }
+        deferred_cycles = {item.cycle_index for item in snapshot.tool_journal if item.state is OperationState.DEFERRED}
+        if len(decision_cycles) == 1:
+            current_cycle = next(iter(decision_cycles))
+        elif snapshot.status is AgentStatus.DEFERRED and len(deferred_cycles) == 1:
+            current_cycle = next(iter(deferred_cycles))
+        else:
+            current_cycle = snapshot.cycle_index
+    all_cycle_entries = [
+        item for item in [*snapshot.model_call_journal, *snapshot.tool_journal] if item.cycle_index == current_cycle
+    ]
+    replay_entries = [
+        item for item in snapshot.tool_journal if item.cycle_index == current_cycle and item.state is OperationState.DEFERRED
+    ]
+    replayed = (
+        bool(replay_entries)
+        and len(parsed) == len(replay_entries)
+        and all(item.kind.value == "tool" for item in replay_entries)
+        and not any(
+            item.state in {OperationState.AMBIGUOUS, OperationState.STARTED, OperationState.PLANNED} for item in all_cycle_entries
+        )
+    )
+    for decision in parsed:
+        entry = next(
+            (
+                item
+                for item in snapshot.tool_journal
+                if item.cycle_index == current_cycle
+                and item.operation_id == decision.handle.operation_id
+                and item.attempt == decision.handle.attempt
+                and item.request_digest == decision.handle.request_digest
+            ),
+            None,
+        )
+        if entry is None or entry.state is not OperationState.DEFERRED or entry.deferred_handle != decision.handle:
+            replayed = False
+            break
+    if replayed:
+        return current
+    if (
+        current.revision != expected_revision
+        or checkpoint.revision != expected_revision
+        or not checkpoint_definition_matches(current, checkpoint)
+    ):
+        return None
+    if current.resume_attempt <= 1 or current.claim_token != claim_token or current.claimed_cycle != claimed_cycle:
+        return None
+
+    batch_entries = [item for item in [*snapshot.model_call_journal, *snapshot.tool_journal] if item.cycle_index == current_cycle]
+    # The store, not only the recovery controller, owns the complete
+    # batch invariant. Any model entry, STARTED entry, or omitted
+    # current-cycle operation makes partial acceptance unsafe.
+    if not batch_entries or any(item.state in {OperationState.STARTED, OperationState.PLANNED} for item in batch_entries):
+        return None
+    ambiguous_entries = [item for item in batch_entries if item.state is OperationState.AMBIGUOUS]
+    if not ambiguous_entries or any(item.kind.value != "tool" for item in ambiguous_entries):
+        return None
+    # A recovery acceptance may include already-adopted entries when
+    # a caller retries after a partial transport failure, but every
+    # current-cycle entry must be represented exactly once and the
+    # batch must contain tools only.  Any omission or extra handle
+    # therefore leaves the checkpoint untouched.
+    current_entries = list(ambiguous_entries)
+    if not ambiguous_entries or len(parsed) != len(current_entries):
+        return None
+    current_keys = {(item.operation_id, item.attempt, item.request_digest) for item in current_entries}
+    if set(decision_keys) != current_keys:
+        return None
+    # Provider response order is not the model-call order.  Apply
+    # accepted entries in journal order so event/outbox ordering is
+    # deterministic and independent of reconciliation delivery order.
+    decisions_by_key = dict(zip(decision_keys, parsed, strict=True))
+    ordered_decisions = [decisions_by_key[(item.operation_id, item.attempt, item.request_digest)] for item in current_entries]
+    for decision in ordered_decisions:
+        entry = next(
+            (
+                item
+                for item in snapshot.tool_journal
+                if item.cycle_index == current_cycle
+                and item.operation_id == decision.handle.operation_id
+                and item.attempt == decision.handle.attempt
+                and item.request_digest == decision.handle.request_digest
+            ),
+            None,
+        )
+        if entry is None:
+            return None
+        if entry.state is OperationState.DEFERRED and entry.deferred_handle == decision.handle:
+            # Already accepted item in a mixed retry; preserve its
+            # existing audit and deferred event identity.
+            continue
+        if (
+            entry.kind.value != "tool"
+            or entry.state is not OperationState.AMBIGUOUS
+            or decision.handle.checkpoint_key != snapshot.checkpoint_key
+            or decision.handle.operation_id != entry.operation_id
+            or decision.handle.attempt != entry.attempt
+            or decision.handle.request_digest != entry.request_digest
+        ):
+            return None
+        entry.state = OperationState.DEFERRED
+        entry.deferred_handle = decision.handle
+        entry.result = None
+        entry.error = None
+        entry.resume_observation = None
+        audit = {
+            "version": RUN_EVENT_VERSION,
+            "type": "reconciliation_resolved",
+            "event_id": _stable_deferred_event_id(entry, "reconciliation"),
+            "run_id": snapshot.root_run_id,
+            "trace_id": snapshot.trace_id,
+            "created_at": 0.0,
+            "cycle_index": entry.cycle_index,
+            "checkpoint_key": snapshot.checkpoint_key,
+            "operation_id": entry.operation_id,
+            "operation_kind": "tool",
+            "decision": "accept_deferred",
+            "claim_mode": "recovery",
+        }
+        snapshot.event_outbox = merge_event_outbox(snapshot.event_outbox, [EventOutboxEntry.pending(audit["event_id"], audit)])
+        deferred = ToolCallDeferredEvent(
+            run_id=snapshot.root_run_id,
+            trace_id=snapshot.trace_id,
+            cycle_index=entry.cycle_index,
+            tool_call_id=entry.tool_call_id or "tool_call",
+            tool_name=entry.tool_name or "tool",
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            handle=decision.handle,
+            execution_started=True,
+            duration_ms=None,
+            checkpoint_key=snapshot.checkpoint_key,
+            operation_kind="tool",
+            event_id=_stable_deferred_event_id(entry, "deferred"),
+            created_at=created_at,
+        ).to_dict()
+        snapshot.event_outbox = merge_event_outbox(
+            snapshot.event_outbox, [EventOutboxEntry.pending(deferred["event_id"], deferred)]
+        )
+    snapshot.status = AgentStatus.DEFERRED
+    snapshot.claim_token = None
+    snapshot.claimed_cycle = None
+    snapshot.lease_expires_at_ms = None
+    snapshot.revision = expected_revision + 1
+    validate_checkpoint(snapshot)
+    return snapshot
+
+
+def _normalize_batch_outcomes(outcomes: list[Any]) -> list[tuple[str, ToolCallOutcome]]:
+    normalized: list[tuple[str, ToolCallOutcome]] = []
+    for item in outcomes:
+        call_id: str | None = None
+        outcome: Any = item
+        if isinstance(item, tuple) and len(item) == 2:
+            call_id, outcome = item
+            # The runner keeps the original ToolCall beside its outcome so
+            # admission can verify the exact invocation.  Store APIs also
+            # accept a plain call-id for recovery/tests; normalize both
+            # shapes without stringifying a ToolCall's repr.
+            if not isinstance(call_id, str):
+                call_id = getattr(call_id, "id", None)
+            if call_id is not None:
+                call_id = str(call_id)
+        if isinstance(outcome, ToolExecutionResult):
+            call_id = call_id or outcome.tool_call_id
+            outcome = ToolCallOutcome.Completed(outcome)
+        if not isinstance(outcome, ToolCallOutcome):
+            raise ValueError("deferred batch outcomes must be ToolCallOutcome values")
+        if outcome.kind == "completed":
+            result = outcome.result
+            if not isinstance(result, ToolExecutionResult):
+                raise ValueError("deferred batch completed outcome has no tool result")
+            call_id = call_id or result.tool_call_id
+        else:
+            call_id = call_id or (outcome.handle.operation_id if outcome.handle else "")
+        if not call_id:
+            raise ValueError("deferred batch outcome is missing tool call identity")
+        normalized.append((call_id, outcome))
+    return normalized
+
+
+def _stable_deferred_event_id(entry: Any, suffix: str) -> str:
+    # Reconciliation and admission replays retain the model tool-call identity.
+    call_id = entry.tool_call_id or entry.operation_id
+    return f"evt_deferred_{call_id}_{suffix}"
+
+
 def prepare_claimed_terminal(
     current: Checkpoint,
     checkpoint: Checkpoint,
     *,
     claim_token: str,
     expected_revision: int,
+    created_at: float | None = None,
 ) -> Checkpoint | None:
     if (
         current.revision != expected_revision
@@ -1986,7 +2635,7 @@ def prepare_claimed_terminal(
             for entry in [*checkpoint.model_call_journal, *checkpoint.tool_journal]
         )
         if terminal_result.resume_observations or has_unclosed_cycle:
-            _append_cycle_aborted_event(checkpoint, logical_cycle=logical_cycle, reason=reason)
+            _append_cycle_aborted_event(checkpoint, logical_cycle=logical_cycle, reason=reason, created_at=created_at)
     checkpoint.terminal_result = terminal_result
     preserve_model_journal = reason is not None
     preserve_journals = bool(reason is not None and observations)
@@ -2017,7 +2666,7 @@ def prepare_claimed_terminal(
     return terminal
 
 
-def prepare_unclaimed_terminal(checkpoint: Checkpoint) -> Checkpoint:
+def prepare_unclaimed_terminal(checkpoint: Checkpoint, *, created_at: float | None = None) -> Checkpoint:
     if checkpoint.terminal_result is None or checkpoint.claim_token is not None:
         raise ValueError("unclaimed terminal preparation requires a terminal result and no claim")
     terminal = deepcopy(checkpoint)
@@ -2035,7 +2684,7 @@ def prepare_unclaimed_terminal(checkpoint: Checkpoint) -> Checkpoint:
             for entry in [*terminal.model_call_journal, *terminal.tool_journal]
         )
         if result.resume_observations or has_unclosed_cycle:
-            _append_cycle_aborted_event(terminal, logical_cycle=logical_cycle, reason=reason)
+            _append_cycle_aborted_event(terminal, logical_cycle=logical_cycle, reason=reason, created_at=created_at)
     terminal.model_call_journal = (
         [
             entry

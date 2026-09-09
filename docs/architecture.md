@@ -168,6 +168,17 @@ Checkpoint stores live under `runtime/stores/` and support SQLite and Redis.
 Backends must preserve the same `AgentResult` and checkpoint payload shape as
 inline execution.
 
+Ordinary tool receipts and deferred admission, resolution, and recovery
+acceptance share snapshot transitions in `runtime/state.py`. Each transition
+receives the event timestamp explicitly and leaves its input snapshots intact.
+Memory locking, SQLite transactions, and Redis WATCH/MULTI own persistence;
+receipt replays retain the stored event bytes without a write.
+Controller admission, host-request/response snapshots, notification delivery,
+and response-claim recovery share transformations in `stores/controller_store.py`.
+Event identities and timestamps enter those transformations as explicit values.
+Durable stores apply those values inside their native transactions; the memory
+store owns its locked index updates.
+
 Optional run budgets are evaluated at stable runtime boundaries shared by all
 backends. Inline and thread runs keep one evaluator for the active run.
 Distributed limits travel in each envelope, while cumulative usage is stored

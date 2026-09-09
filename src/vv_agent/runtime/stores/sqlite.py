@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from copy import deepcopy
@@ -10,6 +11,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal, cast
 
+import vv_agent.events as run_events
 from vv_agent.checkpoint import CheckpointError, EventCursor, canonical_json_sha256
 from vv_agent.deferred import DeferredResolutionReceipt, DeferredResolveDecision, DeferredToolHandle
 from vv_agent.events import HostInteractionRequestedEvent
@@ -60,12 +62,17 @@ from vv_agent.runtime.state import (
     check_claim,
     merge_event_outbox,
     prepare_claimed_terminal,
+    prepare_deferred_acceptance,
+    prepare_deferred_admission,
+    prepare_deferred_resolution,
     prepare_event_delivery,
+    prepare_tool_receipt,
     prepare_unclaimed_terminal,
     validate_checkpoint,
     validate_checkpoint_creation,
     validate_model_journal_accounting,
 )
+from vv_agent.runtime.stores.controller_store import prepare_controller_command, prepare_host_response_consumption
 from vv_agent.types import AgentStatus
 
 
@@ -607,8 +614,6 @@ class SqliteCheckpointStore:
         expected_revision: int,
         claimed_cycle: int,
     ) -> bool:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -620,9 +625,8 @@ class SqliteCheckpointStore:
                     self._conn.rollback()
                     return False
                 current = _checkpoint_from_row(row)
-                helper = InMemoryCheckpointStore()
-                helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
-                updated = helper.record_tool_receipt(
+                authoritative = prepare_tool_receipt(
+                    current,
                     checkpoint,
                     operation_id=operation_id,
                     attempt=attempt,
@@ -632,11 +636,11 @@ class SqliteCheckpointStore:
                     claim_token=claim_token,
                     expected_revision=expected_revision,
                     claimed_cycle=claimed_cycle,
+                    created_at=run_events.event_created_at(),
                 )
-                authoritative = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
-                if not updated or authoritative.revision == current.revision:
+                if authoritative is None or authoritative is current:
                     self._conn.rollback()
-                    return updated
+                    return authoritative is not None
                 self._write_checkpoint_tx(authoritative, expected_revision=expected_revision, claim_token=claim_token)
                 self._conn.commit()
                 return True
@@ -1299,8 +1303,6 @@ class SqliteCheckpointStore:
         return receipt
 
     def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -1328,8 +1330,6 @@ class SqliteCheckpointStore:
                 if row is None:
                     raise CheckpointError("controller command checkpoint was not found", code="controller_command_stale")
                 current = _checkpoint_from_row(row)
-                helper = InMemoryCheckpointStore()
-                helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
                 active = current.active_host_interaction
                 if command_value.kind in {"resume", "host_interaction_response"} and isinstance(current.suspended_origin, dict):
                     active = current.suspended_origin.get("active_host_interaction")
@@ -1344,19 +1344,14 @@ class SqliteCheckpointStore:
                     ).fetchone()
                     if record_row is not None:
                         record = self._host_record_from_row(record_row)
-                        helper._host_interaction_records[(current.checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
-                receipt = helper.admit_controller_command(command_value)
-                snapshot = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
-                staged = None
-                if record is not None:
-                    staged = next(
-                        (
-                            item
-                            for item in helper._host_interaction_records.values()  # type: ignore[attr-defined]
-                            if item["record_id"] == record["record_id"]
-                        ),
-                        None,
-                    )
+                snapshot, staged, receipt = prepare_controller_command(
+                    current,
+                    record,
+                    command_value,
+                    now_ms=time.time_ns() // 1_000_000,
+                    event_id=run_events.new_event_id(),
+                    created_at=run_events.event_created_at(),
+                )
                 if not self._update_checkpoint_row(snapshot, expected_revision=current.revision):
                     raise CheckpointError("controller command checkpoint CAS lost", code="controller_command_stale")
                 if staged is not None:
@@ -1763,17 +1758,16 @@ class SqliteCheckpointStore:
                 record = self._host_record_from_row(record_row)
                 if record["checkpoint_key"] != checkpoint_key:
                     raise CheckpointError("host interaction recovery binding is stale", code="host_interaction_recovery_stale")
-                from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
-                helper = InMemoryCheckpointStore()
-                helper._store[checkpoint_key] = checkpoint  # type: ignore[attr-defined]
-                helper._host_interaction_records[(checkpoint_key, record["interaction_id"])] = record  # type: ignore[attr-defined]
-                result = helper.claim_and_consume_host_interaction_response(envelope_value.to_dict())
+                snapshot, staged_record, result = prepare_host_response_consumption(
+                    checkpoint,
+                    record,
+                    envelope_value,
+                    now_ms=time.time_ns() // 1_000_000,
+                    created_at=run_events.event_created_at(),
+                )
                 if result.kind != "applied":
                     self._conn.commit()
                     return result
-                snapshot = helper._store[checkpoint_key]  # type: ignore[attr-defined]
-                staged_record = helper._host_interaction_records[(checkpoint_key, record["interaction_id"])]  # type: ignore[attr-defined]
                 if not self._update_checkpoint_row(snapshot, expected_revision=checkpoint.revision):
                     raise CheckpointError("host interaction recovery CAS lost", code="host_interaction_recovery_stale")
                 self._conn.execute(
@@ -2017,8 +2011,6 @@ class SqliteCheckpointStore:
         expected_revision: int,
         claimed_cycle: int,
     ) -> bool:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -2029,18 +2021,18 @@ class SqliteCheckpointStore:
                     self._conn.rollback()
                     return False
                 current = _checkpoint_from_row(row)
-                helper = InMemoryCheckpointStore()
-                helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
-                if not helper.admit_deferred_batch(
+                updated = prepare_deferred_admission(
                     current,
+                    checkpoint,
                     outcomes=outcomes,
                     claim_token=claim_token,
                     expected_revision=expected_revision,
                     claimed_cycle=claimed_cycle,
-                ):
+                    created_at=run_events.event_created_at(),
+                )
+                if updated is None:
                     self._conn.rollback()
                     return False
-                updated = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
                 self._write_checkpoint_tx(updated, expected_revision=expected_revision, claim_token=claim_token)
                 self._conn.commit()
                 return True
@@ -2049,8 +2041,6 @@ class SqliteCheckpointStore:
                 raise
 
     def resolve_deferred(self, handle: DeferredToolHandle, result: Any) -> DeferredResolveDecision:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -2060,23 +2050,17 @@ class SqliteCheckpointStore:
                     "FROM deferred_resolution_receipts WHERE handle_key = ?",
                     (handle.key,),
                 ).fetchone()
-                helper = InMemoryCheckpointStore()
-                if receipt_row is not None:
-                    receipt = _receipt_from_row(receipt_row)
-                    helper._deferred_receipts[handle.key] = receipt  # type: ignore[attr-defined]
+                receipt = _receipt_from_row(receipt_row) if receipt_row is not None else None
                 row = self._conn.execute(_SELECT_CHECKPOINT + " WHERE checkpoint_key = ?", (handle.checkpoint_key,)).fetchone()
-                if row is not None:
-                    current = _checkpoint_from_row(row)
-                    helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
-                decision = helper.resolve_deferred(handle, result)
-                if decision.kind == "replayed" or decision.kind in {"not_admitted", "reconciliation_required"}:
+                current = _checkpoint_from_row(row) if row is not None else None
+                updated, decision = prepare_deferred_resolution(
+                    current, receipt, handle, result, created_at=run_events.event_created_at()
+                )
+                if updated is None:
                     self._conn.rollback()
                     return decision
-                if row is None:
-                    self._conn.rollback()
-                    return decision
-                updated = helper._store[handle.checkpoint_key]  # type: ignore[attr-defined]
-                current_revision = current.revision  # type: ignore[union-attr]
+                assert current is not None
+                current_revision = current.revision
                 self._write_checkpoint_tx(updated, expected_revision=current_revision, claim_token=None)
                 receipt = decision.receipt
                 assert receipt is not None
@@ -2111,8 +2095,6 @@ class SqliteCheckpointStore:
         expected_revision: int,
         claimed_cycle: int,
     ) -> bool:
-        from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
-
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -2123,19 +2105,19 @@ class SqliteCheckpointStore:
                     self._conn.rollback()
                     return False
                 current = _checkpoint_from_row(row)
-                helper = InMemoryCheckpointStore()
-                helper._store[current.checkpoint_key] = current  # type: ignore[attr-defined]
-                if not helper.accept_deferred_batch(
+                updated = prepare_deferred_acceptance(
                     current,
+                    checkpoint,
                     decisions=decisions,
                     claim_token=claim_token,
                     expected_revision=expected_revision,
                     claimed_cycle=claimed_cycle,
-                ):
+                    created_at=run_events.event_created_at(),
+                )
+                if updated is None:
                     self._conn.rollback()
                     return False
-                updated = helper._store[current.checkpoint_key]  # type: ignore[attr-defined]
-                if updated.revision == current.revision:
+                if updated is current:
                     # Exact repeated accept_deferred decisions are already
                     # durable replays; no checkpoint write or revision bump.
                     self._conn.rollback()

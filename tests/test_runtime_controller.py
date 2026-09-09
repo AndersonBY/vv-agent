@@ -1076,7 +1076,7 @@ def test_host_response_recovery_preserves_content_and_is_replayable(store: Any) 
     assert store.load_checkpoint("response-recovery").revision == revision
 
 
-def test_host_record_reaper_requires_the_checkpoint_execution_owner(store: Any) -> None:
+def test_host_record_reaper_requires_the_checkpoint_execution_owner(store: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     checkpoint, request, outcome = _admit_host(store, "record-reaper-fence")
     command = _host_response_command(store, request, key=checkpoint.checkpoint_key, command_id="record-reaper-command")
     assert store.resolve_controller_command(command).kind == "applied"
@@ -1161,6 +1161,33 @@ def test_host_record_reaper_requires_the_checkpoint_execution_owner(store: Any) 
         stored_record["claim_token"] = claim.claim_token
         store._client.set(record_key, _host_record_to_storage(stored_record))  # type: ignore[attr-defined]
     assert store.reap_host_interaction_record(record_id=outcome.record_id, checkpoint_key=checkpoint.checkpoint_key, now_ms=11)
+
+    if isinstance(store, RedisCheckpointStore):
+        store._client.set(record_key, _host_record_to_storage(stored_record))
+        concurrent = deepcopy(stored_record)
+        concurrent.update(state="resolved_pending", claim_token=None, lease_expires_at_ms=None, last_error="concurrent_reap")
+        concurrent_wire = _host_record_to_storage(concurrent)
+        original_pipeline = store._client.pipeline
+
+        def racing_pipeline() -> Any:
+            pipe = original_pipeline()
+            original_watch = pipe.watch
+
+            def watch(*keys: str) -> None:
+                if record_key in keys:
+                    store._client.set(record_key, concurrent_wire)
+                original_watch(*keys)
+
+            pipe.watch = watch
+            return pipe
+
+        monkeypatch.setattr(store._client, "pipeline", racing_pipeline)
+        assert not store.reap_host_interaction_record(
+            record_id=outcome.record_id,
+            checkpoint_key=checkpoint.checkpoint_key,
+            now_ms=11,
+        )
+        assert store._client.get(record_key) == concurrent_wire
 
 
 def test_host_response_envelope_is_closed_and_no_lease_default(store: Any) -> None:
@@ -1412,6 +1439,8 @@ def test_notification_owner_attempt_cas_rejects_stale_completion(store: Any) -> 
 
 @pytest.mark.parametrize("kind", ["suspend", "cancel"])
 def test_control_variants_are_admitted_by_all_stores(store: Any, kind: str) -> None:
+    from vv_agent.runtime.stores.controller_store import prepare_controller_command
+
     checkpoint, _request, outcome = _admit_host(store, f"control-{kind}")
     handle = DistributedRunHandle(checkpoint.checkpoint_key, checkpoint.root_run_id, checkpoint.trace_id)
     command = ControllerCommand(
@@ -1421,6 +1450,28 @@ def test_control_variants_are_admitted_by_all_stores(store: Any, kind: str) -> N
         expected_revision=outcome.checkpoint_revision,
         command={"kind": kind},
     )
+    current = store.load_checkpoint(checkpoint.checkpoint_key)
+    original = checkpoint_to_dict(current)
+    prepared, record, receipt = prepare_controller_command(
+        current,
+        None,
+        command,
+        now_ms=100,
+        event_id="evt_control_test",
+        created_at=1.0,
+    )
+    repeated, repeated_record, repeated_receipt = prepare_controller_command(
+        current,
+        None,
+        command,
+        now_ms=100,
+        event_id="evt_control_test",
+        created_at=1.0,
+    )
+    assert checkpoint_to_dict(current) == original
+    assert checkpoint_to_dict(prepared) == checkpoint_to_dict(repeated)
+    assert record == repeated_record
+    assert receipt == repeated_receipt
     resolution = store.resolve_controller_command(command)
     assert resolution.kind == "applied"
     assert resolution.receipt is not None

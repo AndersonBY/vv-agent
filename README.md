@@ -6,17 +6,25 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current package release is `0.16.0`. This repository's `HEAD` locks
+The current package version is `0.16.1`. This repository's `HEAD` locks
 language-neutral Contract `14.0.0`. The central support matrix records paired Python/Rust
 adoption and verification. This repository keeps a Python-idiomatic API.
 
 ```bash
-python -m pip install "vv-agent==0.16.0"
+python -m pip install "vv-agent==0.16.1"
 ```
 
 Use `vv-agent[celery]`, `vv-agent[redis]`, or `vv-agent[s3]` when those optional
 integrations are needed. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
+
+### 0.16.1 Highlights
+
+- Memory, SQLite, and Redis stores share snapshot transitions while retaining
+  their native atomic commit boundaries.
+- Redis host-response recovery preserves concurrent record updates.
+- Cross-runtime recovery tests exchange persisted SQLite checkpoints and Redis
+  controller records between Python and Rust.
 
 ### 0.16.0 Highlights
 

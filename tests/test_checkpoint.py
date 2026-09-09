@@ -17,6 +17,7 @@ import pytest
 
 from vv_agent.checkpoint import (
     AmbiguousModelPolicy,
+    AmbiguousToolPolicy,
     CheckpointConfig,
     CheckpointError,
     CheckpointExtension,
@@ -2274,6 +2275,76 @@ def test_record_tool_receipt_identity_miss_rejects_typed_without_write(
     after = store.load_checkpoint(checkpoint.checkpoint_key)
     assert after is not None
     assert checkpoint_to_dict(after) == before_payload
+
+
+def test_canonical_unknown_journal_recovers_once_through_controller() -> None:
+    import time
+
+    fixture = _fixture("operation_journal.json")
+    case = next(
+        item for item in fixture["recovery_cases"] if item["name"] == "started_tool_surfaces_unknown_outcome_to_model_by_default"
+    )
+    expected = case["expected"]
+    receipt = _journal_case(case["receipt_entry"])
+    seed = _minimal_checkpoint(key=fixture["receipt_identity"]["golden_identity"]["checkpoint_key"])
+    store = InMemoryCheckpointStore()
+    assert store.create_checkpoint(seed)
+    claimed = store.claim_checkpoint(
+        seed.checkpoint_key, 1, claim_token="expired-owner", lease_expires_at_ms=200, now_ms=100, claim_mode="continue"
+    )
+    assert claimed is not None
+    claimed.tool_journal = [OperationJournalEntry.from_dict(_journal_case(case["entry"]))]
+    assert store.progress_checkpoint(claimed, claim_token="expired-owner", expected_revision=claimed.revision)
+
+    original_completion = None
+    observed: list[Any] = []
+    for recovery in range(2):
+        before = store.load_checkpoint(seed.checkpoint_key)
+        assert before is not None
+        time.sleep(max(0, (before.lease_expires_at_ms or 0) / 1000 - time.time()))
+        controller = CheckpointResumeController(
+            config=CheckpointConfig(
+                store=store,
+                key=seed.checkpoint_key,
+                resume_policy=ResumePolicy.REQUIRE_EXISTING,
+                ambiguous_tool_policy=AmbiguousToolPolicy(case["policy"]),
+            ),
+            task_id=seed.task_id,
+            run_id=seed.root_run_id,
+            trace_id=seed.trace_id,
+            run_definition=seed.run_definition,
+            run_definition_digest=seed.run_definition_digest,
+            initial_messages=[],
+            initial_shared_state={},
+            initial_budget_usage=None,
+            extensions=[],
+            reconciliation_provider=None,
+            event_sink=observed.append,
+            lease_duration_ms=1000,
+        )
+        try:
+            assert controller.admit() is None
+            controller._ensure_claim(1)
+            retained = store.load_checkpoint(seed.checkpoint_key)
+            assert retained is not None
+            assert retained.resume_attempt == before.resume_attempt + 1
+            assert len(retained.tool_journal) == 1
+            entry = retained.tool_journal[0]
+            assert entry.state.value == expected["persisted_state"]
+            assert entry.result == receipt["result"]
+            assert entry.result_digest == expected["result_digest"]
+            assert entry.resume_observation is not None
+            assert entry.resume_observation.to_dict() == expected["resume_observation"]
+            completion = [item for item in retained.event_outbox if item.event["type"] == expected["event"]]
+            assert len(completion) == 1
+            assert completion[0].event_id == expected["event_id"]
+            if recovery == 0:
+                original_completion = deepcopy(completion[0].event)
+            else:
+                assert completion[0].event == original_completion
+        finally:
+            controller.close()
+    assert sum(event.type == expected["event"] for event in observed) == 1
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis", "real_redis"])
@@ -4553,41 +4624,18 @@ def test_redis_resolution_retries_to_receipt_replay_after_concurrent_winner() ->
 
 
 def test_cross_runtime_sqlite_probe_from_environment() -> None:
+    import time
+
     database = os.environ.get("VV_AGENT_CROSS_RUNTIME_DB")
     if database is None:
-        return
+        pytest.skip("requires a cross-runtime SQLite database")
     mode = os.environ.get("VV_AGENT_CROSS_RUNTIME_MODE", "read_rust")
     store = SqliteCheckpointStore(database)
     if mode == "write_python":
         checkpoint = _minimal_checkpoint(key="python-wrote")
         checkpoint.messages = [Message(role="user", content="from Python")]
         checkpoint.shared_state = {"writer": "python", "format": "checkpoint"}
-        controller = CheckpointResumeController(
-            config=CheckpointConfig(store=store, key="python-wrote", resume_policy=ResumePolicy.NEW),
-            task_id=checkpoint.task_id,
-            run_id=checkpoint.root_run_id,
-            trace_id=checkpoint.trace_id,
-            run_definition=checkpoint.run_definition,
-            run_definition_digest=checkpoint.run_definition_digest,
-            initial_messages=checkpoint.messages,
-            initial_shared_state=checkpoint.shared_state,
-            initial_budget_usage=None,
-            extensions=[],
-            reconciliation_provider=None,
-            event_sink=lambda _event: None,
-        )
-        try:
-            assert controller.admit() is None
-            plan = controller.plan_tool(
-                cycle_index=1,
-                call=ToolCall(id="cross-tool", name="unsafe_write", arguments={}),
-                idempotency_support=ToolIdempotency.UNSUPPORTED,
-            )
-            assert plan.idempotency_key is None
-        finally:
-            controller.close()
-        return
-    if mode == "read_rust":
+    elif mode == "read_rust":
         checkpoint = store.load_checkpoint("rust-wrote")
         assert checkpoint is not None
         assert checkpoint.messages == [Message(role="user", content="from Rust")]
@@ -4603,8 +4651,50 @@ def test_cross_runtime_sqlite_probe_from_environment() -> None:
                 "request": {"tool_call_id": "cross-tool", "tool_name": "unsafe_write", "arguments": {}, "idempotency_key": None},
             }
         )
-        return
-    raise AssertionError(f"unknown cross-runtime mode: {mode}")
+        expiry = checkpoint.lease_expires_at_ms or 0
+        time.sleep(max(0, expiry / 1000 - time.time()))
+    else:
+        raise AssertionError(f"unknown cross-runtime mode: {mode}")
+
+    controller = CheckpointResumeController(
+        config=CheckpointConfig(
+            store=store,
+            key=checkpoint.checkpoint_key,
+            resume_policy=ResumePolicy.NEW if mode == "write_python" else ResumePolicy.REQUIRE_EXISTING,
+        ),
+        task_id=checkpoint.task_id,
+        run_id=checkpoint.root_run_id,
+        trace_id=checkpoint.trace_id,
+        run_definition=checkpoint.run_definition,
+        run_definition_digest=checkpoint.run_definition_digest,
+        initial_messages=checkpoint.messages,
+        initial_shared_state=checkpoint.shared_state,
+        initial_budget_usage=None,
+        extensions=[],
+        reconciliation_provider=None,
+        event_sink=lambda _event: None,
+        lease_duration_ms=1000,
+    )
+    try:
+        assert controller.admit() is None
+        plan = controller.plan_tool(
+            cycle_index=1,
+            call=ToolCall(id="cross-tool", name="unsafe_write", arguments={}),
+            idempotency_support=ToolIdempotency.UNSUPPORTED,
+        )
+        assert plan.idempotency_key is None
+        assert plan.replay_result is None
+        retained = store.load_checkpoint(checkpoint.checkpoint_key)
+        assert retained is not None
+        assert len(retained.tool_journal) == 1
+        assert retained.tool_journal[0].idempotency_key is None
+        if mode == "read_rust":
+            assert plan.operation_id == entry.operation_id
+            assert plan.attempt == entry.attempt
+            assert plan.request_digest == entry.request_digest
+            assert retained.resume_attempt == checkpoint.resume_attempt + 1
+    finally:
+        controller.close()
 
 
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])

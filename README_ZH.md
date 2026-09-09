@@ -6,17 +6,23 @@
 
 ## 安装
 
-当前包版本为 `0.16.0`。本仓库 `HEAD` 锁定语言无关的 Contract `14.0.0`；Python/Rust
+当前包版本为 `0.16.1`。本仓库 `HEAD` 锁定语言无关的 Contract `14.0.0`；Python/Rust
 配对采用及验证状态以中央 support matrix 为准。本实现保留
 符合 Python 语言习惯的 API 写法。
 
 ```bash
-python -m pip install "vv-agent==0.16.0"
+python -m pip install "vv-agent==0.16.1"
 ```
 
 需要可选集成时可安装 `vv-agent[celery]`、`vv-agent[redis]` 或
 `vv-agent[s3]`。仓库 `HEAD` 采用 forward-only 设计：当前版本只读取当前严格定义的
 公共 API 与传输数据结构。
+
+### 0.16.1 重点能力
+
+- Memory、SQLite 与 Redis 共用快照状态转换，各自保留原生原子提交边界。
+- Redis host response 恢复保留并发更新的记录。
+- 跨语言恢复测试在 Python 与 Rust 间交换持久化 SQLite checkpoint 和 Redis controller 记录。
 
 ### 0.16.0 重点能力
 
