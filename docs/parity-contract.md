@@ -49,6 +49,21 @@ python3 scripts/contract_snapshot.py sync \
   --revision b873f57607cc99a2d3b95f58e61a1f74d9316001
 ```
 
+## Verification Scope
+
+Public producer tests establish the canonical API, runtime decisions, events,
+strict wire readers, and recovery semantics under the locked contract. Passing
+fixture or snapshot checks alone does not establish those behaviors.
+
+The SQLite and Redis exchange probes separately exercise the current physical
+storage representations with real writers, readers, and recovery controllers.
+Their evidence covers the named operations and failure windows, not arbitrary
+mixed-language takeover of a running deployment. A full mixed-runtime failure
+campaign requires a deployment that actually switches language within one run;
+it is not a prerequisite for a single-language host integration. Both existing
+exchange probes and the complete public conformance gates remain required by
+the central cross-repository workflow.
+
 ## Python Producer Map
 
 | Contract surface | Python producer and evidence |
