@@ -1093,8 +1093,6 @@ class CheckpointResumeController:
             checkpoint = self._require_checkpoint()
             claim_token = checkpoint.claim_token
             claimed_cycle = checkpoint.claimed_cycle
-            if claimed_cycle is None and checkpoint.status is AgentStatus.HOST_INTERACTION:
-                claimed_cycle = entry.cycle_index
             if claim_token is None or claimed_cycle is None:
                 raise CheckpointError(
                     "checkpoint tool receipt requires an active claim",
@@ -1200,7 +1198,7 @@ class CheckpointResumeController:
         self._stop_heartbeat()
 
     def finalize(self, result: AgentResult, *, terminal_event: RunEvent | None = None) -> AgentResult:
-        if result.status in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED}:
+        if result.status in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED, AgentStatus.HOST_INTERACTION}:
             result.checkpoint_key = self.checkpoint_key
             return result
         checkpoint = self.store.load_checkpoint(self.checkpoint_key)

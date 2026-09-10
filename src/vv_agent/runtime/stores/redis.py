@@ -78,6 +78,7 @@ from vv_agent.runtime.stores.controller_store import (
     prepare_notification_claim,
     prepare_notification_completion,
     prepare_notification_reconciliation,
+    validate_host_tool_receipt_replay,
 )
 from vv_agent.types import AgentStatus
 
@@ -1295,6 +1296,7 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         if checkpoint.revision < admission_context.expected_revision + 1:
                             raise CheckpointError("host interaction replay revision is stale", code="host_interaction_stale")
+                        validate_host_tool_receipt_replay(checkpoint, request_value, admission_context)
                         return _host_interaction_outcome(
                             record,
                             _notification_from_storage(

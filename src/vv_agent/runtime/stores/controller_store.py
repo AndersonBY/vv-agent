@@ -42,12 +42,14 @@ from vv_agent.runtime.controller import (
 from vv_agent.runtime.state import (
     Checkpoint,
     EventOutboxEntry,
+    checkpoint_definition_matches,
     prepare_claimed_terminal,
+    prepare_tool_receipt,
     prepare_unclaimed_terminal,
     validate_checkpoint,
 )
 from vv_agent.runtime.token_usage import summarize_task_token_usage
-from vv_agent.types import AgentResult, AgentStatus, CompletionReason, Message
+from vv_agent.types import AgentResult, AgentStatus, CompletionReason, Message, ToolExecutionResult
 
 
 def _controller_error(message: str, code: str) -> CheckpointError:
@@ -669,6 +671,8 @@ def _validate_producer_checkpoint(
         claimed_cycle=admission_context.claimed_cycle,
         now_ms=admission_context.now_ms,
     )
+    if current.cancel_requested:
+        raise _controller_error("cancelled run cannot enter host interaction", "checkpoint_cancel_requested")
     assert current.claim_token is not None and current.claimed_cycle is not None
     return current
 
@@ -744,6 +748,28 @@ def _outcome_for_record(
     )
 
 
+def _host_tool_result(snapshot: Checkpoint, request: HostInteractionRequest) -> ToolExecutionResult:
+    from vv_agent.deferred import ToolCallOutcome
+
+    cycle = next((cycle for cycle in snapshot.cycles if cycle.index == request.logical_cycle), None)
+    if cycle is None or [call.id for call in cycle.tool_calls] != [result.tool_call_id for result in cycle.tool_results]:
+        raise _controller_error("host interaction cycle has incomplete tool results", "host_interaction_conflict")
+    result = next((result for result in cycle.tool_results if result.tool_call_id == request.tool_call_id), None)
+    if result is None:
+        raise _controller_error("host interaction result is missing from cycle", "host_interaction_conflict")
+    ToolCallOutcome.HostInteraction(result, request)
+    return result
+
+
+def validate_host_tool_receipt_replay(
+    current: Checkpoint, request: HostInteractionRequest, context: HostInteractionAdmissionContext
+) -> None:
+    if context.cycle_snapshot is None:
+        return
+    if _host_tool_result(current, request) != _host_tool_result(context.cycle_snapshot, request):
+        raise _controller_error("host interaction tool receipt conflicts", "host_interaction_conflict")
+
+
 def prepare_host_interaction(
     current: Checkpoint | None,
     request_value: HostInteractionRequest,
@@ -796,6 +822,60 @@ def prepare_host_interaction(
         record_id=record_id,
     )
     snapshot = clone_checkpoint(current)
+    completed = admission_context.cycle_snapshot
+    if completed is None and (current.model_call_journal or current.tool_journal):
+        raise _controller_error("host interaction requires the completed cycle", "host_interaction_conflict")
+    if completed is not None:
+        if (
+            not checkpoint_definition_matches(current, completed)
+            or completed.checkpoint_key != current.checkpoint_key
+            or completed.revision != current.revision
+            or not completed.cycles
+            or completed.cycles[-1].index != request_value.logical_cycle
+        ):
+            raise _controller_error("host interaction cycle snapshot is stale", "host_interaction_stale")
+        result = _host_tool_result(completed, request_value)
+        entry = next(
+            (
+                item
+                for item in current.tool_journal
+                if item.operation_id == request_value.operation_id
+                and item.tool_call_id == request_value.tool_call_id
+                and item.cycle_index == request_value.logical_cycle
+            ),
+            None,
+        )
+        if entry is None:
+            raise _controller_error("host interaction tool operation is missing", "host_interaction_conflict")
+        receipt = prepare_tool_receipt(
+            current,
+            current,
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            tool_call_id=request_value.tool_call_id,
+            request_digest=entry.request_digest,
+            result=result,
+            claim_token=admission_context.claim_token,
+            expected_revision=revision,
+            claimed_cycle=admission_context.claimed_cycle,
+            created_at=created_at,
+        )
+        if receipt is None:
+            raise _controller_error("host interaction tool receipt was not admitted", "host_interaction_conflict")
+        snapshot = receipt
+        if any(
+            item.state not in {OperationState.SUCCEEDED, OperationState.FAILED}
+            for item in snapshot.model_call_journal + snapshot.tool_journal
+        ):
+            raise _controller_error("host interaction cannot commit unresolved operations", "host_interaction_conflict")
+        snapshot.messages = deepcopy(completed.messages)
+        snapshot.cycles = deepcopy(completed.cycles)
+        snapshot.shared_state = deepcopy(completed.shared_state)
+        snapshot.extension_state = deepcopy(completed.extension_state)
+        snapshot.budget_usage = deepcopy(completed.budget_usage)
+        snapshot.cycle_index = request_value.logical_cycle
+        snapshot.model_call_journal = []
+        snapshot.tool_journal = []
     snapshot.active_host_interaction = request_value.to_dict()
     snapshot.status = AgentStatus.HOST_INTERACTION
     snapshot.claim_token = None
@@ -1115,6 +1195,7 @@ class ControllerStoreMixin:
                     raise _controller_error("host interaction checkpoint was deleted", "host_interaction_conflict")
                 if current.revision < admission_context.expected_revision + 1:
                     raise _controller_error("host interaction replay revision is stale", "host_interaction_stale")
+                validate_host_tool_receipt_replay(current, request_value, admission_context)
                 return _outcome_for_record(
                     existing,
                     self._host_interaction_notifications.get(derive_host_interaction_notification_id(existing["record_id"])),

@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `15.0.0` at revision
-`86fb47c934ef8ef4b0671d895cd3c228c82b1395`. Its canonical artifact has
-SHA-256 `8f21696c853ada95883f92a45bfc7f32b220a2a5fce75118a29d558c3f9fa57d`.
+`contract.lock.json` selects contract `17.0.0` at revision
+`d41ba2746bd817364e21f8c1f77dff7385788944`. Its canonical artifact has
+SHA-256 `3df442a8119ce58f480b5153ab56ee379bae7b1ce97bed1d1e2471a1c2dd4bc9`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,9 +44,9 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v15.0.0/vv-agent-contract-15.0.0.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v15.0.0/vv-agent-contract-15.0.0.zip \
-  --revision 86fb47c934ef8ef4b0671d895cd3c228c82b1395
+  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v17.0.0/vv-agent-contract-17.0.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v17.0.0/vv-agent-contract-17.0.0.zip \
+  --revision d41ba2746bd817364e21f8c1f77dff7385788944
 ```
 
 ## Verification Scope
@@ -77,7 +77,7 @@ the central cross-repository workflow.
 | Agent, Runner, result, and live control | `src/vv_agent/agent.py`, `src/vv_agent/runner.py`, `src/vv_agent/run_handle.py`, `src/vv_agent/result.py` |
 | Typed events | `src/vv_agent/events.py`, `src/vv_agent/event_store.py`, `tests/test_events_contract.py`, `tests/test_event_validation.py`, `tests/test_runner_events_producer_parity.py` |
 | Durable deferred tools and claimed-checkpoint producer evidence | `src/vv_agent/deferred.py`, `src/vv_agent/runtime/tool_call_runner.py`, `src/vv_agent/runtime/stores/`; `tests/test_deferred_tools.py`, `tests/test_checkpoint_resume_events.py` |
-| Typed host-interaction producer, claim-fenced controller admission, and App Server wait projection | `src/vv_agent/runtime/controller.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/context.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/stores/`, `src/vv_agent/app_server/item_mapper.py`, `src/vv_agent/app_server/run_adapter.py`; `tests/test_runtime_controller.py`, `tests/test_app_server_item_mapper.py`, `tests/test_app_server_controller_action.py` |
+| Typed host-interaction producer, claim-fenced controller admission, and App Server wait projection | `src/vv_agent/runtime/controller.py`, `src/vv_agent/runtime/checkpoint_resume.py`, `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/stores/`, `src/vv_agent/app_server/item_mapper.py`, `src/vv_agent/app_server/run_adapter.py`; `tests/test_runtime_controller.py`, `tests/test_app_server_item_mapper.py`, `tests/test_app_server_controller_action.py` |
 
 | LLM stream projection | `src/vv_agent/llm/`, `src/vv_agent/runtime/cycle_runner.py`, `tests/test_llm_interface.py`, `tests/test_runner_events_producer_parity.py` |
 | Configured children | `src/vv_agent/runtime/engine.py`, `src/vv_agent/runtime/sub_task_manager.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_sub_agent_runtime.py` |
@@ -269,12 +269,23 @@ checkpoint-scoped through
 expired claimed `recovery_dispatch` rows in `(expected_revision, command_id)`
 order, and never retries ambiguous rows.
 
+Tool handlers return `ToolCallOutcome.HostInteraction`; `tool_call_runner.py` assembles
+the completed cycle and `CheckpointResumeController` supplies its owned,
+renewed admission context. Store admission requires that snapshot once model
+or tool journals exist. Direct `DistributedBackend.produce_host_interaction`
+is the pre-model seam. `test_distributed_checkpoint.py` exercises real workers
+and bidirectional SQLite/Redis interaction exchanges with the Rust producer.
+
 Host-response consumption runs in `celery_tasks.py`, after worker admission
 and before model or tool work. Only an applied combined checkpoint/interaction
 CAS permits that worker to adopt its retained claim. Consumed replay and token
 spelling do not convey ownership. Duplicate delivery against an unexpired claim
 returns pending without changing its revision; `CeleryBackend.advance` only
 observes one checkpoint snapshot and dispatches recovery.
+Workers also reload the checkpoint when a competing delivery has completed
+the recovery wake. Wake completion replays return the retained receipt without
+transferring execution ownership. SQLite process tests synchronize two unclaimed
+workers before wake CAS and cover both response-consumption and completed-wake races.
 
 Cycle dispatch receipts are a Python transport adaptation, implemented by
 `runtime/dispatch_outbox.py` and enabled only when a host explicitly injects a

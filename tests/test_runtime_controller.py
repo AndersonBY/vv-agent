@@ -17,7 +17,6 @@ from vv_agent.checkpoint import CheckpointConfig, CheckpointError, OperationStat
 from vv_agent.runtime.backends.distributed import DistributedRunHandle
 from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict, checkpoint_to_dict
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
-from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.controller import (
     ControllerCommand,
     DistributedBackend,
@@ -28,7 +27,6 @@ from vv_agent.runtime.controller import (
     derive_controller_command_id,
     derive_host_response_digest,
 )
-from vv_agent.runtime.engine import AgentRuntime
 from vv_agent.runtime.state import OperationJournalEntry
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.redis import RedisCheckpointStore
@@ -328,7 +326,8 @@ def test_host_producer_requires_explicit_admission_context() -> None:
         DistributedBackend(store).produce_host_interaction(request)
 
 
-def test_engine_binds_typed_host_producer_to_the_active_checkpoint_claim() -> None:
+@pytest.mark.parametrize("with_model_journal", [False, True])
+def test_host_producer_uses_the_controllers_active_checkpoint_claim(with_model_journal: bool) -> None:
     store = InMemoryCheckpointStore()
     key = "engine-host-producer"
     checkpoint = _checkpoint(key)
@@ -342,6 +341,11 @@ def test_engine_binds_typed_host_producer_to_the_active_checkpoint_claim() -> No
         claim_mode="continue",
     )
     assert claimed is not None
+    if with_model_journal:
+        fixture = json.loads((FIXTURE_DIR / "operation_journal.json").read_text())
+        entry = next(case["entry"] for case in fixture["valid_entries"] if case["name"] == "model_planned")
+        claimed.model_call_journal = [OperationJournalEntry.from_dict(entry)]
+        assert store.progress_checkpoint(claimed, claim_token="engine-claim", expected_revision=claimed.revision)
     controller = CheckpointResumeController(
         config=CheckpointConfig(store=store, key=key, resume_policy=ResumePolicy.RESUME_IF_PRESENT),
         task_id=claimed.task_id,
@@ -359,17 +363,22 @@ def test_engine_binds_typed_host_producer_to_the_active_checkpoint_claim() -> No
     )
     controller.checkpoint = claimed
     controller._owned_claim_token = claimed.claim_token
-    context = ExecutionContext(metadata={"_vv_agent_checkpoint_controller": controller})
-    AgentRuntime._bind_host_interaction_producer(context)
-    outcome = context.produce_host_interaction(
-        HostInteractionRequest(
-            interaction_id="engine-interaction",
-            logical_cycle=1,
-            operation_id="engine-operation",
-            tool_call_id="engine-tool",
-            prompt="Choose.",
-        )
+    backend = DistributedBackend(store, admission_context=controller.host_interaction_admission_context())
+    request = HostInteractionRequest(
+        interaction_id="engine-interaction",
+        logical_cycle=1,
+        operation_id="engine-operation",
+        tool_call_id="engine-tool",
+        prompt="Choose.",
     )
+    if with_model_journal:
+        before = store.load_checkpoint(key)
+        with pytest.raises(CheckpointError) as error:
+            backend.produce_host_interaction(request)
+        assert error.value.code == "host_interaction_conflict"
+        assert store.load_checkpoint(key) == before
+        return
+    outcome = backend.produce_host_interaction(request)
     assert outcome.status == "admitted"
     assert outcome.outbox_state == "pending"
 
@@ -466,18 +475,8 @@ def test_host_producer_reads_authoritative_renewed_lease_only_for_its_owner(owne
     if owned_claim != "authoritative-claim":
         before = store.load_checkpoint(key)
         assert before is not None
-        context = ExecutionContext(metadata={"_vv_agent_checkpoint_controller": controller})
-        AgentRuntime._bind_host_interaction_producer(context)
         with pytest.raises(CheckpointError) as error:
-            context.produce_host_interaction(
-                HostInteractionRequest(
-                    interaction_id="unowned-interaction",
-                    logical_cycle=1,
-                    operation_id="unowned-operation",
-                    tool_call_id="unowned-tool",
-                    prompt="Choose.",
-                )
-            )
+            controller.host_interaction_admission_context()
         assert error.value.code == "host_interaction_claim_required"
         assert store.load_checkpoint(key) == before
         return
@@ -1376,6 +1375,28 @@ def test_controller_recovery_wake_has_owner_attempt_and_ambiguity_lifecycle(stor
         now_ms=2,
     )
     assert ambiguous is not None and ambiguous["outbox_state"] == "ambiguous"
+    before = store.load_checkpoint("wake-lifecycle")
+    assert (
+        store.complete_controller_command_wake(
+            command_id=command.command_id,
+            command_digest=command.command_digest or "",
+            claim_token="wake-owner-a",
+            attempt=1,
+            outcome="ambiguous",
+            now_ms=3,
+        )
+        == ambiguous
+    )
+    with pytest.raises(CheckpointError):
+        store.complete_controller_command_wake(
+            command_id=command.command_id,
+            command_digest=command.command_digest or "",
+            claim_token="wake-owner-a",
+            attempt=1,
+            outcome="delivered",
+            now_ms=3,
+        )
+    assert store.load_checkpoint("wake-lifecycle") == before
     assert store.reap_controller_command_wakes("wake-lifecycle", 20_000) == []
     retried = store.reconcile_controller_command_wake(
         command_id=command.command_id,
@@ -1764,6 +1785,17 @@ def test_real_redis_controller_cas_replay_and_notification_ambiguity() -> None:
             now_ms=5,
         )
         assert completed_wake is not None and completed_wake["outbox_state"] == "delivered"
+        assert (
+            store.complete_controller_command_wake(
+                command_id=command.command_id,
+                command_digest=command.command_digest or "",
+                claim_token="real-wake-owner",
+                attempt=1,
+                outcome="delivered",
+                now_ms=6,
+            )
+            == completed_wake
+        )
 
         claimed_notification = store.claim_host_interaction_notification(
             notification_id=notification.notification_id,

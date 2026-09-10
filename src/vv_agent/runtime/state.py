@@ -1231,6 +1231,19 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         )
     _validate_host_interaction_request(checkpoint.active_host_interaction, "active_host_interaction")
     _validate_suspended_origin(checkpoint.suspended_origin)
+    interaction = checkpoint.active_host_interaction or (checkpoint.suspended_origin or {}).get("active_host_interaction")
+    if interaction is not None:
+        origin_cycle = interaction["logical_cycle"]
+        committed_origin = origin_cycle == checkpoint.cycle_index and any(
+            cycle.index == origin_cycle
+            and any(result.tool_call_id == interaction["tool_call_id"] for result in cycle.tool_results)
+            for cycle in checkpoint.cycles
+        )
+        if origin_cycle != checkpoint.cycle_index + 1 and not committed_origin:
+            raise CheckpointError(
+                "host interaction must identify the active cycle or a retained completed tool cycle",
+                code="checkpoint_status_invalid",
+            )
     if checkpoint.status is AgentStatus.HOST_INTERACTION:
         if checkpoint.active_host_interaction is None or checkpoint.suspended_origin is not None:
             raise CheckpointError(

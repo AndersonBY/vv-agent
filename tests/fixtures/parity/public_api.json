@@ -5332,7 +5332,7 @@
           }
         },
         {
-          "adaptation": "Python can register an executor directly; Rust registers its ToolSpec adaptation.",
+          "adaptation": "Both registries retain the registered executor for runtime dispatch, including its typed outcome.",
           "id": "register_executor",
           "kind": "operation",
           "python": {
@@ -5366,7 +5366,7 @@
           },
           "rust": {
             "kind": "method",
-            "name": "register"
+            "name": "register_executor"
           }
         }
       ],

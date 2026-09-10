@@ -17,6 +17,7 @@ from vv_agent.checkpoint import CheckpointError, canonical_json_bytes, canonical
 
 if TYPE_CHECKING:
     from vv_agent.runtime.backends.distributed import DistributedRunHandle
+    from vv_agent.runtime.state import Checkpoint
 
 CONTROLLER_COMMAND_SCHEMA = "vv-agent.controller-command.v1"
 CONTROLLER_RECEIPT_SCHEMA = "vv-agent.controller-command-receipt.v1"
@@ -216,6 +217,7 @@ class HostInteractionAdmissionContext:
     claimed_cycle: int
     now_ms: int
     lease_expires_at_ms: int
+    cycle_snapshot: Checkpoint | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "checkpoint_key", _text(self.checkpoint_key, "checkpoint_key"))
@@ -238,6 +240,7 @@ class HostInteractionAdmissionContext:
             claimed_cycle=self.claimed_cycle,
             now_ms=self.now_ms,
             lease_expires_at_ms=self.lease_expires_at_ms,
+            cycle_snapshot=self.cycle_snapshot,
         )
 
 

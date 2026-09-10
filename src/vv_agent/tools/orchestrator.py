@@ -173,9 +173,11 @@ class ToolOrchestrator:
         # run ordinary result hooks or emit a completed event: admission owns
         # the deferred lifecycle event and will persist it atomically with the
         # batch journal/barrier.
+        interaction_request = None
         if isinstance(result, ToolCallOutcome):
             if result.kind == "deferred":
                 return result
+            interaction_request = result.request
             assert result.result is not None
             result = result.result
 
@@ -189,6 +191,9 @@ class ToolOrchestrator:
 
         if result.directive == ToolDirective.WAIT_USER and result.status_code == ToolResultStatus.SUCCESS:
             result.status_code = ToolResultStatus.WAIT_RESPONSE
+
+        if interaction_request is not None:
+            return ToolCallOutcome.HostInteraction(result, interaction_request)
 
         # For a checkpointed external invocation, the admission CAS owns the
         # durable completed lifecycle event.  Emitting here as well would

@@ -626,7 +626,13 @@ def _consume_pending_host_response(*, store: Any, checkpoint: Checkpoint, lease_
         if consumption.kind == "applied" and refreshed.revision != consumption.checkpoint_revision:
             raise CheckpointError("host response execution claim changed", code="checkpoint_claim_active")
         return refreshed, consumption.kind == "applied"
-    return checkpoint, False
+    refreshed = store.load_checkpoint(checkpoint.checkpoint_key)
+    if refreshed is None:
+        raise CheckpointError(
+            "checkpoint disappeared during host interaction recovery",
+            code="checkpoint_not_found",
+        )
+    return refreshed, False
 
 
 def _run_single_cycle(
@@ -656,6 +662,8 @@ def _run_single_cycle(
         registry=capability_registry,
         extensions=extensions,
     )
+    if existing.status is AgentStatus.HOST_INTERACTION:
+        return DistributedWorkerResponse.pending()
     if existing.terminal_result is None:
         if existing.claim_token is not None and (existing.lease_expires_at_ms or 0) > time.time_ns() // 1_000_000:
             return DistributedWorkerResponse.pending()
@@ -759,7 +767,9 @@ def _run_single_cycle(
         )
     if claim_mode == "continue":
         controller.set_next_claim_mode(claim_mode)
-    if claim_mode == "recovery":
+    if claim_mode == "recovery" or any(
+        entry.event.get("type") == "host_interaction_requested" for entry in existing.event_outbox
+    ):
         try:
             recovered, owns_recovery = _consume_pending_host_response(
                 store=store,
@@ -908,15 +918,12 @@ def _run_single_cycle(
                     code="checkpoint_cycle_conflict",
                 )
             try:
-                if controller._require_checkpoint().status is AgentStatus.HOST_INTERACTION:
-                    return DistributedWorkerResponse.pending()
-                else:
-                    controller.commit_cycle(
+                controller.commit_cycle(
                     cycle_index=envelope.cycle_index,
                     messages=messages,
                     cycles=cycles,
                     shared_state=shared_state,
-                    )
+                )
             except CheckpointError as exc:
                 if budget_controller is not None:
                     budget_controller.tool_batch_complete(envelope.cycle_index, operation_failed=True)
@@ -949,10 +956,8 @@ def _run_single_cycle(
                 "checkpoint disappeared before returning the terminal candidate",
                 code="checkpoint_not_found",
             )
-        if current.status is AgentStatus.HOST_INTERACTION:
-            return DistributedWorkerResponse.pending()
-        if result.status is AgentStatus.DEFERRED:
-            if current.status is not AgentStatus.DEFERRED or current.claim_token is not None:
+        if result.status in {AgentStatus.DEFERRED, AgentStatus.HOST_INTERACTION}:
+            if current.status is not result.status or current.claim_token is not None:
                 raise CheckpointError(
                     "deferred result does not match durable checkpoint state",
                     code="checkpoint_store_conflict",

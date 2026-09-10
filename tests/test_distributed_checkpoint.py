@@ -2788,30 +2788,72 @@ def test_celery_scheduler_retry_redispatches_as_recovery(
     assert terminal.resume_attempt == 2
 
 
-def test_real_tool_host_interaction_retains_receipt_before_waiting(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "produce_host_interaction",
+        "claim_and_consume_host_interaction_response",
+        "model_receipt",
+        "concurrent_recovery",
+        "unclaimed_recovery",
+        "completed_wake_race",
+    ],
+)
+def test_real_tool_host_interaction_retains_receipt_before_waiting(tmp_path: Path, fault: str | None) -> None:
+    import multiprocessing
+    import os
+    import time
+
+    from vv_agent import ToolCallOutcome, ToolExecutionResult
+    from vv_agent.runtime.stores.redis import RedisCheckpointStore
     from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 
-    store = SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
-    calls: list[str] = []
-    model_calls: list[Any] = []
+    exchange_write_dir = os.environ.get("VV_AGENT_CROSS_HOST_WRITE_DIR")
+    if exchange_write_dir is not None:
+        assert fault is None, "cross-language producer requires the no-fault case"
+        tmp_path = Path(exchange_write_dir)
+        assert tmp_path.is_dir()
+    if fault is not None and "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("process-exit verification requires fork")
+    process_context = (
+        multiprocessing.context.ForkContext()
+        if "fork" in multiprocessing.get_all_start_methods()
+        else multiprocessing.context.SpawnContext()
+    )
+    redis_url = os.environ.get("VV_AGENT_CROSS_HOST_REDIS_URL")
+    if redis_url is not None:
+        assert exchange_write_dir is not None and fault is None
+    store: Any = RedisCheckpointStore(redis_url) if redis_url else SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
+    calls = process_context.Array("i", [0, 0, 0])
+    model_calls = process_context.Value("i", 0)
+    model_entered = process_context.Event()
+    release_model = process_context.Event()
 
-    def request_choice(context: Any, _arguments: dict[str, Any]) -> ToolOutputText:
-        calls.append("request")
+    def request_choice(context: Any, _arguments: dict[str, Any]) -> ToolCallOutcome:
+        with calls.get_lock():
+            calls[0] += 1
         plan = context.metadata["_vv_agent_checkpoint_plan"]
-        context.ctx.produce_host_interaction(
+        outcome = ToolCallOutcome.HostInteraction(
+            ToolExecutionResult(tool_call_id=context.tool_call_id, content="Region choice requested."),
             HostInteractionRequest(
                 interaction_id="region-choice",
                 logical_cycle=context.cycle_index,
                 operation_id=plan.operation_id,
                 tool_call_id=context.tool_call_id,
                 prompt="Choose a region: https://example.invalid/?keep=1",
-            )
+            ),
         )
-        calls.append("returned")
-        return ToolOutputText(text="Region choice requested.")
+        active = store.load_checkpoint("host-tool")
+        assert active is not None and active.claim_token is not None
+        assert active.status is AgentStatus.RUNNING
+        with calls.get_lock():
+            calls[1] += 1
+        return outcome
 
     def later(_context: Any, _arguments: dict[str, Any]) -> ToolOutputText:
-        calls.append("later")
+        with calls.get_lock():
+            calls[2] += 1
         return ToolOutputText(text="Later result.")
 
     tools = [
@@ -2833,7 +2875,8 @@ def test_real_tool_host_interaction_retains_receipt_before_waiting(tmp_path: Pat
     registry.register_toolset(toolset, worker_tools)
 
     def complete(request: Any) -> LLMResponse:
-        model_calls.append(request)
+        with model_calls.get_lock():
+            model_calls.value += 1
         return LLMResponse(
             content="",
             tool_calls=[
@@ -2859,34 +2902,380 @@ def test_real_tool_host_interaction_retains_receipt_before_waiting(tmp_path: Pat
             ),
         ),
     )
+    agent = Agent(name="region", model="test-model", instructions="Ask before continuing.", tools=tools)
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        max_cycles=3,
+        checkpoint_config=CheckpointConfig(key="host-tool", store=store, resume_policy=ResumePolicy.NEW),
+    )
+
+    def race_recovery(envelope: dict[str, Any]) -> dict[str, Any]:
+        barrier = process_context.Barrier(2, timeout=10)
+        results = process_context.Queue()
+        release_owner = process_context.Event()
+        release_loser_claim = process_context.Event()
+        delayed_claim = fault == "completed_wake_race"
+        before = store.load_checkpoint("host-tool")
+        assert before is not None and before.claim_token is None
+        original_claim = SqliteCheckpointStore.claim_controller_command_wake
+        original_consume = SqliteCheckpointStore.claim_and_consume_host_interaction_response
+
+        def contender(index: int) -> None:
+            separate = SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
+            registry.register("checkpoint_store", checkpoint_ref, separate)
+
+            def synchronized_claim(*args: Any, **kwargs: Any) -> Any:
+                assert separate.load_checkpoint("host-tool") == before
+                barrier.wait()
+                if delayed_claim and index == 1:
+                    assert release_loser_claim.wait(15)
+                return original_claim(*args, **kwargs)
+
+            def hold_owner(*args: Any, **kwargs: Any) -> Any:
+                result = original_consume(*args, **kwargs)
+                if result.kind == "applied" and not delayed_claim:
+                    results.put(("admitted", separate.load_checkpoint("host-tool")))
+                    assert release_owner.wait(15), "contender did not finish"
+                return result
+
+            try:
+                with (
+                    patch.object(SqliteCheckpointStore, "claim_controller_command_wake", synchronized_claim),
+                    patch.object(SqliteCheckpointStore, "claim_and_consume_host_interaction_response", hold_owner),
+                ):
+                    results.put(("result", run_single_cycle(envelope_dict=envelope, capability_registry=registry)))
+            finally:
+                separate.close()
+
+        processes = [process_context.Process(target=contender, args=(index,)) for index in range(2)]
+        try:
+            for process in processes:
+                process.start()
+            if delayed_claim:
+                assert model_entered.wait(15)
+                admitted = store.load_checkpoint("host-tool")
+                release_loser_claim.set()
+            else:
+                kind, admitted = results.get(timeout=15)
+                assert kind == "admitted"
+            kind, loser = results.get(timeout=15)
+            assert kind == "result" and loser["type"] == "pending"
+            assert store.load_checkpoint("host-tool") == admitted
+            assert admitted is not None
+            if not delayed_claim:
+                assert admitted.revision == before.revision + 1
+            assert admitted.resume_attempt == before.resume_attempt + 1
+            assert admitted.claimed_cycle == 2
+            assert model_calls.value == (2 if delayed_claim else 1) and calls[:] == [1, 1, 0]
+            release_owner.set()
+            release_model.set()
+            kind, winner = results.get(timeout=15)
+            assert kind == "result" and winner["type"] == "terminal_candidate"
+            for process in processes:
+                process.join(timeout=5)
+                assert process.exitcode == 0
+            return winner
+        finally:
+            release_owner.set()
+            release_loser_claim.set()
+            release_model.set()
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+            results.close()
+            results.join_thread()
+
+    def deliver(envelope: dict[str, Any], crash_at: str | None = None) -> dict[str, Any] | None:
+        nonlocal store
+        if fault is None:
+            return run_single_cycle(envelope_dict=envelope, capability_registry=registry)
+        store.close()
+        receive, send = process_context.Pipe(duplex=False)
+
+        def child() -> None:
+            nonlocal store
+            receive.close()
+            store = SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
+            registry.register("checkpoint_store", checkpoint_ref, store)
+            try:
+                if crash_at is not None:
+                    method = "progress_checkpoint" if crash_at == "model_receipt" else crash_at
+                    original = getattr(SqliteCheckpointStore, method)
+
+                    def exit_after_commit(*args: Any, **kwargs: Any) -> Any:
+                        value = original(*args, **kwargs)
+                        if crash_at == "model_receipt" and not any(
+                            entry.cycle_index == 2 and entry.state.value == "succeeded" for entry in args[1].model_call_journal
+                        ):
+                            return value
+                        os._exit(23)
+
+                    with patch.object(SqliteCheckpointStore, method, exit_after_commit):
+                        if crash_at in {"claim_and_consume_host_interaction_response", "model_receipt"}:
+                            expired_clock = time.time_ns() - 600_000_000_000
+                            with patch("time.time_ns", return_value=expired_clock):
+                                run_single_cycle(envelope_dict=envelope, capability_registry=registry)
+                        else:
+                            run_single_cycle(envelope_dict=envelope, capability_registry=registry)
+                    raise AssertionError("worker did not reach the committed fault")
+                send.send(run_single_cycle(envelope_dict=envelope, capability_registry=registry))
+            finally:
+                store.close()
+                send.close()
+
+        process = process_context.Process(target=child)
+        process.start()
+        send.close()
+        try:
+            if fault == "concurrent_recovery" and envelope["cycle_index"] == 2:
+                assert model_entered.wait(10), "recovery worker did not enter the model"
+                probe = SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
+                before = probe.load_checkpoint("host-tool")
+                assert before is not None and before.claim_token is not None
+                assert model_calls.value == 2
+                duplicate_receive, duplicate_send = process_context.Pipe(duplex=False)
+
+                def duplicate() -> None:
+                    separate = SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
+                    registry.register("checkpoint_store", checkpoint_ref, separate)
+                    try:
+                        duplicate_send.send(run_single_cycle(envelope_dict=envelope, capability_registry=registry))
+                    finally:
+                        separate.close()
+                        duplicate_send.close()
+
+                contender = process_context.Process(target=duplicate)
+                contender.start()
+                duplicate_send.close()
+                try:
+                    assert duplicate_receive.poll(10), "duplicate worker did not finish"
+                    assert duplicate_receive.recv()["type"] == "pending"
+                    contender.join(timeout=5)
+                    assert contender.exitcode == 0
+                    assert probe.load_checkpoint("host-tool") == before
+                    assert model_calls.value == 2 and calls[:] == [1, 1, 0]
+                finally:
+                    if contender.is_alive():
+                        contender.terminate()
+                        contender.join(timeout=5)
+                    duplicate_receive.close()
+                    probe.close()
+                    release_model.set()
+            assert receive.poll(30), "worker did not return or exit"
+            try:
+                delivered = receive.recv()
+            except EOFError:
+                delivered = None
+            process.join(timeout=5)
+            assert process.exitcode == (23 if crash_at is not None else 0)
+            return delivered
+        finally:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            receive.close()
+            store = SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
+            registry.register("checkpoint_store", checkpoint_ref, store)
+            run_config.checkpoint_config = CheckpointConfig(
+                key="host-tool", store=store, resume_policy=ResumePolicy.REQUIRE_EXISTING
+            )
+
     try:
-        handle = Runner.start_distributed(
-            Agent(name="region", model="test-model", instructions="Ask before continuing.", tools=tools),
-            "Choose a region.",
-            run_config=RunConfig(
-                model_provider=_provider(lambda: ScriptedLLM(steps=[])),
-                execution_backend=backend,
-                max_cycles=3,
-                checkpoint_config=CheckpointConfig(key="host-tool", store=store, resume_policy=ResumePolicy.NEW),
-            ),
-        )
-        response = run_single_cycle(envelope_dict=app.envelopes[0], capability_registry=registry)
-        assert calls == ["request", "returned"]
-        assert len(model_calls) == 1
+        handle = Runner.start_distributed(agent, "Choose a region.", run_config=run_config)
+        if fault == "produce_host_interaction":
+            assert deliver(app.envelopes[0], crash_at=fault) is None
+        response = deliver(app.envelopes[0])
+        assert response is not None and response["type"] == "pending"
+        assert calls[:] == [1, 1, 0]
+        assert model_calls.value == 1
         checkpoint = store.load_checkpoint(handle.checkpoint_key)
         assert checkpoint is not None
         assert checkpoint.status is AgentStatus.HOST_INTERACTION
         assert checkpoint.claim_token is None
-        entry = next(entry for entry in checkpoint.tool_journal if entry.tool_call_id == "choice")
-        assert entry.result is not None
-        assert entry.result["content"] == "Region choice requested."
+        assert checkpoint.cycle_index == 1
+        assert checkpoint.tool_journal == checkpoint.model_call_journal == []
+        assert checkpoint.cycles[-1].tool_results[0].content == "Region choice requested."
+        assert checkpoint.cycles[-1].tool_results[1].error_code == "skipped_due_to_host_interaction"
+        if exchange_write_dir is not None:
+            return
         decision = backend.advance(
             previous_envelope=app.envelopes[0],
             outcome=DistributedDeliveryOutcome.worker(response),
         )
         assert decision.action == "wait"
-    finally:
+        request = HostInteractionRequest.from_dict(checkpoint.active_host_interaction)
+        response_text = "Europe https://example.invalid/?keep=1"
+        command = ControllerCommand(
+            command_id="region-response",
+            handle=handle,
+            resume_attempt=checkpoint.resume_attempt,
+            expected_revision=checkpoint.revision,
+            command={
+                "kind": "host_interaction_response",
+                "interaction_id": request.interaction_id,
+                "logical_cycle": request.logical_cycle,
+                "operation_id": request.operation_id,
+                "tool_call_id": request.tool_call_id,
+                "request_digest": request.request_digest,
+                "response": {"role": "user", "content": response_text},
+            },
+        )
+        assert store.resolve_controller_command(command).kind == "applied"
+        resolved = store.load_checkpoint(handle.checkpoint_key)
+        assert store.resolve_controller_command(command).kind == "replayed"
+        assert store.load_checkpoint(handle.checkpoint_key) == resolved
         store.close()
+        store = SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
+        registry.register("checkpoint_store", checkpoint_ref, store)
+        run_config.checkpoint_config = CheckpointConfig(key="host-tool", store=store, resume_policy=ResumePolicy.REQUIRE_EXISTING)
+
+        def resume_model(request: Any) -> LLMResponse:
+            with model_calls.get_lock():
+                model_calls.value += 1
+            assert sum(message.content == response_text for message in request.messages) == 1
+            assert any(message.content == "Region choice requested." for message in request.messages)
+            if fault in {"concurrent_recovery", "completed_wake_race"}:
+                model_entered.set()
+                assert release_model.wait(15), "duplicate worker did not release the model"
+            return LLMResponse(content="Europe selected.")
+
+        registry.register("llm_client", llm_ref, ScriptedLLM(steps=[resume_model]))
+        recovery = backend.advance(previous_envelope=app.envelopes[0], outcome=DistributedWorkerResponse.pending())
+        assert recovery.action == "dispatch" and recovery.envelope is not None
+        if fault in {"claim_and_consume_host_interaction_response", "model_receipt"}:
+            assert deliver(recovery.envelope.to_dict(), crash_at=fault) is None
+            consumed = store.load_checkpoint(handle.checkpoint_key)
+            assert consumed is not None and consumed.claim_token is not None
+            assert consumed.lease_expires_at_ms is not None
+            assert consumed.lease_expires_at_ms < time.time_ns() // 1_000_000
+            assert model_calls.value == (2 if fault == "model_receipt" else 1)
+            if fault == "model_receipt":
+                assert consumed.model_call_journal[0].state.value == "succeeded"
+            assert sum(message.content == response_text for message in consumed.messages) == 1
+            with pytest.raises(CheckpointError, match="resume_attempt"):
+                run_single_cycle(envelope_dict=recovery.envelope.to_dict(), capability_registry=registry)
+            assert store.load_checkpoint(handle.checkpoint_key) == consumed
+            recovery = backend.advance(
+                previous_envelope=recovery.envelope, outcome=RuntimeError("worker exited after response consumption")
+            )
+            assert recovery.action == "dispatch" and recovery.envelope is not None
+            assert store.load_checkpoint(handle.checkpoint_key) == consumed
+        recovered = (
+            race_recovery(recovery.envelope.to_dict())
+            if fault in {"unclaimed_recovery", "completed_wake_race"}
+            else deliver(recovery.envelope.to_dict())
+        )
+        assert recovered is not None
+        assert recovered["type"] == "terminal_candidate"
+        assert recovered["result"]["status"] == "completed", recovered["result"].get("error")
+        assert recovered["result"]["final_answer"] == "Europe selected."
+        assert calls[:] == [1, 1, 0]
+        assert model_calls.value == 2
+        awaiting_finalization = store.load_checkpoint(handle.checkpoint_key)
+        assert awaiting_finalization is not None
+        assert recovered["result"]["token_usage"]["model_calls"] == [call.to_dict() for call in awaiting_finalization.model_calls]
+        assert run_single_cycle(envelope_dict=recovery.envelope.to_dict(), capability_registry=registry)["type"] == "pending"
+        assert store.load_checkpoint(handle.checkpoint_key) == awaiting_finalization
+        finish = backend.advance(previous_envelope=recovery.envelope, outcome=recovered)
+        assert finish.action == "finalize_required"
+        result = Runner.finalize_distributed(agent, "Choose a region.", decision=finish, run_config=run_config)
+        assert result.status is AgentStatus.COMPLETED
+        assert result.final_output == "Europe selected."
+        terminal = store.load_checkpoint(handle.checkpoint_key)
+        assert terminal is not None
+        assert terminal.terminal_acknowledged and terminal.claim_token is None
+        assert len(terminal.model_calls) == 2
+        assert (
+            Runner.finalize_distributed(agent, "Choose a region.", decision=finish, run_config=run_config).final_output
+            == result.final_output
+        )
+        assert store.load_checkpoint(handle.checkpoint_key) == terminal
+        assert calls[:] == [1, 1, 0] and model_calls.value == 2
+    finally:
+        if isinstance(store, SqliteCheckpointStore):
+            store.close()
+        else:
+            store._client.close()
+
+
+def test_cross_language_host_interaction_store() -> None:
+    import os
+
+    from vv_agent.runtime.controller import HostInteractionRecoveryEnvelope, derive_host_interaction_record_id
+    from vv_agent.runtime.stores.redis import RedisCheckpointStore
+    from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
+
+    directory = os.environ.get("VV_AGENT_CROSS_HOST_DIR")
+    if directory is None:
+        pytest.skip("requires a real cross-language host-interaction checkpoint")
+    mode = os.environ["VV_AGENT_CROSS_HOST_MODE"]
+    assert mode in {"respond", "read"}
+    redis_url = os.environ.get("VV_AGENT_CROSS_HOST_REDIS_URL")
+    store = RedisCheckpointStore(redis_url) if redis_url else SqliteCheckpointStore(Path(directory) / "host-tool.sqlite")
+    text = "Europe 中文 https://example.invalid/?keep=1"
+    try:
+        checkpoint = store.load_checkpoint("host-tool")
+        assert checkpoint is not None
+        assert checkpoint.cycle_index == 1 and len(checkpoint.model_calls) == 1
+        assert checkpoint.cycles[0].tool_results[0].content == "Region choice requested."
+        assert checkpoint.cycles[0].tool_results[1].error_code == "skipped_due_to_host_interaction"
+        assert not checkpoint.tool_journal and not checkpoint.model_call_journal
+        if mode == "respond":
+            request = HostInteractionRequest.from_dict(checkpoint.active_host_interaction)
+            assert request.request_digest is not None
+            assert request.prompt == "Choose a region: https://example.invalid/?keep=1"
+            command = ControllerCommand(
+                command_id="cross-response",
+                handle=DistributedRunHandle("host-tool", checkpoint.root_run_id, checkpoint.trace_id),
+                resume_attempt=checkpoint.resume_attempt,
+                expected_revision=checkpoint.revision,
+                command={
+                    "kind": "host_interaction_response",
+                    "interaction_id": request.interaction_id,
+                    "logical_cycle": request.logical_cycle,
+                    "operation_id": request.operation_id,
+                    "tool_call_id": request.tool_call_id,
+                    "request_digest": request.request_digest,
+                    "response": {"role": "user", "content": text},
+                },
+            )
+            assert store.resolve_controller_command(command).kind == "applied"
+            resolved = store.load_checkpoint("host-tool")
+            assert resolved is not None
+            assert store.resolve_controller_command(command).kind == "replayed"
+            assert store.load_checkpoint("host-tool") == resolved
+            recovery = HostInteractionRecoveryEnvelope(
+                record_id=derive_host_interaction_record_id("host-tool", request),
+                checkpoint_key="host-tool",
+                run_id=checkpoint.root_run_id,
+                trace_id=checkpoint.trace_id,
+                claim_mode="recovery",
+                resume_attempt=resolved.resume_attempt,
+                expected_revision=resolved.revision,
+                logical_cycle=request.logical_cycle,
+                interaction_id=request.interaction_id,
+                operation_id=request.operation_id,
+                tool_call_id=request.tool_call_id,
+                request_digest=request.request_digest,
+                command_id=command.command_id,
+            )
+            assert store.claim_and_consume_host_interaction_response(recovery.to_dict()).kind == "applied"
+            consumed = store.load_checkpoint("host-tool")
+            assert store.claim_and_consume_host_interaction_response(recovery.to_dict()).kind == "replayed"
+            assert store.load_checkpoint("host-tool") == consumed
+        checkpoint = store.load_checkpoint("host-tool")
+        assert checkpoint is not None
+        assert checkpoint.status is AgentStatus.RUNNING
+        assert checkpoint.claimed_cycle == 2 and checkpoint.claim_token is not None
+        assert sum(message.content == text for message in checkpoint.messages) == 1
+        assert checkpoint.terminal_result is None
+    finally:
+        if isinstance(store, SqliteCheckpointStore):
+            store.close()
+        else:
+            store._client.close()
 
 
 def test_registered_celery_task_forwards_transport_redelivery_metadata(

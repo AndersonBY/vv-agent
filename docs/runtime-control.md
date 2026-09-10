@@ -21,6 +21,20 @@ completion candidate. Explicit `continue` requests another cycle; `wait_user`
 pauses for input. Existing after-cycle hooks can reject or steer a candidate
 within the remaining cycle budget without classifying assistant text.
 
+## Host Interaction
+
+A tool returns `ToolCallOutcome.HostInteraction(result, request)` for a durable,
+non-terminal host interaction. The runtime applies after-tool hooks and commits
+the completed model/tool cycle, interaction request, result, and notification
+outbox in one claimed transaction. Remaining calls in that model response have
+explicit `skipped_due_to_host_interaction` results and are not executed.
+
+The returned Agent status is `host_interaction`, with no final output or
+terminal session commit. A controller response preserves the original user
+content and resumes the next model cycle. Distributed workers return `pending`
+while the host response is outstanding. `ask_user` retains its separate terminal
+approval/continuation behavior.
+
 ## Per-Run Control Surface
 
 `RunConfig` can replace or extend model selection/settings, workspace and

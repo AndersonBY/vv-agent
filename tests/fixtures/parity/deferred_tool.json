@@ -226,6 +226,12 @@
         "tool_call_id_matches_request": true,
         "ambiguous_result_rejected": true,
         "handler_return_is_not_admission": true,
+        "admission_owner": "runtime_after_completed_cycle_assembly",
+        "admission_commits_completed_cycle": true,
+        "remaining_calls": "skipped_due_to_host_interaction",
+        "response_execution_cycle": "next_cycle_after_committed_origin",
+        "receipt_retention": "complete_result_in_cycle_record",
+        "accepted_cancel": "retain_definitive_result_and_finalize_cancelled_without_interaction",
         "model_visible_tool_result": true
       }
     },

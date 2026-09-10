@@ -52,7 +52,6 @@ from vv_agent.runtime.checkpoint_resume import (
     _checkpoint_control_result,
 )
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.controller import DistributedBackend, HostInteractionOutcome, HostInteractionRequest
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.runtime.hooks import RuntimeHook, RuntimeHookManager
 from vv_agent.runtime.lifecycle import (
@@ -701,31 +700,6 @@ class AgentRuntime:
             result.partial_output = result.partial_output or _last_assistant_output(result.cycles)
         return result
 
-    @staticmethod
-    def _bind_host_interaction_producer(ctx: ExecutionContext | None) -> None:
-        """Bind the framework producer to the current checkpoint claim.
-
-        Tool handlers receive this same execution context through
-        ``ToolContext.ctx``.  The admission context is reconstructed for each
-        call from the controller's live claim, so a released or stale claim
-        cannot be reused by a later tool invocation.
-        """
-        if ctx is None:
-            return
-        checkpoint_controller = ctx.metadata.get("_vv_agent_checkpoint_controller")
-        if not isinstance(checkpoint_controller, CheckpointResumeController):
-            return
-
-        def produce(request: HostInteractionRequest) -> HostInteractionOutcome:
-            admission_context = checkpoint_controller.host_interaction_admission_context()
-            backend = DistributedBackend(
-                checkpoint_controller.store,
-                admission_context=admission_context,
-            )
-            return backend.produce_host_interaction(request)
-
-        ctx.host_interaction_producer = produce
-
     def _build_cycle_executor(
         self,
         *,
@@ -750,7 +724,6 @@ class AgentRuntime:
 
             if ctx is not None:
                 ctx.metadata["_vv_agent_active_cycle_index"] = cycle_index
-                self._bind_host_interaction_producer(ctx)
 
             def cancellation_result(error: str | None = None) -> AgentResult:
                 reason = error
@@ -1046,7 +1019,7 @@ class AgentRuntime:
                         budget_usage=(budget_controller.snapshot if budget_controller is not None else None),
                     )
                 except CheckpointError as exc:
-                    control_result = checkpoint_control_result(exc)
+                    control_result = checkpoint_control_result(exc, cycle_record)
                     if control_result is None:
                         raise
                     return control_result
@@ -1058,18 +1031,18 @@ class AgentRuntime:
                 tool_result = tool_outcome.directive_result
                 cycles.append(cycle_record)
                 cancelled = is_cancelled()
-                if tool_outcome.deferred_outcomes:
+                if tool_outcome.deferred_outcomes or tool_outcome.host_interaction:
                     checkpoint_key = None
                     if isinstance(ctx, ExecutionContext):
                         controller = ctx.metadata.get("_vv_agent_checkpoint_controller")
                         checkpoint_key = getattr(controller, "checkpoint_key", None)
                     return AgentResult(
-                        status=AgentStatus.DEFERRED,
+                        status=AgentStatus.HOST_INTERACTION if tool_outcome.host_interaction else AgentStatus.DEFERRED,
                         completion_reason=None,
                         partial_output=_last_assistant_output(cycles),
                         messages=messages,
                         cycles=cycles,
-                        wait_reason="deferred_pending",
+                        wait_reason="host_interaction" if tool_outcome.host_interaction else "deferred_pending",
                         shared_state=shared,
                         token_usage=self._task_token_usage(ctx),
                         budget_usage=(budget_controller.snapshot if budget_controller is not None else None),

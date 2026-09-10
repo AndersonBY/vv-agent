@@ -22,7 +22,6 @@ from vv_agent.tools.orchestrator import (
     ToolOrchestrator,
 )
 from vv_agent.types import (
-    AgentStatus,
     AgentTask,
     CompletionReason,
     CycleRecord,
@@ -44,6 +43,7 @@ class ToolRunOutcome:
     completion_tool_name: str | None = None
     interruption_messages: list[Message] = field(default_factory=list)
     deferred_outcomes: list[tuple[ToolCall, ToolCallOutcome]] = field(default_factory=list)
+    host_interaction: bool = False
 
 
 class _ConfiguredSubTaskCancelledError(CancelledError):
@@ -75,6 +75,7 @@ class ToolCallRunner:
         interruption_messages: list[Message] = []
         image_notifications: list[Message] = []
         deferred_outcomes: list[tuple[ToolCall, ToolCallOutcome]] = []
+        host_interaction = False
         planned_tool_names = cycle_record._planned_tool_names
         allowed_tool_names = set(plan_tool_names(task) if planned_tool_names is None else planned_tool_names)
 
@@ -287,6 +288,49 @@ class ToolCallRunner:
                 continue
             assert outcome.result is not None
             result = outcome.result
+            if outcome.kind == "host_interaction":
+                if not isinstance(checkpoint_controller, CheckpointResumeController):
+                    raise CheckpointError("host interaction requires a checkpoint claim", code="host_interaction_claim_required")
+                if deferred_outcomes:
+                    raise CheckpointError(
+                        "host interaction cannot release an unresolved tool batch", code="host_interaction_conflict"
+                    )
+                assert outcome.request is not None
+                cycle_record.tool_results.append(result)
+                messages.append(self._tool_result_message(result))
+                for skipped_call in tool_calls[index + 1 :]:
+                    skipped = self._build_skipped_result(
+                        skipped_call,
+                        error_code="skipped_due_to_host_interaction",
+                        message="Tool not executed while awaiting the host response.",
+                    )
+                    cycle_record.tool_results.append(skipped)
+                    messages.append(self._tool_result_message(skipped))
+                try:
+                    admission = checkpoint_controller.host_interaction_admission_context()
+                    committed_cycles = [
+                        cycle for cycle in checkpoint_controller._require_checkpoint().cycles if cycle.index < cycle_record.index
+                    ]
+                    checkpoint_controller._refresh_snapshot(
+                        messages=messages,
+                        cycles=[*committed_cycles, cycle_record],
+                        shared_state=context.shared_state,
+                    )
+                    admission = replace(admission, cycle_snapshot=deepcopy(checkpoint_controller._require_checkpoint()))
+                    checkpoint_controller.store.produce_host_interaction(outcome.request, admission_context=admission)
+                except CheckpointError as error:
+                    if error.code == "checkpoint_cancel_requested":
+                        checkpoint_controller.finish_tool(cycle_index=context.cycle_index, call=patched_call, result=result)
+                    raise
+                refreshed = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+                if refreshed is None:
+                    raise CheckpointError("checkpoint disappeared after host interaction admission", code="checkpoint_not_found")
+                checkpoint_controller.checkpoint = refreshed
+                checkpoint_controller._owned_claim_token = None
+                checkpoint_controller._active_claim_mode = None
+                checkpoint_controller._stop_heartbeat()
+                host_interaction = True
+                break
             if isinstance(checkpoint_controller, CheckpointResumeController):
                 entry = checkpoint_controller._find_tool_call(
                     cycle_index=context.cycle_index,
@@ -298,11 +342,6 @@ class ToolCallRunner:
                         call=patched_call,
                         result=result,
                     )
-                    authoritative = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
-                    if authoritative is not None and authoritative.status is AgentStatus.HOST_INTERACTION:
-                        cycle_record.tool_results.append(result)
-                        messages.append(self._tool_result_message(result))
-                        break
 
             cycle_record.tool_results.append(result)
             messages.append(self._tool_result_message(result))
@@ -413,6 +452,7 @@ class ToolCallRunner:
             completion_tool_name=completion_tool_name,
             interruption_messages=interruption_messages,
             deferred_outcomes=deferred_outcomes,
+            host_interaction=host_interaction,
         )
 
     @staticmethod

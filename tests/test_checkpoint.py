@@ -2277,12 +2277,17 @@ def test_record_tool_receipt_identity_miss_rejects_typed_without_write(
     assert checkpoint_to_dict(after) == before_payload
 
 
-@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
-def test_host_interaction_rejects_receipt_from_released_owner(store_kind: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "real_redis"])
+def test_host_interaction_rejects_receipt_from_released_owner(
+    store_kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from copy import deepcopy
+    from dataclasses import replace
+
     from vv_agent.runtime.controller import HostInteractionAdmissionContext, HostInteractionRequest
 
     store = _store(store_kind, tmp_path, f"released-owner-{store_kind}")
-    checkpoint = _minimal_checkpoint(key=f"released-owner-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"released-owner-{store_kind}-{uuid4().hex}")
     assert store.create_checkpoint(checkpoint)
     claimed = store.claim_checkpoint(
         checkpoint.checkpoint_key,
@@ -2298,18 +2303,74 @@ def test_host_interaction_rejects_receipt_from_released_owner(store_kind: str, t
     claimed.tool_journal = [entry]
     assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
     claimed.revision += 1
-    store.produce_host_interaction(
-        HostInteractionRequest("interaction", 1, entry.operation_id, entry.tool_call_id, "Choose"),
-        admission_context=HostInteractionAdmissionContext(
-            checkpoint_key=checkpoint.checkpoint_key,
-            claim_token="owner",
-            expected_revision=claimed.revision,
-            claimed_cycle=1,
-            now_ms=100,
-            lease_expires_at_ms=200,
-        ),
+    assert entry.tool_call_id is not None and entry.tool_name is not None
+    request = HostInteractionRequest("interaction", 1, entry.operation_id, entry.tool_call_id, "Choose")
+    result = ToolExecutionResult(tool_call_id=entry.tool_call_id, content="requested", status_code=ToolResultStatus.SUCCESS)
+    completion = deepcopy(claimed)
+    from vv_agent.types import ToolCall
+
+    completion.cycles = [
+        CycleRecord(
+            index=1,
+            assistant_message="",
+            tool_calls=[ToolCall(id=entry.tool_call_id, name=entry.tool_name, arguments={})],
+            tool_results=[result],
+        )
+    ]
+    admission = HostInteractionAdmissionContext(
+        checkpoint_key=checkpoint.checkpoint_key,
+        claim_token="owner",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+        now_ms=100,
+        lease_expires_at_ms=200,
+        cycle_snapshot=completion,
     )
+    with pytest.raises(CheckpointError) as error:
+        store.produce_host_interaction(request, admission_context=replace(admission, cycle_snapshot=None))
+    assert error.value.code == "host_interaction_conflict"
+    assert store.load_checkpoint(checkpoint.checkpoint_key) == claimed
+    if store_kind == "sqlite":
+        before_fault = checkpoint_to_dict(store.load_checkpoint(checkpoint.checkpoint_key))
+
+        def fail_notification(_row: Any) -> Any:
+            raise RuntimeError("notification persistence interrupted")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(SqliteCheckpointStore, "_notification_values", staticmethod(fail_notification))
+            with pytest.raises(RuntimeError, match="notification persistence interrupted"):
+                store.produce_host_interaction(request, admission_context=admission)
+        store.close()
+        store = _store(store_kind, tmp_path, f"released-owner-{store_kind}")
+        assert checkpoint_to_dict(store.load_checkpoint(checkpoint.checkpoint_key)) == before_fault
+        assert store._conn.execute("SELECT COUNT(*) FROM host_interaction_records").fetchone()[0] == 0
+        assert store._conn.execute("SELECT COUNT(*) FROM host_interaction_notification_outbox").fetchone()[0] == 0
+    store.produce_host_interaction(request, admission_context=admission)
     before = checkpoint_to_dict(store.load_checkpoint(checkpoint.checkpoint_key))
+    current = store.load_checkpoint(checkpoint.checkpoint_key)
+    assert current.revision == claimed.revision + 1
+    assert current.claim_token is None
+    assert current.cycle_index == 1
+    assert current.tool_journal == []
+    assert current.cycles[0].tool_results[0] == result
+    for suspended in (False, True):
+        malformed = deepcopy(before)
+        malformed["cycles"] = []
+        if suspended:
+            malformed["status"] = "suspended"
+            malformed["suspended_origin"] = {
+                "status": "host_interaction",
+                "active_host_interaction": malformed["active_host_interaction"],
+            }
+            malformed["active_host_interaction"] = None
+        with pytest.raises(CheckpointError, match="retained completed tool cycle"):
+            checkpoint_from_dict(malformed)
+    assert store.produce_host_interaction(request, admission_context=admission).status == "replayed"
+    other_completion = deepcopy(completion)
+    other_completion.cycles[0].tool_results[0] = replace(result, content="different")
+    conflicting = replace(admission, cycle_snapshot=other_completion)
+    with pytest.raises(CheckpointError, match="receipt conflicts"):
+        store.produce_host_interaction(request, admission_context=conflicting)
     with pytest.raises(CheckpointError) as error:
         store.record_tool_receipt(
             claimed,

@@ -71,6 +71,7 @@ from vv_agent.runtime.stores.controller_store import (
     prepare_controller_command,
     prepare_host_interaction,
     prepare_host_response_consumption,
+    validate_host_tool_receipt_replay,
 )
 from vv_agent.types import AgentStatus
 
@@ -1126,6 +1127,7 @@ class SqliteCheckpointStore:
                             raise CheckpointError("host interaction checkpoint was deleted", code="host_interaction_conflict")
                         if checkpoint.revision < admission_context.expected_revision + 1:
                             raise CheckpointError("host interaction replay revision is stale", code="host_interaction_stale")
+                        validate_host_tool_receipt_replay(checkpoint, request_value, admission_context)
                         self._conn.commit()
                         return self._host_outcome(existing, status="replayed", checkpoint_revision=checkpoint.revision)
                 row = self._conn.execute(

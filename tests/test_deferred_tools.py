@@ -145,11 +145,101 @@ def test_host_interaction_outcome_round_trips_and_rejects_mismatches() -> None:
         bad["result"][field] = value
         with pytest.raises(ValueError):
             ToolCallOutcome.from_dict(bad)
+
+
+def test_orchestrator_preserves_host_interaction_until_admission() -> None:
+    from vv_agent.tools.orchestrator import ToolOrchestrator
+
+    request = HostInteractionRequest("interaction", 1, "operation", "call-host", "Choose")
+    expected = ToolCallOutcome.HostInteraction(
+        ToolExecutionResult(tool_call_id="call-host", content="requested", status_code=ToolResultStatus.SUCCESS),
+        request,
+    )
+
+    @function_tool(name="request_choice", params_json_schema=_EMPTY_SCHEMA)
+    def request_choice(_context: ToolContext) -> ToolCallOutcome:
+        return expected
+
+    events = []
+    finalized = []
+
+    def finalize(_call: Any, _context: Any, result: ToolExecutionResult) -> ToolExecutionResult:
+        finalized.append(result)
+        return result
+
+    result = ToolOrchestrator.from_tools([request_choice]).run_one(
+        ToolCall(id="call-host", name="request_choice", arguments={}),
+        context=_context(),
+        event_sink=events.append,
+        _result_finalizer=finalize,
+    )
+    assert result == expected
+    assert finalized == [expected.result]
+    assert not any(isinstance(event, ToolCallCompletedEvent) for event in events)
     for field, value in (("schema_version", "vv-agent.tool-call-outcome.v2"), ("extra", True)):
-        bad = outcome.to_dict()
+        bad = expected.to_dict()
         bad[field] = value
         with pytest.raises(ValueError):
             ToolCallOutcome.from_dict(bad)
+
+
+def test_local_runner_retains_host_interaction_without_finalizing() -> None:
+    store = InMemoryCheckpointStore()
+
+    @function_tool(name="request_choice", params_json_schema=_EMPTY_SCHEMA)
+    def request_choice(context: ToolContext) -> ToolCallOutcome:
+        plan = context.metadata["_vv_agent_checkpoint_plan"]
+        return ToolCallOutcome.HostInteraction(
+            ToolExecutionResult(tool_call_id=context.tool_call_id, content="requested"),
+            HostInteractionRequest("interaction", context.cycle_index, plan.operation_id, context.tool_call_id, "Choose"),
+        )
+
+    result, checkpoint = _run_checkpointed_tools(
+        store, "local-host", [request_choice], [ToolCall(id="choice", name="request_choice", arguments={})]
+    )
+    assert result.status is AgentStatus.HOST_INTERACTION
+    assert result.final_output is None
+    assert result.raw_result.wait_reason == "host_interaction"
+    assert checkpoint.status is AgentStatus.HOST_INTERACTION
+    assert checkpoint.terminal_result is None
+    assert checkpoint.claim_token is None
+
+
+def test_cancel_before_host_interaction_keeps_result_without_waiting() -> None:
+    from vv_agent.runtime.backends.distributed import DistributedRunHandle
+    from vv_agent.runtime.controller import ControllerCommand
+
+    store = InMemoryCheckpointStore()
+
+    @function_tool(name="request_choice", params_json_schema=_EMPTY_SCHEMA)
+    def request_choice(context: ToolContext) -> ToolCallOutcome:
+        plan = context.metadata["_vv_agent_checkpoint_plan"]
+        checkpoint = store.load_checkpoint("cancel-host")
+        assert checkpoint is not None
+        decision = store.resolve_controller_command(
+            ControllerCommand(
+                command_id="cancel-before-choice",
+                handle=DistributedRunHandle("cancel-host", checkpoint.root_run_id, checkpoint.trace_id),
+                resume_attempt=checkpoint.resume_attempt,
+                expected_revision=checkpoint.revision,
+                command={"kind": "cancel"},
+            )
+        )
+        assert decision.kind == "applied"
+        return ToolCallOutcome.HostInteraction(
+            ToolExecutionResult(tool_call_id=context.tool_call_id, content="Choice prepared."),
+            HostInteractionRequest("interaction", context.cycle_index, plan.operation_id, context.tool_call_id, "Choose"),
+        )
+
+    result, checkpoint = _run_checkpointed_tools(
+        store, "cancel-host", [request_choice], [ToolCall(id="choice", name="request_choice", arguments={})]
+    )
+    assert result.status is AgentStatus.FAILED
+    assert result.raw_result.completion_reason.value == "cancelled"
+    assert checkpoint.active_host_interaction is None
+    assert checkpoint.terminal_result is not None and checkpoint.claim_token is None
+    assert any(tool.content == "Choice prepared." for cycle in checkpoint.cycles for tool in cycle.tool_results)
+    assert not any(event.event["type"] == "host_interaction_requested" for event in checkpoint.event_outbox)
 
 
 def test_checkpointed_non_definitive_tool_outcome_uses_normal_wait_user_lifecycle() -> None:

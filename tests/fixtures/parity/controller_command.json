@@ -325,6 +325,8 @@
     "admission": {
       "requires_active_claim": true,
       "claimed_cycle_must_equal_logical_cycle": true,
+      "pre_model_admission_requires_empty_operation_journals": true,
+      "missing_cycle_snapshot_with_operation_journals": "host_interaction_conflict_zero_writes",
       "single_cas_writes": [
         "active_host_interaction (complete strict HostInteractionRequest)",
         "host_interaction_record (request and identity)",
@@ -1231,8 +1233,8 @@
     "cycle_semantics": {
       "cycle_index": "last_committed_cycle",
       "claimed_cycle": "cycle_index_plus_one_while_worker_claim_is_live",
-      "logical_cycle": "the_same_in_flight_cycle_identity_after_claim_release",
-      "host_interaction_response_and_resume": "preserve_cycle_index_and_reclaim_the_same_logical_cycle",
+      "logical_cycle": "origin_cycle_identity_after_claim_release",
+      "host_interaction_response_and_resume": "preserve_committed_cycle_index_and_claim_next_uncommitted_cycle",
       "no_new_cycle_is_created_by_controller_command": true
     }
   },

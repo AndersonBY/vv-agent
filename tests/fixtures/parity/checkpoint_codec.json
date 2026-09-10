@@ -394,7 +394,8 @@
   "status_rules": {
     "host_interaction_is_non_terminal": true,
     "suspended_is_non_terminal": true,
-    "host_interaction_preserves_cycle_index_without_commit": true,
+    "host_interaction_preserves_cycle_index_without_commit": "direct_framework_interaction_before_model_execution_only",
+    "tool_host_interaction_commits_cycle_and_clears_active_journals": true,
     "suspended_preserves_cycle_index_without_commit": true,
     "active_host_interaction_is_durable_checkpoint_state": true,
     "active_host_interaction_logical_cycle_equals_claimed_cycle_before_release": true,
