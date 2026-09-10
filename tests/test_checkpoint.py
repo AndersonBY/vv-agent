@@ -2277,6 +2277,55 @@ def test_record_tool_receipt_identity_miss_rejects_typed_without_write(
     assert checkpoint_to_dict(after) == before_payload
 
 
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
+def test_host_interaction_rejects_receipt_from_released_owner(store_kind: str, tmp_path: Path) -> None:
+    from vv_agent.runtime.controller import HostInteractionAdmissionContext, HostInteractionRequest
+
+    store = _store(store_kind, tmp_path, f"released-owner-{store_kind}")
+    checkpoint = _minimal_checkpoint(key=f"released-owner-{store_kind}")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key,
+        1,
+        claim_token="owner",
+        lease_expires_at_ms=200,
+        now_ms=100,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    entry = OperationJournalEntry.from_dict(_journal_case("tool_started"))
+    entry.cycle_index = 1
+    claimed.tool_journal = [entry]
+    assert store.progress_checkpoint(claimed, claim_token="owner", expected_revision=claimed.revision)
+    claimed.revision += 1
+    store.produce_host_interaction(
+        HostInteractionRequest("interaction", 1, entry.operation_id, entry.tool_call_id, "Choose"),
+        admission_context=HostInteractionAdmissionContext(
+            checkpoint_key=checkpoint.checkpoint_key,
+            claim_token="owner",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+            now_ms=100,
+            lease_expires_at_ms=200,
+        ),
+    )
+    before = checkpoint_to_dict(store.load_checkpoint(checkpoint.checkpoint_key))
+    with pytest.raises(CheckpointError) as error:
+        store.record_tool_receipt(
+            claimed,
+            operation_id=entry.operation_id,
+            attempt=entry.attempt,
+            tool_call_id=entry.tool_call_id,
+            request_digest=entry.request_digest,
+            result=ToolExecutionResult(tool_call_id=entry.tool_call_id, content="late", status_code=ToolResultStatus.SUCCESS),
+            claim_token="owner",
+            expected_revision=claimed.revision,
+            claimed_cycle=1,
+        )
+    assert error.value.code == "checkpoint_claim_required"
+    assert checkpoint_to_dict(store.load_checkpoint(checkpoint.checkpoint_key)) == before
+
+
 def test_canonical_unknown_journal_recovers_once_through_controller() -> None:
     import time
 

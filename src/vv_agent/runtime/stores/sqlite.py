@@ -640,9 +640,7 @@ class SqliteCheckpointStore:
                 if authoritative is None or authoritative is current:
                     self._conn.rollback()
                     return authoritative is not None
-                write_revision = current.revision if current.status is AgentStatus.HOST_INTERACTION else expected_revision
-                write_claim = None if current.status is AgentStatus.HOST_INTERACTION else claim_token
-                self._write_checkpoint_tx(authoritative, expected_revision=write_revision, claim_token=write_claim)
+                self._write_checkpoint_tx(authoritative, expected_revision=expected_revision, claim_token=claim_token)
                 self._conn.commit()
                 return True
             except BaseException:
