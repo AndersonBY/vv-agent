@@ -8,14 +8,6 @@ from typing import Any
 
 from vv_agent.skills import normalize_skill_list, render_skills_xml
 
-TASK_FINISH_PROMPT = {
-    "en-US": (
-        "Use task_finish for an explicit final result. Natural completion is allowed when the configured "
-        "no-tool policy permits it."
-    ),
-    "zh-CN": "可使用 task_finish 显式返回最终结果；若配置的 no-tool policy 允许，也可自然结束。",
-}
-
 ASK_USER_PROMPT = {
     "en-US": "Ask the user only for a required decision that cannot be resolved from context or available tools.",
     "zh-CN": "只有缺少无法从上下文或可用工具中获得的必要决策时才询问用户。",

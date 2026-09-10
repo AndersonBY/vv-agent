@@ -11,8 +11,8 @@ from vv_agent.constants import (
     BASH_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     EDIT_FILE_TOOL_NAME,
+    READ_FILE_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
 from vv_agent.llm import LlmRequest
@@ -41,10 +41,7 @@ class CapturingLLM:
             assert isinstance(function, dict)
             names.append(str(function["name"]))
         self.tool_names = names
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
         del stream_callback
@@ -70,12 +67,12 @@ def test_tool_policy_allowed_tools_filters_default_and_custom_tool_schemas(tmp_p
         run_config=RunConfig(
             workspace=tmp_path,
             model_provider=FixedModelProvider(llm, _resolved()),
-            tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "allowed"]),
+            tool_policy=ToolPolicy(allowed_tools=[READ_FILE_TOOL_NAME, "allowed"]),
         ),
     )
 
     assert result.final_output == "ok"
-    assert llm.tool_names == [TASK_FINISH_TOOL_NAME, "allowed"]
+    assert llm.tool_names == [READ_FILE_TOOL_NAME, "allowed"]
 
 
 def test_tool_policy_disallowed_tools_filters_custom_tool_schema(tmp_path: Path) -> None:
@@ -147,12 +144,12 @@ def test_tool_policy_allowed_tools_can_expose_edit_file_schema(tmp_path: Path) -
         run_config=RunConfig(
             workspace=tmp_path,
             model_provider=FixedModelProvider(llm, _resolved()),
-            tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, EDIT_FILE_TOOL_NAME]),
+            tool_policy=ToolPolicy(allowed_tools=[EDIT_FILE_TOOL_NAME]),
         ),
     )
 
     assert result.final_output == "ok"
-    assert set(llm.tool_names) == {EDIT_FILE_TOOL_NAME, TASK_FINISH_TOOL_NAME}
+    assert llm.tool_names == [EDIT_FILE_TOOL_NAME]
 
 
 def test_tool_policy_disallowed_tools_can_hide_edit_file_schema(tmp_path: Path) -> None:

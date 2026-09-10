@@ -8,7 +8,7 @@ import pytest
 
 from vv_agent import Agent, RunConfig, Runner, ScriptedModelProvider
 from vv_agent.config import ResolvedModelConfig
-from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.compiler import AgentCompiler
@@ -199,30 +199,12 @@ def test_public_runner_executes_configured_child_without_runtime_task(tmp_path: 
     def finish_child(request: LlmRequest) -> LLMResponse:
         observed_models.append(request.model)
         assert set(_request_tool_names(request)).isdisjoint(configured_names)
-        return LLMResponse(
-            content="finish child",
-            tool_calls=[
-                ToolCall(
-                    id="finish-child",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": public_runner["child_final_output"]},
-                )
-            ],
-        )
+        return LLMResponse(content=public_runner["child_final_output"])
 
     def finish_parent(request: LlmRequest) -> LLMResponse:
         observed_models.append(request.model)
         assert [name for name in _request_tool_names(request) if name in configured_names] == configured_names
-        return LLMResponse(
-            content="finish parent",
-            tool_calls=[
-                ToolCall(
-                    id="finish-parent",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": public_runner["parent_final_output"]},
-                )
-            ],
-        )
+        return LLMResponse(content=public_runner["parent_final_output"])
 
     llm = ScriptedLLM(steps=[delegate, finish_child, finish_parent])
     provider = ScriptedModelProvider(

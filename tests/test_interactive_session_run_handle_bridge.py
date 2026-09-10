@@ -10,7 +10,7 @@ from support import FixedModelProvider, ModelMapProvider
 
 from vv_agent import AgentSessionOptions, InteractiveAgentClient, InteractiveAgentDefinition
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.runtime import CancellationToken
 from vv_agent.types import AgentStatus, LLMResponse, SubAgentConfig, ToolCall
@@ -29,14 +29,7 @@ def _resolved(*, backend: str = "test", model: str = "test-model") -> ResolvedMo
 
 def _model_provider() -> FixedModelProvider:
     return FixedModelProvider(
-        ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="answer",
-                    tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "answer"})],
-                )
-            ]
-        ),
+        ScriptedLLM(steps=[LLMResponse(content="answer")]),
         _resolved(),
     )
 
@@ -68,10 +61,7 @@ def test_interactive_session_steering_queue_reaches_run_handle_runtime(tmp_path)
 
     def respond(request: LlmRequest) -> LLMResponse:
         seen_user_messages.append([message.content for message in request.messages if message.role == "user"])
-        return LLMResponse(
-            content="answer",
-            tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-        )
+        return LLMResponse(content="done")
 
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
@@ -143,14 +133,14 @@ def test_active_run_handle_steer_queues_session_context(tmp_path) -> None:
     def first_step(_: LlmRequest) -> LLMResponse:
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=3)
-        return LLMResponse(content="continue", tool_calls=[])
+        return LLMResponse(
+            content="continue",
+            tool_calls=[ToolCall(id="todo", name="todo_write", arguments={"todos": []})],
+        )
 
     def second_step(request: LlmRequest) -> LLMResponse:
         seen_user_messages.append([message.content for message in request.messages if message.role == "user"])
-        return LLMResponse(
-            content="finish",
-            tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-        )
+        return LLMResponse(content="done")
 
     steps.extend([first_step, second_step])
 
@@ -183,7 +173,6 @@ def test_active_run_handle_steer_queues_session_context(tmp_path) -> None:
     assert seen_user_messages == [
         [
             "hello",
-            "No tool call was produced. Continue the task and call `task_finish` when all todo items are done.",
             "queued from handle",
             "second queued from handle",
         ]
@@ -199,17 +188,11 @@ def test_active_run_handle_follow_up_queues_next_session_turn(tmp_path) -> None:
     def first_step(_: LlmRequest) -> LLMResponse:
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=3)
-        return LLMResponse(
-            content="finish first",
-            tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "first done"})],
-        )
+        return LLMResponse(content="first done")
 
     def second_step(request: LlmRequest) -> LLMResponse:
         seen_user_messages.append([message.content for message in request.messages if message.role == "user"])
-        return LLMResponse(
-            content="finish second",
-            tool_calls=[ToolCall(id="finish-2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "second done"})],
-        )
+        return LLMResponse(content="second done")
 
     steps.extend([first_step, second_step])
 
@@ -270,35 +253,13 @@ def test_interactive_sub_agent_uses_model_provider_for_child_model(tmp_path) -> 
                                 )
                             ],
                         ),
-                        LLMResponse(
-                            content="finish parent",
-                            tool_calls=[
-                                ToolCall(
-                                    id="parent-call-2",
-                                    name=TASK_FINISH_TOOL_NAME,
-                                    arguments={"message": "parent done"},
-                                )
-                            ],
-                        ),
+                        LLMResponse(content="parent done"),
                     ]
                 ),
                 parent_resolved,
             ),
             "child-model": (
-                ScriptedLLM(
-                    steps=[
-                        LLMResponse(
-                            content="finish child",
-                            tool_calls=[
-                                ToolCall(
-                                    id="child-call-1",
-                                    name=TASK_FINISH_TOOL_NAME,
-                                    arguments={"message": "child done"},
-                                )
-                            ],
-                        )
-                    ]
-                ),
+                ScriptedLLM(steps=[LLMResponse(content="child done")]),
                 child_resolved,
             ),
         },

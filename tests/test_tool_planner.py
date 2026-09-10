@@ -12,7 +12,6 @@ from vv_agent.constants import (
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
 from vv_agent.prompt import build_raw_system_prompt_bundle
@@ -42,8 +41,8 @@ def _task(**overrides: object) -> AgentTask:
 def test_plan_tool_names_default_capabilities() -> None:
     names = plan_tool_names(_task())
 
-    assert names[0] == TASK_FINISH_TOOL_NAME
-    assert ASK_USER_TOOL_NAME in names
+    assert names[0] == ASK_USER_TOOL_NAME
+    assert "task_finish" not in names
     for tool_name in WORKSPACE_TOOLS:
         assert tool_name in names
 
@@ -56,7 +55,7 @@ def test_plan_tool_names_respects_flags() -> None:
         )
     )
 
-    assert names == [TASK_FINISH_TOOL_NAME]
+    assert names == []
 
 
 def test_plan_tool_names_adds_computer_tools() -> None:
@@ -115,7 +114,7 @@ def test_plan_tool_schemas_only_returns_registered_tools() -> None:
     names = {schema["function"]["name"] for schema in schemas}
     for tool_name in WORKSPACE_TOOLS:
         assert tool_name in names
-    assert TASK_FINISH_TOOL_NAME in names
+    assert "task_finish" not in names
 
 
 def test_plan_tool_names_includes_activate_skill_for_skill_dirs_in_available_skills() -> None:

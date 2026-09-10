@@ -14,10 +14,9 @@ from vv_agent import (
     ScriptedModelProvider,
 )
 from vv_agent.config import ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ModelError
-from vv_agent.types import LLMResponse, Message, ToolCall
+from vv_agent.types import LLMResponse, Message
 
 
 def test_scripted_model_provider_runs_through_the_shared_request_contract(tmp_path: Path) -> None:
@@ -25,16 +24,7 @@ def test_scripted_model_provider_runs_through_the_shared_request_contract(tmp_pa
 
     def respond(request: LlmRequest) -> LLMResponse:
         requests.append(request)
-        return LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCall(
-                    id="finish",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": "done"},
-                )
-            ],
-        )
+        return LLMResponse(content="done")
 
     provider = ScriptedModelProvider.from_callback("scripted", "demo-model", respond).with_default_settings(
         ModelSettings(temperature=0.1, max_tokens=100)
@@ -87,12 +77,7 @@ def test_scripted_provider_default_model_is_runner_fallback(tmp_path: Path) -> N
     provider = ScriptedModelProvider.new(
         "scripted",
         "provider-default",
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            )
-        ],
+        [LLMResponse(content="done")],
     )
 
     result = Runner.run_sync(

@@ -22,7 +22,6 @@ from vv_agent import (
     TraceProcessor,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model import ModelRef
 from vv_agent.types import LLMResponse, ToolCall
@@ -86,9 +85,10 @@ def test_runner_emits_run_and_tool_trace_spans(tmp_path: Path) -> None:
                 ScriptedLLM(
                     steps=[
                         LLMResponse(
-                            content="done",
-                            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-                        )
+                            content="update todos",
+                            tool_calls=[ToolCall(id="todo", name="todo_write", arguments={"todos": []})],
+                        ),
+                        LLMResponse(content="ok"),
                     ]
                 ),
                 _resolved(),
@@ -108,7 +108,7 @@ def test_runner_emits_run_and_tool_trace_spans(tmp_path: Path) -> None:
     assert run_span.metadata["agent_name"] == "assistant"
     assert agent_span.parent_id == run_span.span_id
     assert tool_span.parent_id == agent_span.span_id
-    assert tool_span.metadata["tool_name"] == TASK_FINISH_TOOL_NAME
+    assert tool_span.metadata["tool_name"] == "todo_write"
     assert tool_span.ended_at is not None
 
 
@@ -150,14 +150,7 @@ def test_typed_output_failure_occurs_after_persistence_and_completed_event(tmp_p
             run_config=RunConfig(
                 workspace=tmp_path,
                 model_provider=FixedModelProvider(
-                    ScriptedLLM(
-                        steps=[
-                            LLMResponse(
-                                content="done",
-                                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "[]"})],
-                            )
-                        ]
-                    ),
+                    ScriptedLLM(steps=[LLMResponse(content="[]")]),
                     _resolved(),
                 ),
                 session=session,
@@ -201,14 +194,7 @@ def test_trace_processor_failures_are_isolated_from_the_run(tmp_path: Path) -> N
             run_config=RunConfig(
                 workspace=tmp_path,
                 model_provider=FixedModelProvider(
-                    ScriptedLLM(
-                        steps=[
-                            LLMResponse(
-                                content="done",
-                                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-                            )
-                        ]
-                    ),
+                    ScriptedLLM(steps=[LLMResponse(content="ok")]),
                     _resolved(),
                 ),
                 tracing={"processors": [BrokenProcessor()]},

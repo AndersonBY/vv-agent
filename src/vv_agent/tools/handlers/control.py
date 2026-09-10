@@ -2,52 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from vv_agent.constants import TODO_INCOMPLETE_ERROR_CODE
 from vv_agent.tools.base import ToolContext
-from vv_agent.tools.handlers.common import get_todo_list, to_json, trim_portable_whitespace
+from vv_agent.tools.handlers.common import to_json, trim_portable_whitespace
 from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
-
-
-def task_finish(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:
-    todo = get_todo_list(context.shared_state)
-    require_all_done = bool(arguments.get("require_all_todos_completed", True))
-    message = trim_portable_whitespace(str(arguments.get("message", "Task completed"))) or "Task completed"
-    exposed_files = arguments.get("exposed_files")
-
-    incomplete_todos = []
-    for item in todo:
-        status = str(item.get("status", "")).lower()
-        done_flag = bool(item.get("done", False))
-        if status in {"completed", "done", "finished"} or done_flag:
-            continue
-        incomplete_todos.append(str(item.get("title", "Untitled TODO")))
-
-    if require_all_done and incomplete_todos:
-        return ToolExecutionResult(
-            tool_call_id="",
-            status_code=ToolResultStatus.ERROR,
-            error_code=TODO_INCOMPLETE_ERROR_CODE,
-            content=to_json(
-                {
-                    "ok": False,
-                    "error_code": TODO_INCOMPLETE_ERROR_CODE,
-                    "error": "Cannot finish task while todo items are incomplete",
-                    "incomplete_todos": incomplete_todos,
-                }
-            ),
-        )
-
-    metadata: dict[str, Any] = {"final_message": message}
-    if isinstance(exposed_files, list):
-        metadata["exposed_files"] = [str(path) for path in exposed_files if str(path).strip()]
-
-    return ToolExecutionResult(
-        tool_call_id="",
-        status_code=ToolResultStatus.SUCCESS,
-        content=to_json({"ok": True, "message": message}),
-        directive=ToolDirective.FINISH,
-        metadata=metadata,
-    )
 
 
 def ask_user(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:

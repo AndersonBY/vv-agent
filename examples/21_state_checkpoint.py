@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, CheckpointConfig, RunConfig, Runner
+from vv_agent import Agent, CheckpointConfig, RunConfig, Runner, VvLlmModelProvider
 from vv_agent.checkpoint import ResumePolicy
 from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 
@@ -37,8 +37,10 @@ def main() -> None:
     store = SqliteCheckpointStore(db_path)
     config = RunConfig(
         model=model,
-        settings_file=settings_file,
-        default_backend=backend,
+        model_provider=VvLlmModelProvider(
+            settings_file=settings_file,
+            default_backend=backend,
+        ),
         workspace=workspace,
         max_cycles=5,
         checkpoint_config=CheckpointConfig(
@@ -52,7 +54,7 @@ def main() -> None:
     )
     agent = Agent(
         name="checkpoint-demo",
-        instructions=("Complete the requested task carefully. Use the finish tool only after the answer is ready."),
+        instructions="Complete the requested task carefully, then provide the final answer.",
         model=model,
     )
 

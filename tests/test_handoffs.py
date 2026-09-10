@@ -10,7 +10,6 @@ from support import ModelMapProvider, require_tool_result
 
 from vv_agent import Agent, RunConfig, Runner, ToolPolicy, function_tool, handoff
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.events import HandoffCompletedEvent, HandoffStartedEvent
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
@@ -53,20 +52,7 @@ def test_handoff_transfers_control_and_finishes_with_target_output(tmp_path: Pat
     )
     model_provider = _provider(
         {
-            "writer": ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="writer done",
-                        tool_calls=[
-                            ToolCall(
-                                id="writer-finish",
-                                name=TASK_FINISH_TOOL_NAME,
-                                arguments={"message": "written by target"},
-                            )
-                        ],
-                    )
-                ]
-            ),
+            "writer": ScriptedLLM(steps=[LLMResponse(content="written by target")]),
             "triage": ScriptedLLM(
                 steps=[
                     LLMResponse(
@@ -103,20 +89,7 @@ def test_handoff_run_emits_lifecycle_events(tmp_path: Path) -> None:
 
     model_provider = _provider(
         {
-            "writer": ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="writer done",
-                        tool_calls=[
-                            ToolCall(
-                                id="writer-finish",
-                                name=TASK_FINISH_TOOL_NAME,
-                                arguments={"message": "written by target"},
-                            )
-                        ],
-                    )
-                ]
-            ),
+            "writer": ScriptedLLM(steps=[LLMResponse(content="written by target")]),
             "triage": ScriptedLLM(
                 steps=[
                     LLMResponse(
@@ -402,16 +375,7 @@ def test_run_handle_can_cancel_while_handoff_target_is_running(tmp_path: Path) -
 
     def target_step(_request: Any) -> LLMResponse:
         target_release.wait(timeout=2)
-        return LLMResponse(
-            content="done",
-            tool_calls=[
-                ToolCall(
-                    id="finish",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": "done"},
-                )
-            ],
-        )
+        return LLMResponse(content="done")
 
     model_provider = _provider(
         {
@@ -462,20 +426,7 @@ def test_approved_handoff_resume_switches_to_target_agent(tmp_path: Path) -> Non
 
     model_provider = _provider(
         {
-            "writer": ScriptedLLM(
-                steps=[
-                    LLMResponse(
-                        content="",
-                        tool_calls=[
-                            ToolCall(
-                                id="writer-finish",
-                                name=TASK_FINISH_TOOL_NAME,
-                                arguments={"message": "written"},
-                            )
-                        ],
-                    )
-                ]
-            ),
+            "writer": ScriptedLLM(steps=[LLMResponse(content="written")]),
             "triage": ScriptedLLM(
                 steps=[
                     LLMResponse(
@@ -508,6 +459,7 @@ def test_approved_handoff_resume_switches_to_target_agent(tmp_path: Path) -> Non
     resumed = runner.resume(state)
 
     assert resumed.agent_name == "writer"
-    assert resumed.status == AgentStatus.WAIT_USER
+    assert resumed.status == AgentStatus.COMPLETED
+    assert resumed.final_output == "written"
     completed = next(event for event in resumed.events if isinstance(event, HandoffCompletedEvent))
     assert completed.child_run_id == resumed.run_id

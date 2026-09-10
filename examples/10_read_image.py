@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner, function_tool
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, function_tool
 
 
 @function_tool
@@ -24,13 +24,15 @@ def image_info(path: str) -> dict[str, object]:
 def main() -> None:
     agent = Agent(
         name="image-reporter",
-        instructions="Use image_info, then produce a Markdown report with task_finish.",
+        instructions="Use image_info, then produce a Markdown report.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[image_info],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
     )
     prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Inspect ./example.png and report what metadata is available.")

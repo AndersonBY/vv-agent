@@ -1773,16 +1773,7 @@ def test_approval_resume_retains_journal_proven_failed_tool_suffix(
                 == '{"ok": false, "error": "permanent failure", "error_code": "permanent_error", "retryable": false}'
                 for message in request.messages
             )
-            return LLMResponse(
-                content="ready to finish",
-                tool_calls=[
-                    ToolCall(
-                        id="approved-failed-finish",
-                        name="task_finish",
-                        arguments={"message": "finished after failed approval"},
-                    )
-                ],
-            )
+            return LLMResponse(content="finished after failed approval")
 
         return ScriptedLLM(steps=[finish_after_failed_tool])
 
@@ -1910,16 +1901,7 @@ def test_approval_resume_failed_tool_session_commit_replays_identical_payload_af
                 and message.content == failed_content
                 for message in request.messages
             )
-            return LLMResponse(
-                content="ready to finish",
-                tool_calls=[
-                    ToolCall(
-                        id="approved-failed-session-finish",
-                        name="task_finish",
-                        arguments={"message": "finished after failed approval"},
-                    )
-                ],
-            )
+            return LLMResponse(content="finished after failed approval")
 
         return ScriptedLLM(steps=[finish_after_failed_tool])
 
@@ -2395,16 +2377,7 @@ def test_approval_resume_session_commit_replays_identical_payload_after_crash() 
                 message.role == "tool" and message.tool_call_id == "approved-session-call" and message.content == "written"
                 for message in request.messages
             )
-            return LLMResponse(
-                content="ready to finish",
-                tool_calls=[
-                    ToolCall(
-                        id="approval-session-finish",
-                        name="task_finish",
-                        arguments={"message": "finished after approval"},
-                    )
-                ],
-            )
+            return LLMResponse(content="finished after approval")
 
         return ScriptedLLM(steps=[finish_after_approved])
 
@@ -2487,8 +2460,8 @@ def test_approval_resume_session_commit_replays_identical_payload_after_crash() 
     }
     expected_event_counts = {
         "checkpoint_resumed": 1,
-        "operation_replayed": 3,
-        "tool_call_completed": 2,
+        "operation_replayed": 2,
+        "tool_call_completed": 1,
         "session_persisted": 1,
         "run_completed": 1,
     }
@@ -2496,13 +2469,12 @@ def test_approval_resume_session_commit_replays_identical_payload_after_crash() 
     replayed_operations = [
         entry.event["operation_id"] for entry in retained.event_outbox if entry.event.get("type") == "operation_replayed"
     ]
-    assert len(replayed_operations) == len(set(replayed_operations)) == 3
+    assert len(replayed_operations) == len(set(replayed_operations)) == 2
     completed_tool_calls = [entry.event for entry in retained.event_outbox if entry.event.get("type") == "tool_call_completed"]
     assert {event["tool_call_id"] for event in completed_tool_calls} == {
         "approved-session-call",
-        "approval-session-finish",
     }
-    assert len({event["operation_id"] for event in completed_tool_calls}) == 2
+    assert len({event["operation_id"] for event in completed_tool_calls}) == 1
     tool_receipts = [
         entry.event
         for entry in retained.event_outbox
@@ -2553,21 +2525,15 @@ def test_approval_resume_after_cycle_commit_continues_authoritative_checkpoint(
                 ]
             )
         if provider_runs == 2:
-            return ScriptedLLM(steps=[LLMResponse(content="cycle committed")])
-        return ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="",
-                    tool_calls=[
-                        ToolCall(
-                            id="approved-cycle-finish",
-                            name="task_finish",
-                            arguments={"message": "finished after cycle recovery"},
-                        )
-                    ],
-                )
-            ]
-        )
+            return ScriptedLLM(
+                steps=[
+                    LLMResponse(
+                        content="cycle committed",
+                        tool_calls=[ToolCall(id="todo-cycle", name="todo_write", arguments={"todos": []})],
+                    )
+                ]
+            )
+        return ScriptedLLM(steps=[LLMResponse(content="finished after cycle recovery")])
 
     agent = Agent(
         name="approval-cycle-recovery-agent",
@@ -2583,7 +2549,6 @@ def test_approval_resume_after_cycle_commit_continues_authoritative_checkpoint(
             key="approval-cycle-source",
             provider=_provider(model_factory),
             max_cycles=3,
-            no_tool_policy="continue",
         ),
     )
     state = source.into_state()

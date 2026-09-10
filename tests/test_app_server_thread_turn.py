@@ -9,7 +9,6 @@ from vv_agent import Agent, RunConfig
 from vv_agent.app_server import AppServer, AppServerErrorCode, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
 from vv_agent.types import LLMResponse, ToolCall
@@ -31,7 +30,6 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
         steps=[
             LLMResponse(
                 content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
                 raw={
                     "usage": {
                         "prompt_tokens": 10,
@@ -93,14 +91,7 @@ def test_processor_starts_thread_and_streams_turn_items() -> None:
 
 
 def test_turn_start_and_completion_emit_thread_status_changes() -> None:
-    server, transport = _server_with_scripted_steps(
-        [
-            LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            )
-        ]
-    )
+    server, transport = _server_with_scripted_steps([LLMResponse(content="done")])
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
     _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {"agentKey": "default"}})
     _send(
@@ -135,15 +126,15 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
         _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
-        return LLMResponse(content="continue", tool_calls=[])
+        return LLMResponse(
+            content="continue",
+            tool_calls=[ToolCall(id="plan", name="todo_write", arguments={"todos": []})],
+        )
 
     def second_step(request: LlmRequest) -> LLMResponse:
         _model, messages = request.model, request.messages
         seen_user_messages.append([message.content for message in messages if message.role == "user"])
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-        )
+        return LLMResponse(content="done")
 
     server, transport = _server_with_scripted_steps([first_step, second_step], max_cycles=3)
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
@@ -180,7 +171,6 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
     assert seen_user_messages == [
         [
             "hello",
-            "No tool call was produced. Continue the task and call `task_finish` when all todo items are done.",
             "queued from app server",
         ]
     ]
@@ -194,10 +184,7 @@ def test_turn_steer_rejects_turn_id_mismatch() -> None:
         _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-        )
+        return LLMResponse(content="done")
 
     server, transport = _server_with_scripted_steps([first_step])
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
@@ -244,18 +231,12 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
         _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
-        return LLMResponse(
-            content="first",
-            tool_calls=[ToolCall(id="finish-1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "first"})],
-        )
+        return LLMResponse(content="first")
 
     def second_step(request: LlmRequest) -> LLMResponse:
         _model, messages = request.model, request.messages
         seen_user_messages.append([message.content for message in messages if message.role == "user"])
-        return LLMResponse(
-            content="second",
-            tool_calls=[ToolCall(id="finish-2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "second"})],
-        )
+        return LLMResponse(content="second")
 
     server, transport = _server_with_scripted_steps([first_step, second_step])
     _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})

@@ -13,7 +13,7 @@ from support import require_tool_result
 from vv_agent.agent import RunContext
 from vv_agent.approval import ApprovalBroker
 from vv_agent.config import ResolvedModelConfig
-from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.events import SubRunCompletedEvent, SubRunStartedEvent
 from vv_agent.interactive import AgentSessionRun, InteractiveAgentDefinition, create_agent_session
 from vv_agent.llm import LlmRequest, ScriptedLLM
@@ -484,7 +484,7 @@ def test_turn_snapshot_projects_current_execution_capabilities_only() -> None:
             execution_context=current_context,
             run_context=current_run_context,
             task_metadata={
-                "_vv_agent_allowed_tools": ["task_finish", "read_file"],
+                "_vv_agent_allowed_tools": ["read_file", "edit_file"],
                 "_vv_agent_disallowed_tools": ["bash"],
             },
         )
@@ -500,7 +500,7 @@ def test_turn_snapshot_projects_current_execution_capabilities_only() -> None:
     assert projected.metadata["_vv_agent_model_provider"] is current_model_provider
     assert projected.metadata["_vv_agent_trace_context"] == {"traceparent": "current"}
     assert projected.metadata["_vv_agent_run_context"] is current_run_context
-    assert projected.metadata["_vv_agent_allowed_tools"] == ["task_finish", "read_file"]
+    assert projected.metadata["_vv_agent_allowed_tools"] == ["read_file", "edit_file"]
     assert projected.metadata["_vv_agent_disallowed_tools"] == ["bash"]
     assert "private_old_value" not in projected.metadata
     assert "private_current_value" not in projected.metadata
@@ -547,11 +547,8 @@ def test_agent_session_resets_only_its_owned_approval_broker(tmp_path: Path) -> 
     assert owned.reset_calls == 1
 
 
-def _finish(message: str, call_id: str) -> LLMResponse:
-    return LLMResponse(
-        content="",
-        tool_calls=[ToolCall(id=call_id, name=TASK_FINISH_TOOL_NAME, arguments={"message": message})],
-    )
+def _finish(message: str) -> LLMResponse:
+    return LLMResponse(content=message)
 
 
 class _TurnRoutingLLM:
@@ -563,7 +560,7 @@ class _TurnRoutingLLM:
     def complete(self, request: LlmRequest) -> LLMResponse:
         if request.metadata.get("is_sub_task") is True:
             self.child_calls += 1
-            return _finish(f"child result {self.child_calls}", f"child-finish-{self.child_calls}")
+            return _finish(f"child result {self.child_calls}")
 
         self.parent_calls += 1
         if self.parent_calls == 1:
@@ -593,7 +590,7 @@ class _TurnRoutingLLM:
                     )
                 ],
             )
-        return _finish(f"parent result {self.parent_calls}", f"parent-finish-{self.parent_calls}")
+        return _finish(f"parent result {self.parent_calls}")
 
     def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
         del stream_callback
@@ -899,8 +896,8 @@ def _retained_configured_child(
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(
             steps=[
-                _finish("initial child done", "initial-child-finish"),
-                continuation_response or _finish("continued child done", "continued-child-finish"),
+                _finish("initial child done"),
+                continuation_response or _finish("continued child done"),
             ]
         ),
         tool_registry=build_default_registry(),
@@ -962,7 +959,7 @@ def test_sync_child_manager_stays_running_and_rejected_continuation_does_not_unr
         child_started.set()
         if not release_child.wait(timeout=3):
             raise TimeoutError("sync child was not released")
-        return _finish("sync child done", "sync-child-finish")
+        return _finish("sync child done")
 
     manager = _manager(register_session=register_session, unregister_session=unregister_session)
     runtime = AgentRuntime(

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from vv_agent.config import build_vv_llm_from_local_settings
-from vv_agent.constants import FIND_FILES_TOOL_NAME, SEARCH_FILES_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import FIND_FILES_TOOL_NAME, SEARCH_FILES_TOOL_NAME
 from vv_agent.model import VvLlmModelProvider
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_system_prompt_bundle
@@ -63,7 +63,7 @@ def _build_live_task(*, model_id: str, workspace: Path) -> AgentTask:
     prompt_bundle = build_system_prompt_bundle(
         (
             "You are Vector Vein agent runtime live validation. Follow the user's exact tool order. "
-            "Use only the available workspace search tools and finish with task_finish."
+            "Use only the available workspace search tools and finish with a brief answer."
         ),
         language="en-US",
         allow_interruption=False,
@@ -80,7 +80,7 @@ def _build_live_task(*, model_id: str, workspace: Path) -> AgentTask:
             "Step 1: call find_files with path '.', glob '**/*.txt', sort 'path_asc', and max_results 10. "
             "Step 2: call search_files with pattern 'CALYPSO_NEEDLE_7421', glob '**/*.txt', "
             "output_mode 'content', and n true. "
-            "Step 3: call task_finish with message exactly 'LIVE_SEARCH_TOOLS_OK'. "
+            "Step 3: reply exactly 'LIVE_SEARCH_TOOLS_OK'. "
             "Do not call read_file, bash, workspace_grep, or list_files."
         ),
         max_cycles=8,
@@ -91,11 +91,9 @@ def _build_live_task(*, model_id: str, workspace: Path) -> AgentTask:
             "_vv_agent_allowed_tools": [
                 FIND_FILES_TOOL_NAME,
                 SEARCH_FILES_TOOL_NAME,
-                TASK_FINISH_TOOL_NAME,
             ],
             "_vv_agent_model_settings": ModelSettings(
                 temperature=0.0,
-                tool_choice="required",
                 parallel_tool_calls=False,
                 timeout_seconds=180.0,
             ),
@@ -133,7 +131,8 @@ def test_live_model_uses_find_files_then_search_files(tmp_path: Path) -> None:
     assert "workspace_grep" not in event_names
     assert "list_files" not in event_names
     assert event_names[:2] == [FIND_FILES_TOOL_NAME, SEARCH_FILES_TOOL_NAME], event_names
-    assert event_names[-1] == TASK_FINISH_TOOL_NAME
+    assert not result.cycles[-1].tool_calls
+    assert result.final_answer == "LIVE_SEARCH_TOOLS_OK"
 
     find_event = events[0]
     assert find_event.result.status_code is ToolResultStatus.SUCCESS

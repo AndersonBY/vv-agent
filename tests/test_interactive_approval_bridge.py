@@ -16,7 +16,6 @@ from vv_agent import (
     function_tool,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.tools.executor import FunctionToolExecutor
 from vv_agent.types import LLMResponse, ToolCall
@@ -60,10 +59,7 @@ def test_interactive_session_routes_approval_to_active_run_handle(tmp_path) -> N
     llm = ScriptedLLM(
         steps=[
             LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            LLMResponse(
-                content="finished",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "finished"})],
-            ),
+            LLMResponse(content="finished"),
         ]
     )
 
@@ -128,15 +124,9 @@ def test_allow_session_persists_across_automatic_follow_up(tmp_path) -> None:
     llm = ScriptedLLM(
         steps=[
             LLMResponse(content="first call", tool_calls=[ToolCall(id="call_1", name="dangerous", arguments={})]),
-            LLMResponse(
-                content="first finish",
-                tool_calls=[ToolCall(id="finish_1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "first"})],
-            ),
+            LLMResponse(content="first"),
             LLMResponse(content="second call", tool_calls=[ToolCall(id="call_2", name="dangerous", arguments={})]),
-            LLMResponse(
-                content="second finish",
-                tool_calls=[ToolCall(id="finish_2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "second"})],
-            ),
+            LLMResponse(content="second"),
         ]
     )
 
@@ -178,10 +168,7 @@ def test_allow_session_persists_across_automatic_follow_up(tmp_path) -> None:
 def test_interactive_session_exposes_active_run_handle_lifecycle(tmp_path) -> None:
     llm = ScriptedLLM(
         steps=[
-            LLMResponse(
-                content="finished",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "finished"})],
-            ),
+            LLMResponse(content="finished"),
         ]
     )
 

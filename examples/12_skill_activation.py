@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 
 
 def main() -> None:
@@ -16,13 +16,15 @@ def main() -> None:
     ]
     agent = Agent(
         name="skill-router",
-        instructions="Choose an available skill when it helps, then call task_finish.",
+        instructions="Choose an available skill when it helps, then provide the final answer.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         metadata={"available_skills": available_skills},
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
     )
     prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Pick the best skill for reviewing a patch.")

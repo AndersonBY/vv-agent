@@ -6,7 +6,7 @@ from pathlib import Path
 from support import require_tool_result
 
 from vv_agent import constants as constants_module
-from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import ASK_USER_TOOL_NAME
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.types import ToolCall, ToolDirective, ToolResultStatus
 from vv_agent.workspace import LocalWorkspaceBackend
@@ -71,47 +71,3 @@ def test_ask_user_returns_structured_selection_metadata(tmp_path: Path) -> None:
     assert payload["selection_type"] == "multi"
     assert payload["allow_custom_options"] is True
     assert payload["options"] == ["A", "B"]
-
-
-def test_task_finish_blocks_when_todo_incomplete(tmp_path: Path) -> None:
-    registry = build_default_registry()
-    context = _context(tmp_path)
-
-    registry.execute(
-        ToolCall(
-            id="c3",
-            name=TASK_LIST_TOOL_NAME,
-            arguments={"todos": [{"title": "step1", "status": "pending", "priority": "medium"}]},
-        ),
-        context,
-    )
-
-    result = registry.execute(
-        ToolCall(
-            id="c4",
-            name=TASK_FINISH_TOOL_NAME,
-            arguments={"message": "done"},
-        ),
-        context,
-    )
-    result = require_tool_result(result)
-
-    payload = json.loads(result.content)
-    assert result.status_code is ToolResultStatus.ERROR
-    assert payload["error_code"] == "todo_incomplete"
-
-
-def test_task_finish_returns_canonical_json_wire(tmp_path: Path) -> None:
-    registry = build_default_registry()
-
-    result = registry.execute(
-        ToolCall(
-            id="finish",
-            name=TASK_FINISH_TOOL_NAME,
-            arguments={"message": "done"},
-        ),
-        _context(tmp_path),
-    )
-    result = require_tool_result(result)
-
-    assert result.content == '{"message":"done","ok":true}'

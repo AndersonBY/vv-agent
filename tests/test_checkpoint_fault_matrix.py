@@ -132,7 +132,7 @@ def _config(
     return RunConfig(
         model_provider=provider,
         max_cycles=max_cycles,
-        no_tool_policy="continue",
+        no_tool_policy="finish",
         checkpoint_config=CheckpointConfig(
             key=key,
             resume_policy=ResumePolicy.RESUME_IF_PRESENT,
@@ -271,16 +271,7 @@ def test_renewal_return_after_known_expiry_fails_closed(monkeypatch: pytest.Monk
 
 
 def _finish_response(message: str) -> LLMResponse:
-    return LLMResponse(
-        content="",
-        tool_calls=[
-            ToolCall(
-                id=f"finish-{message}",
-                name="task_finish",
-                arguments={"message": message},
-            )
-        ],
-    )
+    return LLMResponse(content=message)
 
 
 def test_f1_crash_before_model_intent_resumes_with_one_model_call() -> None:
@@ -483,7 +474,9 @@ def test_f7_committed_cycle_resumes_at_next_cycle() -> None:
         def complete(_request: Any) -> LLMResponse:
             nonlocal model_calls
             model_calls += 1
-            return LLMResponse(content="continue")
+            return LLMResponse(
+                content="continue", tool_calls=[ToolCall(id="todo-f7", name="todo_write", arguments={"todos": []})]
+            )
 
         return ScriptedLLM(steps=[complete])
 
@@ -532,6 +525,7 @@ def test_committed_budget_usage_is_cumulative_after_resume() -> None:
             model_calls += 1
             return LLMResponse(
                 content="continue",
+                tool_calls=[ToolCall(id="todo-budget", name="todo_write", arguments={"todos": []})],
                 raw={
                     "usage": {
                         "prompt_tokens": 15,

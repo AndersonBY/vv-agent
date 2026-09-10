@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from vv_agent import Agent, RunConfig, Runner
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 
 
 def load_agent(path: Path, profile: str) -> Agent:
@@ -18,11 +18,11 @@ def load_agent(path: Path, profile: str) -> Agent:
             json.dumps(
                 {
                     "researcher": {
-                        "instructions": "Collect facts and finish with task_finish.",
+                        "instructions": "Collect facts and provide a summary.",
                         "model": "kimi-k3",
                     },
                     "writer": {
-                        "instructions": "Write a concise final answer and finish with task_finish.",
+                        "instructions": "Write a concise final answer.",
                         "model": "kimi-k3",
                     },
                 },
@@ -41,8 +41,10 @@ def main() -> None:
     profile = os.getenv("VV_AGENT_EXAMPLE_PROFILE", "researcher")
     agent = load_agent(workspace / "agent_profiles.json", profile)
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=workspace,
     )
     result = Runner.run_sync(

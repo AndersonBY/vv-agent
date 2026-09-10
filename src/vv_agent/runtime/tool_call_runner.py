@@ -22,6 +22,7 @@ from vv_agent.tools.orchestrator import (
     ToolOrchestrator,
 )
 from vv_agent.types import (
+    AgentStatus,
     AgentTask,
     CompletionReason,
     CycleRecord,
@@ -297,6 +298,11 @@ class ToolCallRunner:
                         call=patched_call,
                         result=result,
                     )
+                    authoritative = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+                    if authoritative is not None and authoritative.status is AgentStatus.HOST_INTERACTION:
+                        cycle_record.tool_results.append(result)
+                        messages.append(self._tool_result_message(result))
+                        break
 
             cycle_record.tool_results.append(result)
             messages.append(self._tool_result_message(result))

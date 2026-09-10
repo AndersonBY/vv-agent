@@ -46,11 +46,11 @@ CLI / low-level runtime API
   -> AgentResult
 ```
 
-The default control policy is tool-driven: `task_finish` ends the run
-and `ask_user` waits for input. Hosts can explicitly set `no_tool_policy` to
-`finish` or `wait_user` when a normal assistant response should be terminal.
-The runtime applies that declared control without classifying the response text
-or inferring task-specific completion.
+The default `no_tool_policy` is `finish`: an assistant response without tool
+calls supplies the final answer. `ask_user` waits for required input. Hosts can
+explicitly select `continue` or `wait_user`, and existing after-cycle hooks can
+steer a completion candidate before finalization. The runtime does not classify
+response text or use TODO state as a success predicate.
 
 ## Runtime Boundary
 
@@ -353,7 +353,8 @@ and `tests/test_tools.py`.
 
 - Model resolution is exact: requested model keys are not aliased to independent
   provider models.
-- Runtime terminal states are explicit tool outcomes, not prose heuristics.
+- Runtime terminal states follow no-tool policy, explicit tool outcomes, host
+  hooks, cancellation, failure, and resource bounds, not prose heuristics.
 - Public SDK code should enter through `Agent`, `Runner`, `RunConfig`,
   `ModelSettings`, tools, sessions, typed `RunEvent` objects, or
   `InteractiveAgentClient` for stateful host-controlled runtimes.

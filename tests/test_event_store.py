@@ -7,11 +7,10 @@ from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig, Runner, event_from_dict
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.event_store import JsonlRunEventStore, RunEventReplayQuery
 from vv_agent.events import ApprovalResolvedEvent, RunEvent, RunStartedEvent, SubRunCompletedEvent, SubRunStartedEvent
 from vv_agent.llm import ScriptedLLM
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import LLMResponse
 
 
 def test_jsonl_event_store_appends_and_replays_events(tmp_path) -> None:
@@ -174,14 +173,7 @@ class FailingRunEventStore:
 
 
 def _model_provider():
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            )
-        ]
-    )
+    llm = ScriptedLLM(steps=[LLMResponse(content="done")])
 
     endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
     resolved = ResolvedModelConfig(

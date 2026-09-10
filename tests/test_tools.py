@@ -15,7 +15,6 @@ from vv_agent.constants import (
     FIND_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     SEARCH_FILES_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
 from vv_agent.tools import ToolContext, build_default_registry
@@ -1662,23 +1661,6 @@ def test_write_file_append_returns_changed_files_metadata(registry, tool_context
     assert result.metadata["operation"] == "write_file"
     assert result.metadata["append"] is True
     assert target.read_text(encoding="utf-8") == "ab"
-
-
-def test_todo_finish_guard(registry, tool_context: ToolContext) -> None:
-    create_todo = ToolCall(
-        id="call1",
-        name=TASK_LIST_TOOL_NAME,
-        arguments={"todos": [{"title": "task 1", "status": "pending", "priority": "high"}]},
-    )
-    registry.execute(create_todo, tool_context)
-
-    finish_call = ToolCall(id="call2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})
-    finish_result = registry.execute(finish_call, tool_context)
-    payload = json.loads(finish_result.content)
-
-    assert finish_result.status_code is ToolResultStatus.ERROR
-    assert finish_result.directive == ToolDirective.CONTINUE
-    assert payload["error_code"] == "todo_incomplete"
 
 
 def test_ask_user_sets_wait_directive(registry, tool_context: ToolContext) -> None:

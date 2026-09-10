@@ -1,6 +1,6 @@
 {
-  "contract": "vv-agent-builtin-tools-v2",
-  "schema_version": 2,
+  "contract": "vv-agent-builtin-tools-v3",
+  "schema_version": 3,
   "exposure_contract": {
     "allowed_values": [
       "direct",
@@ -15,40 +15,6 @@
     "unknown_values": "reject"
   },
   "tools": [
-    {
-      "approval": "not_required",
-      "description": "Explicitly finish the run with a user-facing result when the requested work is complete. This tool is optional when the configured no-tool policy allows natural completion; the runtime still enforces unfinished-TODO checks.",
-      "exposure": "direct",
-      "kind": "function",
-      "metadata": {},
-      "model_visible": true,
-      "name": "task_finish",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "exposed_files": {
-            "description": "Workspace-relative deliverable paths to expose to the user.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "message": {
-            "description": "Final user-facing result.",
-            "type": "string"
-          },
-          "require_all_todos_completed": {
-            "description": "Reject finish while TODOs remain unless false.",
-            "type": "boolean"
-          }
-        },
-        "required": [],
-        "type": "object"
-      },
-      "strict": true,
-      "timeout_seconds": null,
-      "type": "function"
-    },
     {
       "approval": "not_required",
       "description": "Pause for a required user decision that cannot be discovered safely with available tools. Ask one concrete question and provide concise options when useful.",

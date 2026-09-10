@@ -6,11 +6,10 @@ from support import FixedModelProvider
 
 from vv_agent import Agent, GuardrailResult, RunConfig, Runner, input_guardrail, output_guardrail
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
-from vv_agent.types import AgentStatus, LLMResponse, ToolCall
+from vv_agent.types import AgentStatus, LLMResponse
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -80,10 +79,7 @@ def test_input_guardrail_can_rewrite_input(tmp_path: Path) -> None:
         model, messages = request.model, request.messages
         del model
         seen_user_messages.extend(message.content for message in messages if message.role == "user")
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     model_provider = FixedModelProvider(ScriptedLLM(steps=[respond]), _resolved())
 
@@ -105,14 +101,7 @@ def test_output_guardrail_can_rewrite_final_output(tmp_path: Path) -> None:
         return GuardrailResult.rewrite(f"redacted: {output}")
 
     model_provider = FixedModelProvider(
-        ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="done",
-                    tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "secret"})],
-                )
-            ]
-        ),
+        ScriptedLLM(steps=[LLMResponse(content="secret")]),
         _resolved(),
     )
 

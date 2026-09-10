@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 from vv_agent.runtime.backends.thread import ThreadBackend
 
 
@@ -20,12 +20,14 @@ def print_event(event) -> None:
 def main() -> None:
     agent = Agent(
         name="advanced",
-        instructions="Stream progress when possible and finish with task_finish.",
+        instructions="Stream progress when possible, then provide the final answer.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         execution_backend=ThreadBackend(max_workers=2),
         stream=print_event,

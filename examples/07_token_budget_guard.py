@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunBudgetLimits, RunConfig, Runner
+from vv_agent import Agent, RunBudgetLimits, RunConfig, Runner, VvLlmModelProvider
 
 TOKEN_BUDGET = int(os.getenv("VV_AGENT_EXAMPLE_TOKEN_BUDGET", "4000"))
 
@@ -14,12 +14,14 @@ TOKEN_BUDGET = int(os.getenv("VV_AGENT_EXAMPLE_TOKEN_BUDGET", "4000"))
 def main() -> None:
     agent = Agent(
         name="budgeted",
-        instructions="Keep the answer concise and call task_finish.",
+        instructions="Keep the answer concise.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         budget_limits=RunBudgetLimits(
             max_total_tokens=TOKEN_BUDGET,

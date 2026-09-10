@@ -18,7 +18,6 @@ from vv_agent import (
 )
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.types import LLMResponse, ToolCall
@@ -81,10 +80,7 @@ class BlockingShouldRequestApprovalProvider(ApprovalProvider):
 
 
 def _finish_response(message: str = "finished") -> LLMResponse:
-    return LLMResponse(
-        content=message,
-        tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": message})],
-    )
+    return LLMResponse(content=message)
 
 
 def test_approval_provider_failure_fails_run_without_faking_a_denial() -> None:
@@ -471,8 +467,9 @@ def test_approval_provider_does_not_change_default_no_tool_policy() -> None:
         ),
     )
 
-    assert result.status == AgentStatus.MAX_CYCLES
-    assert result.final_output == "Reached max cycles without finish signal."
+    assert result.status == AgentStatus.COMPLETED
+    assert result.final_output == "first"
+    assert len(result.raw_result.cycles) == 1
 
 
 def test_cancel_unblocks_pending_approval_without_running_tool() -> None:

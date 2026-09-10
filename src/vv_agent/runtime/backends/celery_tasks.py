@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,12 @@ from vv_agent.runtime.checkpoint_resume import (
     _checkpoint_control_result,
 )
 from vv_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.controller import (
+    DistributedBackend,
+    HostInteractionRecoveryEnvelope,
+    HostInteractionRequest,
+    derive_host_interaction_record_id,
+)
 from vv_agent.runtime.engine import (
     AgentRuntime,
     _RunBudgetController,
@@ -110,11 +117,6 @@ def _validate_task_and_capabilities(
         )
     if checkpoint.run_definition_digest != envelope.run_definition_digest:
         raise _definition_mismatch("distributed run definition digest does not match the durable checkpoint")
-    if checkpoint.resume_attempt != envelope.resume_attempt:
-        raise CheckpointError(
-            "distributed resume_attempt does not match the durable checkpoint",
-            code="checkpoint_resume_attempt_mismatch",
-        )
 
     task = envelope.task
     controls = definition["runtime_controls"]
@@ -502,6 +504,131 @@ def _rebuild_runtime(
     return runtime, context, sub_task_manager, tool_policy, host_cost_meter
 
 
+def _consume_pending_host_response(*, store: Any, checkpoint: Checkpoint, lease_duration_ms: int) -> tuple[Checkpoint, bool]:
+    """Consume one admitted host response before the ordinary claim path."""
+    if checkpoint.status is not AgentStatus.RUNNING or checkpoint.claim_token is not None:
+        return checkpoint, False
+    now_ms = time.time_ns() // 1_000_000
+    wakes = store.reap_controller_command_wakes(checkpoint.checkpoint_key, now_ms)
+    for wake in wakes:
+        if not isinstance(wake, Mapping) or wake.get("outbox_state") != "pending":
+            continue
+        command_id = wake.get("command_id")
+        command_digest = wake.get("command_digest")
+        if not isinstance(command_id, str) or not isinstance(command_digest, str):
+            continue
+        command = store.get_controller_command(command_id)
+        if command is None or command.handle.checkpoint_key != checkpoint.checkpoint_key:
+            continue
+        response_command_id: str
+        if command.kind == "host_interaction_response":
+            payload = command.command
+            request_event = next(
+                (
+                    entry.event
+                    for entry in checkpoint.event_outbox
+                    if entry.event.get("type") == "host_interaction_requested"
+                    and entry.event.get("interaction_id") == payload.get("interaction_id")
+                    and entry.event.get("request_digest") == payload.get("request_digest")
+                ),
+                None,
+            )
+            if not isinstance(request_event, dict):
+                raise CheckpointError(
+                    "host interaction recovery request is missing",
+                    code="host_interaction_recovery_required",
+                )
+            request = HostInteractionRequest(
+                interaction_id=request_event["interaction_id"],
+                logical_cycle=request_event["logical_cycle"],
+                operation_id=request_event["operation_id"],
+                tool_call_id=request_event["tool_call_id"],
+                prompt=request_event["prompt"],
+                request_digest=request_event["request_digest"],
+            )
+            response_command_id = command.command_id
+        elif command.kind == "resume":
+            find_record = getattr(store, "_find_resolved_pending_host_interaction", None)
+            if not callable(find_record):
+                raise CheckpointError(
+                    "host interaction recovery record lookup is unavailable",
+                    code="host_interaction_recovery_required",
+                )
+            record = find_record(checkpoint_key=checkpoint.checkpoint_key)
+            if not isinstance(record, Mapping):
+                continue
+            request = HostInteractionRequest.from_dict(record["request"])
+            response_command_id = record["command_id"]
+            response_command = store.get_controller_command(response_command_id)
+            if (
+                response_command is None
+                or response_command.kind != "host_interaction_response"
+                or response_command.handle.checkpoint_key != checkpoint.checkpoint_key
+            ):
+                raise CheckpointError(
+                    "host interaction recovery command is stale",
+                    code="host_interaction_recovery_stale",
+                )
+        else:
+            continue
+        record_id = derive_host_interaction_record_id(checkpoint.checkpoint_key, request)
+        store.reap_host_interaction_record(
+            record_id=record_id,
+            checkpoint_key=checkpoint.checkpoint_key,
+            now_ms=now_ms,
+        )
+        current = store.load_checkpoint(checkpoint.checkpoint_key)
+        if current is None:
+            raise CheckpointError(
+                "checkpoint disappeared before host interaction recovery",
+                code="checkpoint_not_found",
+            )
+        claim_token = f"distributed-host-response:{command_id}"
+        claimed_wake = store.claim_controller_command_wake(
+            command_id=command_id,
+            command_digest=command_digest,
+            claim_token=claim_token,
+            lease_expires_at_ms=now_ms + max(lease_duration_ms, 1_000),
+            now_ms=now_ms,
+        )
+        if not isinstance(claimed_wake, Mapping) or claimed_wake.get("outbox_state") != "claimed":
+            continue
+        recovery = HostInteractionRecoveryEnvelope(
+            record_id=record_id,
+            checkpoint_key=current.checkpoint_key,
+            run_id=current.root_run_id,
+            trace_id=current.trace_id,
+            claim_mode="recovery",
+            resume_attempt=current.resume_attempt,
+            expected_revision=current.revision,
+            logical_cycle=request.logical_cycle,
+            interaction_id=request.interaction_id,
+            operation_id=request.operation_id,
+            tool_call_id=request.tool_call_id,
+            request_digest=request.request_digest or "",
+            command_id=response_command_id,
+        )
+        consumption = DistributedBackend(store).claim_and_consume_host_interaction_response(recovery.to_dict())
+        store.complete_controller_command_wake(
+            command_id=command_id,
+            command_digest=command_digest,
+            claim_token=claim_token,
+            attempt=int(claimed_wake["attempt"]),
+            outcome="delivered",
+            now_ms=time.time_ns() // 1_000_000,
+        )
+        refreshed = store.load_checkpoint(checkpoint.checkpoint_key)
+        if refreshed is None:
+            raise CheckpointError(
+                "checkpoint disappeared after host interaction recovery",
+                code="checkpoint_not_found",
+            )
+        if consumption.kind == "applied" and refreshed.revision != consumption.checkpoint_revision:
+            raise CheckpointError("host response execution claim changed", code="checkpoint_claim_active")
+        return refreshed, consumption.kind == "applied"
+    return checkpoint, False
+
+
 def _run_single_cycle(
     *,
     envelope: DistributedRunEnvelope,
@@ -529,6 +656,14 @@ def _run_single_cycle(
         registry=capability_registry,
         extensions=extensions,
     )
+    if existing.terminal_result is None:
+        if existing.claim_token is not None and (existing.lease_expires_at_ms or 0) > time.time_ns() // 1_000_000:
+            return DistributedWorkerResponse.pending()
+        if existing.cycle_index < envelope.cycle_index and existing.resume_attempt != envelope.resume_attempt:
+            raise CheckpointError(
+                "distributed resume_attempt does not match the durable checkpoint",
+                code="checkpoint_resume_attempt_mismatch",
+            )
     runtime_config = config.to_runtime_config(
         store=store,
         capability_refs=existing.run_definition["capability_refs"],
@@ -624,6 +759,25 @@ def _run_single_cycle(
         )
     if claim_mode == "continue":
         controller.set_next_claim_mode(claim_mode)
+    if claim_mode == "recovery":
+        try:
+            recovered, owns_recovery = _consume_pending_host_response(
+                store=store,
+                checkpoint=existing,
+                lease_duration_ms=envelope.lease_duration_ms,
+            )
+            if owns_recovery:
+                controller.checkpoint = recovered
+                controller.adopt_existing_claim(
+                    claim_token=recovered.claim_token or "",
+                    claimed_cycle=envelope.cycle_index,
+                )
+            elif recovered.claim_token is not None and (recovered.lease_expires_at_ms or 0) > time.time_ns() // 1_000_000:
+                controller.close()
+                return DistributedWorkerResponse.pending()
+        except BaseException:
+            controller.close()
+            raise
     budget_controller: _RunBudgetController | None = None
     if envelope.budget_limits is not None and envelope.budget_limits.has_limits:
         budget_controller = _RunBudgetController(
@@ -754,12 +908,15 @@ def _run_single_cycle(
                     code="checkpoint_cycle_conflict",
                 )
             try:
-                controller.commit_cycle(
+                if controller._require_checkpoint().status is AgentStatus.HOST_INTERACTION:
+                    return DistributedWorkerResponse.pending()
+                else:
+                    controller.commit_cycle(
                     cycle_index=envelope.cycle_index,
                     messages=messages,
                     cycles=cycles,
                     shared_state=shared_state,
-                )
+                    )
             except CheckpointError as exc:
                 if budget_controller is not None:
                     budget_controller.tool_batch_complete(envelope.cycle_index, operation_failed=True)
@@ -792,6 +949,8 @@ def _run_single_cycle(
                 "checkpoint disappeared before returning the terminal candidate",
                 code="checkpoint_not_found",
             )
+        if current.status is AgentStatus.HOST_INTERACTION:
+            return DistributedWorkerResponse.pending()
         if result.status is AgentStatus.DEFERRED:
             if current.status is not AgentStatus.DEFERRED or current.claim_token is not None:
                 raise CheckpointError(

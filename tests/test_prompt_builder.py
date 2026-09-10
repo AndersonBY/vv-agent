@@ -53,7 +53,6 @@ def test_prompt_includes_tool_governance_rules() -> None:
     assert "Ask the user only for a required decision" in prompt
     assert "Prefer specialized workspace tools" in prompt
     assert "at most one item in progress" in prompt
-    assert "Use task_finish for an explicit final result" in prompt
     assert old_tool_name not in prompt
     assert "read_file" not in prompt
     assert "write_file" not in prompt

@@ -5,7 +5,7 @@ from pathlib import Path
 from support import ModelMapProvider
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.events import (
     HandoffCompletedEvent,
     HandoffStartedEvent,
@@ -120,21 +120,11 @@ def test_create_sub_task_emits_sub_run_events_with_parent_tool_call_lineage(tmp_
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish parent",
-                tool_calls=[ToolCall(id="call_finish_parent", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})],
-            ),
+            LLMResponse(content="parent done"),
         ]
     )
 
-    sub_llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="sub done",
-                tool_calls=[ToolCall(id="sub_finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
-            )
-        ]
-    )
+    sub_llm = ScriptedLLM(steps=[LLMResponse(content="sub done")])
     provider = ModelMapProvider(
         routes={
             "parent-model": (parent_llm, _fake_resolved(backend="moonshot", model="parent-model")),

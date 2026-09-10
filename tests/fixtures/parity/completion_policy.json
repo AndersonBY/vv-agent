@@ -1,11 +1,11 @@
 {
-  "version": 1,
+  "version": 2,
   "policy_values": [
     "continue",
     "wait_user",
     "finish"
   ],
-  "framework_default": "continue",
+  "framework_default": "finish",
   "precedence": [
     "run_config",
     "runner_default_run_config",
@@ -40,7 +40,7 @@
   },
   "cases": [
     {
-      "name": "framework_default_continues_then_tool_finishes",
+      "name": "framework_default_finishes_with_assistant_output",
       "agent_policy": null,
       "runner_default_policy": null,
       "run_policy": null,
@@ -48,32 +48,20 @@
       "tool_use_behavior": "run_llm_again",
       "steps": [
         {
-          "assistant_output": "draft one",
+          "assistant_output": "done",
           "tool_calls": []
-        },
-        {
-          "assistant_output": "",
-          "tool_calls": [
-            {
-              "id": "finish-2",
-              "name": "task_finish",
-              "arguments": {
-                "message": "done"
-              }
-            }
-          ]
         }
       ],
       "expected": {
-        "effective_policy": "continue",
+        "effective_policy": "finish",
         "status": "completed",
-        "completion_reason": "tool_finish",
-        "completion_tool_name": "task_finish",
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
         "final_answer": "done",
         "wait_reason": null,
         "partial_output": null,
-        "cycles": 2,
-        "continuation_hint_emitted": true
+        "cycles": 1,
+        "continuation_hint_emitted": false
       }
     },
     {
@@ -142,11 +130,16 @@
           "assistant_output": "",
           "tool_calls": [
             {
-              "id": "finish-override",
-              "name": "task_finish",
-              "arguments": {
-                "message": "override done"
-              }
+              "id": "handoff-override",
+              "name": "handoff_result",
+              "arguments": {}
+            }
+          ],
+          "tool_results": [
+            {
+              "tool_call_id": "handoff-override",
+              "content": "override done",
+              "directive": "finish"
             }
           ]
         }
@@ -155,7 +148,7 @@
         "effective_policy": "continue",
         "status": "completed",
         "completion_reason": "tool_finish",
-        "completion_tool_name": "task_finish",
+        "completion_tool_name": "handoff_result",
         "final_answer": "override done",
         "wait_reason": null,
         "partial_output": null,
@@ -215,7 +208,7 @@
         }
       ],
       "expected": {
-        "effective_policy": "continue",
+        "effective_policy": "finish",
         "status": "completed",
         "completion_reason": "stop_on_first_tool",
         "completion_tool_name": "lookup",
@@ -256,7 +249,7 @@
         }
       ],
       "expected": {
-        "effective_policy": "continue",
+        "effective_policy": "finish",
         "status": "completed",
         "completion_reason": "stop_at_tool_name",
         "completion_tool_name": "lookup",
@@ -389,7 +382,7 @@
           "fresh_run_id": true,
           "trace_id_relation": "same_as_source",
           "status": "completed",
-          "completion_reason": "tool_finish",
+          "completion_reason": "no_tool_finish",
           "cycles": 1
         }
       },

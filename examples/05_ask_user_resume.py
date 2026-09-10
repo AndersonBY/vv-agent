@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner, ToolPolicy, function_tool
+from vv_agent import Agent, RunConfig, Runner, ToolPolicy, VvLlmModelProvider, function_tool
 
 
 @function_tool(needs_approval=True)
@@ -20,13 +20,15 @@ def delete_file(path: str) -> str:
 def main() -> None:
     agent = Agent(
         name="operator",
-        instructions="Use tools when needed. Finish with task_finish.",
+        instructions="Use tools when needed, then provide the final answer.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[delete_file],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         tool_policy=ToolPolicy(approval=os.getenv("VV_AGENT_EXAMPLE_APPROVAL", "default")),
     )

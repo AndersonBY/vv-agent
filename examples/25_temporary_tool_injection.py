@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, RunContext, Runner, function_tool
+from vv_agent import Agent, RunConfig, RunContext, Runner, VvLlmModelProvider, function_tool
 
 
 def temp_tool_enabled(ctx: RunContext, _agent: Agent) -> bool:
@@ -22,14 +22,16 @@ def temporary_lookup(key: str) -> str:
 def main() -> None:
     agent = Agent(
         name="temporary-tool-demo",
-        instructions="Use temporary_lookup when it is available, then call task_finish.",
+        instructions="Use temporary_lookup when it is available, then provide the final answer.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[temporary_lookup],
     )
     enabled = os.getenv("VV_AGENT_TEMP_TOOL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         context={"enable_temp_tool": enabled},
     )

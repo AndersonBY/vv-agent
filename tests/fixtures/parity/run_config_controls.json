@@ -3,7 +3,7 @@
   "framework_defaults": {
     "max_cycles": 10,
     "max_handoffs": 10,
-    "no_tool_policy": "continue",
+    "no_tool_policy": "finish",
     "microcompaction_policy": {
       "trigger_ratio": 0.75,
       "target_ratio": 0.6,

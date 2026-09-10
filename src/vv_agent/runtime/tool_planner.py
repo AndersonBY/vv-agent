@@ -10,7 +10,6 @@ from vv_agent.constants import (
     CREATE_SUB_TASK_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
 from vv_agent.runtime.shell import resolve_shell_invocation
@@ -113,7 +112,7 @@ def _patch_dynamic_tool_schemas(
 
 def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = None) -> list[str]:
     del memory_usage_percentage
-    tool_names: list[str] = [TASK_FINISH_TOOL_NAME]
+    tool_names: list[str] = []
 
     if task.allow_interruption:
         tool_names.append(ASK_USER_TOOL_NAME)

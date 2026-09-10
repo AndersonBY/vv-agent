@@ -11,7 +11,6 @@ from support import FixedModelProvider
 
 from vv_agent import Agent, GuardrailResult, RunConfig, Runner, function_tool, input_guardrail
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ModelRef
 from vv_agent.model_settings import ModelSettings
@@ -37,14 +36,7 @@ def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
 
 
 def _finish_llm(message: str = "done") -> ScriptedLLM:
-    return ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content=message,
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": message})],
-            )
-        ]
-    )
+    return ScriptedLLM(steps=[LLMResponse(content=message)])
 
 
 def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
@@ -68,10 +60,7 @@ def test_runner_start_yields_tool_started_and_result(tmp_path) -> None:
                 content="calling",
                 tool_calls=[ToolCall(id="call_1", name="slow_tool", arguments={})],
             ),
-            LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
 
@@ -135,7 +124,7 @@ def test_run_handle_state_reports_failed_result_from_guardrail() -> None:
     assert state.cancelled is False
 
 
-def test_runner_start_preserves_default_no_tool_continue_policy() -> None:
+def test_runner_start_preserves_default_no_tool_finish_policy() -> None:
     agent = Agent(name="assistant", instructions="Answer.", model="test-model")
     llm = ScriptedLLM(
         steps=[
@@ -151,9 +140,10 @@ def test_runner_start_preserves_default_no_tool_continue_policy() -> None:
     )
     result = handle.result(timeout=2)
 
-    assert result.status == AgentStatus.MAX_CYCLES
-    assert result.final_output == "Reached max cycles without finish signal."
-    assert handle.state().status == "max_cycles"
+    assert result.status == AgentStatus.COMPLETED
+    assert result.final_output == "first"
+    assert len(result.result.cycles) == 1
+    assert handle.state().status == "completed"
 
 
 def test_completed_result_wins_over_late_cancel_request() -> None:
@@ -164,10 +154,7 @@ def test_completed_result_wins_over_late_cancel_request() -> None:
 
     def finish_when_ready(_request) -> LLMResponse:
         ready.wait(timeout=2)
-        return LLMResponse(
-            content="ok",
-            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     def stream(event) -> None:
         if event.type == "run_completed":
@@ -210,10 +197,7 @@ def test_stream_sync_is_backed_by_live_handle() -> None:
                 content="calling",
                 tool_calls=[ToolCall(id="call_1", name="slow_tool", arguments={})],
             ),
-            LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
 
@@ -286,10 +270,7 @@ class _BurstStreamingLLM:
         assert stream_callback is not None
         for index in range(self.event_count):
             stream_callback({"event": "assistant_delta", "content_delta": str(index)})
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-        )
+        return LLMResponse(content="done")
 
 
 def test_run_handle_subscribers_are_independent_and_lossless_after_live_capacity() -> None:
@@ -327,16 +308,7 @@ class _BlockingCancellationLLM:
         del request
         self.started.set()
         assert self.release.wait(timeout=3)
-        return LLMResponse(
-            content="should be cancelled",
-            tool_calls=[
-                ToolCall(
-                    id="cancel-finish",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": "should be cancelled"},
-                )
-            ],
-        )
+        return LLMResponse(content="should be cancelled")
 
     def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
         del stream_callback
@@ -388,10 +360,7 @@ class _AsyncChildStreamingLLM:
         if request.messages and request.messages[0].role == "system" and request.messages[0].content == "Child prompt":
             self.child_started.set()
             assert self.release_child.wait(timeout=3)
-            return LLMResponse(
-                content="child done",
-                tool_calls=[ToolCall(id="child-finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "child done"})],
-            )
+            return LLMResponse(content="child done")
         with self.lock:
             self.parent_calls += 1
             parent_call = self.parent_calls
@@ -410,10 +379,7 @@ class _AsyncChildStreamingLLM:
                     )
                 ],
             )
-        return LLMResponse(
-            content="parent done",
-            tool_calls=[ToolCall(id="parent-finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})],
-        )
+        return LLMResponse(content="parent done")
 
     def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
         del stream_callback

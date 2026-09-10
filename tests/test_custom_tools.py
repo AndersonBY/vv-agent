@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
@@ -121,10 +120,7 @@ def test_runtime_executes_custom_workflow_tool(tmp_path: Path) -> None:
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
     runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)

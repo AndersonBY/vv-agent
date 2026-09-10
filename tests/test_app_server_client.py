@@ -29,26 +29,12 @@ from vv_agent.app_server import (
 )
 from vv_agent.app_server.schema import CLIENT_METHOD_SPECS
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
 
 def _client(*, final_output: str = "done") -> AppServerClient:
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="finish",
-                        name=TASK_FINISH_TOOL_NAME,
-                        arguments={"message": final_output},
-                    )
-                ],
-            )
-        ]
-    )
+    llm = ScriptedLLM(steps=[LLMResponse(content=final_output)])
     resolved = ResolvedModelConfig(
         backend="test",
         requested_model="test-model",
@@ -87,10 +73,7 @@ def _approval_client(calls: list[str]) -> AppServerClient:
                 content="calling",
                 tool_calls=[ToolCall(id="call_1", name="dangerous_tool", arguments={})],
             ),
-            LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
     resolved = ResolvedModelConfig(

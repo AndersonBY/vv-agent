@@ -13,11 +13,10 @@ SERVER_CODE = r"""
 from pathlib import Path
 import os
 
-from vv_agent import Agent, RunConfig, ToolPolicy
+from vv_agent import Agent, RunConfig, ToolPolicy, VvLlmModelProvider
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.app_server.server import AppServer
 from vv_agent.app_server.transport import StdioJsonlTransport
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 
 settings_file = Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py"))
 backend = os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot")
@@ -30,17 +29,15 @@ host = DefaultAppServerHost(
     agent=Agent(
         name="stdio-app-server-assistant",
         instructions=(
-            "Answer the user directly without inspecting the workspace. "
-            "When the short answer is ready, call task_finish with that answer."
+            "Answer the user concisely without inspecting the workspace."
         ),
         model=model,
     ),
     run_config=RunConfig(
-        settings_file=settings_file,
-        default_backend=backend,
+        model_provider=VvLlmModelProvider(settings_file=settings_file, default_backend=backend),
         workspace=workspace,
         max_cycles=max(max_cycles, 1),
-        tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME]),
+        tool_policy=ToolPolicy(allowed_tools=[]),
     ),
 )
 AppServer(transport=StdioJsonlTransport(), host=host).run_forever()

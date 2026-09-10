@@ -26,10 +26,9 @@ from vv_agent.app_server.protocol import (
 )
 from vv_agent.app_server.server import AppServer
 from vv_agent.app_server.transport import ChannelTransport
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.run_config import RunConfig
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import LLMResponse
 
 
 class AppServerClientError(RuntimeError):
@@ -209,7 +208,6 @@ def run_debug_message(message: str) -> list[dict[str, object]]:
         [
             LLMResponse(
                 content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
             )
         ],
     )

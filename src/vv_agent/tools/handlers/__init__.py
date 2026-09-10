@@ -1,6 +1,6 @@
 from vv_agent.tools.handlers.background import check_background_command
 from vv_agent.tools.handlers.bash import run_bash_command
-from vv_agent.tools.handlers.control import ask_user, task_finish
+from vv_agent.tools.handlers.control import ask_user
 from vv_agent.tools.handlers.image import read_image
 from vv_agent.tools.handlers.search import search_files
 from vv_agent.tools.handlers.skills import activate_skill
@@ -22,7 +22,6 @@ __all__ = [
     "run_bash_command",
     "search_files",
     "sub_task_status",
-    "task_finish",
     "todo_read",
     "todo_write",
     "write_file",

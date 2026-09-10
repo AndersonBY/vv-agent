@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -357,6 +358,7 @@ def test_engine_binds_typed_host_producer_to_the_active_checkpoint_claim() -> No
         preloaded_checkpoint=claimed,
     )
     controller.checkpoint = claimed
+    controller._owned_claim_token = claimed.claim_token
     context = ExecutionContext(metadata={"_vv_agent_checkpoint_controller": controller})
     AgentRuntime._bind_host_interaction_producer(context)
     outcome = context.produce_host_interaction(
@@ -403,6 +405,7 @@ def test_checkpoint_heartbeat_refreshes_host_producer_lease_fence() -> None:
         lease_duration_ms=60,
     )
     controller.checkpoint = claimed
+    controller._owned_claim_token = claimed.claim_token
     before = claimed.lease_expires_at_ms
     controller._start_heartbeat()
     try:
@@ -419,7 +422,8 @@ def test_checkpoint_heartbeat_refreshes_host_producer_lease_fence() -> None:
         controller.close()
 
 
-def test_host_producer_reads_authoritative_renewed_lease() -> None:
+@pytest.mark.parametrize("owned_claim", [None, "other-claim", "authoritative-claim"])
+def test_host_producer_reads_authoritative_renewed_lease_only_for_its_owner(owned_claim: str | None) -> None:
     store = InMemoryCheckpointStore()
     key = "authoritative-host-producer"
     checkpoint = _checkpoint(key)
@@ -450,6 +454,7 @@ def test_host_producer_reads_authoritative_renewed_lease() -> None:
         preloaded_checkpoint=claimed,
     )
     controller.checkpoint = claimed
+    controller._owned_claim_token = owned_claim
     renewed_lease = now_ms + 200_000
     assert store.renew_checkpoint_claim(
         key,
@@ -458,6 +463,24 @@ def test_host_producer_reads_authoritative_renewed_lease() -> None:
         now_ms=now_ms + 1,
     )
     assert claimed.lease_expires_at_ms != renewed_lease
+    if owned_claim != "authoritative-claim":
+        before = store.load_checkpoint(key)
+        assert before is not None
+        context = ExecutionContext(metadata={"_vv_agent_checkpoint_controller": controller})
+        AgentRuntime._bind_host_interaction_producer(context)
+        with pytest.raises(CheckpointError) as error:
+            context.produce_host_interaction(
+                HostInteractionRequest(
+                    interaction_id="unowned-interaction",
+                    logical_cycle=1,
+                    operation_id="unowned-operation",
+                    tool_call_id="unowned-tool",
+                    prompt="Choose.",
+                )
+            )
+        assert error.value.code == "host_interaction_claim_required"
+        assert store.load_checkpoint(key) == before
+        return
     context = controller.host_interaction_admission_context()
     assert context.lease_expires_at_ms == renewed_lease
     assert controller.checkpoint is not None
@@ -1045,6 +1068,73 @@ def test_host_producer_rejects_expired_or_wrong_execution_claim_without_writes(s
         )
     unchanged = store.load_checkpoint(key)
     assert unchanged is not None and unchanged.revision == before.revision
+
+
+def _produce_sqlite_host_in_process(path: str, request: Any, admission: Any, barrier: Any, results: Any) -> None:
+    store = SqliteCheckpointStore(path)
+    try:
+        barrier.wait(timeout=15)
+        results.put(store.produce_host_interaction(request, admission_context=admission).to_dict())
+    finally:
+        store.close()
+
+
+def test_sqlite_host_producer_processes_admit_once(tmp_path: Path) -> None:
+    path = str(tmp_path / "producer-processes.sqlite3")
+    store = SqliteCheckpointStore(path)
+    checkpoint = _checkpoint("producer-processes")
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        checkpoint.checkpoint_key, 1, claim_token="producer", lease_expires_at_ms=10, now_ms=1, claim_mode="continue"
+    )
+    assert claimed is not None
+    request = HostInteractionRequest(
+        interaction_id="process-interaction",
+        logical_cycle=1,
+        operation_id="process-operation",
+        tool_call_id="process-tool",
+        prompt="Choose.",
+    )
+    admission = HostInteractionAdmissionContext(
+        checkpoint_key=checkpoint.checkpoint_key,
+        claim_token="producer",
+        expected_revision=claimed.revision,
+        claimed_cycle=1,
+        now_ms=1,
+        lease_expires_at_ms=10,
+    )
+    store.close()
+    context = multiprocessing.get_context("spawn")
+    barrier, results = context.Barrier(2), context.Queue()
+    processes = [
+        context.Process(target=_produce_sqlite_host_in_process, args=(path, request, admission, barrier, results))
+        for _ in range(2)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        outcomes = [results.get(timeout=20) for _ in processes]
+        for process in processes:
+            process.join(timeout=20)
+            assert process.exitcode == 0
+        assert {outcome["status"] for outcome in outcomes} == {"admitted", "replayed"}
+        assert outcomes[0]["record_id"] == outcomes[1]["record_id"]
+        reopened = SqliteCheckpointStore(path)
+        try:
+            current = reopened.load_checkpoint(checkpoint.checkpoint_key)
+            assert current is not None and current.revision == claimed.revision + 1
+            assert current.status is AgentStatus.HOST_INTERACTION and current.claim_token is None
+            assert sum(entry.event["type"] == "host_interaction_requested" for entry in current.event_outbox) == 1
+            assert reopened._conn.execute("SELECT COUNT(*) FROM host_interaction_records").fetchone()[0] == 1
+            assert reopened.get_host_interaction_notification(outcomes[0]["notification_id"]) is not None
+        finally:
+            reopened.close()
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+        results.close()
 
 
 def test_host_response_recovery_preserves_content_and_is_replayable(store: Any) -> None:

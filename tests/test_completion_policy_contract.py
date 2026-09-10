@@ -20,8 +20,8 @@ from vv_agent.agent import ToolUseBehavior
 from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptStep
 from vv_agent.model import ScriptedModelProvider
-from vv_agent.tools import ToolOutputText
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.tools import ToolOutputText, build_default_registry
+from vv_agent.types import LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
 FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "completion_policy.json"
 
@@ -50,6 +50,17 @@ def _provider(steps: list[ScriptStep]) -> ScriptedModelProvider:
 
 @pytest.mark.parametrize("case", _contract()["cases"], ids=lambda case: case["name"])
 def test_public_completion_policy_matrix(case: dict[str, Any], tmp_path: Path) -> None:
+    registry = build_default_registry()
+    registry.register_tool(
+        "handoff_result",
+        lambda _context, _arguments: ToolExecutionResult(
+            tool_call_id="",
+            content="override done",
+            directive=ToolDirective.FINISH,
+            metadata={"final_message": "override done"},
+        ),
+        "Return the delegated result.",
+    )
     requests: list[LlmRequest] = []
     scripted_steps: list[ScriptStep] = []
     for step in case["steps"]:
@@ -91,6 +102,7 @@ def test_public_completion_policy_matrix(case: dict[str, Any], tmp_path: Path) -
     configured = Runner.configured(
         RunConfig(
             model_provider=_provider(scripted_steps),
+            tool_registry_factory=lambda: registry,
             no_tool_policy=cast(NoToolPolicy | None, case["runner_default_policy"]),
         )
     )
@@ -120,7 +132,7 @@ def test_public_completion_policy_matrix(case: dict[str, Any], tmp_path: Path) -
     )
     assert continuation_hint_emitted is expected["continuation_hint_emitted"]
     assert all(
-        "task_finish" in {cast(dict[str, Any], tool["function"])["name"] for tool in request.tools} for request in requests
+        "task_finish" not in {cast(dict[str, Any], tool["function"])["name"] for tool in request.tools} for request in requests
     )
 
     terminal = result.events[-1]

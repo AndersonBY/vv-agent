@@ -189,7 +189,7 @@
     }
   },
   "outcome": {
-    "schema_version": "vv-agent.tool-call-outcome.v2",
+    "schema_version": "vv-agent.tool-call-outcome.v3",
     "discriminator": "kind",
     "variants": {
       "completed": {
@@ -211,6 +211,41 @@
         "kind": "deferred",
         "handle_type": "DeferredToolHandle",
         "model_visible_tool_result": false
+      },
+      "host_interaction": {
+        "required_fields": [
+          "kind",
+          "result",
+          "request"
+        ],
+        "kind": "host_interaction",
+        "result": "complete definitive ToolExecutionResult",
+        "request_type": "HostInteractionRequest",
+        "result_status_values": ["SUCCESS", "ERROR"],
+        "result_directive": "continue",
+        "tool_call_id_matches_request": true,
+        "ambiguous_result_rejected": true,
+        "handler_return_is_not_admission": true,
+        "model_visible_tool_result": true
+      }
+    },
+    "host_interaction_golden": {
+      "schema_version": "vv-agent.tool-call-outcome.v3",
+      "kind": "host_interaction",
+      "result": {
+        "tool_call_id": "call_host_4",
+        "content": "Choice requested.",
+        "status_code": "SUCCESS",
+        "directive": "continue"
+      },
+      "request": {
+        "schema_version": "vv-agent.host-interaction-request.v1",
+        "interaction_id": "interaction-42",
+        "logical_cycle": 4,
+        "operation_id": "op_host_cycle_4",
+        "tool_call_id": "call_host_4",
+        "prompt": "Choose an approved option.",
+        "request_digest": "6eb7f7953c3aaa93c94dfe723ffa00aecb877505af29f2730b9950c20961c787"
       }
     },
     "closed_objects": true,

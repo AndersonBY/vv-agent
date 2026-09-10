@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider
 from vv_agent.runtime.hooks import BaseRuntimeHook, BeforeMemoryCompactEvent
 
 
@@ -19,12 +19,14 @@ class MemoryAuditHook(BaseRuntimeHook):
 def main() -> None:
     agent = Agent(
         name="memory-auditor",
-        instructions="Answer normally and call task_finish.",
+        instructions="Answer the user.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         hooks=[MemoryAuditHook()],
     )

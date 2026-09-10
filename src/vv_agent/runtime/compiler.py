@@ -80,7 +80,7 @@ class AgentCompiler:
             context_length=resolved.context_length,
             max_output_tokens=resolved.max_output_tokens,
         )
-        no_tool_policy = run_config.no_tool_policy or agent.no_tool_policy or "continue"
+        no_tool_policy = run_config.no_tool_policy or agent.no_tool_policy or "finish"
         metadata["_vv_agent_tool_use_behavior"] = agent.tool_use_behavior
         if agent.stop_at_tool_names:
             metadata["_vv_agent_stop_at_tool_names"] = list(agent.stop_at_tool_names)

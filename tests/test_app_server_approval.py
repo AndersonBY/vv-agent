@@ -12,7 +12,6 @@ from vv_agent import Agent, RunConfig, function_tool
 from vv_agent.app_server import AppServer, ChannelTransport, MessageProcessor, OutgoingRouter, RequestId
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -347,15 +346,9 @@ def _server_with_approval_tool(
     llm = ScriptedLLM(
         steps=[
             LLMResponse(content="calling", tool_calls=[ToolCall(id="call_1", name="dangerous_tool", arguments={})]),
-            LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
             LLMResponse(content="calling again", tool_calls=[ToolCall(id="call_2", name="dangerous_tool", arguments={})]),
-            LLMResponse(
-                content="done again",
-                tool_calls=[ToolCall(id="finish_2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done again"})],
-            ),
+            LLMResponse(content="done again"),
         ]
     )
 

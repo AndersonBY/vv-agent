@@ -9,7 +9,6 @@ from vv_agent.constants import (
     ACTIVATE_SKILL_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
 )
 from vv_agent.events import DiagnosticEvent, RunEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
@@ -39,7 +38,7 @@ _PNG_1X1 = bytes.fromhex(
 )
 
 
-def test_runtime_finishes_via_task_finish(tmp_path: Path) -> None:
+def test_runtime_finishes_with_natural_output_after_tool_cycle(tmp_path: Path) -> None:
     llm = ScriptedLLM(
         steps=[
             LLMResponse(
@@ -52,10 +51,7 @@ def test_runtime_finishes_via_task_finish(tmp_path: Path) -> None:
                     )
                 ],
             ),
-            LLMResponse(
-                content="finalizing",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "all done"})],
-            ),
+            LLMResponse(content="all done"),
         ]
     )
     runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
@@ -199,7 +195,7 @@ def test_runtime_waits_for_user_when_ask_user_called(tmp_path: Path) -> None:
     assert "confirm" in (result.wait_reason or "")
 
 
-def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
+def test_runtime_natural_completion_preserves_pending_todos(tmp_path: Path) -> None:
     llm = ScriptedLLM(
         steps=[
             LLMResponse(
@@ -212,24 +208,7 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
                     )
                 ],
             ),
-            LLMResponse(
-                content="try finish",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
-            LLMResponse(
-                content="mark done",
-                tool_calls=[
-                    ToolCall(
-                        id="c3",
-                        name=TASK_LIST_TOOL_NAME,
-                        arguments={"todos": [{"title": "t1", "status": "completed", "priority": "medium"}]},
-                    )
-                ],
-            ),
-            LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="c4", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done for real"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
     runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
@@ -239,9 +218,9 @@ def test_runtime_retries_after_todo_guard_error(tmp_path: Path) -> None:
 
     result = runtime.run(task)
     assert result.status == AgentStatus.COMPLETED
-    assert result.final_answer == "done for real"
-    assert len(result.cycles) == 4
-    assert result.todo_list[0]["status"] == "completed"
+    assert result.final_answer == "done"
+    assert len(result.cycles) == 2
+    assert result.todo_list[0]["status"] == "pending"
 
 
 def test_runtime_hits_max_cycles_with_continue_policy(tmp_path: Path) -> None:
@@ -318,10 +297,7 @@ def test_runtime_emits_cycle_logs(tmp_path: Path) -> None:
                     )
                 ],
             ),
-            LLMResponse(
-                content="finalizing",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "all done"})],
-            ),
+            LLMResponse(content="all done"),
         ]
     )
     events: list[RunEvent] = []
@@ -625,10 +601,7 @@ def test_runtime_uses_prompt_tokens_for_followup_compaction_budget(tmp_path: Pat
     def inspect_cycle_two_messages(request: LlmRequest) -> LLMResponse:
         _model, messages = request.model, request.messages
         observed_cycle_two_messages.extend(messages)
-        return LLMResponse(
-            content="finish",
-            tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-        )
+        return LLMResponse(content="done")
 
     llm = ScriptedLLM(
         steps=[
@@ -656,7 +629,7 @@ def test_runtime_uses_prompt_tokens_for_followup_compaction_budget(tmp_path: Pat
 
     result = runtime.run(task)
 
-    assert result.status == AgentStatus.COMPLETED
+    assert result.status == AgentStatus.MAX_CYCLES
     assert observed_cycle_two_messages
     assert all("<Compressed Agent Memory>" not in message.content for message in observed_cycle_two_messages)
 
@@ -673,10 +646,7 @@ def test_runtime_injects_image_message_after_read_image(tmp_path: Path) -> None:
         assert image_messages[-1].content.startswith("[Image loaded]")
         assert image_messages[-1].image_url is not None
         assert image_messages[-1].image_url.startswith("data:image/png;base64,")
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     llm = ScriptedLLM(
         steps=[
@@ -715,10 +685,7 @@ def test_runtime_tool_result_event_keeps_full_content_by_default(tmp_path: Path)
                     )
                 ],
             ),
-            LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-            ),
+            LLMResponse(content="ok"),
         ]
     )
     events: list[RunEvent] = []
@@ -761,10 +728,7 @@ def test_runtime_tool_result_event_preview_can_be_truncated_explicitly(tmp_path:
                     )
                 ],
             ),
-            LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-            ),
+            LLMResponse(content="ok"),
         ]
     )
     events: list[RunEvent] = []
@@ -822,10 +786,7 @@ def test_runtime_keeps_tool_results_adjacent_before_image_notifications(tmp_path
         image_messages = [msg for msg in messages[assistant_index + 3 :] if msg.role == "user" and msg.image_url]
         assert image_messages
         assert image_messages[0].content == ""
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     llm = ScriptedLLM(
         steps=[
@@ -878,10 +839,7 @@ def test_runtime_skips_image_notifications_when_multimodal_disabled(tmp_path: Pa
         model, messages = request.model, request.messages
         del model
         assert not any(message.role == "user" and message.image_url for message in messages)
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     llm = ScriptedLLM(
         steps=[
@@ -937,8 +895,7 @@ def test_runtime_collects_cycle_and_total_token_usage(tmp_path: Path) -> None:
                 },
             ),
             LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
+                content="ok",
                 raw={
                     "usage": {
                         "input_tokens": 50,
@@ -992,10 +949,7 @@ def test_runtime_propagates_available_skills_into_tool_context(tmp_path: Path) -
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
     runtime = AgentRuntime(llm_client=llm, tool_registry=build_default_registry(), default_workspace=tmp_path)
@@ -1025,10 +979,7 @@ def test_runtime_propagates_available_skills_path_list_into_tool_context(tmp_pat
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
 

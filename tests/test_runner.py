@@ -23,12 +23,18 @@ from vv_agent import (
     RunResult,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import READ_IMAGE_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import READ_IMAGE_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.tools import ToolExposure, function_tool
 from vv_agent.types import AgentStatus, LLMResponse, Message, NoToolPolicy, ToolCall
 
 ASSISTANT_REASONING_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "assistant_reasoning_history.json"
+
+
+@function_tool
+def echo(message: str) -> str:
+    """Return the supplied message."""
+    return message
 
 
 def _assistant_reasoning_contract() -> dict[str, object]:
@@ -69,10 +75,7 @@ def test_runner_run_sync_executes_agent_with_model_provider(tmp_path: Path) -> N
     def capture_request(request: LlmRequest) -> LLMResponse:
         assert request.model_settings is not None
         seen_settings.append(request.model_settings)
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     model_provider = FixedModelProvider(
         ScriptedLLM(steps=[capture_request]),
@@ -168,7 +171,7 @@ def test_runner_preserves_reasoning_only_history_for_next_model_request(tmp_path
         captured_requests.append(list(request.messages))
         return LLMResponse(
             content="",
-            tool_calls=[ToolCall(id="finish-reasoning", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            tool_calls=[ToolCall(id="echo-reasoning", name="echo", arguments={"message": "done"})],
         )
 
     llm = ScriptedLLM(
@@ -189,7 +192,13 @@ def test_runner_preserves_reasoning_only_history_for_next_model_request(tmp_path
     )
 
     result = Runner.run_sync(
-        Agent(name="assistant", instructions="Preserve private reasoning history.", model="m"),
+        Agent(
+            name="assistant",
+            instructions="Preserve private reasoning history.",
+            model="m",
+            tools=[echo],
+            tool_use_behavior="stop_on_first_tool",
+        ),
         "continue the task",
         run_config=RunConfig(
             workspace=tmp_path,
@@ -222,7 +231,7 @@ def test_runner_removes_fully_empty_assistant_before_next_model_request(tmp_path
         captured_requests.append(list(request.messages))
         return LLMResponse(
             content="",
-            tool_calls=[ToolCall(id="finish-empty", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+            tool_calls=[ToolCall(id="echo-empty", name="echo", arguments={"message": "done"})],
         )
 
     llm = ScriptedLLM(
@@ -233,7 +242,13 @@ def test_runner_removes_fully_empty_assistant_before_next_model_request(tmp_path
     )
 
     result = Runner.run_sync(
-        Agent(name="assistant", instructions="Drop invalid empty history.", model="m"),
+        Agent(
+            name="assistant",
+            instructions="Drop invalid empty history.",
+            model="m",
+            tools=[echo],
+            tool_use_behavior="stop_on_first_tool",
+        ),
         "continue the task",
         run_config=RunConfig(
             workspace=tmp_path,
@@ -255,10 +270,7 @@ def test_runner_passes_resolved_model_settings_to_llm_complete(tmp_path: Path) -
     class CapturingLLM:
         def complete(self, request: LlmRequest) -> LLMResponse:
             seen_settings.append(request.model_settings)
-            return LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-            )
+            return LLMResponse(content="ok")
 
         def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
             del stream_callback
@@ -294,10 +306,7 @@ def test_runner_keeps_hidden_tools_executable_but_out_of_model_schemas(tmp_path:
             for schema in request.tools:
                 function = cast(dict[str, object], schema["function"])
                 captured_tool_names.append(str(function["name"]))
-            return LLMResponse(
-                content="",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            )
+            return LLMResponse(content="done")
 
         def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
             del stream_callback
@@ -372,7 +381,7 @@ def test_stop_on_first_tool_does_not_finish_on_a_no_tool_response(tmp_path: Path
                 LLMResponse(content="draft without a tool"),
                 LLMResponse(
                     content="",
-                    tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
+                    tool_calls=[ToolCall(id="echo", name="echo", arguments={"message": "done"})],
                 ),
             ]
         ),
@@ -384,6 +393,8 @@ def test_stop_on_first_tool_does_not_finish_on_a_no_tool_response(tmp_path: Path
             name="assistant",
             instructions="Finish explicitly.",
             model="m",
+            tools=[echo],
+            no_tool_policy="continue",
             tool_use_behavior="stop_on_first_tool",
         ),
         "go",
@@ -451,10 +462,7 @@ def test_runner_exposes_read_image_for_resolved_multimodal_model(tmp_path: Path)
                 if isinstance(function, dict):
                     typed_function = cast(dict[str, object], function)
                     seen_tool_names.add(str(typed_function.get("name")))
-            return LLMResponse(
-                content="done",
-                tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-            )
+            return LLMResponse(content="ok")
 
         def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
             del stream_callback
@@ -491,10 +499,7 @@ def test_runner_prefers_resolved_catalog_token_limits_for_memory(tmp_path: Path,
 
     def capture_request(request: LlmRequest) -> LLMResponse:
         observed_requests.append(request)
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     model_provider = FixedModelProvider(
         ScriptedLLM(steps=[capture_request]),
@@ -534,10 +539,7 @@ def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
             if stream_callback is not None:
                 stream_callback({"event": "assistant_delta", "content_delta": "hel"})
                 stream_callback({"event": "assistant_delta", "content_delta": "lo"})
-            return LLMResponse(
-                content="hello",
-                tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            )
+            return LLMResponse(content="hello")
 
     events = list(
         Runner.stream_sync(
@@ -559,16 +561,13 @@ def test_runner_stream_sync_yields_typed_events(tmp_path: Path) -> None:
         "assistant_delta",
         "assistant_delta",
         "model_call_completed",
-        "tool_call_planned",
-        "tool_call_started",
-        "tool_call_completed",
         "run_completed",
     ]
     assert [event.delta for event in events if isinstance(event, AssistantDeltaEvent)] == ["hel", "lo"]
     assert any(event.code == "cycle_llm_response" for event in events if isinstance(event, DiagnosticEvent))
     completed = events[-1]
     assert isinstance(completed, RunCompletedEvent)
-    assert completed.final_output == "done"
+    assert completed.final_output == "hello"
     assert completed.to_dict()["type"] == "run_completed"
     assert isinstance(events[1], AgentStartedEvent)
     assert isinstance(events[2], CycleStartedEvent)
@@ -587,13 +586,19 @@ def test_runner_appends_session_items_across_runs(tmp_path: Path) -> None:
             tool_calls=[
                 ToolCall(
                     id=f"finish_{call_index}",
-                    name=TASK_FINISH_TOOL_NAME,
+                    name="echo",
                     arguments={"message": f"{['first', 'second'][call_index - 1]} result"},
                 )
             ],
         )
 
-    agent = Agent(name="assistant", instructions="Remember context.", model="m")
+    agent = Agent(
+        name="assistant",
+        instructions="Remember context.",
+        model="m",
+        tools=[echo],
+        tool_use_behavior="stop_on_first_tool",
+    )
     config = RunConfig(
         workspace=tmp_path,
         session=session,
@@ -665,20 +670,7 @@ def test_runner_coerces_json_final_output_to_dataclass(tmp_path: Path) -> None:
         count: int
 
     model_provider = FixedModelProvider(
-        ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="done",
-                    tool_calls=[
-                        ToolCall(
-                            id="finish",
-                            name=TASK_FINISH_TOOL_NAME,
-                            arguments={"message": '{"title": "orders", "count": 3}'},
-                        )
-                    ],
-                )
-            ]
-        ),
+        ScriptedLLM(steps=[LLMResponse(content='{"title": "orders", "count": 3}')]),
         _fake_resolved(),
     )
 

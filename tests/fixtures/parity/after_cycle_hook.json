@@ -307,8 +307,8 @@
       ],
       "native_outcome": {
         "kind": "completed",
-        "completion_reason": "tool_finish",
-        "completion_tool_name": "task_finish",
+        "completion_reason": "no_tool_finish",
+        "completion_tool_name": null,
         "steer_allowed": true
       },
       "expected": {

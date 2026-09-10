@@ -1914,8 +1914,8 @@ def _build_builtin_tools_manifest() -> dict[str, Any]:
             }
         )
     return {
-        "contract": "vv-agent-builtin-tools-v2",
-        "schema_version": 2,
+        "contract": "vv-agent-builtin-tools-v3",
+        "schema_version": 3,
         "exposure_contract": {
             "allowed_values": ["direct", "hidden"],
             "model_visible_values": ["direct"],
@@ -2058,7 +2058,7 @@ def test_prompt_bundle_manifest_enforces_session_memory_gate() -> None:
 def test_builtin_tools_manifest_uses_real_default_registry() -> None:
     fixture = _load_fixture("builtin_tools.json")
     assert fixture == _build_builtin_tools_manifest()
-    assert len(fixture["tools"]) == 15
+    assert len(fixture["tools"]) == 14
     assert all(tool["model_visible"] for tool in fixture["tools"])
 
 

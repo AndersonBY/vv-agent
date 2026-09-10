@@ -24,7 +24,7 @@ from vv_agent import (
     output_guardrail,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import LlmRequest
 from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
@@ -389,16 +389,7 @@ def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> N
                 content="remember",
                 tool_calls=[ToolCall(id="remember-call", name="remember", arguments={"value": "kept"})],
             )
-        return LLMResponse(
-            content="finish",
-            tool_calls=[
-                ToolCall(
-                    id="finish-call",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": '{"status":"ok"}'},
-                )
-            ],
-        )
+        return LLMResponse(content='{"status":"ok"}')
 
     provider = ScriptedModelProvider.from_callback("test", "parent-model", capture_request)
     client = InteractiveAgentClient(
@@ -451,16 +442,7 @@ def test_interactive_client_preserves_public_agent_handoff(tmp_path: Path) -> No
                     )
                 ],
             ),
-            LLMResponse(
-                content="written",
-                tool_calls=[
-                    ToolCall(
-                        id="writer-finish",
-                        name=TASK_FINISH_TOOL_NAME,
-                        arguments={"message": "writer result"},
-                    )
-                ],
-            ),
+            LLMResponse(content="writer result"),
         ],
     )
     writer = Agent(name="writer", instructions="Write.", model="shared-model")

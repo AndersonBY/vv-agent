@@ -2016,23 +2016,24 @@ def prepare_tool_receipt(
         )
     if current is None:
         return None
-    if current.claim_token is None or not claim_token:
+    host_receipt = current.status is AgentStatus.HOST_INTERACTION and current.claim_token is None
+    if (current.claim_token is None and not host_receipt) or (current.claim_token is not None and not claim_token):
         raise CheckpointError(
             "tool receipt requires an active claim",
             code="checkpoint_claim_required",
         )
-    if current.claim_token != claim_token or current.claimed_cycle != claimed_cycle:
+    if not host_receipt and (current.claim_token != claim_token or current.claimed_cycle != claimed_cycle):
         raise CheckpointError(
             "tool receipt claim does not match the checkpoint claim",
             code="checkpoint_claim_conflict",
         )
-    if current.revision != expected_revision or checkpoint.revision != expected_revision:
+    if not host_receipt and (current.revision != expected_revision or checkpoint.revision != expected_revision):
         raise CheckpointError(
             "tool receipt revision does not match the checkpoint revision",
             code="checkpoint_revision_conflict",
         )
     if (
-        current.status is not AgentStatus.RUNNING
+        current.status not in {AgentStatus.RUNNING, AgentStatus.HOST_INTERACTION}
         or current.terminal_result is not None
         or not checkpoint_definition_matches(current, checkpoint)
     ):

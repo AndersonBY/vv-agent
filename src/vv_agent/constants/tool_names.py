@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-TODO_INCOMPLETE_ERROR_CODE = "todo_incomplete"
-
 ASK_USER_TOOL_NAME = "ask_user"
-TASK_FINISH_TOOL_NAME = "task_finish"
 READ_FILE_TOOL_NAME = "read_file"
 WRITE_FILE_TOOL_NAME = "write_file"
 FIND_FILES_TOOL_NAME = "find_files"

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from support import FactoryModelProvider
@@ -366,6 +367,8 @@ class _FailOnceTerminalDeliveryStore(InMemoryCheckpointStore):
 
 def _terminal_replay_window(
     tmp_path: Path,
+    *,
+    transport_redelivered: bool = False,
 ) -> tuple[_FailOnceTerminalDeliveryStore, DistributedCapabilityRegistry, CeleryBackend, dict[str, Any], list[int]]:
     store = _FailOnceTerminalDeliveryStore()
     checkpoint_ref = CapabilityRef("checkpoint.terminal-replay-repair", "1")
@@ -389,7 +392,7 @@ def _terminal_replay_window(
             checkpoint_store_ref=checkpoint_ref,
         ),
     )
-    app = _ImmediateApp(registry=registry, store=store)
+    app = _ImmediateApp(registry=registry, store=store, transport_redelivered=transport_redelivered)
     backend = CeleryBackend(
         celery_app=app,
         runtime_recipe=recipe,
@@ -1404,7 +1407,15 @@ def test_nonblocking_celery_response_recovery_consumes_once_before_continue(
     llm_ref = CapabilityRef("llm.host-recovery", "1")
     registry = DistributedCapabilityRegistry()
     registry.register("checkpoint_store", checkpoint_ref, store)
-    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[LLMResponse(content="continued")]))
+
+    def complete(_request: Any) -> LLMResponse:
+        before = store.load_checkpoint("host-recovery")
+        duplicate = run_single_cycle(envelope_dict=app.envelopes[1], capability_registry=registry)
+        assert duplicate["type"] == "pending"
+        assert store.load_checkpoint("host-recovery") == before
+        return LLMResponse(content="continued")
+
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[complete]))
     recipe = RuntimeRecipe(
         settings_file=str(tmp_path / "unused-settings.py"),
         backend="test",
@@ -1519,17 +1530,23 @@ def test_nonblocking_celery_response_recovery_consumes_once_before_continue(
     )
     assert crashed_wake is not None and crashed_wake["outbox_state"] == "claimed"
 
-    decision = backend.advance(
-        previous_envelope=first_envelope,
-        outcome=DistributedWorkerResponse.pending(),
-    )
-    assert decision.action in {"dispatch", "retry_at"}
+    admission = store.load_checkpoint("host-recovery")
+    with patch.object(store, "load_checkpoint", wraps=store.load_checkpoint) as loads:
+        decision = backend.advance(
+            previous_envelope=first_envelope,
+            outcome=DistributedWorkerResponse.pending(),
+        )
+    assert loads.call_count == 1
+    assert store.load_checkpoint("host-recovery") == admission
+    assert decision.action == "dispatch"
     assert decision.envelope is not None and decision.envelope.claim_mode == "recovery"
     assert len(app.envelopes) == 2
+    worker_response = run_single_cycle(envelope_dict=app.envelopes[1], capability_registry=registry)
+    assert worker_response["type"] == "committed"
     consumed = store.load_checkpoint("host-recovery")
     assert consumed is not None
-    assert consumed.messages[-1].content == "approved"
-    assert consumed.claim_token is not None and consumed.claim_token.startswith("host-response:")
+    assert [message.content for message in consumed.messages].count("approved") == 1
+    assert consumed.claim_token is None
     receipt = store.get_controller_command_receipt(wake_command.command_id)
     assert receipt is not None and receipt.outbox_state == "delivered"
     if suspended:
@@ -1548,8 +1565,6 @@ def test_nonblocking_celery_response_recovery_consumes_once_before_continue(
     assert replayed.revision == consumed_revision
     assert [message.content for message in replayed.messages].count("approved") == 1
 
-    worker_response = run_single_cycle(envelope_dict=app.envelopes[1], capability_registry=registry)
-    assert worker_response["type"] == "committed"
     committed = store.load_checkpoint("host-recovery")
     assert committed is not None and committed.cycle_index == 1 and committed.claim_token is None
 
@@ -2207,8 +2222,8 @@ def test_celery_rejects_resolved_tool_metadata_drift_before_claim(
 
     assert getattr(caught.value, "code", None) == "checkpoint_definition_mismatch"
     error_message = str(caught.value)
-    assert "actual_len=10" in error_message
-    assert "expected_len=10" in error_message
+    assert "actual_len=9" in error_message
+    assert "expected_len=9" in error_message
     assert "actual_names=" in error_message
     assert "expected_names=" in error_message
     assert "task_extra_tool_names=" in error_message
@@ -2501,10 +2516,16 @@ def test_celery_returns_candidate_then_runner_owns_terminal_order(
     assert len(session.get_items()) > 0
 
 
-def test_celery_worker_terminal_replay_repairs_pending_delivery_without_model_calls(tmp_path: Path) -> None:
-    store, registry, _backend, envelope, model_calls = _terminal_replay_window(tmp_path)
+@pytest.mark.parametrize("transport_redelivered", [False, True])
+def test_celery_worker_terminal_replay_repairs_pending_delivery_without_model_calls(
+    tmp_path: Path, transport_redelivered: bool
+) -> None:
+    store, registry, _backend, envelope, model_calls = _terminal_replay_window(
+        tmp_path, transport_redelivered=transport_redelivered
+    )
     before = store.load_checkpoint("terminal-replay-repair")
     assert before is not None
+    assert before.resume_attempt == envelope["resume_attempt"] + int(transport_redelivered)
     event_ids = tuple(entry.event_id for entry in before.event_outbox)
 
     first = DistributedWorkerResponse.from_dict(
@@ -2765,6 +2786,107 @@ def test_celery_scheduler_retry_redispatches_as_recovery(
     terminal = store.load_checkpoint("distributed-retry")
     assert terminal is not None
     assert terminal.resume_attempt == 2
+
+
+def test_real_tool_host_interaction_retains_receipt_before_waiting(tmp_path: Path) -> None:
+    from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
+
+    store = SqliteCheckpointStore(tmp_path / "host-tool.sqlite")
+    calls: list[str] = []
+    model_calls: list[Any] = []
+
+    def request_choice(context: Any, _arguments: dict[str, Any]) -> ToolOutputText:
+        calls.append("request")
+        plan = context.metadata["_vv_agent_checkpoint_plan"]
+        context.ctx.produce_host_interaction(
+            HostInteractionRequest(
+                interaction_id="region-choice",
+                logical_cycle=context.cycle_index,
+                operation_id=plan.operation_id,
+                tool_call_id=context.tool_call_id,
+                prompt="Choose a region: https://example.invalid/?keep=1",
+            )
+        )
+        calls.append("returned")
+        return ToolOutputText(text="Region choice requested.")
+
+    def later(_context: Any, _arguments: dict[str, Any]) -> ToolOutputText:
+        calls.append("later")
+        return ToolOutputText(text="Later result.")
+
+    tools = [
+        FunctionTool(
+            name=name,
+            description=name,
+            params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            on_invoke=callback,
+        )
+        for name, callback in (("request_choice", request_choice), ("later", later))
+    ]
+    worker_tools = build_default_registry()
+    for tool in tools:
+        worker_tools.register_executor(FunctionToolExecutor(tool))
+    toolset = ToolsetRef("host-tool", "1", toolset_schema_digest(worker_tools))
+    registry = DistributedCapabilityRegistry()
+    checkpoint_ref, llm_ref = CapabilityRef("host-tool-store", "1"), CapabilityRef("host-tool-llm", "1")
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register_toolset(toolset, worker_tools)
+
+    def complete(request: Any) -> LLMResponse:
+        model_calls.append(request)
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id="choice", name="request_choice", arguments={}),
+                ToolCall(id="later", name="later", arguments={}),
+            ],
+        )
+
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[complete]))
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app,
+        capability_registry=registry,
+        runtime_recipe=RuntimeRecipe(
+            settings_file="",
+            backend="test",
+            model="test-model",
+            workspace=str(tmp_path),
+            capabilities=DistributedCapabilities(
+                toolset_ref=toolset,
+                llm_client_ref=llm_ref,
+                checkpoint_store_ref=checkpoint_ref,
+            ),
+        ),
+    )
+    try:
+        handle = Runner.start_distributed(
+            Agent(name="region", model="test-model", instructions="Ask before continuing.", tools=tools),
+            "Choose a region.",
+            run_config=RunConfig(
+                model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+                execution_backend=backend,
+                max_cycles=3,
+                checkpoint_config=CheckpointConfig(key="host-tool", store=store, resume_policy=ResumePolicy.NEW),
+            ),
+        )
+        response = run_single_cycle(envelope_dict=app.envelopes[0], capability_registry=registry)
+        assert calls == ["request", "returned"]
+        assert len(model_calls) == 1
+        checkpoint = store.load_checkpoint(handle.checkpoint_key)
+        assert checkpoint is not None
+        assert checkpoint.status is AgentStatus.HOST_INTERACTION
+        assert checkpoint.claim_token is None
+        entry = next(entry for entry in checkpoint.tool_journal if entry.tool_call_id == "choice")
+        assert entry.result is not None
+        assert entry.result["content"] == "Region choice requested."
+        decision = backend.advance(
+            previous_envelope=app.envelopes[0],
+            outcome=DistributedDeliveryOutcome.worker(response),
+        )
+        assert decision.action == "wait"
+    finally:
+        store.close()
 
 
 def test_registered_celery_task_forwards_transport_redelivery_metadata(

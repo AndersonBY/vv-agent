@@ -12,7 +12,6 @@ from vv_agent.constants import (
     BASH_TOOL_NAME,
     EDIT_FILE_TOOL_NAME,
     READ_FILE_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
 from vv_agent.events import RunEvent, ToolCallCompletedEvent
@@ -131,7 +130,7 @@ def test_live_edit_file_feedback_recovers_when_model_edits_before_read(tmp_path:
     assert events[0].result.error_code == "file_not_read"
     assert events[0].result.status_code is ToolResultStatus.ERROR
     assert events[2].result.status_code is ToolResultStatus.SUCCESS
-    assert event_names[-1] == TASK_FINISH_TOOL_NAME
+    assert not result.cycles[-1].tool_calls
 
 
 def test_live_edit_file_feedback_recovers_when_file_changes_after_read(tmp_path: Path) -> None:
@@ -178,4 +177,4 @@ def test_live_edit_file_feedback_recovers_when_file_changes_after_read(tmp_path:
     assert any(event.name == EDIT_FILE_TOOL_NAME and event.result.status_code is ToolResultStatus.SUCCESS for event in events), (
         event_names
     )
-    assert event_names[-1] == TASK_FINISH_TOOL_NAME
+    assert not result.cycles[-1].tool_calls

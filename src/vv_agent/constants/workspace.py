@@ -15,7 +15,6 @@ from vv_agent.constants.tool_names import (
     FIND_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
     SEARCH_FILES_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
 )
@@ -33,30 +32,6 @@ WORKSPACE_TOOLS = [
 ]
 
 _DEFAULT_TOOL_SCHEMAS: dict[str, ToolSchema] = {
-    "task_finish": {
-        "type": "function",
-        "function": {
-            "name": "task_finish",
-            "description": "Explicitly finish the run with a user-facing result when the requested work is complete. This tool is optional when the configured no-tool policy allows natural completion; the runtime still enforces unfinished-TODO checks.",
-            "parameters": {
-                "additionalProperties": False,
-                "properties": {
-                    "exposed_files": {
-                        "description": "Workspace-relative deliverable paths to expose to the user.",
-                        "items": {"type": "string"},
-                        "type": "array",
-                    },
-                    "message": {"description": "Final user-facing result.", "type": "string"},
-                    "require_all_todos_completed": {
-                        "description": "Reject finish while TODOs remain unless false.",
-                        "type": "boolean",
-                    },
-                },
-                "required": [],
-                "type": "object",
-            },
-        },
-    },
     "ask_user": {
         "type": "function",
         "function": {
@@ -488,12 +463,10 @@ _DEFAULT_TOOL_SCHEMAS: dict[str, ToolSchema] = {
     },
 }
 
-TASK_FINISH_TOOL_SCHEMA: ToolSchema = _DEFAULT_TOOL_SCHEMAS[TASK_FINISH_TOOL_NAME]
 ASK_USER_TOOL_SCHEMA: ToolSchema = _DEFAULT_TOOL_SCHEMAS[ASK_USER_TOOL_NAME]
 ACTIVATE_SKILL_TOOL_SCHEMA: ToolSchema = _DEFAULT_TOOL_SCHEMAS[ACTIVATE_SKILL_TOOL_NAME]
 
 _CONTROL_TOOL_NAMES = {
-    TASK_FINISH_TOOL_NAME,
     ASK_USER_TOOL_NAME,
     ACTIVATE_SKILL_TOOL_NAME,
 }

@@ -99,7 +99,7 @@
         "expected": {
           "system_message": {
             "role": "system",
-            "content": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\nUse task_finish for an explicit final result. Natural completion is allowed when the configured no-tool policy permits it.\n</Tools>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>"
+            "content": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>"
           },
           "cache_control_fields": []
         }
@@ -120,7 +120,7 @@
             },
             {
               "type": "text",
-              "text": "<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\nUse task_finish for an explicit final result. Natural completion is allowed when the configured no-tool policy permits it.\n</Tools>\n\n",
+              "text": "<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n",
               "cache_control": {
                 "type": "ephemeral"
               }
@@ -274,7 +274,7 @@
           },
           {
             "id": "tools",
-            "text": "<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\nUse task_finish for an explicit final result. Natural completion is allowed when the configured no-tool policy permits it.\n</Tools>",
+            "text": "<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>",
             "stable": true,
             "source": "runtime.tools"
           },
@@ -291,8 +291,8 @@
             "source": "run.clock"
           }
         ],
-        "flat_prompt": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\nUse task_finish for an explicit final result. Natural completion is allowed when the configured no-tool policy permits it.\n</Tools>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
-        "stable_hash": "554a1f381151d9f609f7075188e1e9e54e6dd3ba093b9b976a507f6f56dd7c27"
+        "flat_prompt": "<Agent Definition>\nYou are a careful coding agent.\n</Agent Definition>\n\n<Environment>\nYou are running in a <OS> workspace environment and can use tools to inspect and modify files.\n</Environment>\n\n<Tools>\nAsk the user only for a required decision that cannot be resolved from context or available tools.\n\nPrefer specialized workspace tools for direct file operations; use bash when they are insufficient.\n\nFor multi-step work, keep the TODO state current with at most one item in progress.\n\nConfigured sub-agents:\n- agent_id=`researcher`: Finds source evidence.\n- agent_id=`writer`: Writes the final report.\n\nAvailable skills metadata (Agent Skills format):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\nReview code against the requested contract.\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- Keep source evidence.\n</Session Memory>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
+        "stable_hash": "030813d624f5fcef2b265a1ae5b3eec10f5001622eb2cec1228cbe1bd786ec3e"
       }
     },
     {
@@ -341,7 +341,7 @@
           },
           {
             "id": "tools",
-            "text": "<Tools>\n只有缺少无法从上下文或可用工具中获得的必要决策时才询问用户。\n\n直接操作文件时优先使用工作区专用工具；仅在专用工具不足时使用 bash。\n\n多步骤工作中，同一时间只保留一个进行中的 TODO。\n\n已配置的子 Agent：\n- agent_id=`researcher`: 查找源码证据。\n- agent_id=`writer`: 整理最终报告。\n\n可用技能元数据 (Agent Skills 标准格式):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n核对代码与契约。\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\n可使用 task_finish 显式返回最终结果；若配置的 no-tool policy 允许，也可自然结束。\n</Tools>",
+            "text": "<Tools>\n只有缺少无法从上下文或可用工具中获得的必要决策时才询问用户。\n\n直接操作文件时优先使用工作区专用工具；仅在专用工具不足时使用 bash。\n\n多步骤工作中，同一时间只保留一个进行中的 TODO。\n\n已配置的子 Agent：\n- agent_id=`researcher`: 查找源码证据。\n- agent_id=`writer`: 整理最终报告。\n\n可用技能元数据 (Agent Skills 标准格式):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n核对代码与契约。\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>",
             "stable": true,
             "source": "runtime.tools"
           },
@@ -358,8 +358,8 @@
             "source": "run.clock"
           }
         ],
-        "flat_prompt": "<Agent Definition>\n你是一个严谨的编码 Agent。\n</Agent Definition>\n\n<Environment>\n你运行在 <OS> 工作区环境中, 可以用工具读取, 搜索, 修改文件.\n</Environment>\n\n<Tools>\n只有缺少无法从上下文或可用工具中获得的必要决策时才询问用户。\n\n直接操作文件时优先使用工作区专用工具；仅在专用工具不足时使用 bash。\n\n多步骤工作中，同一时间只保留一个进行中的 TODO。\n\n已配置的子 Agent：\n- agent_id=`researcher`: 查找源码证据。\n- agent_id=`writer`: 整理最终报告。\n\n可用技能元数据 (Agent Skills 标准格式):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n核对代码与契约。\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n\n可使用 task_finish 显式返回最终结果；若配置的 no-tool policy 允许，也可自然结束。\n</Tools>\n\n<Session Memory>\n- 保留源码证据。\n</Session Memory>\n\n<Current Time>\n任务开始时的真实 UTC 时间:\n2026-07-10T08:30:00Z\n</Current Time>",
-        "stable_hash": "c7a295c26509af6a2443e252ad5d30902653321fc7839a22041b9a6115584f81"
+        "flat_prompt": "<Agent Definition>\n你是一个严谨的编码 Agent。\n</Agent Definition>\n\n<Environment>\n你运行在 <OS> 工作区环境中, 可以用工具读取, 搜索, 修改文件.\n</Environment>\n\n<Tools>\n只有缺少无法从上下文或可用工具中获得的必要决策时才询问用户。\n\n直接操作文件时优先使用工作区专用工具；仅在专用工具不足时使用 bash。\n\n多步骤工作中，同一时间只保留一个进行中的 TODO。\n\n已配置的子 Agent：\n- agent_id=`researcher`: 查找源码证据。\n- agent_id=`writer`: 整理最终报告。\n\n可用技能元数据 (Agent Skills 标准格式):\n<available_skills>\n<skill>\n<name>\nreview-code\n</name>\n<description>\n核对代码与契约。\n</description>\n<location>\nskills/review-code/SKILL.md\n</location>\n</skill>\n</available_skills>\n</Tools>\n\n<Session Memory>\n- 保留源码证据。\n</Session Memory>\n\n<Current Time>\n任务开始时的真实 UTC 时间:\n2026-07-10T08:30:00Z\n</Current Time>",
+        "stable_hash": "bf60402d5fe400e20fd190532630bcdba031cbec6f32b6f4714870349396daac"
       }
     },
     {
@@ -387,20 +387,14 @@
             "source": "agent.instructions"
           },
           {
-            "id": "tools",
-            "text": "<Tools>\nUse task_finish for an explicit final result. Natural completion is allowed when the configured no-tool policy permits it.\n</Tools>",
-            "stable": true,
-            "source": "runtime.tools"
-          },
-          {
             "id": "current_time",
             "text": "<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
             "stable": false,
             "source": "run.clock"
           }
         ],
-        "flat_prompt": "<Agent Definition>\nReturn only verified facts.\n</Agent Definition>\n\n<Tools>\nUse task_finish for an explicit final result. Natural completion is allowed when the configured no-tool policy permits it.\n</Tools>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
-        "stable_hash": "39aa76fbccb4e50a6084b769681ae04a8ab00f306aeb227cfa7f217807a8ff78"
+        "flat_prompt": "<Agent Definition>\nReturn only verified facts.\n</Agent Definition>\n\n<Current Time>\nActual task start time (UTC):\n2026-07-10T08:30:00Z\n</Current Time>",
+        "stable_hash": "ff9555f1446040f95411ebbbeddff5cde33d8ea0ebd1b3674bb47e6c982f0fc8"
       }
     },
     {

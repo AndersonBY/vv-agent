@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from vv_agent import Agent, RunConfig, Runner, ToolCallCompletedEvent, ToolOutputText, function_tool
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.types import LLMResponse, ToolCall
@@ -61,10 +60,7 @@ def test_real_runner_trace_matches_current_producer_fixture() -> None:
                 content="lookup",
                 tool_calls=[ToolCall(id="lookup-call", name="lookup", arguments={"query": "parity"})],
             ),
-            LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="finish-call", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
     agent = Agent(

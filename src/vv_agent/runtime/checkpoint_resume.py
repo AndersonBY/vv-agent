@@ -345,6 +345,7 @@ class CheckpointResumeController:
         if (
             checkpoint.status is not AgentStatus.RUNNING
             or checkpoint.claim_token is None
+            or checkpoint.claim_token != self._owned_claim_token
             or checkpoint.claimed_cycle is None
             or checkpoint.lease_expires_at_ms is None
             or checkpoint.lease_expires_at_ms <= now_ms
@@ -434,18 +435,6 @@ class CheckpointResumeController:
             return replay
         now_ms = self._now_ms()
         if existing.claim_token is not None and (existing.lease_expires_at_ms or 0) > now_ms:
-            if (
-                self._first_claim_is_recovery
-                and existing.claim_token.startswith("host-response:")
-                and existing.claimed_cycle == existing.cycle_index + 1
-            ):
-                self.checkpoint = existing
-                self._owned_claim_token = existing.claim_token
-                self._active_claim_mode = "recovery"
-                self._start_heartbeat()
-                self._first_claim_is_recovery = False
-                self._restore_extensions(existing)
-                return None
             raise CheckpointError(
                 f"checkpoint key {key!r} has a live claim",
                 code="checkpoint_claim_active",
@@ -457,6 +446,20 @@ class CheckpointResumeController:
 
     def close(self) -> None:
         self._stop_heartbeat()
+
+    def adopt_existing_claim(self, *, claim_token: str, claimed_cycle: int) -> None:
+        checkpoint = self._require_checkpoint()
+        if (
+            not claim_token
+            or checkpoint.claim_token != claim_token
+            or checkpoint.claimed_cycle != claimed_cycle
+            or (checkpoint.lease_expires_at_ms or 0) <= self._now_ms()
+        ):
+            raise CheckpointError("recovery execution claim is stale", code="checkpoint_claim_active")
+        self._owned_claim_token = claim_token
+        self._active_claim_mode = "recovery"
+        self._first_claim_is_recovery = False
+        self._start_heartbeat()
 
     def resolve_deferred(self, handle: Any, result: ToolExecutionResult) -> Any:
         """Forward a callback through the store's receipt-first public API.
@@ -1090,6 +1093,8 @@ class CheckpointResumeController:
             checkpoint = self._require_checkpoint()
             claim_token = checkpoint.claim_token
             claimed_cycle = checkpoint.claimed_cycle
+            if claimed_cycle is None and checkpoint.status is AgentStatus.HOST_INTERACTION:
+                claimed_cycle = entry.cycle_index
             if claim_token is None or claimed_cycle is None:
                 raise CheckpointError(
                     "checkpoint tool receipt requires an active claim",

@@ -18,8 +18,8 @@ from vv_agent import (
     RunConfig,
     Runner,
     ToolCallStartedEvent,
+    function_tool,
 )
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.types import LLMResponse, ToolCall
@@ -57,16 +57,7 @@ class StreamingGoldenLLM:
                 }
             )
             stream_callback({"event": "assistant_delta", "content_delta": "assistant message"})
-        return LLMResponse(
-            content="complete assistant message",
-            tool_calls=[
-                ToolCall(
-                    id="finish_golden",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": "done"},
-                )
-            ],
-        )
+        return LLMResponse(content="complete assistant message")
 
 
 class ContractStreamLLM:
@@ -96,11 +87,26 @@ class ContractStreamLLM:
             tool_calls=[
                 ToolCall(
                     id="call_stream",
-                    name=TASK_FINISH_TOOL_NAME,
+                    name="echo",
                     arguments={"message": "done"},
                 )
             ],
         )
+
+
+def _stream_agent() -> Agent:
+    @function_tool
+    def echo(message: str) -> str:
+        """Return the supplied message."""
+        return message
+
+    return Agent(
+        name="stream-agent",
+        instructions="Return the third-cycle tool result.",
+        model="stream-model",
+        tools=[echo],
+        tool_use_behavior="stop_on_first_tool",
+    )
 
 
 def test_real_runner_projects_contract_stream_fixture_without_trusting_source_identity(tmp_path: Path) -> None:
@@ -117,7 +123,7 @@ def test_real_runner_projects_contract_stream_fixture_without_trusting_source_id
             callback_order.append(event.type)
 
     result = Runner.run_sync(
-        Agent(name="stream-agent", instructions="Finish on the third cycle.", model="stream-model"),
+        _stream_agent(),
         "stream input",
         run_config=RunConfig(
             workspace=tmp_path,
@@ -167,11 +173,11 @@ def test_real_runner_projects_contract_stream_fixture_without_trusting_source_id
         {"type": "assistant_delta", "content_delta": "legacy discriminator"},
         {"event": "assistant_delta", "content_delta": 7},
         {"event": "reasoning_delta", "reasoning_delta": None},
-        {"event": "tool_call_started", "tool_call_id": "", "function_name": "task_finish"},
+        {"event": "tool_call_started", "tool_call_id": "", "function_name": "echo"},
         {
             "event": "tool_call_progress",
             "tool_call_id": "call_stream",
-            "function_name": "task_finish",
+            "function_name": "echo",
             "arguments_chars": -1,
         },
     ],
@@ -184,7 +190,7 @@ def test_real_runner_drops_malformed_known_provider_stream_payloads(
     observed: list[Any] = []
 
     result = Runner.run_sync(
-        Agent(name="stream-agent", instructions="Finish on the third cycle.", model="stream-model"),
+        _stream_agent(),
         "stream input",
         run_config=RunConfig(
             workspace=tmp_path,
@@ -216,7 +222,7 @@ def test_real_runner_events_match_cross_language_producer_fixture(tmp_path: Path
     result = Runner.run_sync(
         Agent(
             name="runner-agent",
-            instructions="Finish with task_finish.",
+            instructions="Return the final answer.",
             model="golden-model",
         ),
         "golden input",
@@ -269,7 +275,7 @@ def test_typed_stream_observer_failure_cannot_suppress_run_handle_journal(tmp_pa
         handle = Runner.start(
             Agent(
                 name="runner-agent",
-                instructions="Finish with task_finish.",
+                instructions="Return the final answer.",
                 model="golden-model",
             ),
             "golden input",

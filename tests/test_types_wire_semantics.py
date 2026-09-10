@@ -120,7 +120,7 @@ def test_agent_task_from_dict_uses_public_dict_defaults_for_optional_fields() ->
         "max_cycles": 8,
         "memory_compact_threshold": 250_000,
         "memory_threshold_percentage": 90,
-        "no_tool_policy": "continue",
+        "no_tool_policy": "finish",
         "allow_interruption": True,
         "use_workspace": True,
         "agent_type": None,

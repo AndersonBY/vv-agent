@@ -8,14 +8,14 @@ from typing import Any
 import pytest
 
 from vv_agent import Agent, MemorySession, RunBudgetLimits, RunConfig, Runner, output_guardrail
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.event_store import RunEventReplayQuery
 from vv_agent.events import RunEvent
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.runtime import CancellationToken
-from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall
+from vv_agent.tools import build_default_registry
+from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "runner_terminal.json"
 TERMINAL_TYPES = {"run_completed", "run_failed", "run_cancelled"}
@@ -28,23 +28,9 @@ def _contract() -> dict[str, Any]:
 def _agent(
     *,
     output_guardrails=None,
-    assistant_message: str = "finish",
     final_message: str = "done",
 ) -> tuple[Agent, ScriptedModelProvider]:
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content=assistant_message,
-                tool_calls=[
-                    ToolCall(
-                        id="finish",
-                        name=TASK_FINISH_TOOL_NAME,
-                        arguments={"message": final_message},
-                    )
-                ],
-            )
-        ]
-    )
+    llm = ScriptedLLM(steps=[LLMResponse(content=final_message)])
     return (
         Agent(
             name="terminal-agent",
@@ -62,13 +48,25 @@ def _agent(
 
 def test_session_persists_before_the_only_success_terminal() -> None:
     expected = _contract()["success_with_session"]
-    agent, provider = _agent()
+    agent, _ = _agent()
+    registry = build_default_registry()
+    registry.register_tool(
+        "handoff_result",
+        lambda _context, _arguments: ToolExecutionResult(tool_call_id="", content="done", directive=ToolDirective.FINISH),
+        "Return the delegated result.",
+    )
+    provider = ScriptedModelProvider.from_steps(
+        "test",
+        "terminal-model",
+        [LLMResponse(content="done", tool_calls=[ToolCall(id="result", name="handoff_result", arguments={})])],
+    )
     result = Runner.run_sync(
         agent,
         "go",
         run_config=RunConfig(
             model_provider=provider,
             session=MemorySession("terminal-session"),
+            tool_registry_factory=lambda: registry,
         ),
     )
     types = [event.type for event in result.events]
@@ -96,8 +94,7 @@ def test_output_guardrail_block_short_circuits_and_owns_final_terminal() -> None
 
     agent, provider = _agent(
         output_guardrails=[block, later],
-        assistant_message=expected["partial_output"],
-        final_message="tool result must not become partial output",
+        final_message=expected["partial_output"],
     )
     result = Runner.run_sync(
         agent,
@@ -133,6 +130,7 @@ def test_max_cycles_preserves_partial_output_and_typed_reason() -> None:
             name="max-cycles-agent",
             instructions="Continue until stopped.",
             model="max-cycles-model",
+            no_tool_policy="continue",
         ),
         "go",
         run_config=RunConfig(

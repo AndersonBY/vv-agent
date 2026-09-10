@@ -1090,7 +1090,7 @@ def _agent_task_bool(data: dict[str, Any], field_name: str, *, default: bool) ->
 
 
 def _agent_task_no_tool_policy(data: dict[str, Any]) -> NoToolPolicy:
-    value = data.get("no_tool_policy", "continue")
+    value = data.get("no_tool_policy", "finish")
     if not isinstance(value, str):
         raise TypeError("AgentTask field 'no_tool_policy' must be a string")
     if value not in {"continue", "wait_user", "finish"}:
@@ -1184,7 +1184,7 @@ class AgentTask:
     memory_compact_threshold: int = 250_000
     memory_threshold_percentage: int = 90
     microcompaction_policy: MicrocompactionPolicy = field(default_factory=MicrocompactionPolicy)
-    no_tool_policy: NoToolPolicy = "continue"
+    no_tool_policy: NoToolPolicy = "finish"
     allow_interruption: bool = True
     use_workspace: bool = True
     sub_agents: dict[str, SubAgentConfig] = field(default_factory=dict)

@@ -101,7 +101,7 @@
       "keep_recent_cycles": 4,
       "min_result_chars": 700
     },
-    "no_tool_policy": "continue",
+    "no_tool_policy": "finish",
     "allow_interruption": false,
     "use_workspace": true,
     "agent_type": "computer",
@@ -456,8 +456,8 @@
           ],
           "misses": [
             "é",
-            "\u0301",
-            "\u200c"
+            "́",
+            "‌"
           ]
         },
         {
@@ -475,7 +475,7 @@
             "\u001d",
             "\u001e",
             "\u001f",
-            "\u00a0"
+            " "
           ]
         }
       ],

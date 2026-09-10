@@ -12,7 +12,6 @@ from vv_agent.prompt.templates import (
     ASK_USER_PROMPT,
     COMPUTER_AGENT_ENV_PROMPT,
     CURRENT_TIME_PROMPT,
-    TASK_FINISH_PROMPT,
     TODO_PROMPT,
     render_available_skills,
     render_sub_agents,
@@ -294,16 +293,16 @@ def create_system_prompt_builder(
         skills_prompt = render_available_skills(language, available_skills, workspace=workspace_path)
         if skills_prompt:
             tool_lines.append(skills_prompt)
-    tool_lines.append(TASK_FINISH_PROMPT.get(language, TASK_FINISH_PROMPT["en-US"]))
-    joined_tool_lines = "\n\n".join(tool_lines)
-    builder.add_section(
-        PromptSection(
-            id="tools",
-            text=f"<Tools>\n{joined_tool_lines}\n</Tools>",
-            stable=True,
-            source="runtime.tools",
+    if tool_lines:
+        joined_tool_lines = "\n\n".join(tool_lines)
+        builder.add_section(
+            PromptSection(
+                id="tools",
+                text=f"<Tools>\n{joined_tool_lines}\n</Tools>",
+                stable=True,
+                source="runtime.tools",
+            )
         )
-    )
 
     if session_memory_enabled and session_memory_context:
         builder.add_section(

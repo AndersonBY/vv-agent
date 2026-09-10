@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from vv_agent import Agent, MemorySession, ModelSettings, RunConfig, Runner, function_tool
+from vv_agent import Agent, MemorySession, ModelSettings, RunConfig, Runner, VvLlmModelProvider, function_tool
 from vv_agent.events import RunEvent
 
 
@@ -63,8 +63,10 @@ def main() -> None:
         backend = "minimax"
 
     config = RunConfig(
-        settings_file=settings_file,
-        default_backend=backend,
+        model_provider=VvLlmModelProvider(
+            settings_file=settings_file,
+            default_backend=backend,
+        ),
         workspace=workspace,
         max_cycles=max(max_cycles, 1),
         stream=print_event if verbose else None,

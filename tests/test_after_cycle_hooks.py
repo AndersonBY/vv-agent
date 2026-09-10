@@ -10,7 +10,7 @@ from vv_agent import (
     NativeCycleOutcomeKind,
     RunBudgetLimits,
 )
-from vv_agent.constants import ASK_USER_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import ASK_USER_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime import AgentRuntime
@@ -22,6 +22,7 @@ from vv_agent.types import (
     CompletionReason,
     LLMResponse,
     ToolCall,
+    ToolDirective,
     ToolExecutionResult,
 )
 
@@ -78,13 +79,14 @@ def test_after_cycle_steer_defers_no_tool_completion(tmp_path: Path) -> None:
             prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="answer",
             max_cycles=3,
-            no_tool_policy="finish",
+            initial_shared_state={"todo_list": [{"title": "review", "status": "pending"}]},
         )
     )
 
     assert result.status is AgentStatus.COMPLETED
     assert result.completion_reason is CompletionReason.NO_TOOL_FINISH
     assert result.final_answer == "checked answer"
+    assert all("task_finish" not in _tool_names(request) for request in requests)
     assert [snapshot.native_outcome.kind for snapshot in hook.snapshots] == [
         NativeCycleOutcomeKind.COMPLETED,
         NativeCycleOutcomeKind.COMPLETED,
@@ -97,6 +99,18 @@ def test_after_cycle_steer_defers_no_tool_completion(tmp_path: Path) -> None:
 
 
 def test_after_cycle_steer_defers_tool_finish(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    registry.register_tool(
+        "handoff_result",
+        lambda _context, arguments: ToolExecutionResult(
+            tool_call_id="",
+            content=arguments["message"],
+            directive=ToolDirective.FINISH,
+            metadata={"final_message": arguments["message"]},
+        ),
+        "Return the delegated answer.",
+        parameters={"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]},
+    )
     hook = RecordingHook(
         decisions=[
             AfterCycleDecision.steer(["Verify before finalizing."]),
@@ -112,7 +126,7 @@ def test_after_cycle_steer_defers_tool_finish(tmp_path: Path) -> None:
                     tool_calls=[
                         ToolCall(
                             id="finish-1",
-                            name=TASK_FINISH_TOOL_NAME,
+                            name="handoff_result",
                             arguments={"message": "first answer"},
                         )
                     ],
@@ -124,7 +138,7 @@ def test_after_cycle_steer_defers_tool_finish(tmp_path: Path) -> None:
                         tool_calls=[
                             ToolCall(
                                 id="finish-2",
-                                name=TASK_FINISH_TOOL_NAME,
+                                name="handoff_result",
                                 arguments={"message": "verified answer"},
                             )
                         ],
@@ -132,13 +146,14 @@ def test_after_cycle_steer_defers_tool_finish(tmp_path: Path) -> None:
                 ),
             ]
         ),
-        tool_registry=build_default_registry(),
+        tool_registry=registry,
         default_workspace=tmp_path,
         after_cycle_hooks=[hook],
     )
     result = runtime.run(
         AgentTask(
             task_id="after-cycle-tool-steer",
+            extra_tool_names=["handoff_result"],
             model="test-model",
             prompt_bundle=build_raw_system_prompt_bundle("system"),
             user_prompt="finish",

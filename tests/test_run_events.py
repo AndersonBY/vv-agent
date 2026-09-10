@@ -15,7 +15,6 @@ from vv_agent import (
     ToolCallStartedEvent,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
@@ -36,15 +35,16 @@ def test_runner_emits_tool_call_started_and_completed_events(tmp_path: Path) -> 
         ScriptedLLM(
             steps=[
                 LLMResponse(
-                    content="done",
+                    content="update todos",
                     tool_calls=[
                         ToolCall(
-                            id="finish",
-                            name=TASK_FINISH_TOOL_NAME,
-                            arguments={"message": "ok"},
+                            id="todo",
+                            name="todo_write",
+                            arguments={"todos": []},
                         )
                     ],
-                )
+                ),
+                LLMResponse(content="ok"),
             ]
         ),
         _resolved(),
@@ -59,23 +59,16 @@ def test_runner_emits_tool_call_started_and_completed_events(tmp_path: Path) -> 
     started = [event for event in result.events if isinstance(event, ToolCallStartedEvent)]
     finished = [event for event in result.events if isinstance(event, ToolCallCompletedEvent)]
     assert len(started) == 1
-    assert started[0].tool_name == TASK_FINISH_TOOL_NAME
-    assert started[0].tool_call_id == "finish"
+    assert started[0].tool_name == "todo_write"
+    assert started[0].tool_call_id == "todo"
     assert len(finished) == 1
-    assert finished[0].tool_name == TASK_FINISH_TOOL_NAME
-    assert finished[0].tool_call_id == "finish"
+    assert finished[0].tool_name == "todo_write"
+    assert finished[0].tool_call_id == "todo"
 
 
 def test_runner_emits_cycle_and_model_call_started_events(tmp_path: Path) -> None:
     model_provider = FixedModelProvider(
-        ScriptedLLM(
-            steps=[
-                LLMResponse(
-                    content="done",
-                    tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-                )
-            ]
-        ),
+        ScriptedLLM(steps=[LLMResponse(content="ok")]),
         _resolved(),
     )
 

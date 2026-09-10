@@ -7,9 +7,9 @@ that repository.
 
 ## Pinned Contract
 
-`contract.lock.json` selects contract `14.0.0` at revision
-`b873f57607cc99a2d3b95f58e61a1f74d9316001`. Its canonical artifact has
-SHA-256 `0109fb57c04d9a0a058e2bc8df28bc777464e70687c52d2af36e5dba60e9dd4c`.
+`contract.lock.json` selects contract `15.0.0` at revision
+`86fb47c934ef8ef4b0671d895cd3c228c82b1395`. Its canonical artifact has
+SHA-256 `8f21696c853ada95883f92a45bfc7f32b220a2a5fce75118a29d558c3f9fa57d`.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
 as the machine-readable source for the current verified Python and Rust
@@ -44,9 +44,9 @@ After an immutable central release exists:
 ```bash
 python3 scripts/contract_snapshot.py sync \
   --source ../vv-agent-contract \
-  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v14.0.0/vv-agent-contract-14.0.0.zip \
-  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v14.0.0/vv-agent-contract-14.0.0.zip \
-  --revision b873f57607cc99a2d3b95f58e61a1f74d9316001
+  --artifact https://github.com/AndersonBY/vv-agent-contract/releases/download/v15.0.0/vv-agent-contract-15.0.0.zip \
+  --artifact-url https://github.com/AndersonBY/vv-agent-contract/releases/download/v15.0.0/vv-agent-contract-15.0.0.zip \
+  --revision 86fb47c934ef8ef4b0671d895cd3c228c82b1395
 ```
 
 ## Verification Scope
@@ -70,7 +70,7 @@ the central cross-repository workflow.
 | --- | --- |
 | Public API | `src/vv_agent/__init__.py`, `tests/test_parity_evidence_manifests.py` |
 | Resolved PromptBundle and one-run producer scope | `src/vv_agent/prompt/`, `src/vv_agent/runtime/compiler.py`, `src/vv_agent/runtime/run_definition.py`, `src/vv_agent/llm/`; `tests/test_prompt_builder.py`, `tests/test_context_providers.py`, `tests/test_protocol_types.py`, `tests/test_checkpoint.py`, `tests/test_distributed_checkpoint.py` |
-| Canonical 15-tool surface and compact schemas | `src/vv_agent/constants/workspace.py`, `src/vv_agent/tools/registry.py`, `src/vv_agent/tools/executor.py`; `tests/test_tool_schema_contract.py`, `tests/test_builtin_tool_behavior_contract.py` |
+| Canonical 14-tool surface and compact schemas | `src/vv_agent/constants/workspace.py`, `src/vv_agent/tools/registry.py`, `src/vv_agent/tools/executor.py`; `tests/test_tool_schema_contract.py`, `tests/test_builtin_tool_behavior_contract.py` |
 | Sparse bounded tool results, artifact recovery, and read cursor | `src/vv_agent/types.py`, `src/vv_agent/workspace/artifacts.py`, `src/vv_agent/tools/handlers/bash.py`, `src/vv_agent/tools/handlers/background.py`, `src/vv_agent/tools/handlers/workspace_io.py`; `tests/test_protocol_types.py`, `tests/test_checkpoint.py`, `tests/test_distributed_checkpoint.py`, `tests/test_bash_tools.py`, `tests/test_workspace_io_parity.py` |
 | Tool metadata and policy | `src/vv_agent/tools/metadata.py`, `src/vv_agent/run_config.py`, `src/vv_agent/runtime/tool_planner.py`, `tests/test_tool_metadata_contract.py`, `tests/test_tool_policy.py` |
 | Tool execution lifecycle | `src/vv_agent/tools/orchestrator.py`, `src/vv_agent/runtime/tool_call_runner.py`, `tests/test_tool_orchestrator.py`, `tests/test_runtime_hooks.py` |
@@ -155,7 +155,7 @@ producers again. Providers without section-aware caching receive one
 deterministic flattening; Anthropic may use canonical section boundaries for
 cache breakpoints. Generic metadata is never a prompt-section transport.
 
-The current model-visible manifest is `vv-agent-builtin-tools-v2` with 15
+The current model-visible manifest is `vv-agent-builtin-tools-v3` with 14
 direct tools. `ToolExposure` has only `direct` and `hidden`; there is no
 deferred exposure. The model-visible `compress_memory` tool and its
 `memory_notes` state do not exist. Framework-owned automatic compaction remains
@@ -268,6 +268,13 @@ checkpoint-scoped through
 `reap_controller_command_wakes(checkpoint_key, now_ms)`, returns only pending or
 expired claimed `recovery_dispatch` rows in `(expected_revision, command_id)`
 order, and never retries ambiguous rows.
+
+Host-response consumption runs in `celery_tasks.py`, after worker admission
+and before model or tool work. Only an applied combined checkpoint/interaction
+CAS permits that worker to adopt its retained claim. Consumed replay and token
+spelling do not convey ownership. Duplicate delivery against an unexpired claim
+returns pending without changing its revision; `CeleryBackend.advance` only
+observes one checkpoint snapshot and dispatches recovery.
 
 Cycle dispatch receipts are a Python transport adaptation, implemented by
 `runtime/dispatch_outbox.py` and enabled only when a host explicitly injects a

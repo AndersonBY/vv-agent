@@ -15,6 +15,12 @@ effective order is:
 This lets an agent carry a reusable safety boundary while a specific run can
 override it.
 
+The no-tool policy order is per-run `RunConfig`, configured Runner default,
+`Agent`, then `finish`. An assistant response without tool calls supplies the
+completion candidate. Explicit `continue` requests another cycle; `wait_user`
+pauses for input. Existing after-cycle hooks can reject or steer a candidate
+within the remaining cycle budget without classifying assistant text.
+
 ## Per-Run Control Surface
 
 `RunConfig` can replace or extend model selection/settings, workspace and

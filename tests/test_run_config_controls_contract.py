@@ -17,7 +17,7 @@ def test_run_config_control_manifest_is_closed_and_matches_the_public_surface() 
     assert contract["framework_defaults"] == {
         "max_cycles": 10,
         "max_handoffs": 10,
-        "no_tool_policy": "continue",
+        "no_tool_policy": "finish",
         "session_memory_enabled": False,
         "microcompaction_policy": {
             "trigger_ratio": 0.75,

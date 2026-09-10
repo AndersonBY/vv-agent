@@ -14,7 +14,6 @@ from typing import Any, Literal, cast
 import vv_agent.events as run_events
 from vv_agent.checkpoint import CheckpointError, EventCursor, canonical_json_sha256
 from vv_agent.deferred import DeferredResolutionReceipt, DeferredResolveDecision, DeferredToolHandle
-from vv_agent.events import HostInteractionRequestedEvent
 from vv_agent.runtime.checkpoint_codec import (
     _strict_json_loads,
     checkpoint_from_dict,
@@ -23,7 +22,6 @@ from vv_agent.runtime.checkpoint_codec import (
     checkpoint_to_json,
 )
 from vv_agent.runtime.controller import (
-    HOST_NOTIFICATION_SCHEMA,
     HOST_RECORD_SCHEMA,
     ControllerCommand,
     ControllerCommandReceipt,
@@ -36,7 +34,6 @@ from vv_agent.runtime.controller import (
     HostInteractionRequest,
     derive_controller_receipt_outbox_id,
     derive_host_interaction_notification_id,
-    derive_host_interaction_record_id,
     validate_host_interaction_notification,
     validate_host_interaction_record,
 )
@@ -53,7 +50,6 @@ from vv_agent.runtime.state import (
     CheckpointConflictError,
     CheckpointRenewal,
     ClaimMode,
-    EventOutboxEntry,
     OperationState,
     RenewOutcome,
     _LeaseOperationClock,
@@ -68,11 +64,14 @@ from vv_agent.runtime.state import (
     prepare_event_delivery,
     prepare_tool_receipt,
     prepare_unclaimed_terminal,
-    validate_checkpoint,
     validate_checkpoint_creation,
     validate_model_journal_accounting,
 )
-from vv_agent.runtime.stores.controller_store import prepare_controller_command, prepare_host_response_consumption
+from vv_agent.runtime.stores.controller_store import (
+    prepare_controller_command,
+    prepare_host_interaction,
+    prepare_host_response_consumption,
+)
 from vv_agent.types import AgentStatus
 
 
@@ -641,7 +640,9 @@ class SqliteCheckpointStore:
                 if authoritative is None or authoritative is current:
                     self._conn.rollback()
                     return authoritative is not None
-                self._write_checkpoint_tx(authoritative, expected_revision=expected_revision, claim_token=claim_token)
+                write_revision = current.revision if current.status is AgentStatus.HOST_INTERACTION else expected_revision
+                write_claim = None if current.status is AgentStatus.HOST_INTERACTION else claim_token
+                self._write_checkpoint_tx(authoritative, expected_revision=write_revision, claim_token=write_claim)
                 self._conn.commit()
                 return True
             except BaseException:
@@ -1073,19 +1074,6 @@ class SqliteCheckpointStore:
             row.get("last_error"),
         )
 
-    @staticmethod
-    def _host_notification_payload(record_id: str, request: HostInteractionRequest, notification_id: str) -> dict[str, Any]:
-        return {
-            "schema_version": HOST_NOTIFICATION_SCHEMA,
-            "notification_id": notification_id,
-            "record_id": record_id,
-            "interaction_id": request.interaction_id,
-            "logical_cycle": request.logical_cycle,
-            "status": "host_interaction",
-            "wait_reason": "host_interaction",
-            "prompt": request.prompt,
-        }
-
     def _host_outcome(self, record: dict[str, Any], *, status: str, checkpoint_revision: int) -> HostInteractionOutcome:
         notification_id = derive_host_interaction_notification_id(record["record_id"])
         notification = self._notification_row(notification_id)
@@ -1146,96 +1134,14 @@ class SqliteCheckpointStore:
                     _SELECT_CHECKPOINT + " WHERE checkpoint_key = ?",
                     (checkpoint_key,),
                 ).fetchone()
-                if row is None:
-                    raise CheckpointError("host interaction checkpoint was not found", code="host_interaction_claim_required")
-                current = _checkpoint_from_row(row)
-                if current.revision != admission_context.expected_revision:
-                    raise CheckpointError("host interaction producer revision is stale", code="host_interaction_stale")
-                if current.lease_expires_at_ms != admission_context.lease_expires_at_ms:
-                    raise CheckpointError("host interaction producer lease is stale", code="host_interaction_claim_required")
-                if current.claimed_cycle != current.cycle_index + 1:
-                    raise CheckpointError("host interaction producer cycle fence is invalid", code="host_interaction_stale")
-                if (
-                    current.status is not AgentStatus.RUNNING
-                    or current.claim_token != admission_context.claim_token
-                    or current.claimed_cycle != admission_context.claimed_cycle
-                    or current.lease_expires_at_ms is None
-                    or current.lease_expires_at_ms <= admission_context.now_ms
-                ):
-                    raise CheckpointError(
-                        "host interaction producer requires an active claim; checkpoint execution claim is stale or expired",
-                        code="host_interaction_claim_required",
-                    )
-                key = current.checkpoint_key
-                if current.claim_token is None or current.claimed_cycle is None:
-                    raise CheckpointError(
-                        "host interaction producer requires an active claim", code="host_interaction_claim_required"
-                    )
-                record_id = derive_host_interaction_record_id(key, request_value)
-                notification_id = derive_host_interaction_notification_id(record_id)
-                event = HostInteractionRequestedEvent(
-                    run_id=current.root_run_id,
-                    trace_id=current.trace_id,
-                    checkpoint_key=key,
-                    resume_attempt=current.resume_attempt,
-                    interaction_id=request_value.interaction_id,
-                    logical_cycle=request_value.logical_cycle,
-                    operation_id=request_value.operation_id,
-                    tool_call_id=request_value.tool_call_id,
-                    request_digest=request_value.request_digest or "",
-                    prompt=request_value.prompt,
-                    cycle_index=current.cycle_index,
-                    event_id=f"evt_host_interaction_requested_{record_id[:16]}",
-                ).to_dict()
-                snapshot = checkpoint_from_json(checkpoint_to_json(current))
-                snapshot.active_host_interaction = request_value.to_dict()
-                snapshot.status = AgentStatus.HOST_INTERACTION
-                snapshot.claim_token = None
-                snapshot.claimed_cycle = None
-                snapshot.lease_expires_at_ms = None
-                snapshot.revision = current.revision + 1
-                snapshot.event_outbox.append(EventOutboxEntry.pending(event["event_id"], event))
-                validate_checkpoint(snapshot)
-                record = {
-                    "record_id": record_id,
-                    "checkpoint_key": key,
-                    "interaction_id": request_value.interaction_id,
-                    "logical_cycle": request_value.logical_cycle,
-                    "request": request_value.to_dict(),
-                    "request_digest": request_value.request_digest,
-                    "state": "active",
-                    "attempt": 0,
-                    "claim_token": None,
-                    "lease_expires_at_ms": None,
-                    "response": None,
-                    "response_digest": None,
-                    "command_id": None,
-                    "resolved_revision": None,
-                    "consumed_revision": None,
-                }
-                notification_payload = self._host_notification_payload(record_id, request_value, notification_id)
-                notification = {
-                    "notification_id": notification_id,
-                    "checkpoint_key": key,
-                    "record_id": record_id,
-                    "payload": notification_payload,
-                    "payload_digest": canonical_json_sha256(notification_payload, "notification_payload"),
-                    "outbox_state": "pending",
-                    "claim_token": None,
-                    "lease_expires_at_ms": None,
-                    "attempt": 0,
-                    "delivered_at_ms": None,
-                    "aborted_at_ms": None,
-                    "abort_reason": None,
-                    "last_error": None,
-                }
-                validate_host_interaction_record({**record, "schema_version": HOST_RECORD_SCHEMA})
-                validate_host_interaction_notification(
-                    notification_payload,
-                    notification_id=notification_id,
-                    record_id=record_id,
+                current = _checkpoint_from_row(row) if row is not None else None
+                snapshot, record, notification, outcome = prepare_host_interaction(
+                    current,
+                    request_value,
+                    admission_context=admission_context,
+                    created_at=time.time(),
                 )
-                if not self._update_checkpoint_row(snapshot, expected_revision=current.revision):
+                if not self._update_checkpoint_row(snapshot, expected_revision=admission_context.expected_revision):
                     raise CheckpointError("host interaction producer CAS lost", code="host_interaction_claim_required")
                 self._conn.execute(
                     "INSERT INTO host_interaction_records (record_id, checkpoint_key, interaction_id, logical_cycle, request, "
@@ -1251,7 +1157,7 @@ class SqliteCheckpointStore:
                     self._notification_values(notification),
                 )
                 self._conn.commit()
-                return self._host_outcome(record, status="admitted", checkpoint_revision=snapshot.revision)
+                return outcome
             except BaseException:
                 self._conn.rollback()
                 raise

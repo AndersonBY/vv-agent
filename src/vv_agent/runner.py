@@ -989,7 +989,7 @@ class Runner:
         )
         configured_no_tool_policy = next(
             (value for value in (config.no_tool_policy, defaults.no_tool_policy, agent.no_tool_policy) if value is not None),
-            "continue",
+            "finish",
         )
         effective_max_cycles = _validate_bounded_int(configured_max_cycles, "max_cycles", minimum=1)
         effective_max_handoffs = _validate_bounded_int(configured_max_handoffs, "max_handoffs", minimum=0)

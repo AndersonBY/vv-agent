@@ -28,7 +28,12 @@ from vv_agent.event_store import JsonlRunEventStore
 from vv_agent.llm import ScriptedLLM
 from vv_agent.result import RunState
 from vv_agent.runtime import CancellationToken, InlineBackend
-from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolDirective
+from vv_agent.types import AgentStatus, CompletionReason, LLMResponse, ToolCall, ToolDirective, ToolExecutionResult
+
+
+@function_tool(name="handoff_result")
+def handoff_result(message: str) -> ToolExecutionResult:
+    return ToolExecutionResult(tool_call_id="", content=message, directive=ToolDirective.FINISH)
 
 
 def _approval_resume_case(name: str) -> dict[str, Any]:
@@ -190,10 +195,7 @@ def test_approved_continue_tool_returns_to_the_model_loop(tmp_path: Path) -> Non
             message.role == "tool" and message.tool_call_id == "lookup-call" and message.content == "approved:item"
             for message in request.messages
         )
-        return LLMResponse(
-            content="ready to finish",
-            tool_calls=[ToolCall(id="finish-call", name="task_finish", arguments={"message": "finished after approval"})],
-        )
+        return LLMResponse(content="finished after approval")
 
     model = ScriptedLLM(
         steps=[
@@ -367,7 +369,7 @@ def test_approved_terminal_tool_applies_output_guardrails_and_updates_terminal_e
     [
         ("ask_user", {"question": "Choose one"}, AgentStatus.WAIT_USER, CompletionReason.WAIT_USER, "Choose one"),
         (
-            "task_finish",
+            "handoff_result",
             {"message": "approved finish"},
             AgentStatus.COMPLETED,
             CompletionReason.TOOL_FINISH,
@@ -396,6 +398,7 @@ def test_approved_explicit_directive_preserves_wait_or_finish_semantics(
             name="approver",
             instructions="Execute the explicitly controlled tool.",
             model="approval-model",
+            tools=[handoff_result],
         ),
         "run controlled tool",
         run_config=RunConfig(
@@ -489,10 +492,7 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
             message.role == "tool" and message.tool_call_id == "guarded-call" and "not allowed" in message.content.lower()
             for message in request.messages
         )
-        return LLMResponse(
-            content="handled denied tool",
-            tool_calls=[ToolCall(id="denied-finish", name="task_finish", arguments={"message": "denial handled"})],
-        )
+        return LLMResponse(content="denial handled")
 
     active_model = ScriptedLLM(steps=[approval_call(), finish_after_denial])
 
@@ -554,7 +554,7 @@ def test_manual_approval_resume_rechecks_current_policy_and_preserves_tool_conte
 
 
 def test_only_wait_user_results_convert_to_run_state() -> None:
-    model = ScriptedLLM(steps=[LLMResponse(content="done", tool_calls=[ToolCall(id="finish", name="task_finish", arguments={})])])
+    model = ScriptedLLM(steps=[LLMResponse(content="done")])
     result = Runner.run_sync(
         Agent(
             name="done",
@@ -861,7 +861,7 @@ def test_approval_typed_output_error_follows_fresh_terminal(tmp_path: Path) -> N
         steps=[
             LLMResponse(
                 content="typed candidate",
-                tool_calls=[ToolCall(id="finish", name="task_finish", arguments={"message": "not-json"})],
+                tool_calls=[ToolCall(id="result", name="handoff_result", arguments={"message": "not-json"})],
             )
         ]
     )
@@ -871,6 +871,7 @@ def test_approval_typed_output_error_follows_fresh_terminal(tmp_path: Path) -> N
             instructions="Return typed output.",
             model="approval-model",
             output_type=dict,
+            tools=[handoff_result],
         ),
         "go",
         run_config=RunConfig(

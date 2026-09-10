@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner, function_tool
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, function_tool
 
 
 @function_tool
@@ -17,7 +17,7 @@ def list_documents() -> list[str]:
 
 summarizer = Agent(
     name="summarizer",
-    instructions="Summarize the requested document id in one sentence and finish with task_finish.",
+    instructions="Summarize the requested document id in one sentence.",
     model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
 )
 
@@ -33,8 +33,10 @@ def main() -> None:
         ],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         max_cycles=10,
     )

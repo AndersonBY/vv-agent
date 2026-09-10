@@ -137,7 +137,7 @@
         "event": "tool_call_started",
         "tool_call_id": "call_stream",
         "tool_call_index": 0,
-        "function_name": "task_finish",
+        "function_name": "echo",
         "arguments_chars": 0,
         "estimated_tokens": 0
       },
@@ -145,7 +145,7 @@
         "event": "tool_call_progress",
         "tool_call_id": "call_stream",
         "tool_call_index": 0,
-        "function_name": "task_finish",
+        "function_name": "echo",
         "arguments_chars": 18,
         "estimated_tokens": 5
       },
@@ -195,7 +195,7 @@
         "agent_name": "stream-agent",
         "tool_call_id": "call_stream",
         "tool_call_index": 0,
-        "tool_name": "task_finish",
+        "tool_name": "echo",
         "arguments_chars": 0,
         "estimated_tokens": 0
       },
@@ -211,7 +211,7 @@
         "agent_name": "stream-agent",
         "tool_call_id": "call_stream",
         "tool_call_index": 0,
-        "tool_name": "task_finish",
+        "tool_name": "echo",
         "arguments_chars": 18,
         "estimated_tokens": 5
       }

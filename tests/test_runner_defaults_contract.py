@@ -17,22 +17,12 @@ from vv_agent import (
     ToolContext,
     function_tool,
 )
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest
 from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 
 def _finish_response(message: str = "done") -> LLMResponse:
-    return LLMResponse(
-        content="",
-        tool_calls=[
-            ToolCall(
-                id="finish",
-                name=TASK_FINISH_TOOL_NAME,
-                arguments={"message": message},
-            )
-        ],
-    )
+    return LLMResponse(content=message)
 
 
 @pytest.mark.parametrize("value", [True, False, 0, -1, 1.5, "2", (1 << 32)])

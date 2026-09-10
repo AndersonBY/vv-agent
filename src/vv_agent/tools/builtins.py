@@ -13,7 +13,6 @@ from vv_agent.constants import (
     READ_IMAGE_TOOL_NAME,
     SEARCH_FILES_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
     TODO_WRITE_TOOL_NAME,
     WRITE_FILE_TOOL_NAME,
     get_default_tool_schemas,
@@ -32,7 +31,6 @@ from vv_agent.tools.handlers import (
     run_bash_command,
     search_files,
     sub_task_status,
-    task_finish,
     todo_write,
     write_file,
 )
@@ -44,7 +42,6 @@ def build_default_registry() -> ToolRegistry:
     registry.register_schemas(get_default_tool_schemas())
     registry.register_many(
         [
-            ToolSpec(name=TASK_FINISH_TOOL_NAME, handler=task_finish),
             ToolSpec(name=ASK_USER_TOOL_NAME, handler=ask_user),
             ToolSpec(name=ACTIVATE_SKILL_TOOL_NAME, handler=activate_skill),
             ToolSpec(name=TODO_WRITE_TOOL_NAME, handler=todo_write),

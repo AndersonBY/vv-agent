@@ -8,10 +8,10 @@ from support import FixedModelProvider
 
 from vv_agent import Agent, ApprovalPolicy, RunConfig, Runner, ToolPolicy, function_tool
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
+from vv_agent.constants import ASK_USER_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.runtime import BaseRuntimeHook, BeforeLLMEvent
-from vv_agent.types import AgentStatus, LLMResponse, ToolCall
+from vv_agent.types import AgentStatus, LLMResponse
 
 
 def _resolved() -> ResolvedModelConfig:
@@ -53,10 +53,7 @@ def test_dynamic_instructions_receive_agent_and_complete_run_context(tmp_path: P
     def finish(request: LlmRequest) -> LLMResponse:
         _model, messages = request.model, request.messages
         assert "tenant=acme agent=assistant run=run_" in messages[0].content
-        return LLMResponse(
-            content="",
-            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-        )
+        return LLMResponse(content="done")
 
     agent = Agent(
         name="assistant",
@@ -96,14 +93,7 @@ def test_agent_hooks_run_before_per_run_hooks(tmp_path: Path) -> None:
             order.append(self.name)
             return None
 
-    llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            )
-        ]
-    )
+    llm = ScriptedLLM(steps=[LLMResponse(content="done")])
     agent = Agent(
         name="assistant",
         instructions="Finish.",
@@ -140,7 +130,7 @@ def test_agent_max_cycles_applies_when_run_config_only_supplies_provider() -> No
             return self.complete(request)
 
     result = Runner.run_sync(
-        Agent(name="bounded", instructions="Try twice.", model="m", max_cycles=2),
+        Agent(name="bounded", instructions="Try twice.", model="m", max_cycles=2, no_tool_policy="continue"),
         "go",
         run_config=RunConfig(model_provider=FixedModelProvider(NoToolLLM(), _resolved())),
     )
@@ -153,7 +143,7 @@ def test_run_config_max_cycles_overrides_agent_default() -> None:
     llm = ScriptedLLM(steps=[LLMResponse(content="one"), LLMResponse(content="two")])
 
     result = Runner.run_sync(
-        Agent(name="bounded", instructions="Try more.", model="m", max_cycles=3),
+        Agent(name="bounded", instructions="Try more.", model="m", max_cycles=3, no_tool_policy="continue"),
         "go",
         run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved()), max_cycles=1),
     )
@@ -166,7 +156,7 @@ def test_explicit_framework_default_max_cycles_still_overrides_agent_default() -
     llm = ScriptedLLM(steps=[LLMResponse(content=f"cycle {index}") for index in range(10)])
 
     result = Runner.run_sync(
-        Agent(name="bounded", instructions="Try more.", model="m", max_cycles=3),
+        Agent(name="bounded", instructions="Try more.", model="m", max_cycles=3, no_tool_policy="continue"),
         "go",
         run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved()), max_cycles=10),
     )
@@ -187,10 +177,7 @@ def test_agent_tool_policy_is_default_and_run_config_policy_overrides_it() -> No
 
         def complete(self, request: LlmRequest) -> LLMResponse:
             self.tool_names = [str(cast(dict[str, object], tool["function"])["name"]) for tool in request.tools]
-            return LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            )
+            return LLMResponse(content="done")
 
         def complete_with_stream(self, request: LlmRequest, stream_callback=None) -> LLMResponse:
             del stream_callback
@@ -202,10 +189,10 @@ def test_agent_tool_policy_is_default_and_run_config_policy_overrides_it() -> No
         instructions="Use policy.",
         model="m",
         tools=[lookup],
-        tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME]),
+        tool_policy=ToolPolicy(allowed_tools=[ASK_USER_TOOL_NAME]),
     )
     Runner.run_sync(agent, "agent policy", run_config=RunConfig(model_provider=FixedModelProvider(agent_llm, _resolved())))
-    assert agent_llm.tool_names == [TASK_FINISH_TOOL_NAME]
+    assert agent_llm.tool_names == [ASK_USER_TOOL_NAME]
 
     run_llm = CapturingLLM()
     Runner.run_sync(
@@ -213,10 +200,10 @@ def test_agent_tool_policy_is_default_and_run_config_policy_overrides_it() -> No
         "run policy",
         run_config=RunConfig(
             model_provider=FixedModelProvider(run_llm, _resolved()),
-            tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "lookup"]),
+            tool_policy=ToolPolicy(allowed_tools=[ASK_USER_TOOL_NAME, "lookup"]),
         ),
     )
-    assert run_llm.tool_names == [TASK_FINISH_TOOL_NAME, "lookup"]
+    assert run_llm.tool_names == [ASK_USER_TOOL_NAME, "lookup"]
 
 
 def test_agent_and_run_tool_policies_merge_each_policy_dimension() -> None:

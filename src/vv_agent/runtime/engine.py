@@ -23,7 +23,7 @@ from vv_agent.budget import (
 )
 from vv_agent.checkpoint import CheckpointError, utf16_sort_key
 from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
-from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME
 from vv_agent.events import (
     AgentStartedEvent,
     BudgetExhaustedEvent,
@@ -1928,7 +1928,7 @@ class AgentRuntime:
 
     @staticmethod
     def _build_continue_hint() -> str:
-        return f"No tool call was produced. Continue the task and call `{TASK_FINISH_TOOL_NAME}` when all todo items are done."
+        return "No tool call was produced. Continue the task."
 
     @staticmethod
     def _extract_final_message(result: ToolExecutionResult) -> str:
@@ -2956,7 +2956,7 @@ class AgentRuntime:
             memory_compact_threshold=parent_task.memory_compact_threshold,
             memory_threshold_percentage=parent_task.memory_threshold_percentage,
             microcompaction_policy=parent_task.microcompaction_policy,
-            no_tool_policy="continue",
+            no_tool_policy="finish",
             allow_interruption=False,
             use_workspace=parent_task.use_workspace,
             sub_agents={},

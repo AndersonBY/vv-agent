@@ -6,7 +6,6 @@ from vv_agent.constants import (
     READ_FILE_TOOL_NAME,
     SEARCH_FILES_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
 from vv_agent.tools import build_default_registry
@@ -22,7 +21,7 @@ def test_registry_exports_backend_style_tool_schemas() -> None:
     assert "function" in first
 
     names = {schema["function"]["name"] for schema in schemas}
-    assert TASK_FINISH_TOOL_NAME in names
+    assert "task_finish" not in names
     assert READ_FILE_TOOL_NAME in names
     assert CREATE_SUB_TASK_TOOL_NAME in names
     assert SUB_TASK_STATUS_TOOL_NAME in names
@@ -37,20 +36,6 @@ def test_schema_description_is_loaded_from_constants() -> None:
     description = read_schema["function"]["description"]
     assert "workspace" in description.lower()
     assert "line" in description.lower()
-
-
-def test_task_finish_schema_exposes_todo_completion_guard() -> None:
-    registry = build_default_registry()
-    schema = registry.get_schema(TASK_FINISH_TOOL_NAME)
-
-    parameters = schema["function"]["parameters"]
-    require_all_todos_completed = parameters["properties"]["require_all_todos_completed"]
-
-    assert parameters["required"] == []
-    assert require_all_todos_completed == {
-        "type": "boolean",
-        "description": "Reject finish while TODOs remain unless false.",
-    }
 
 
 def test_create_sub_task_schema_uses_agent_id_only() -> None:

@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner, function_tool
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, function_tool
 
 
 @function_tool
@@ -18,13 +18,15 @@ def create_ticket(title: str, priority: str = "normal") -> dict[str, str]:
 def main() -> None:
     agent = Agent(
         name="support",
-        instructions="Create tickets when the user reports work. Finish with task_finish.",
+        instructions="Create tickets when the user reports work, then report the result.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[create_ticket],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
     )
     prompt = os.getenv("VV_AGENT_EXAMPLE_PROMPT", "Create a high priority ticket for login failures.")

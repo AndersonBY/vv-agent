@@ -6,17 +6,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner, handoff
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, handoff
 
 researcher = Agent(
     name="researcher",
-    instructions="Collect the relevant facts and finish with task_finish.",
+    instructions="Collect the relevant facts and provide a summary.",
     model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
 )
 
 writer = Agent(
     name="writer",
-    instructions="Use research when useful, then write the final answer with task_finish.",
+    instructions="Use research when useful, then write the final answer.",
     model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
     tools=[researcher.as_tool(name="research", description="Ask the researcher for facts.")],
 )
@@ -31,8 +31,10 @@ triage = Agent(
 
 def main() -> None:
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         max_cycles=8,
     )

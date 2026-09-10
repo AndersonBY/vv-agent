@@ -11,7 +11,7 @@ import pytest
 from vv_agent import Agent, RunConfig, ToolPolicy, function_tool, handoff
 from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import BASH_TOOL_NAME, FIND_FILES_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import BASH_TOOL_NAME, FIND_FILES_TOOL_NAME
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.tool_planner import plan_tool_names
@@ -85,7 +85,7 @@ def test_agent_compiler_builds_runtime_task_from_public_contract() -> None:
         run_config=RunConfig(
             model="override-model",
             max_cycles=12,
-            tool_policy=ToolPolicy(allowed_tools=[TASK_FINISH_TOOL_NAME, "lookup", "transfer_to_writer"]),
+            tool_policy=ToolPolicy(allowed_tools=["lookup", "transfer_to_writer"]),
             metadata={"request_id": "r1"},
         ),
         resolved=_resolved(),
@@ -102,7 +102,7 @@ def test_agent_compiler_builds_runtime_task_from_public_contract() -> None:
     assert task.extra_tool_names == ["lookup", "transfer_to_writer"]
     assert task.metadata["team"] == "ops"
     assert task.metadata["request_id"] == "r1"
-    assert task.metadata["_vv_agent_allowed_tools"] == [TASK_FINISH_TOOL_NAME, "lookup", "transfer_to_writer"]
+    assert task.metadata["_vv_agent_allowed_tools"] == ["lookup", "transfer_to_writer"]
     assert task.metadata["trace_id"] == "trace-1"
     assert not hasattr(task, "runtime_metadata")
 
@@ -174,7 +174,6 @@ def test_frozen_checkpoint_restores_computer_extra_tools_without_duplicate_built
     definition = _frozen_definition(run_metadata={})
     cast(dict[str, object], definition["agent"])["type"] = "computer"
     definition["tools"] = [
-        {"schema": {"function": {"name": TASK_FINISH_TOOL_NAME}}},
         {"schema": {"function": {"name": BASH_TOOL_NAME}}},
         {"schema": {"function": {"name": FIND_FILES_TOOL_NAME}}},
         {"schema": {"function": {"name": "lookup"}}},
@@ -195,7 +194,7 @@ def test_frozen_checkpoint_restores_computer_extra_tools_without_duplicate_built
 
     assert task.agent_type == "computer"
     assert task.use_workspace
-    assert task.extra_tool_names == [TASK_FINISH_TOOL_NAME, BASH_TOOL_NAME, FIND_FILES_TOOL_NAME, "lookup"]
+    assert task.extra_tool_names == [BASH_TOOL_NAME, FIND_FILES_TOOL_NAME, "lookup"]
     planned = plan_tool_names(task)
     for name in task.extra_tool_names:
         assert planned.count(name) == 1

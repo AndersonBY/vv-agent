@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from vv_agent import Agent, RunConfig, Runner, function_tool
+from vv_agent import Agent, RunConfig, Runner, VvLlmModelProvider, function_tool
 
 
 @function_tool
@@ -34,13 +34,15 @@ def save_report(path: str, content: str) -> str:
 def main() -> None:
     agent = Agent(
         name="paper-analyst",
-        instructions="Search papers, write a short Chinese summary, save it, then call task_finish.",
+        instructions="Search papers, write a short Chinese summary, save it, then report the result.",
         model=os.getenv("VV_AGENT_EXAMPLE_MODEL", "kimi-k3"),
         tools=[search_arxiv, save_report],
     )
     config = RunConfig(
-        settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
-        default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        model_provider=VvLlmModelProvider(
+            settings_file=Path(os.getenv("VV_AGENT_LOCAL_SETTINGS", "local_settings.py")),
+            default_backend=os.getenv("VV_AGENT_EXAMPLE_BACKEND", "moonshot"),
+        ),
         workspace=Path(os.getenv("VV_AGENT_EXAMPLE_WORKSPACE", "./workspace")),
         max_cycles=8,
     )

@@ -44,6 +44,7 @@ from vv_agent.events import ToolCallCompletedEvent
 from vv_agent.llm import ScriptedLLM
 from vv_agent.runtime.checkpoint_codec import checkpoint_to_dict
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
+from vv_agent.runtime.controller import HostInteractionRequest
 from vv_agent.runtime.state import compute_tool_identity_key
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.types import LLMResponse, ToolCall, ToolResultStatus
@@ -132,6 +133,23 @@ def test_require_tool_result_rejects_deferred_and_unwraps_completed() -> None:
     )
     assert require_tool_result(completed) is completed
     assert require_tool_result(ToolCallOutcome.Completed(completed)) is completed
+
+
+def test_host_interaction_outcome_round_trips_and_rejects_mismatches() -> None:
+    request = HostInteractionRequest("interaction", 1, "operation", "call-host", "Choose")
+    result = ToolExecutionResult(tool_call_id="call-host", content="accepted", status_code=ToolResultStatus.SUCCESS)
+    outcome = ToolCallOutcome.HostInteraction(result, request)
+    assert ToolCallOutcome.from_dict(outcome.to_dict()) == outcome
+    for field, value in (("tool_call_id", "other"), ("directive", "wait_user")):
+        bad = outcome.to_dict()
+        bad["result"][field] = value
+        with pytest.raises(ValueError):
+            ToolCallOutcome.from_dict(bad)
+    for field, value in (("schema_version", "vv-agent.tool-call-outcome.v2"), ("extra", True)):
+        bad = outcome.to_dict()
+        bad[field] = value
+        with pytest.raises(ValueError):
+            ToolCallOutcome.from_dict(bad)
 
 
 def test_checkpointed_non_definitive_tool_outcome_uses_normal_wait_user_lifecycle() -> None:

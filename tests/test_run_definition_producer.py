@@ -87,6 +87,7 @@ def _minimal_inputs() -> tuple[Agent, RunConfig, ResolvedModelConfig, AgentTask]
         prompt_bundle=build_raw_system_prompt_bundle("You are a careful assistant."),
         user_prompt="Summarize the status.",
         max_cycles=10,
+        no_tool_policy="continue",
     )
     return agent, config, resolved, task
 

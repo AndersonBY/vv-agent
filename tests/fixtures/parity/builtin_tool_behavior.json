@@ -195,7 +195,7 @@
           "status_code": "ERROR",
           "directive": "continue",
           "error_code": "command_failed",
-        "content": "fixture-output\n",
+          "content": "fixture-output\n",
           "metadata": {
             "error_code": "command_failed",
             "cwd": ".",
@@ -331,22 +331,6 @@
       }
     },
     "control": {
-      "blank_task_finish": {
-        "arguments": {
-          "message": "  \t  "
-        },
-        "result": {
-          "status_code": "SUCCESS",
-          "directive": "finish",
-          "content": {
-            "ok": true,
-            "message": "Task completed"
-          },
-          "metadata": {
-            "final_message": "Task completed"
-          }
-        }
-      },
       "blank_ask_user": {
         "arguments": {
           "question": "  \n  "

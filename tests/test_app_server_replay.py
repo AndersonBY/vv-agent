@@ -12,10 +12,9 @@ from vv_agent.app_server import AppServer, ChannelTransport
 from vv_agent.app_server.host import DefaultAppServerHost
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import LLMResponse
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -80,10 +79,7 @@ def test_resume_during_active_turn_subscribes_before_later_notifications() -> No
         _model, _messages = request.model, request.messages
         first_step_ready.set()
         assert first_step_can_finish.wait(timeout=2)
-        return LLMResponse(
-            content="done",
-            tool_calls=[ToolCall(id="finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-        )
+        return LLMResponse(content="done")
 
     server, first_transport = _server_with_steps([first_step])
     _send(
@@ -169,10 +165,7 @@ def _server_with_steps(steps: list[ScriptStep]) -> tuple[AppServer, ChannelTrans
 
 
 def _finish_response(message: str) -> LLMResponse:
-    return LLMResponse(
-        content=message,
-        tool_calls=[ToolCall(id=f"finish-{message}", name=TASK_FINISH_TOOL_NAME, arguments={"message": message})],
-    )
+    return LLMResponse(content=message)
 
 
 def _initialize_and_start_thread(server: AppServer, transport: ChannelTransport) -> None:

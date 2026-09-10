@@ -7,7 +7,7 @@ import pytest
 from support import ModelMapProvider
 
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
 from vv_agent.events import (
     AssistantDeltaEvent,
     ModelToolCallProgressEvent,
@@ -127,21 +127,11 @@ def test_create_sub_task_executes_configured_sub_agent(tmp_path: Path) -> None:
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish parent",
-                tool_calls=[ToolCall(id="p2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})],
-            ),
+            LLMResponse(content="parent done"),
         ]
     )
 
-    sub_llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="sub done",
-                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub-result"})],
-            )
-        ]
-    )
+    sub_llm = ScriptedLLM(steps=[LLMResponse(content="sub-result")])
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = AgentRuntime(
@@ -196,22 +186,11 @@ def test_create_sub_task_batch_aggregates_sub_agent_results(tmp_path: Path) -> N
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish parent",
-                tool_calls=[ToolCall(id="p2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "batch done"})],
-            ),
+            LLMResponse(content="batch done"),
         ]
     )
 
-    sub_llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="sub done",
-                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": answer})],
-            )
-            for answer in ("sub-A", "sub-B")
-        ]
-    )
+    sub_llm = ScriptedLLM(steps=[LLMResponse(content=answer) for answer in ("sub-A", "sub-B")])
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = AgentRuntime(
@@ -276,22 +255,11 @@ def test_create_sub_task_batch_uses_execution_backend_parallel_map(tmp_path: Pat
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish parent",
-                tool_calls=[ToolCall(id="p2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
 
-    sub_llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="sub done",
-                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": answer})],
-            )
-            for answer in ("sub-A", "sub-B")
-        ]
-    )
+    sub_llm = ScriptedLLM(steps=[LLMResponse(content=answer) for answer in ("sub-A", "sub-B")])
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = AgentRuntime(
@@ -475,21 +443,11 @@ def test_sub_task_session_events_include_task_and_session_identifiers(tmp_path: 
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish parent",
-                tool_calls=[ToolCall(id="p2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
 
-    sub_llm = ScriptedLLM(
-        steps=[
-            LLMResponse(
-                content="sub finish",
-                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
-            )
-        ]
-    )
+    sub_llm = ScriptedLLM(steps=[LLMResponse(content="sub done")])
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=sub_llm)
 
     runtime = AgentRuntime(
@@ -549,10 +507,7 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish parent",
-                tool_calls=[ToolCall(id="p2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "parent done"})],
-            ),
+            LLMResponse(content="parent done"),
         ]
     )
 
@@ -596,10 +551,7 @@ def test_sub_agent_stream_callback_forwards_event_objects(tmp_path: Path) -> Non
                         "estimated_tokens": 12,
                     }
                 )
-            return LLMResponse(
-                content="sub done",
-                tool_calls=[ToolCall(id="s1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "sub done"})],
-            )
+            return LLMResponse(content="sub done")
 
     parent_events: list[RunEvent] = []
     provider = _shared_model_provider(parent_llm=parent_llm, child_llm=StreamingSubLLM())

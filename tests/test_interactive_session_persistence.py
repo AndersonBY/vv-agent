@@ -21,9 +21,8 @@ from vv_agent import (
     create_agent_session,
 )
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
-from vv_agent.constants import TASK_FINISH_TOOL_NAME
 from vv_agent.llm import LlmRequest, ScriptedLLM
-from vv_agent.types import AgentResult, LLMResponse, ToolCall
+from vv_agent.types import AgentResult, LLMResponse
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "parity" / "configured_sub_agent.json"
 
@@ -76,16 +75,7 @@ def test_interactive_client_hydrates_and_reuses_backing_session_without_duplicat
         turn += 1
         current_turn = turn
         requests.append(list(request.messages))
-        return LLMResponse(
-            content=f"answer {current_turn}",
-            tool_calls=[
-                ToolCall(
-                    id=f"finish-{current_turn}",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": f"done {current_turn}"},
-                )
-            ],
-        )
+        return LLMResponse(content=f"done {current_turn}")
 
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
@@ -132,8 +122,12 @@ def test_interactive_client_hydrates_and_reuses_backing_session_without_duplicat
         "first",
         "second",
     ]
-    assert sum(message.tool_call_id == "finish-1" for message in persisted) == 1
-    assert sum(message.tool_call_id == "finish-2" for message in persisted) == 1
+    assert [message.content for message in persisted if message.role == "assistant"] == [
+        "earlier answer",
+        "done 1",
+        "done 2",
+    ]
+    assert not any(message.role == "tool" or message.tool_calls for message in persisted)
 
 
 def test_create_agent_session_hydrates_replaces_and_validates_backing_session(tmp_path: Path) -> None:

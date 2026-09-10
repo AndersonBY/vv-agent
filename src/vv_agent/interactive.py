@@ -149,7 +149,7 @@ class InteractiveAgentDefinition:
     max_cycles: int = 10
     memory_compact_threshold: int = 250_000
     memory_threshold_percentage: int = 90
-    no_tool_policy: NoToolPolicy = "continue"
+    no_tool_policy: NoToolPolicy = "finish"
     allow_interruption: bool = True
     use_workspace: bool = True
     enable_todo_management: bool = True

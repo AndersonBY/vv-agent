@@ -18,7 +18,6 @@ from vv_agent.constants import (
     CREATE_SUB_TASK_TOOL_NAME,
     FIND_FILES_TOOL_NAME,
     READ_FILE_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
 )
 from vv_agent.events import (
     AssistantDeltaEvent,
@@ -172,13 +171,6 @@ def _attach_continuable_manager_task(
             status=status,
             final_answer="initial done" if status == AgentStatus.COMPLETED else None,
         ),
-    )
-
-
-def _finish(message: str, *, tool_call_id: str = "finish") -> LLMResponse:
-    return LLMResponse(
-        content="",
-        tool_calls=[ToolCall(id=tool_call_id, name=TASK_FINISH_TOOL_NAME, arguments={"message": message})],
     )
 
 
@@ -626,7 +618,7 @@ def test_request_metadata_cannot_assign_framework_owned_child_identity(tmp_path:
         sub_agents={"researcher": SubAgentConfig(model="shared-model", description="Research")},
     )
     outcome = AgentRuntime(
-        llm_client=ScriptedLLM(steps=[_finish("done")]),
+        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )._run_sub_task(
@@ -677,7 +669,7 @@ def test_runtime_lineage_prefers_public_then_execution_then_request_without_task
             request_metadata["parent_run_id"] = request_parent_run_id
         manager = _manager()
         outcome = AgentRuntime(
-            llm_client=ScriptedLLM(steps=[_finish("done")]),
+            llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
             tool_registry=build_default_registry(),
             default_workspace=tmp_path,
         )._run_sub_task(
@@ -761,7 +753,7 @@ def test_runtime_trace_identity_precedence_and_child_run_fallback(
         context_metadata["_vv_agent_trace_id"] = execution_trace_id
 
     outcome = AgentRuntime(
-        llm_client=ScriptedLLM(steps=[_finish("done")]),
+        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )._run_sub_task(
@@ -811,7 +803,7 @@ def test_public_run_context_private_trace_id_precedes_public_trace_id(tmp_path: 
     )
 
     outcome = AgentRuntime(
-        llm_client=ScriptedLLM(steps=[_finish("done")]),
+        llm_client=ScriptedLLM(steps=[LLMResponse(content="done")]),
         tool_registry=build_default_registry(),
         default_workspace=tmp_path,
     )._run_sub_task(
@@ -953,7 +945,7 @@ def test_non_string_identity_metadata_is_ignored_and_falls_through(
                     content="",
                     tool_calls=[ToolCall(id="inspect", name="inspect_identity", arguments={})],
                 ),
-                _finish("done"),
+                LLMResponse(content="done"),
             ]
         ),
         tool_registry=registry,
@@ -1058,16 +1050,7 @@ def test_configured_sub_agent_uses_parent_workspace_backend_and_emits_sub_run_ev
 
     def finish_child(request: LlmRequest) -> LLMResponse:
         child_requests.append(request)
-        return LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCall(
-                    id="child-finish",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": "child done"},
-                )
-            ],
-        )
+        return LLMResponse(content="child done")
 
     llm = ScriptedLLM(
         steps=[
@@ -1086,10 +1069,7 @@ def test_configured_sub_agent_uses_parent_workspace_backend_and_emits_sub_run_ev
                 tool_calls=[ToolCall(id="read", name="read_file", arguments={"path": "virtual.txt"})],
             ),
             finish_child,
-            LLMResponse(
-                content="",
-                tool_calls=[ToolCall(id="parent-finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
     events: list[Any] = []
@@ -1155,8 +1135,8 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
                 content="",
                 tool_calls=[ToolCall(id="delegate", name="contract_delegate", arguments={})],
             ),
-            _finish("child done", tool_call_id="child-finish"),
-            _finish("parent done", tool_call_id="parent-finish"),
+            LLMResponse(content="child done"),
+            LLMResponse(content="parent done"),
         ]
     )
     runtime = AgentRuntime(
@@ -1228,7 +1208,7 @@ def test_real_sub_run_events_normalize_line_by_line_to_shared_fixture(tmp_path: 
                     content="",
                     tool_calls=[ToolCall(id="delegate-failed", name="contract_failure", arguments={})],
                 ),
-                _finish("parent recovered", tool_call_id="parent-finish-failed"),
+                LLMResponse(content="parent recovered"),
             ]
         ),
         tool_registry=failure_registry,
@@ -1364,12 +1344,12 @@ def test_explicit_backend_and_resolved_limits_reach_real_child_request(
 
     def capture_child(request: LlmRequest) -> LLMResponse:
         observed_requests.append(request)
-        return _finish("child done", tool_call_id="explicit-child-finish")
+        return LLMResponse(content="child done")
 
     parent_llm = ScriptedLLM(
         steps=[
             _delegate({"agent_id": "researcher", "task_description": "Resolve child model"}),
-            _finish("parent done", tool_call_id="explicit-parent-finish"),
+            LLMResponse(content="parent done"),
         ]
     )
     child_llm = ScriptedLLM(steps=[capture_child])
@@ -1446,13 +1426,13 @@ def test_same_model_parent_client_reuse_inherits_parent_task_token_limits(tmp_pa
 
     def capture_child(request: LlmRequest) -> LLMResponse:
         child_requests.append(request)
-        return _finish("child done", tool_call_id="reused-child-finish")
+        return LLMResponse(content="child done")
 
     llm = ScriptedLLM(
         steps=[
             _delegate({"agent_id": "researcher", "task_description": "Reuse parent client"}),
             capture_child,
-            _finish("parent done", tool_call_id="reused-parent-finish"),
+            LLMResponse(content="parent done"),
         ]
     )
     runtime = AgentRuntime(
@@ -1597,14 +1577,14 @@ def test_public_runtime_projects_capabilities_and_fresh_child_identity(tmp_path:
 
     def child_finish_request(request: LlmRequest) -> LLMResponse:
         child_requests.append(request)
-        return _finish("child done", tool_call_id="child-finish")
+        return LLMResponse(content="child done")
 
     llm = ScriptedLLM(
         steps=[
             _delegate({"agent_id": "researcher", "task_description": "Inspect capabilities"}),
             child_capture_request,
             child_finish_request,
-            _finish("parent done", tool_call_id="parent-finish"),
+            LLMResponse(content="parent done"),
         ]
     )
     provider = _ChildModelProvider(llm)
@@ -1856,7 +1836,7 @@ class _MaliciousChildStreamLLM:
                     "event": "tool_call_started",
                     "tool_call_id": "child-stream-finish",
                     "tool_call_index": 0,
-                    "function_name": TASK_FINISH_TOOL_NAME,
+                    "function_name": READ_FILE_TOOL_NAME,
                     "arguments_chars": 0,
                     "estimated_tokens": 0,
                 },
@@ -1864,7 +1844,7 @@ class _MaliciousChildStreamLLM:
                     "event": "tool_call_progress",
                     "tool_call_id": "child-stream-finish",
                     "tool_call_index": 0,
-                    "function_name": TASK_FINISH_TOOL_NAME,
+                    "function_name": READ_FILE_TOOL_NAME,
                     "arguments_chars": 24,
                     "estimated_tokens": 6,
                 },
@@ -1878,12 +1858,12 @@ class _MaliciousChildStreamLLM:
                     "final_output": "spoof-output",
                 }
             )
-            return _finish("child done", tool_call_id="child-stream-finish")
+            return LLMResponse(content="child done")
 
         self.parent_calls += 1
         if self.parent_calls == 1:
             return _delegate({"agent_id": "researcher", "task_description": "Stream safely"})
-        return _finish("parent done", tool_call_id="parent-stream-finish")
+        return LLMResponse(content="parent done")
 
 
 class _ObserverPanicChildStreamLLM:
@@ -1910,12 +1890,12 @@ class _ObserverPanicChildStreamLLM:
             self.child_calls += 1
             assert stream_callback is not None
             stream_callback({"event": "assistant_delta", "content_delta": f"child delta {self.child_calls}"})
-            return _finish(f"child answer {self.child_calls}", tool_call_id=f"child-finish-{self.child_calls}")
+            return LLMResponse(content=f"child answer {self.child_calls}")
 
         self.parent_calls += 1
         if self.parent_calls == 1:
             return _delegate({"agent_id": "researcher", "task_description": "Stream through observer"})
-        return _finish("parent done", tool_call_id="parent-observer-finish")
+        return LLMResponse(content="parent done")
 
 
 def test_configured_child_stream_observer_failure_isolated_and_child_remains_continuable(tmp_path: Path) -> None:
@@ -2074,7 +2054,7 @@ class _PolicyContinuationLLM:
         if request.metadata.get("is_sub_task") is True:
             self.child_calls += 1
             if self.child_calls == 1:
-                return _finish("initial child done", tool_call_id="initial-child-finish")
+                return LLMResponse(content="initial child done")
             if self.child_calls in {2, 4, 6, 8, 10}:
                 return LLMResponse(
                     content="",
@@ -2086,16 +2066,13 @@ class _PolicyContinuationLLM:
                         )
                     ],
                 )
-            return _finish(
-                f"continued child done {self.child_calls}",
-                tool_call_id=f"continued-child-finish-{self.child_calls}",
-            )
+            return LLMResponse(content=f"continued child done {self.child_calls}")
 
         self.parent_calls += 1
         if self.parent_calls == 1:
             return _delegate({"agent_id": "researcher", "task_description": "Create retained child"})
         if self.parent_calls in {2, 4, 6, 8, 10, 12}:
-            return _finish(f"parent done {self.parent_calls}", tool_call_id=f"parent-finish-{self.parent_calls}")
+            return LLMResponse(content=f"parent done {self.parent_calls}")
         assert self.child_task_id.get("value")
         return LLMResponse(
             content="",
@@ -2505,6 +2482,7 @@ def test_failed_child_preserves_usage_after_a_completed_cycle(tmp_path: Path) ->
                 _delegate({"agent_id": "researcher", "task_description": "Collect facts"}),
                 LLMResponse(
                     content="continue",
+                    tool_calls=[ToolCall(id="plan", name="todo_write", arguments={"todos": []})],
                     raw={
                         "usage": {
                             "prompt_tokens": 11,
@@ -2514,7 +2492,7 @@ def test_failed_child_preserves_usage_after_a_completed_cycle(tmp_path: Path) ->
                     },
                 ),
                 fail_second_child_request,
-                _finish("parent handled failure", tool_call_id="parent-finish"),
+                LLMResponse(content="parent handled failure"),
             ]
         ),
         tool_registry=build_default_registry(),
@@ -2576,7 +2554,13 @@ def test_failed_child_preserves_usage_after_a_completed_cycle(tmp_path: Path) ->
             ),
             AgentStatus.WAIT_USER,
         ),
-        (LLMResponse(content="still working"), AgentStatus.MAX_CYCLES),
+        (
+            LLMResponse(
+                content="still working",
+                tool_calls=[ToolCall(id="plan", name="todo_write", arguments={"todos": []})],
+            ),
+            AgentStatus.MAX_CYCLES,
+        ),
     ],
 )
 def test_wait_user_and_max_cycles_each_complete_started_lifecycle(
@@ -2661,14 +2645,14 @@ class _BlockingConfiguredLLM:
             self.child_started.put(None)
             if not self.release.wait(timeout=5):
                 raise TimeoutError("test child was not released")
-            return _finish("child done", tool_call_id="child-finish")
+            return LLMResponse(content="child done")
 
         with self._lock:
             self._parent_calls += 1
             parent_call = self._parent_calls
         if parent_call == 1:
             return _delegate(self.create_arguments)
-        return _finish("parent done", tool_call_id="parent-finish")
+        return LLMResponse(content="parent done")
 
     def complete_with_stream(
         self,
@@ -3329,7 +3313,7 @@ def test_child_workspace_filter_hides_discovery_but_allows_known_path_reads(tmp_
 
     def finish_after_read(request: LlmRequest) -> LLMResponse:
         read_requests.append(request)
-        return _finish("child done", tool_call_id="child-finish")
+        return LLMResponse(content="child done")
 
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(
@@ -3353,7 +3337,7 @@ def test_child_workspace_filter_hides_discovery_but_allows_known_path_reads(tmp_
                 ),
                 read_hidden_file,
                 finish_after_read,
-                _finish("parent done", tool_call_id="parent-finish"),
+                LLMResponse(content="parent done"),
             ]
         ),
         tool_registry=build_default_registry(),
@@ -3410,16 +3394,7 @@ def test_configured_sub_agent_continuation_replays_complete_prior_turn(tmp_path:
 
     def finish_continuation(request: LlmRequest) -> LLMResponse:
         continuation_requests.append(request)
-        return LLMResponse(
-            content="",
-            tool_calls=[
-                ToolCall(
-                    id="second-finish",
-                    name=TASK_FINISH_TOOL_NAME,
-                    arguments={"message": "second answer"},
-                )
-            ],
-        )
+        return LLMResponse(content="second answer")
 
     def fail_continuation(request: LlmRequest) -> LLMResponse:
         continuation_requests.append(request)
@@ -3441,20 +3416,8 @@ def test_configured_sub_agent_continuation_replays_complete_prior_turn(tmp_path:
                 content="",
                 tool_calls=[ToolCall(id="remember", name="remember_state", arguments={})],
             ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        id="first-finish",
-                        name=TASK_FINISH_TOOL_NAME,
-                        arguments={"message": "first answer"},
-                    )
-                ],
-            ),
-            LLMResponse(
-                content="",
-                tool_calls=[ToolCall(id="parent-finish", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="first answer"),
+            LLMResponse(content="done"),
             continue_child,
             finish_continuation,
             fail_continuation,
@@ -3584,15 +3547,15 @@ class _ContinuationCancellationLLM:
                 call = self._parent_calls
 
         if is_child and call == 1:
-            return _finish("initial child done", tool_call_id="initial-child-finish")
+            return LLMResponse(content="initial child done")
         if is_child:
             self.continuation_started.put(None)
             if not self.release.wait(timeout=5):
                 raise TimeoutError("continuation cancellation test was not released")
-            return _finish("continuation should be cancelled", tool_call_id="continued-child-finish")
+            return LLMResponse(content="continuation should be cancelled")
         if call == 1:
             return _delegate({"agent_id": "researcher", "task_description": "initial prompt"})
-        return _finish("parent done", tool_call_id="parent-finish")
+        return LLMResponse(content="parent done")
 
     def complete_with_stream(
         self,
@@ -3688,7 +3651,7 @@ class _PanicThenRecoverConfiguredLLM:
         if is_child and call == 1:
             raise _ConfiguredChildPanic("configured child panicked")
         if is_child:
-            return _finish("child recovered", tool_call_id="recovered-child-finish")
+            return LLMResponse(content="child recovered")
         if call == 1:
             return _delegate(
                 {
@@ -3697,7 +3660,7 @@ class _PanicThenRecoverConfiguredLLM:
                     "wait_for_completion": False,
                 }
             )
-        return _finish("parent done", tool_call_id="parent-finish")
+        return LLMResponse(content="parent done")
 
     def complete_with_stream(
         self,

@@ -139,13 +139,12 @@
       "capabilities": {
         "toolset_ref": {
           "id": "vv-agent.builtin-tools",
-          "version": "1",
-          "schema_digest": "d266963bff5d4dc90f4fd4c9897381aa589375078f0c08c23af474e27f6b0269"
+          "version": "3",
+          "schema_digest": "4f535c2bfd1657cec4a8dce5f0d846dc8f683a5470100a8ce83801739b8e3c9a"
         },
         "tool_policy": {
           "allowed_tools": [
-            "read_file",
-            "task_finish"
+            "read_file"
           ],
           "disallowed_tools": [
             "bash"

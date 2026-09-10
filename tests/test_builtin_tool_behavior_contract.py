@@ -13,7 +13,6 @@ from vv_agent.constants import (
     FILE_INFO_TOOL_NAME,
     FIND_FILES_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
-    TASK_FINISH_TOOL_NAME,
 )
 from vv_agent.prompt import build_raw_system_prompt_bundle, build_system_prompt
 from vv_agent.runtime.background_sessions import background_session_manager
@@ -201,11 +200,6 @@ def test_fixture_drives_builtin_handler_envelopes_and_metadata(tmp_path: Path) -
         find_files_case["result"],
     )
 
-    finish_case = tools["control"]["blank_task_finish"]
-    _assert_result(
-        _execute(registry, _context(tmp_path), TASK_FINISH_TOOL_NAME, finish_case["arguments"]),
-        finish_case["result"],
-    )
     ask_case = tools["control"]["blank_ask_user"]
     _assert_result(
         _execute(registry, _context(tmp_path), ASK_USER_TOOL_NAME, ask_case["arguments"]),

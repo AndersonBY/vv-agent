@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from vv_agent import constants as constants_module
-from vv_agent.constants import READ_FILE_TOOL_NAME, TASK_FINISH_TOOL_NAME
+from vv_agent.constants import READ_FILE_TOOL_NAME
 from vv_agent.events import DiagnosticEvent
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.memory import MemoryManager
@@ -50,10 +50,7 @@ def test_runtime_hook_can_patch_before_llm_messages(tmp_path: Path) -> None:
         model, messages = request.model, request.messages
         del model
         assert any(message.role == "user" and message.content == "HOOK_CONTEXT" for message in messages)
-        return LLMResponse(
-            content="finish",
-            tool_calls=[ToolCall(id="c1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "ok"})],
-        )
+        return LLMResponse(content="ok")
 
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(steps=[assert_hook_message]),
@@ -160,10 +157,7 @@ def test_runtime_hook_can_short_circuit_tool_call(tmp_path: Path) -> None:
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
     lifecycle_events = []
@@ -327,10 +321,7 @@ def test_runtime_hook_after_tool_call_with_blank_id_is_normalized(tmp_path: Path
                     )
                 ],
             ),
-            LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
     runtime = AgentRuntime(
@@ -356,10 +347,7 @@ def test_runtime_hook_can_replace_llm_response(tmp_path: Path) -> None:
     class ReplaceResponseHook(BaseRuntimeHook):
         def after_llm(self, event: AfterLLMEvent) -> LLMResponse:
             del event
-            return LLMResponse(
-                content="forced finish",
-                tool_calls=[ToolCall(id="h1", name=TASK_FINISH_TOOL_NAME, arguments={"message": "hook-finish"})],
-            )
+            return LLMResponse(content="hook-finish")
 
     runtime = AgentRuntime(
         llm_client=ScriptedLLM(steps=[LLMResponse(content="plain")]),
@@ -405,10 +393,7 @@ def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
                     ToolCall(id="t2", name="_demo_noop", arguments={}),
                 ],
             ),
-            LLMResponse(
-                content="finish",
-                tool_calls=[ToolCall(id="c2", name=TASK_FINISH_TOOL_NAME, arguments={"message": "done"})],
-            ),
+            LLMResponse(content="done"),
         ]
     )
 
