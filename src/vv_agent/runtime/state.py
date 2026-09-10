@@ -48,7 +48,7 @@ from vv_agent.types import (
 if TYPE_CHECKING:
     from vv_agent.runtime.controller import HostInteractionAdmissionContext
 
-CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v10"
+CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v11"
 HOST_INTERACTION_REQUEST_SCHEMA = "vv-agent.host-interaction-request.v1"
 _HOST_INTERACTION_REQUEST_FIELDS = frozenset(
     {
@@ -1601,15 +1601,15 @@ def _validate_suspended_origin(value: Any) -> None:
             code="checkpoint_status_invalid",
         )
     status = value.get("status")
-    if status not in {AgentStatus.RUNNING.value, AgentStatus.HOST_INTERACTION.value}:
+    if status not in {AgentStatus.RUNNING.value, AgentStatus.HOST_INTERACTION.value, AgentStatus.DEFERRED.value}:
         raise CheckpointError(
             "suspended_origin.status is invalid",
             code="checkpoint_status_invalid",
         )
     _validate_host_interaction_request(value.get("active_host_interaction"), "suspended_origin.active_host_interaction")
-    if status == AgentStatus.RUNNING.value and value.get("active_host_interaction") is not None:
+    if status != AgentStatus.HOST_INTERACTION.value and value.get("active_host_interaction") is not None:
         raise CheckpointError(
-            "running suspended_origin cannot contain active_host_interaction",
+            "non-host suspended_origin cannot contain active_host_interaction",
             code="checkpoint_status_invalid",
         )
     if status == AgentStatus.HOST_INTERACTION.value and value.get("active_host_interaction") is None:
@@ -2359,7 +2359,9 @@ def prepare_deferred_resolution(
     ).to_dict()
     snapshot.event_outbox = merge_event_outbox(snapshot.event_outbox, [EventOutboxEntry.pending(event["event_id"], event)])
     remaining = [item for item in snapshot.tool_journal if item.state is OperationState.DEFERRED]
-    snapshot.status = AgentStatus.DEFERRED if remaining else AgentStatus.RUNNING
+    suspended = snapshot.status is AgentStatus.SUSPENDED
+    if not suspended:
+        snapshot.status = AgentStatus.DEFERRED if remaining else AgentStatus.RUNNING
     snapshot.revision = checkpoint.revision + 1
     receipt = DeferredResolutionReceipt(
         handle=handle,
@@ -2371,7 +2373,9 @@ def prepare_deferred_resolution(
     )
     validate_checkpoint(snapshot)
     return snapshot, (
-        DeferredResolveDecision.AppliedReady(receipt) if not remaining else DeferredResolveDecision.AppliedWaiting(receipt)
+        DeferredResolveDecision.AppliedWaiting(receipt)
+        if remaining or suspended
+        else DeferredResolveDecision.AppliedReady(receipt)
     )
 
 

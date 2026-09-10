@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from threading import Barrier, Thread
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from support import FactoryModelProvider, require_tool_result
@@ -95,6 +97,123 @@ def _run_checkpointed_tools(
         ),
     )
     return result, store.load_checkpoint(key)
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+@pytest.mark.parametrize(
+    "case",
+    json.loads((Path(__file__).parent / "fixtures/parity/controller_command.json").read_text())["deferred_control_cases"],
+    ids=lambda case: case["name"],
+)
+def test_deferred_controller_preserves_suspension_receipts_and_cancel_evidence(
+    tmp_path: Path, store_kind: str, case: Any
+) -> None:
+    from vv_agent.deferred import DeferredResolutionStale
+    from vv_agent.runtime.backends.distributed import DistributedRunHandle
+    from vv_agent.runtime.controller import ControllerCommand
+    from vv_agent.runtime.state import Checkpoint
+    from vv_agent.runtime.stores.redis import RedisCheckpointStore
+    from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
+
+    redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+    if store_kind == "redis" and not redis_url:
+        pytest.skip("set VV_AGENT_TEST_REDIS_URL for live Redis")
+    path = tmp_path / "deferred-control.sqlite"
+
+    def open_store() -> Any:
+        if store_kind == "sqlite":
+            return SqliteCheckpointStore(path)
+        if store_kind == "redis":
+            assert redis_url is not None
+            return RedisCheckpointStore(redis_url)
+        return InMemoryCheckpointStore()
+
+    store = open_store()
+    key = f"deferred-control-{uuid4().hex}"
+    handles: list[DeferredToolHandle] = []
+
+    def load_checkpoint() -> Checkpoint:
+        checkpoint = store.load_checkpoint(key)
+        assert checkpoint is not None
+        return checkpoint
+
+    @function_tool(name="remote", params_json_schema=_EMPTY_SCHEMA)
+    def remote(context: ToolContext) -> ToolCallOutcome:
+        outcome = context.defer()
+        assert outcome.handle is not None
+        handles.append(outcome.handle)
+        return outcome
+
+    result, checkpoint = _run_checkpointed_tools(
+        store, key, [remote], [ToolCall(id=f"call-{index}", name="remote", arguments={}) for index in range(2)]
+    )
+    assert result.status is AgentStatus.DEFERRED and len(handles) == 2
+    initial_cycle = checkpoint.cycle_index
+    replies = [
+        ToolExecutionResult(tool_call_id=f"call-{index}", content=f"结果 {index} https://example.invalid/?token=保留")
+        for index in range(2)
+    ]
+    commands = []
+    for kind in case["commands"]:
+        checkpoint = load_checkpoint()
+        command = ControllerCommand(
+            command_id=f"{key}-{kind}",
+            handle=DistributedRunHandle(key, checkpoint.root_run_id, checkpoint.trace_id),
+            resume_attempt=checkpoint.resume_attempt,
+            expected_revision=checkpoint.revision,
+            command={"kind": kind},
+        )
+        resolution = store.resolve_controller_command(command)
+        assert resolution.kind == "applied" and resolution.wake is not None, resolution.error
+        commands.append(command)
+        if store_kind != "memory":
+            store = open_store()
+        checkpoint = load_checkpoint()
+        saved = checkpoint_to_dict(checkpoint)
+        assert store.resolve_controller_command(command).kind == "replayed"
+        assert checkpoint_to_dict(load_checkpoint()) == saved
+        if kind == "suspend":
+            assert checkpoint.suspended_origin == {"status": "deferred", "active_host_interaction": None}
+            assert resolution.wake.action == "none"
+            for index in range(case["resolve_while_suspended"]):
+                decision = store.resolve_deferred(handles[index], replies[index])
+                assert decision.kind == "applied_waiting"
+                waiting = load_checkpoint()
+                assert waiting.status is AgentStatus.SUSPENDED and waiting.claim_token is None
+                assert waiting.suspended_origin == checkpoint.suspended_origin
+                saved = checkpoint_to_dict(waiting)
+                assert store.resolve_deferred(handles[index], replies[index]).kind == "replayed"
+                assert checkpoint_to_dict(load_checkpoint()) == saved
+    checkpoint = load_checkpoint()
+    assert checkpoint.status.value == case["resulting_status"]
+    assert checkpoint.cycle_index == initial_cycle and checkpoint.claim_token is None
+    assert (resolution.wake.action == "recovery_dispatch") is case["wake"]
+    if case["commands"][-1] == "cancel":
+        assert checkpoint.terminal_result is not None and checkpoint.terminal_result.completion_reason is not None
+        assert checkpoint.terminal_result.completion_reason.value == "cancelled"
+        observations = checkpoint.terminal_result.resume_observations
+        assert len(observations) == 2 - case["resolve_while_suspended"]
+        assert all(
+            observation.state.value == "ambiguous" and observation.risk == "unknown_tool_side_effect"
+            for observation in observations
+        )
+        assert sum(entry.event["type"] == "cycle_aborted" for entry in checkpoint.event_outbox) == 1
+        saved = checkpoint_to_dict(checkpoint)
+        for index in range(2):
+            if index < case["resolve_while_suspended"]:
+                assert store.resolve_deferred(handles[index], replies[index]).kind == "replayed"
+            else:
+                with pytest.raises(DeferredResolutionStale):
+                    store.resolve_deferred(handles[index], replies[index])
+        assert checkpoint_to_dict(load_checkpoint()) == saved
+    elif case["wake"]:
+        for entry, reply in zip(checkpoint.tool_journal, replies, strict=True):
+            assert entry.result is not None and entry.result["content"] == reply.content
+    saved = checkpoint_to_dict(load_checkpoint())
+    for command in commands:
+        assert store.resolve_controller_command(command).kind == "replayed"
+    assert checkpoint_to_dict(load_checkpoint()) == saved
+    assert len(handles) == 2
 
 
 def test_function_tool_preserves_closed_outcome_and_fails_closed_without_checkpoint() -> None:

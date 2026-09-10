@@ -304,7 +304,7 @@ class SqliteCheckpointStore:
             return False
         claimed_cycle = checkpoint.claimed_cycle
         if claimed_cycle is None:
-            raise ValueError("checkpoint v10 suspend requires an active claim")
+            raise ValueError("checkpoint v11 suspend requires an active claim")
         snapshot = replace(
             checkpoint,
             revision=expected_revision + 1,
@@ -358,7 +358,7 @@ class SqliteCheckpointStore:
             return False
         claimed_cycle = checkpoint.claimed_cycle
         if claimed_cycle is None:
-            raise ValueError("checkpoint v10 commit requires an active claim")
+            raise ValueError("checkpoint v11 commit requires an active claim")
         if (
             checkpoint.cycle_index != claimed_cycle
             or checkpoint.status is not AgentStatus.RUNNING
@@ -429,7 +429,7 @@ class SqliteCheckpointStore:
         snapshot = prepare_unclaimed_terminal(checkpoint)
         snapshot = checkpoint_from_json(checkpoint_to_json(snapshot))
         if snapshot.terminal_result is None or snapshot.claim_token is not None:
-            raise ValueError("finalized checkpoint v10 must be terminal and unclaimed")
+            raise ValueError("finalized checkpoint v11 must be terminal and unclaimed")
         snapshot.revision = expected_revision + 1
         row = dict(zip(_COLUMNS, _checkpoint_row(snapshot), strict=True))
         columns = _FINALIZE_COLUMNS
@@ -2062,7 +2062,7 @@ class SqliteCheckpointStore:
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v10'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v11'),
     run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v5'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,
@@ -2515,7 +2515,7 @@ def _json_load(value: object, field_name: str) -> Any:
     try:
         return _strict_json_loads(str(value))
     except (json.JSONDecodeError, ValueError) as exc:
-        raise ValueError(f"invalid checkpoint v10 {field_name} JSON") from exc
+        raise ValueError(f"invalid checkpoint v11 {field_name} JSON") from exc
 
 
 def _sqlite_int(value: object, field_name: str) -> int:

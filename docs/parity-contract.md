@@ -214,7 +214,14 @@ central unknown-outcome recovery case through two expired-lease admissions,
 checking the complete receipt, digest, observation, stable event identity, and
 single delivery.
 
-Checkpoint records require `vv-agent.checkpoint.v10`; run definitions require
+Deferred controller suspend/resume retains the existing journal barrier.
+Receipts received during suspension remain durable without a worker wake;
+resume wakes only after every deferred handle has resolved. Cancel closes
+unresolved tools with unknown-effect observations and rejects their late
+results. `test_deferred_tools.py` exercises the real Runner producer and
+controller/receipt replay through memory, reopened SQLite and Redis stores.
+
+Checkpoint records require `vv-agent.checkpoint.v11`; run definitions require
 `vv-agent.run-definition.v5`; distributed envelopes require
 `vv-agent.distributed-run.v5`. The frozen definition stores `prompt_bundle`,
 not a second independently editable flattened system prompt. Readers reject every other shape before claim or

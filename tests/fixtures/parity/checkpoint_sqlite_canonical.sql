@@ -1,14 +1,14 @@
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
--- SQLite enforces scalar lifecycle/fence relations below.  The strict v10 codec
+-- SQLite enforces scalar lifecycle/fence relations below.  The strict v11 codec
 -- (not SQLite JSON1) validates closed HostInteractionRequest and
 -- HostInteractionResponse objects, RFC 8785 digests, forbidden fields, and
 -- the 65,536-byte UTF-8 limits before any CAS transaction begins.
 
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v10'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v11'),
     run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v5'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,

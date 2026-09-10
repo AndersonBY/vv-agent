@@ -190,7 +190,7 @@ events. Unknown tools, policy denials, and approval short-circuits emit planned
 plus completed with `execution_started=False`, no started event, and null
 duration. Cancellation or process loss after started may leave no completed
 event; these observations do not provide exactly-once execution or replace the
-checkpoint v10 operation journal and deferred barrier.
+checkpoint v11 operation journal and deferred barrier.
 
 When a configured session accepts the current turn through `add_items()`, the
 Runner emits `session_persisted`. Run, trace, agent, and session identities are

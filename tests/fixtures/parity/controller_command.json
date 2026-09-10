@@ -1,12 +1,12 @@
 {
-  "contract_version": "14.0.0",
+  "contract_version": "18.0.0",
   "schema_version": "vv-agent.controller-command.v1",
   "scope": {
     "task_neutral": true,
     "deferred_resolution_is_separate": true,
     "terminal_successor_is_separate": true,
     "ask_user_terminal_semantics_unchanged": true,
-    "checkpoint_schema": "vv-agent.checkpoint.v10",
+    "checkpoint_schema": "vv-agent.checkpoint.v11",
     "cancel_requested_field": "required boolean",
     "cycle_aborted_event": "RunEvent v5",
     "forbidden_wire_members": [
@@ -1409,7 +1409,7 @@
     "committed_terminal",
     "live_claim_cancel_requested",
     "unresolved_ambiguous_operation",
-    "unresolved_deferred_barrier",
+    "deferred_barrier_preserved_by_suspend_resume_or_closed_by_cancel",
     "controller_command_state_rule",
     "expired_claim_reclamation",
     "ordinary_cancel"
@@ -1644,10 +1644,43 @@
   },
   "deferred_boundary": {
     "resolver": "resolve_deferred(handle, result)",
-    "controller_command_cannot_clear_barrier": true,
+    "suspend_and_resume_preserve_unresolved_handles": true,
+    "suspended_resolution_decision": "applied_waiting",
+    "suspended_resolution_wakes": false,
+    "cancel_closes_unresolved_handles_with_observations": true,
     "last_resolution_decision": "applied_ready",
     "last_resolution_next_step": "reuse retained pending observation with distributed advance"
   },
+  "deferred_control_cases": [
+    {
+      "name": "resume_with_pending_handles",
+      "commands": ["suspend", "resume"],
+      "resolve_while_suspended": 0,
+      "resulting_status": "deferred",
+      "wake": false
+    },
+    {
+      "name": "resume_after_all_receipts",
+      "commands": ["suspend", "resume"],
+      "resolve_while_suspended": 2,
+      "resulting_status": "running",
+      "wake": true
+    },
+    {
+      "name": "cancel_deferred",
+      "commands": ["cancel"],
+      "resolve_while_suspended": 0,
+      "resulting_status": "failed",
+      "wake": false
+    },
+    {
+      "name": "cancel_suspended_with_receipt",
+      "commands": ["suspend", "cancel"],
+      "resolve_while_suspended": 1,
+      "resulting_status": "failed",
+      "wake": false
+    }
+  ],
   "successor_boundary": {
     "controller_command_cannot_mutate_terminal": true,
     "source_terminal_immutable": true,

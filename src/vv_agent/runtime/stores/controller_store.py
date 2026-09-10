@@ -271,7 +271,7 @@ def _validate_command_binding(current: Checkpoint | None, command: ControllerCom
             "controller command is blocked by an unresolved external effect",
             "controller_command_ambiguity_requires_reconciliation",
         )
-    if (command.kind != "cancel" or current.claim_token is None) and (
+    if command.kind not in {"suspend", "resume", "cancel"} and (
         current.status is AgentStatus.DEFERRED or any(entry.state is OperationState.DEFERRED for entry in journals)
     ):
         raise _controller_error(
@@ -438,7 +438,7 @@ def prepare_controller_command(
             wake_destination = "distributed_advance"
         checkpoint.revision += 1
     elif kind == "suspend":
-        if checkpoint.status not in {AgentStatus.RUNNING, AgentStatus.HOST_INTERACTION}:
+        if checkpoint.status not in {AgentStatus.RUNNING, AgentStatus.HOST_INTERACTION, AgentStatus.DEFERRED}:
             raise _controller_error("suspend command is not admissible for this state", "controller_command_stale")
         checkpoint.suspended_origin = {
             "status": checkpoint.status.value,
@@ -463,7 +463,12 @@ def prepare_controller_command(
                 raise _controller_error("suspended host interaction record is missing", "host_interaction_recovery_required")
             _checked_host_record(record, checkpoint_key=checkpoint.checkpoint_key)
             pending = record["state"] in {"resolved_pending", "resolved_claimed"}
-        if origin["status"] == AgentStatus.HOST_INTERACTION.value and not pending:
+        if origin["status"] == AgentStatus.DEFERRED.value and any(
+            entry.state is OperationState.DEFERRED for entry in checkpoint.tool_journal
+        ):
+            checkpoint.status = AgentStatus.DEFERRED
+            checkpoint.suspended_origin = None
+        elif origin["status"] == AgentStatus.HOST_INTERACTION.value and not pending:
             checkpoint.status = AgentStatus.HOST_INTERACTION
             checkpoint.active_host_interaction = deepcopy(active)
             checkpoint.suspended_origin = None

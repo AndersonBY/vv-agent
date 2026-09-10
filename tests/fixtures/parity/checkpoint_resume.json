@@ -1,7 +1,7 @@
 {
   "contract": "checkpoint_resume",
   "version": 10,
-  "checkpoint_schema": "vv-agent.checkpoint.v10",
+  "checkpoint_schema": "vv-agent.checkpoint.v11",
   "run_definition_schema": "vv-agent.run-definition.v5",
   "checkpoint_wire": {
     "required_fields": [
@@ -1715,7 +1715,7 @@
     "controller_command_conflict_zero_write": true,
     "controller_command_stale_fence_zero_write": true,
     "controller_command_ambiguity_remains_explicit_during_cancel": true,
-    "controller_command_deferred_barrier_precedes_control": true,
+    "controller_command_deferred_controls_preserve_effect_evidence": true,
     "host_interaction_claim_release_is_atomic": true,
     "controller_command_suspend_cancel_abort_do_not_wake": true,
     "controller_command_replay_after_revision_advance_is_idempotent": true

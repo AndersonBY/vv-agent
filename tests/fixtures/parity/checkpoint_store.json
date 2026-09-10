@@ -1,7 +1,7 @@
 {
   "contract": "checkpoint_store",
   "version": 10,
-  "checkpoint_schema": "vv-agent.checkpoint.v10",
+  "checkpoint_schema": "vv-agent.checkpoint.v11",
   "run_definition_schema": "vv-agent.run-definition.v5",
   "checkpoint_state_columns": {
     "active_host_interaction": "complete closed vv-agent.host-interaction-request.v1 JSON object (including prompt and schema_version) or null",

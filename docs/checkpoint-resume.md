@@ -10,7 +10,7 @@ The current public API inventory is `vv-agent-public-api-v7`/schema 7. The
 ## Opt In
 
 Durable execution is disabled unless a `CheckpointConfig` is attached to the
-run. Enabled records require `schema_version=vv-agent.checkpoint.v10` and
+run. Enabled records require `schema_version=vv-agent.checkpoint.v11` and
 `run_definition_schema=vv-agent.run-definition.v5`; no other record shape is
 read or repaired.
 
@@ -244,7 +244,7 @@ worker; durable cross-process approval continuation remains a separate protocol.
 
 ## Scope And Limits
 
-Checkpoint v10 provides durable resume, deferred barriers, host-interaction recovery, and explicit ambiguity. It does not make
+Checkpoint v11 provides durable resume, deferred barriers, host-interaction recovery, and explicit ambiguity. It does not make
 an arbitrary external API exactly-once, recover a provider response that was
 never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,

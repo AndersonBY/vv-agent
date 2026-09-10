@@ -1416,7 +1416,7 @@ def test_checkpoint_resume_rejects_definition_mismatch_before_claim(
 def test_checkpoint_invalid_fixture_cases_have_stable_codes() -> None:
     fixture = _fixture("checkpoint_codec.json")
     expected_codes = {
-        "old_v9_schema_is_rejected_forward_only": "checkpoint_schema_unsupported",
+        "old_v10_schema_is_rejected_forward_only": "checkpoint_schema_unsupported",
         "unknown_schema": "checkpoint_schema_unsupported",
         "blank_checkpoint_key": "checkpoint_key_invalid",
         "bad_definition_digest": "checkpoint_definition_digest_invalid",
