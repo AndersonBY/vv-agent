@@ -175,6 +175,7 @@ def test_deferred_controller_preserves_suspension_receipts_and_cancel_evidence(
             assert event["type"] == "checkpoint_resumed"
             assert event["checkpoint_key"] == key
             assert event["resume_attempt"] == checkpoint.resume_attempt
+            assert event["cycle_index"] == checkpoint.cycle_index
         assert store.resolve_controller_command(command).kind == "replayed"
         assert checkpoint_to_dict(load_checkpoint()) == saved
         if kind == "suspend":
