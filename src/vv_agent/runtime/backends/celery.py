@@ -348,8 +348,7 @@ class CeleryBackend:
         if checkpoint is None:
             raise CheckpointError("checkpoint disappeared after distributed timeout", code="checkpoint_not_found")
         reconciliation_required = (
-            checkpoint.claim_token is not None
-            and checkpoint.claim_token != checkpoint_controller._owned_claim_token
+            checkpoint.claim_token is not None and checkpoint.claim_token != checkpoint_controller._owned_claim_token
         )
         return AgentResult(
             status=AgentStatus.RECONCILIATION_REQUIRED if reconciliation_required else AgentStatus.FAILED,
@@ -380,8 +379,7 @@ class CeleryBackend:
         if checkpoint is None:
             raise CheckpointError("checkpoint disappeared during cancellation", code="checkpoint_not_found") from error
         reconciliation_required = (
-            checkpoint.claim_token is not None
-            and checkpoint.claim_token != checkpoint_controller._owned_claim_token
+            checkpoint.claim_token is not None and checkpoint.claim_token != checkpoint_controller._owned_claim_token
         )
         return AgentResult(
             status=AgentStatus.RECONCILIATION_REQUIRED if reconciliation_required else AgentStatus.FAILED,
