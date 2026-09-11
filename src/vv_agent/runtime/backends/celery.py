@@ -588,6 +588,11 @@ class CeleryBackend:
             response = DistributedWorkerResponse.from_dict(response_payload)
             decision = self.advance(previous_envelope=envelope, outcome=response, enqueue=False)
             if decision.action == "terminal_replay":
+                if decision.result is None:
+                    raise CheckpointError(
+                        "terminal replay decision did not include a result",
+                        code="checkpoint_store_conflict",
+                    )
                 replay = DistributedWorkerResponse.terminal_replay(
                     checkpoint_revision=decision.checkpoint_revision or 0,
                     result=decision.result,
