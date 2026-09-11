@@ -1727,6 +1727,49 @@ def test_nonblocking_celery_duplicate_and_out_of_order_callbacks_do_not_skip_cyc
     assert len(app.envelopes) == enqueued_before_stale_callback
 
 
+def test_nonblocking_start_admission_can_own_first_delivery(tmp_path: Path) -> None:
+    store = InMemoryCheckpointStore()
+    checkpoint_ref = CapabilityRef("checkpoint.start-admission", "1")
+    llm_ref = CapabilityRef("llm.start-admission", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[LLMResponse(content="unused")]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused-settings.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path / "workspace"),
+        capabilities=DistributedCapabilities(llm_client_ref=llm_ref, checkpoint_store_ref=checkpoint_ref),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(celery_app=app, runtime_recipe=recipe, capability_registry=registry)
+    run_config = RunConfig(
+        model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+        execution_backend=backend,
+        checkpoint_config=CheckpointConfig(
+            key="start-admission",
+            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+            store=store,
+        ),
+    )
+    admitted: list[tuple[DistributedRunHandle, DistributedRunEnvelope]] = []
+
+    def admit(handle: DistributedRunHandle, envelope: DistributedRunEnvelope) -> bool:
+        admitted.append((handle, envelope))
+        return False
+
+    handle = Runner.start_distributed(
+        Agent(name="start-admission-agent", instructions="Return one answer.", model="test-model"),
+        "start",
+        run_config=run_config,
+        start_admission=admit,
+    )
+
+    assert admitted and admitted[0][0] == handle
+    assert admitted[0][1].checkpoint_config.key == handle.checkpoint_key
+    assert app.envelopes == []
+
+
 def test_nonblocking_celery_rejects_brokered_approval_before_checkpoint_creation(tmp_path: Path) -> None:
     store = InMemoryCheckpointStore()
     checkpoint_ref = CapabilityRef("checkpoint.nonblocking-approval", "1")

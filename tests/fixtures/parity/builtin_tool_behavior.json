@@ -350,6 +350,33 @@
           }
         }
       }
+    },
+    "edit_file": {
+      "success": {
+        "before": "alpha\nbeta\ngamma\n",
+        "arguments": {
+          "path": "edited.txt",
+          "old_string": "beta",
+          "new_string": "BETTA"
+        },
+        "after": "alpha\nBETTA\ngamma\n",
+        "result": {
+          "status_code": "SUCCESS",
+          "directive": "continue",
+          "content": {
+            "ok": true,
+            "path": "edited.txt",
+            "replaced_count": 1
+          },
+          "metadata": {
+            "changed_files": [
+              "edited.txt"
+            ],
+            "operation": "edit_file",
+            "line_ending": "lf"
+          }
+        }
+      }
     }
   },
   "registry": {

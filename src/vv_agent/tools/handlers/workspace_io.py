@@ -25,7 +25,6 @@ EDIT_FILE_ALLOWED_BASELINE_SOURCES = frozenset({READ_FILE_BASELINE_SOURCE, WRITE
 WRITE_FILE_ALLOWED_BASELINE_SOURCES = frozenset(
     {READ_FILE_BASELINE_SOURCE, WRITE_FILE_BASELINE_SOURCE, EDIT_FILE_BASELINE_SOURCE}
 )
-EDIT_DIFF_MAX_CHARS = 12_000
 UTF8_BOM = b"\xef\xbb\xbf"
 LIST_FILES_DEFAULT_MAX_RESULTS = 100
 LIST_FILES_HARD_MAX_RESULTS = 5_000
@@ -198,80 +197,6 @@ def _workspace_error(message: str, *, error_code: str, **details: Any) -> ToolEx
         content=to_json(payload),
         metadata={"error_code": error_code, **details},
     )
-
-
-def _split_unified_diff_lines(text: str) -> list[str]:
-    lines: list[str] = []
-    start = 0
-    for index, char in enumerate(text):
-        if char == "\n":
-            lines.append(text[start : index + 1])
-            start = index + 1
-    if start < len(text):
-        lines.append(text[start:])
-    return lines
-
-
-def _format_unified_range(start_index: int, count: int) -> str:
-    start_line = start_index + 1 if count else start_index
-    return str(start_line) if count == 1 else f"{start_line},{count}"
-
-
-def _render_unified_line(marker: str, line: str) -> str:
-    has_newline = line.endswith("\n")
-    body = line[:-1] if has_newline else line
-    if has_newline and body.endswith("\r"):
-        body = body[:-1]
-    rendered = f"{marker}{body}\n"
-    if not has_newline:
-        rendered += "\\ No newline at end of file\n"
-    return rendered
-
-
-def _bounded_unified_diff(path: str, before: str, after: str) -> tuple[str, bool, int, int]:
-    before_lines = _split_unified_diff_lines(before)
-    after_lines = _split_unified_diff_lines(after)
-
-    prefix = 0
-    while prefix < len(before_lines) and prefix < len(after_lines) and before_lines[prefix] == after_lines[prefix]:
-        prefix += 1
-
-    suffix = 0
-    while (
-        prefix + suffix < len(before_lines)
-        and prefix + suffix < len(after_lines)
-        and before_lines[-1 - suffix] == after_lines[-1 - suffix]
-    ):
-        suffix += 1
-
-    before_changed_end = len(before_lines) - suffix
-    after_changed_end = len(after_lines) - suffix
-    additions = after_changed_end - prefix
-    deletions = before_changed_end - prefix
-    if additions == 0 and deletions == 0:
-        return "", False, 0, 0
-
-    context_start = max(prefix - 3, 0)
-    before_hunk_end = min(before_changed_end + 3, len(before_lines))
-    after_hunk_end = min(after_changed_end + 3, len(after_lines))
-    before_hunk_count = before_hunk_end - context_start
-    after_hunk_count = after_hunk_end - context_start
-
-    diff_parts = [
-        f"--- {path}\n",
-        f"+++ {path}\n",
-        "@@ "
-        f"-{_format_unified_range(context_start, before_hunk_count)} "
-        f"+{_format_unified_range(context_start, after_hunk_count)} @@\n",
-    ]
-    diff_parts.extend(_render_unified_line(" ", line) for line in before_lines[context_start:prefix])
-    diff_parts.extend(_render_unified_line("-", line) for line in before_lines[prefix:before_changed_end])
-    diff_parts.extend(_render_unified_line("+", line) for line in after_lines[prefix:after_changed_end])
-    diff_parts.extend(_render_unified_line(" ", line) for line in after_lines[after_changed_end:after_hunk_end])
-    diff_text = "".join(diff_parts)
-    if len(diff_text) <= EDIT_DIFF_MAX_CHARS:
-        return diff_text, False, additions, deletions
-    return diff_text[:EDIT_DIFF_MAX_CHARS], True, additions, deletions
 
 
 def _resolve_rg_executable() -> str | None:
@@ -1118,17 +1043,12 @@ def edit_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
         source=EDIT_FILE_BASELINE_SOURCE,
     )
 
-    diff, diff_truncated, additions, deletions = _bounded_unified_diff(path, text, updated)
     return ToolExecutionResult(
         tool_call_id="",
         status_code=ToolResultStatus.SUCCESS,
         content=to_json({"ok": True, "path": path, "replaced_count": replaced_count}),
         metadata={
             "changed_files": [path],
-            "diff": diff,
-            "diff_truncated": diff_truncated,
-            "additions": additions,
-            "deletions": deletions,
             "operation": "edit_file",
             "line_ending": line_ending,
         },

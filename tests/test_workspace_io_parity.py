@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from vv_agent.constants import (
@@ -243,48 +244,40 @@ def test_write_file_reports_utf8_bytes_and_compatible_unicode_chars(tmp_path: Pa
     }
 
 
-def test_edit_file_returns_real_unified_diff(tmp_path: Path) -> None:
+def test_edit_file_large_document_consecutive_edits_keep_compact_receipts_and_current_baseline(tmp_path: Path) -> None:
     registry, context = _tool_runtime(tmp_path)
-    (tmp_path / "diff.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
-    _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "diff.txt"})
+    target = tmp_path / "report.md"
+    before = "重复正文 references / 中文来源\n" * 4_000
+    before += "\n".join(f"source{i}/target" for i in range(7))
+    target.write_text(before, encoding="utf-8")
+    read = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "report.md", "start_line": 1, "end_line": 1})
+    assert read.status_code is ToolResultStatus.SUCCESS
 
-    result = _execute(
+    expected = before
+    started = time.monotonic()
+    for i in range(7):
+        result = _execute(
+            registry,
+            context,
+            EDIT_FILE_TOOL_NAME,
+            {"path": "report.md", "old_string": f"source{i}/target", "new_string": f"source{i} / target"},
+        )
+        assert result.status_code is ToolResultStatus.SUCCESS
+        assert json.loads(result.content) == {"ok": True, "path": "report.md", "replaced_count": 1}
+        assert result.metadata == {"changed_files": ["report.md"], "operation": "edit_file", "line_ending": "lf"}
+        expected = expected.replace(f"source{i}/target", f"source{i} / target")
+    assert time.monotonic() - started < 5
+    assert target.read_text(encoding="utf-8") == expected
+
+    target.write_text(expected + "\nexternal change", encoding="utf-8")
+    rejected = _execute(
         registry,
         context,
         EDIT_FILE_TOOL_NAME,
-        {"path": "diff.txt", "old_string": "beta", "new_string": "BETTA"},
+        {"path": "report.md", "old_string": "source0", "new_string": "updated"},
     )
-
-    assert result.status_code is ToolResultStatus.SUCCESS
-    assert result.directive == ToolDirective.CONTINUE
-    assert result.error_code is None
-    assert result.metadata["diff"] == ("--- diff.txt\n+++ diff.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETTA\n gamma\n")
-    assert result.metadata["diff_truncated"] is False
-    assert result.metadata["additions"] == 1
-    assert result.metadata["deletions"] == 1
-
-
-def test_edit_file_truncates_large_cjk_diff_at_unicode_boundary(tmp_path: Path) -> None:
-    registry, context = _tool_runtime(tmp_path)
-    before = "旧" * 6_100
-    after = "新" * 6_100
-    (tmp_path / "large-diff.txt").write_text(before, encoding="utf-8")
-    _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large-diff.txt"})
-
-    result = _execute(
-        registry,
-        context,
-        EDIT_FILE_TOOL_NAME,
-        {"path": "large-diff.txt", "old_string": before, "new_string": after},
-    )
-    diff = result.metadata["diff"]
-
-    assert result.status_code is ToolResultStatus.SUCCESS
-    assert result.metadata["diff_truncated"] is True
-    assert len(diff) == 12_000
-    assert len(diff.encode("utf-8")) > 12_000
-    assert diff.startswith("--- large-diff.txt\n+++ large-diff.txt\n@@ -1 +1 @@\n-")
-    assert (tmp_path / "large-diff.txt").read_text(encoding="utf-8") == after
+    assert rejected.error_code == "file_changed_since_read"
+    assert target.read_text(encoding="utf-8") == expected + "\nexternal change"
 
 
 def test_read_and_edit_preserve_utf8_bom_and_crlf(tmp_path: Path) -> None:
@@ -304,8 +297,6 @@ def test_read_and_edit_preserve_utf8_bom_and_crlf(tmp_path: Path) -> None:
 
     assert edit_result.status_code is ToolResultStatus.SUCCESS
     assert edit_result.metadata["line_ending"] == "crlf"
-    assert "\ufeff" not in edit_result.metadata["diff"]
-    assert "\r" not in edit_result.metadata["diff"]
     assert target.read_bytes() == b"\xef\xbb\xbffirst\r\n" + "更新行\r\n".encode()
 
 

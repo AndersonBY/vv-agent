@@ -48,6 +48,7 @@ from vv_agent.run_handle import RunHandle, RunHandleRunner
 from vv_agent.runtime import AgentRuntime, ToolCallRunner
 from vv_agent.runtime.backends.distributed import (
     DistributedAdvanceDecision,
+    DistributedRunEnvelope,
     DistributedRunHandle,
 )
 from vv_agent.runtime.checkpoint_resume import (
@@ -262,6 +263,7 @@ class Runner:
         *,
         run_config: RunConfig,
         continuation: Any | None = None,
+        start_admission: Callable[[DistributedRunHandle, DistributedRunEnvelope], bool] | None = None,
     ) -> DistributedRunHandle:
         """Prepare a durable run, enqueue cycle 1, and return without waiting."""
         return cls._start_distributed(
@@ -269,6 +271,7 @@ class Runner:
             input,
             run_config=run_config,
             continuation=continuation,
+            start_admission=start_admission,
         )
 
     @classmethod
@@ -279,6 +282,7 @@ class Runner:
         *,
         run_config: RunConfig,
         continuation: Any | None = None,
+        start_admission: Callable[[DistributedRunHandle, DistributedRunEnvelope], bool] | None = None,
     ) -> DistributedRunHandle:
         """Start a distributed run from an already compiled runtime task."""
         if not isinstance(task, AgentTask):
@@ -289,6 +293,7 @@ class Runner:
             input,
             run_config=run_config,
             continuation=continuation,
+            start_admission=start_admission,
             compiled_invocation=_CompiledTaskInvocation(task=task),
         )
 
@@ -300,6 +305,7 @@ class Runner:
         *,
         run_config: RunConfig,
         continuation: Any | None = None,
+        start_admission: Callable[[DistributedRunHandle, DistributedRunEnvelope], bool] | None = None,
         compiled_invocation: _CompiledTaskInvocation | None = None,
     ) -> DistributedRunHandle:
         if run_config.checkpoint_config is None:
@@ -323,6 +329,7 @@ class Runner:
             run_config=effective_config,
             _distributed_start=True,
             _distributed_continuation=continuation,
+            _distributed_start_admission=start_admission,
             _compiled_invocation=compiled_invocation,
         )
         if not isinstance(result, DistributedRunHandle):
@@ -1281,6 +1288,7 @@ class Runner:
         _run_id: str | None = None,
         _distributed_start: bool = False,
         _distributed_continuation: Any | None = None,
+        _distributed_start_admission: Callable[[DistributedRunHandle, DistributedRunEnvelope], bool] | None = None,
         _distributed_terminal_decision: DistributedAdvanceDecision | None = None,
     ) -> RunResult | DistributedRunHandle:
         preloaded_checkpoint = CheckpointResumeController.preload(run_config.checkpoint_config)
@@ -1319,6 +1327,7 @@ class Runner:
                 preloaded_checkpoint=preloaded_checkpoint,
                 _distributed_start=_distributed_start,
                 _distributed_continuation=_distributed_continuation,
+                _distributed_start_admission=_distributed_start_admission,
                 _distributed_terminal_decision=_distributed_terminal_decision,
             )
             return result
@@ -1348,6 +1357,7 @@ class Runner:
         preloaded_checkpoint: Any | None = None,
         _distributed_start: bool = False,
         _distributed_continuation: Any | None = None,
+        _distributed_start_admission: Callable[[DistributedRunHandle, DistributedRunEnvelope], bool] | None = None,
         _distributed_terminal_decision: DistributedAdvanceDecision | None = None,
     ) -> tuple[RunResult | DistributedRunHandle, dict[str, Any]]:
         if run_config.checkpoint_config is not None:
@@ -1675,6 +1685,7 @@ class Runner:
                     checkpoint_controller=checkpoint_controller,
                     ctx=ctx,
                     continuation=_distributed_continuation,
+                    start_admission=_distributed_start_admission,
                 )
             finally:
                 checkpoint_controller.close()

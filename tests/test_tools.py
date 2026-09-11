@@ -1535,7 +1535,7 @@ def test_edit_file_replace_all_replaces_every_match(registry, tool_context: Tool
     assert target.read_text(encoding="utf-8") == "hi world\nhi agent"
 
 
-def test_edit_file_success_returns_changed_files_and_diff_metadata(registry, tool_context: ToolContext) -> None:
+def test_edit_file_success_returns_file_metadata(registry, tool_context: ToolContext) -> None:
     target = tool_context.workspace / "diff.txt"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
 
@@ -1554,12 +1554,11 @@ def test_edit_file_success_returns_changed_files_and_diff_metadata(registry, too
 
     payload = json.loads(result.content)
     assert payload["replaced_count"] == 1
-    assert result.metadata["changed_files"] == ["diff.txt"]
-    assert result.metadata["operation"] == "edit_file"
-    assert "-beta" in result.metadata["diff"]
-    assert "+BETTA" in result.metadata["diff"]
-    assert result.metadata["additions"] == 1
-    assert result.metadata["deletions"] == 1
+    assert result.metadata == {
+        "changed_files": ["diff.txt"],
+        "operation": "edit_file",
+        "line_ending": "lf",
+    }
 
 
 def test_edit_file_preserves_crlf_when_old_string_uses_lf(registry, tool_context: ToolContext) -> None:

@@ -166,6 +166,7 @@ class CeleryBackend:
         checkpoint_controller: CheckpointResumeController,
         ctx: ExecutionContext | None = None,
         continuation: Callable[[DistributedRunHandle, DistributedRunEnvelope], Any] | Any | None = None,
+        start_admission: Callable[[DistributedRunHandle, DistributedRunEnvelope], bool] | None = None,
     ) -> DistributedRunHandle:
         """Enqueue the first cycle of an admitted run and return immediately."""
         self._validate_nonblocking_recipe()
@@ -224,6 +225,14 @@ class CeleryBackend:
             budget_limits=budget_limits,
         )
         handle = self._handle_for_checkpoint(checkpoint)
+        if start_admission is not None:
+            if not callable(start_admission):
+                raise DistributedContractError("distributed start admission must be callable")
+            should_enqueue = start_admission(handle, envelope)
+            if not isinstance(should_enqueue, bool):
+                raise DistributedContractError("distributed start admission must return a boolean")
+            if not should_enqueue:
+                return handle
         self._enqueue_envelope(envelope, handle=handle, continuation=continuation)
         return handle
 

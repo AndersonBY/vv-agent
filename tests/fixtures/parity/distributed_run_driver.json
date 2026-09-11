@@ -13,7 +13,14 @@
     "start": {
       "requires_prepared_checkpoint": true,
       "maximum_envelopes_enqueued": 1,
-      "waits_for_completion": false
+      "waits_for_completion": false,
+      "start_admission": {
+        "optional": true,
+        "arguments": ["handle", "envelope"],
+        "returns_boolean": true,
+        "true": "framework_enqueues_the_envelope",
+        "false": "caller_owns_first_delivery_and_framework_does_not_enqueue"
+      }
     },
     "advance": {
       "authoritative_checkpoint_reads": 1,

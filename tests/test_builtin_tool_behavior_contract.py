@@ -182,6 +182,17 @@ def test_fixture_drives_builtin_handler_envelopes_and_metadata(tmp_path: Path) -
         source_case["result"],
     )
 
+    edit_case = tools["edit_file"]["success"]
+    context = _context(tmp_path)
+    target = tmp_path / edit_case["arguments"]["path"]
+    target.write_text(edit_case["before"], encoding="utf-8")
+    _execute(registry, context, "read_file", {"path": edit_case["arguments"]["path"]})
+    _assert_result(
+        _execute(registry, context, "edit_file", edit_case["arguments"]),
+        edit_case["result"],
+    )
+    assert target.read_text(encoding="utf-8") == edit_case["after"]
+
     image_case = tools["read_image"]["too_large"]
     (tmp_path / image_case["path"]).write_bytes(b"x" * image_case["actual_bytes"])
     _assert_result(
