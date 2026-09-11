@@ -201,25 +201,26 @@ class CeleryBackend:
                     handle=self._handle_for_checkpoint(checkpoint),
                     continuation=None,
                 )
-                if isinstance(raw_response, dict):
-                    response_payload = raw_response
-                else:
-                    ready = getattr(raw_response, "ready", None)
-                    if callable(ready) and not ready():
-                        response_payload = raw_response.get(timeout=self.dispatch_timeout_seconds)
-                    else:
-                        response_payload = getattr(raw_response, "result", None)
-                        if callable(response_payload):
-                            response_payload = response_payload()
-                        if response_payload is None:
-                            response_payload = getattr(raw_response, "value", None)
-                if not isinstance(response_payload, dict):
-                    raise DistributedContractError("local Celery execution requires a worker response mapping")
-                outcome: Any = DistributedWorkerResponse.from_dict(response_payload)
-            except BaseException as exc:
+            except Exception as exc:
+                if isinstance(exc, CancelledError):
+                    return self._local_cancelled(checkpoint_controller, exc)
                 if isinstance(exc, (DistributedCapabilityError, DistributedContractError, TypeError, ValueError)):
                     raise
                 outcome = exc
+            else:
+                try:
+                    response_payload = self._wait_local_response(raw_response, ctx=ctx, envelope=envelope)
+                except Exception as exc:
+                    if isinstance(exc, CancelledError):
+                        return self._local_cancelled(checkpoint_controller, exc)
+                    outcome = exc
+                else:
+                    if isinstance(response_payload, BaseException):
+                        outcome = response_payload
+                    else:
+                        if not isinstance(response_payload, dict):
+                            raise DistributedContractError("local Celery execution requires a worker response mapping")
+                        outcome = DistributedWorkerResponse.from_dict(response_payload)
             decision = self.advance(previous_envelope=envelope, outcome=outcome, enqueue=False)
             if decision.action == "terminal_replay":
                 assert decision.result is not None
@@ -262,14 +263,138 @@ class CeleryBackend:
                 )
             if decision.envelope is None:
                 raise CheckpointError("distributed advance returned no next envelope", code="checkpoint_store_conflict")
+            next_envelope = decision.envelope
+            retrying_delivery = isinstance(outcome, Exception) or (
+                isinstance(outcome, DistributedWorkerResponse) and outcome.response_type == "pending"
+            )
+            if retrying_delivery and envelope.deadline_unix_ms is not None:
+                if (time.time_ns() // 1_000_000) >= envelope.deadline_unix_ms:
+                    return self._local_transport_timeout(checkpoint_controller, envelope)
+                next_envelope = replace(next_envelope, deadline_unix_ms=envelope.deadline_unix_ms)
             if decision.not_before_unix_ms is not None:
-                delay = decision.not_before_unix_ms - (time.time_ns() // 1_000_000)
-                if delay > 0:
-                    time.sleep(delay / 1000)
-            pending_envelope = decision.envelope
-            cycle_index = decision.envelope.cycle_index
-            claim_mode = decision.envelope.claim_mode or "continue"
+                try:
+                    self._wait_local_until(
+                        decision.not_before_unix_ms,
+                        ctx=ctx,
+                        deadline_unix_ms=next_envelope.deadline_unix_ms,
+                    )
+                except CancelledError as exc:
+                    return self._local_cancelled(checkpoint_controller, exc)
+                except TimeoutError:
+                    return self._local_transport_timeout(checkpoint_controller, next_envelope)
+            pending_envelope = next_envelope
+            cycle_index = next_envelope.cycle_index
+            claim_mode = next_envelope.claim_mode or "continue"
             checkpoint_controller.set_next_claim_mode(claim_mode)
+
+    @staticmethod
+    def _wait_local_response(
+        raw_response: Any,
+        *,
+        ctx: ExecutionContext | None,
+        envelope: DistributedRunEnvelope,
+    ) -> Any:
+        if isinstance(raw_response, dict):
+            return raw_response
+        ready = getattr(raw_response, "ready", None)
+        get = getattr(raw_response, "get", None)
+        while True:
+            if ctx is not None:
+                ctx.check_cancelled()
+            remaining = envelope.remaining_seconds()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(f"distributed delivery {envelope.job_id} timed out")
+            if callable(ready) and ready():
+                result = getattr(raw_response, "result", None)
+                if callable(result):
+                    result = result()
+                if result is None:
+                    result = getattr(raw_response, "value", None)
+                if isinstance(result, BaseException):
+                    return result
+                return result
+            if callable(get):
+                timeout = _DISPATCH_POLL_SECONDS if remaining is None else min(_DISPATCH_POLL_SECONDS, remaining)
+                try:
+                    result = get(timeout=timeout)
+                except Exception as exc:
+                    if exc.__class__.__name__ == "TimeoutError":
+                        continue
+                    raise
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+            result = getattr(raw_response, "result", None)
+            if callable(result):
+                result = result()
+            if result is None:
+                result = getattr(raw_response, "value", None)
+            return result
+
+    @staticmethod
+    def _wait_local_until(
+        target_unix_ms: int,
+        *,
+        ctx: ExecutionContext | None,
+        deadline_unix_ms: int | None,
+    ) -> None:
+        while True:
+            if ctx is not None:
+                ctx.check_cancelled()
+            now_ms = time.time_ns() // 1_000_000
+            remaining_ms = target_unix_ms - now_ms
+            if remaining_ms <= 0:
+                return
+            if deadline_unix_ms is not None:
+                deadline_remaining_ms = deadline_unix_ms - now_ms
+                if deadline_remaining_ms <= 0:
+                    raise TimeoutError("distributed retry deadline expired")
+                remaining_ms = min(remaining_ms, deadline_remaining_ms)
+            time.sleep(min(remaining_ms / 1000, _DISPATCH_POLL_SECONDS))
+
+    @staticmethod
+    def _local_transport_timeout(
+        checkpoint_controller: CheckpointResumeController,
+        envelope: DistributedRunEnvelope,
+    ) -> AgentResult:
+        checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+        if checkpoint is None:
+            raise CheckpointError("checkpoint disappeared after distributed timeout", code="checkpoint_not_found")
+        return AgentResult(
+            status=AgentStatus.FAILED,
+            completion_reason=CompletionReason.FAILED,
+            partial_output=_last_assistant_output(checkpoint.cycles),
+            messages=deepcopy(checkpoint.messages),
+            cycles=deepcopy(checkpoint.cycles),
+            error={
+                "code": "distributed_delivery_timeout",
+                "message": f"distributed delivery {envelope.job_id} timed out",
+                "retryable": True,
+            },
+            shared_state=deepcopy(checkpoint.shared_state),
+            token_usage=summarize_task_token_usage(checkpoint.model_calls),
+            budget_usage=deepcopy(checkpoint.budget_usage),
+        )
+
+    @staticmethod
+    def _local_cancelled(
+        checkpoint_controller: CheckpointResumeController,
+        error: CancelledError,
+    ) -> AgentResult:
+        checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
+        if checkpoint is None:
+            raise CheckpointError("checkpoint disappeared during cancellation", code="checkpoint_not_found") from error
+        return AgentResult(
+            status=AgentStatus.FAILED,
+            completion_reason=CompletionReason.CANCELLED,
+            partial_output=_last_assistant_output(checkpoint.cycles),
+            messages=deepcopy(checkpoint.messages),
+            cycles=deepcopy(checkpoint.cycles),
+            error={"code": "cancelled", "message": str(error), "retryable": False},
+            shared_state=deepcopy(checkpoint.shared_state),
+            token_usage=summarize_task_token_usage(checkpoint.model_calls),
+            budget_usage=deepcopy(checkpoint.budget_usage),
+        )
 
     def execute(
         self,

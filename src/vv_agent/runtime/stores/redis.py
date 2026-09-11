@@ -1475,10 +1475,9 @@ class RedisCheckpointStore:
         pipe: Any,
         command_id: str,
     ) -> tuple[ControllerCommandReceipt, dict[str, Any]] | None:
-        raw_receipt = pipe.get(self._controller_receipt_key(command_id))
+        raw_receipt, raw_wake = pipe.mget([self._controller_receipt_key(command_id), self._controller_outbox_key(command_id)])
         if raw_receipt is None:
             return None
-        raw_wake = pipe.get(self._controller_outbox_key(command_id))
         if raw_wake is None:
             raise CheckpointError("controller wake outbox is missing", code="controller_command_conflict")
         receipt = _controller_receipt_from_storage(raw_receipt)

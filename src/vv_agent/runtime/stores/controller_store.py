@@ -1441,6 +1441,12 @@ class ControllerStoreMixin:
         with self._lock:
             receipt = self._controller_command_receipts.get(command_id)
             if receipt is None:
+                prepare_controller_wake_claim(
+                    None,
+                    claim_token=claim_token,
+                    lease_expires_at_ms=lease_expires_at_ms,
+                    now_ms=now_ms,
+                )
                 return None
             if receipt.command_digest != command_digest:
                 raise _controller_error("controller command digest conflicts", "controller_command_conflict")
@@ -1453,6 +1459,8 @@ class ControllerStoreMixin:
             )
             if staged is None:
                 return None
+            if staged == row:
+                return deepcopy(staged)
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
@@ -1471,6 +1479,14 @@ class ControllerStoreMixin:
         with self._lock:
             receipt = self._controller_command_receipts.get(command_id)
             if receipt is None:
+                prepare_controller_wake_completion(
+                    None,
+                    claim_token=claim_token,
+                    attempt=attempt,
+                    outcome=outcome,
+                    now_ms=now_ms,
+                    error=error,
+                )
                 return None
             if receipt.command_digest != command_digest:
                 raise _controller_error("controller command digest conflicts", "controller_command_conflict")
@@ -1485,6 +1501,8 @@ class ControllerStoreMixin:
             )
             if staged is None:
                 return None
+            if staged == row:
+                return deepcopy(staged)
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
@@ -1500,6 +1518,7 @@ class ControllerStoreMixin:
         with self._lock:
             receipt = self._controller_command_receipts.get(command_id)
             if receipt is None:
+                prepare_controller_wake_reconciliation(None, outcome=outcome, now_ms=now_ms)
                 return None
             if receipt.command_digest != command_digest:
                 raise _controller_error("controller command digest conflicts", "controller_command_conflict")
@@ -1507,6 +1526,8 @@ class ControllerStoreMixin:
             staged = prepare_controller_wake_reconciliation(row, outcome=outcome, now_ms=now_ms)
             if staged is None:
                 return None
+            if staged == row:
+                return deepcopy(staged)
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
@@ -1520,6 +1541,8 @@ class ControllerStoreMixin:
             staged = prepare_controller_wake_reap(row, now_ms=now_ms)
             if staged is None:
                 return None
+            if staged == row:
+                return deepcopy(staged)
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
