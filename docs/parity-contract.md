@@ -391,7 +391,8 @@ behavior remains identical:
   `DistributedAdvanceDecision` as the passive handle, transport observation,
   and one-step scheduler decision mapped by the central nonblocking driver
   contract. `CeleryBackend.start()` and `advance()` are enqueue-only;
-  synchronous `execute_local()` remains a separate local-only controller entry point.
+  `execute_local()` is only a thin immediate-response adapter that routes
+  through the same `advance()` decisions.
 - Python settings-file resolution maps to Rust's explicit `ModelProvider`.
 
 ## Completion Gate

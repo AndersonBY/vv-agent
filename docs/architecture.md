@@ -139,9 +139,10 @@ cache total only when every included cycle reports that metric.
   `RuntimeRecipe`, a declared checkpoint-store capability, and a shared
   `CheckpointStore` resolved by each worker.
 
-`CeleryBackend.execute_local()` is a local-only synchronous controller path for
-hosts that intentionally wait outside a Celery worker; the generic
-`CeleryBackend.execute()` seam rejects direct use. Event-driven hosts use
+`CeleryBackend.execute_local()` is a thin single-process adapter for callers
+that intentionally wait outside a Celery worker. It feeds immediate worker
+responses through the same `advance()` decisions used by event-driven hosts;
+the generic `CeleryBackend.execute()` seam rejects direct use. Event-driven hosts use
 `Runner.start_distributed()` plus `CeleryBackend.start()` and `advance()`.
 `start()` admits the checkpoint, enqueues at most Cycle 1, and returns a passive
 `DistributedRunHandle`; `advance()` performs one authoritative checkpoint read,
