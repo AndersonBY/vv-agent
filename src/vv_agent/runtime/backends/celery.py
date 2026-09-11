@@ -36,12 +36,6 @@ from vv_agent.runtime.backends.distributed import (
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.controller import (
-    ControllerCommand,
-    ControllerCommandResolution,
-    DistributedBackend,
-    HostInteractionRecoveryResult,
-)
 from vv_agent.runtime.dispatch_outbox import (
     DispatchOutboxClaim,
     DispatchOutboxRecord,
@@ -116,27 +110,6 @@ class CeleryBackend:
     @property
     def manages_run_budget(self) -> bool:
         return True
-
-    def controller_backend(self) -> DistributedBackend:
-        """Return the public v9 controller seam backed by the recipe store."""
-        self._validate_nonblocking_recipe()
-        assert self.capability_registry is not None
-        self.capability_registry.validate(self.runtime_recipe.capabilities)
-        store_ref = self.runtime_recipe.capabilities.checkpoint_store_ref
-        assert store_ref is not None
-        return DistributedBackend(self.capability_registry.resolve("checkpoint_store", store_ref))
-
-    def resolve_controller_command(
-        self,
-        command: ControllerCommand,
-    ) -> ControllerCommandResolution:
-        return self.controller_backend().resolve_controller_command(command)
-
-    def claim_and_consume_host_interaction_response(
-        self,
-        envelope: Mapping[str, Any],
-    ) -> HostInteractionRecoveryResult:
-        return self.controller_backend().claim_and_consume_host_interaction_response(envelope)
 
     def execute_local(
         self,
