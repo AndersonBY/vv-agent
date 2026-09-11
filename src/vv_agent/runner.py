@@ -1867,7 +1867,8 @@ class Runner:
             result_error = _agent_result_error_text(raw_result.error)
             final_output = (
                 None
-                if raw_result.status in {
+                if raw_result.status
+                in {
                     AgentStatus.RECONCILIATION_REQUIRED,
                     AgentStatus.DEFERRED,
                     AgentStatus.HOST_INTERACTION,
