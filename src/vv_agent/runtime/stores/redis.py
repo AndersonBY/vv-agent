@@ -1513,6 +1513,12 @@ class RedisCheckpointStore:
                     pipe.watch(receipt_key, outbox_key)
                     snapshot = self._redis_controller_wake_snapshot(pipe, command_id)
                     if snapshot is None:
+                        prepare_controller_wake_claim(
+                            None,
+                            claim_token=claim_token,
+                            lease_expires_at_ms=lease_expires_at_ms,
+                            now_ms=now_ms,
+                        )
                         pipe.unwatch()
                         return None
                     receipt, current = snapshot
@@ -1563,6 +1569,14 @@ class RedisCheckpointStore:
                     pipe.watch(receipt_key, outbox_key)
                     snapshot = self._redis_controller_wake_snapshot(pipe, command_id)
                     if snapshot is None:
+                        prepare_controller_wake_completion(
+                            None,
+                            claim_token=claim_token,
+                            attempt=attempt,
+                            outcome=outcome,
+                            now_ms=now_ms,
+                            error=error,
+                        )
                         pipe.unwatch()
                         return None
                     receipt, current = snapshot
@@ -1608,6 +1622,7 @@ class RedisCheckpointStore:
                     pipe.watch(receipt_key, outbox_key)
                     snapshot = self._redis_controller_wake_snapshot(pipe, command_id)
                     if snapshot is None:
+                        prepare_controller_wake_reconciliation(None, outcome=outcome, now_ms=now_ms)
                         pipe.unwatch()
                         return None
                     receipt, current = snapshot

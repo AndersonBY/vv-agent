@@ -1457,6 +1457,12 @@ class SqliteCheckpointStore:
             try:
                 row = self._controller_receipt_row(command_id)
                 if row is None:
+                    prepare_controller_wake_claim(
+                        None,
+                        claim_token=claim_token,
+                        lease_expires_at_ms=lease_expires_at_ms,
+                        now_ms=now_ms,
+                    )
                     self._conn.commit()
                     return None
                 receipt = self._controller_receipt_from_row(row)
@@ -1498,6 +1504,14 @@ class SqliteCheckpointStore:
             try:
                 row = self._controller_receipt_row(command_id)
                 if row is None:
+                    prepare_controller_wake_completion(
+                        None,
+                        claim_token=claim_token,
+                        attempt=attempt,
+                        outcome=outcome,
+                        now_ms=now_ms,
+                        error=error,
+                    )
                     self._conn.commit()
                     return None
                 receipt = self._controller_receipt_from_row(row)
@@ -1538,6 +1552,7 @@ class SqliteCheckpointStore:
             try:
                 row = self._controller_receipt_row(command_id)
                 if row is None:
+                    prepare_controller_wake_reconciliation(None, outcome=outcome, now_ms=now_ms)
                     self._conn.commit()
                     return None
                 receipt = self._controller_receipt_from_row(row)

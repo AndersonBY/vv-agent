@@ -8,13 +8,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
 
 from vv_agent.checkpoint import CheckpointConfig, CheckpointError, OperationState, ResumePolicy
+from vv_agent.runtime.backends.celery import CeleryBackend
 from vv_agent.runtime.backends.distributed import DistributedRunHandle
+from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict, checkpoint_to_dict
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.controller import (
@@ -282,6 +285,96 @@ def _host_response_command(store: Any, request: HostInteractionRequest, *, key: 
             "response": {"role": "user", "content": "Approved sk-response-456 at https://example.invalid/next"},
         },
     )
+
+
+@pytest.mark.parametrize("operation", ["claim", "completion", "reconciliation"])
+def test_missing_controller_wake_validates_arguments_before_returning_none(store: Any, operation: str) -> None:
+    command_id = f"missing-wake-{operation}"
+    if operation == "claim":
+        with pytest.raises(ValueError):
+            store.claim_controller_command_wake(
+                command_id=command_id,
+                command_digest="digest",
+                claim_token="",
+                lease_expires_at_ms=100,
+                now_ms=1,
+            )
+        assert (
+            store.claim_controller_command_wake(
+                command_id=command_id,
+                command_digest="digest",
+                claim_token="owner",
+                lease_expires_at_ms=100,
+                now_ms=1,
+            )
+            is None
+        )
+    elif operation == "completion":
+        with pytest.raises(ValueError):
+            store.complete_controller_command_wake(
+                command_id=command_id,
+                command_digest="digest",
+                claim_token="owner",
+                attempt=1,
+                outcome="invalid",
+                now_ms=1,
+            )
+        assert (
+            store.complete_controller_command_wake(
+                command_id=command_id,
+                command_digest="digest",
+                claim_token="owner",
+                attempt=1,
+                outcome="delivered",
+                now_ms=1,
+            )
+            is None
+        )
+    else:
+        with pytest.raises(ValueError):
+            store.reconcile_controller_command_wake(
+                command_id=command_id,
+                command_digest="digest",
+                outcome="invalid",
+                now_ms=1,
+            )
+        assert (
+            store.reconcile_controller_command_wake(
+                command_id=command_id,
+                command_digest="digest",
+                outcome="retry",
+                now_ms=1,
+            )
+            is None
+        )
+
+
+@pytest.mark.parametrize("kind", ["cancel", "timeout"])
+def test_local_stop_with_foreign_claim_requires_reconciliation(store: Any, kind: str) -> None:
+    key = f"local-stop-foreign-{kind}"
+    checkpoint = _checkpoint(key)
+    assert store.create_checkpoint(checkpoint)
+    claimed = store.claim_checkpoint(
+        key,
+        1,
+        claim_token="foreign-owner",
+        lease_expires_at_ms=10_000,
+        now_ms=1,
+        claim_mode="continue",
+    )
+    assert claimed is not None
+    controller = SimpleNamespace(store=store, checkpoint_key=key, _owned_claim_token=None)
+    if kind == "cancel":
+        result = CeleryBackend._local_cancelled(controller, CancelledError("local cancellation"))
+    else:
+        result = CeleryBackend._local_transport_timeout(controller, SimpleNamespace(job_id="local-timeout"))
+    assert result.status is AgentStatus.RECONCILIATION_REQUIRED
+    assert result.wait_reason == "reconciliation_required"
+    assert result.checkpoint_key == key
+    current = store.load_checkpoint(key)
+    assert current is not None
+    assert current.claim_token == "foreign-owner"
+    assert current.terminal_result is None
 
 
 def _recovery_envelope(store: Any, request: HostInteractionRequest, outcome: Any, *, key: str, command_id: str) -> dict[str, Any]:

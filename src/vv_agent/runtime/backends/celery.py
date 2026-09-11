@@ -145,20 +145,7 @@ class CeleryBackend:
                 if ctx is not None:
                     ctx.check_cancelled()
             except CancelledError as exc:
-                current = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
-                if current is None:
-                    raise CheckpointError("checkpoint disappeared during cancellation", code="checkpoint_not_found") from exc
-                return AgentResult(
-                    status=AgentStatus.FAILED,
-                    completion_reason=CompletionReason.CANCELLED,
-                    partial_output=_last_assistant_output(current.cycles),
-                    messages=deepcopy(current.messages),
-                    cycles=deepcopy(current.cycles),
-                    error={"code": "cancelled", "message": str(exc), "retryable": False},
-                    shared_state=deepcopy(current.shared_state),
-                    token_usage=summarize_task_token_usage(current.model_calls),
-                    budget_usage=deepcopy(current.budget_usage),
-                )
+                return self._local_cancelled(checkpoint_controller, exc)
             checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
             if checkpoint is None:
                 raise CheckpointError("checkpoint disappeared before distributed dispatch", code="checkpoint_not_found")
@@ -360,13 +347,20 @@ class CeleryBackend:
         checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
         if checkpoint is None:
             raise CheckpointError("checkpoint disappeared after distributed timeout", code="checkpoint_not_found")
+        reconciliation_required = (
+            checkpoint.claim_token is not None
+            and checkpoint.claim_token != checkpoint_controller._owned_claim_token
+        )
         return AgentResult(
-            status=AgentStatus.FAILED,
-            completion_reason=CompletionReason.FAILED,
-            partial_output=_last_assistant_output(checkpoint.cycles),
+            status=AgentStatus.RECONCILIATION_REQUIRED if reconciliation_required else AgentStatus.FAILED,
+            completion_reason=None if reconciliation_required else CompletionReason.FAILED,
+            partial_output=None if reconciliation_required else _last_assistant_output(checkpoint.cycles),
             messages=deepcopy(checkpoint.messages),
             cycles=deepcopy(checkpoint.cycles),
-            error={
+            wait_reason="reconciliation_required" if reconciliation_required else None,
+            error=None
+            if reconciliation_required
+            else {
                 "code": "distributed_delivery_timeout",
                 "message": f"distributed delivery {envelope.job_id} timed out",
                 "retryable": True,
@@ -374,6 +368,7 @@ class CeleryBackend:
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
+            checkpoint_key=checkpoint.checkpoint_key,
         )
 
     @staticmethod
@@ -384,16 +379,22 @@ class CeleryBackend:
         checkpoint = checkpoint_controller.store.load_checkpoint(checkpoint_controller.checkpoint_key)
         if checkpoint is None:
             raise CheckpointError("checkpoint disappeared during cancellation", code="checkpoint_not_found") from error
+        reconciliation_required = (
+            checkpoint.claim_token is not None
+            and checkpoint.claim_token != checkpoint_controller._owned_claim_token
+        )
         return AgentResult(
-            status=AgentStatus.FAILED,
-            completion_reason=CompletionReason.CANCELLED,
-            partial_output=_last_assistant_output(checkpoint.cycles),
+            status=AgentStatus.RECONCILIATION_REQUIRED if reconciliation_required else AgentStatus.FAILED,
+            completion_reason=None if reconciliation_required else CompletionReason.CANCELLED,
+            partial_output=None if reconciliation_required else _last_assistant_output(checkpoint.cycles),
             messages=deepcopy(checkpoint.messages),
             cycles=deepcopy(checkpoint.cycles),
-            error={"code": "cancelled", "message": str(error), "retryable": False},
+            wait_reason="reconciliation_required" if reconciliation_required else None,
+            error=None if reconciliation_required else {"code": "cancelled", "message": str(error), "retryable": False},
             shared_state=deepcopy(checkpoint.shared_state),
             token_usage=summarize_task_token_usage(checkpoint.model_calls),
             budget_usage=deepcopy(checkpoint.budget_usage),
+            checkpoint_key=checkpoint.checkpoint_key,
         )
 
     def execute(
