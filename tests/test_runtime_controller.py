@@ -945,10 +945,12 @@ def test_sqlite_controller_resolution_classification_is_atomic_across_store_inst
     )
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            resolutions = list(executor.map(
-                lambda store: store.resolve_controller_command(command),
-                (first_store, second_store),
-            ))
+            resolutions = list(
+                executor.map(
+                    lambda store: store.resolve_controller_command(command),
+                    (first_store, second_store),
+                )
+            )
         assert {resolution.kind for resolution in resolutions} == {"applied", "replayed"}
         assert resolutions[0].receipt == resolutions[1].receipt
     finally:
