@@ -11,7 +11,6 @@ import json
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
-from threading import RLock
 from typing import Any, Literal, cast
 
 import vv_agent.events as run_events
@@ -1331,7 +1330,7 @@ class RedisCheckpointStore:
                     continue
         raise RuntimeError("redis host interaction admission exceeded transaction retry limit")
 
-    def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
+    def _admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> tuple[ControllerCommandReceipt, bool]:
         """Admit one closed controller variant under checkpoint CAS."""
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
         checkpoint_key = command_value.handle.checkpoint_key
@@ -1376,7 +1375,7 @@ class RedisCheckpointStore:
                                 "controller command id was reused with a different digest", code="controller_command_conflict"
                             )
                         pipe.unwatch()
-                        return receipt
+                        return receipt, False
                     raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
@@ -1460,28 +1459,26 @@ class RedisCheckpointStore:
                         pipe.set(record_key, _host_record_to_storage(staged))
                         pipe.sadd(self._host_record_set_key(checkpoint_key), record_key)
                     pipe.execute()
-                    return receipt
+                    return receipt, True
                 except self._watch_error:
                     continue
         raise RuntimeError("redis controller admission exceeded transaction retry limit")
 
+    def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
+        receipt, _applied = self._admit_controller_command(command)
+        return receipt
+
     def resolve_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandResolution:
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
-        resolution_lock = getattr(self, "_controller_resolution_lock", None)
-        if resolution_lock is None:
-            resolution_lock = RLock()
-            self._controller_resolution_lock = resolution_lock
-        with resolution_lock:
-            existed = self._client.get(self._controller_receipt_key(command_value.command_id)) is not None
-            try:
-                receipt = self.admit_controller_command(command_value)
-            except CheckpointError as exc:
-                return ControllerCommandResolution(kind="rejected", error=getattr(exc, "code", None) or str(exc))
+        try:
+            receipt, applied = self._admit_controller_command(command_value)
+        except CheckpointError as exc:
+            return ControllerCommandResolution(kind="rejected", error=getattr(exc, "code", None) or str(exc))
         checkpoint = self.load_checkpoint(command_value.handle.checkpoint_key)
         if checkpoint is None:
             return ControllerCommandResolution(kind="rejected", error="controller_command_stale")
         return ControllerCommandResolution(
-            kind="replayed" if existed else "applied",
+            kind="applied" if applied else "replayed",
             receipt=receipt,
             wake=ControllerWake(
                 action=receipt.outbox_action,

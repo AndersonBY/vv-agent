@@ -1208,7 +1208,7 @@ class SqliteCheckpointStore:
             raise CheckpointError("controller command receipt scalar fields conflict", code="controller_command_conflict")
         return receipt
 
-    def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
+    def _admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> tuple[ControllerCommandReceipt, bool]:
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -1228,7 +1228,7 @@ class SqliteCheckpointStore:
                     receipt = self._controller_receipt_from_row(existing_row)
                     self._controller_wake_from_row(existing_row, receipt)
                     self._conn.commit()
-                    return receipt
+                    return receipt, False
                 row = self._conn.execute(
                     _SELECT_CHECKPOINT + " WHERE checkpoint_key = ?",
                     (command_value.handle.checkpoint_key,),
@@ -1292,30 +1292,27 @@ class SqliteCheckpointStore:
                     self._controller_receipt_values(receipt, command_value),
                 )
                 self._conn.commit()
-                return receipt
+                return receipt, True
             except BaseException:
                 self._conn.rollback()
                 raise
 
+    def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
+        receipt, _applied = self._admit_controller_command(command)
+        return receipt
+
     def resolve_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandResolution:
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
         with self._lock:
-            was_present = (
-                self._conn.execute(
-                    "SELECT 1 FROM controller_command_receipts WHERE command_id = ?",
-                    (command_value.command_id,),
-                ).fetchone()
-                is not None
-            )
             try:
-                receipt = self.admit_controller_command(command_value)
+                receipt, applied = self._admit_controller_command(command_value)
             except CheckpointError as exc:
                 return ControllerCommandResolution(kind="rejected", error=getattr(exc, "code", None) or str(exc))
         checkpoint = self.load_checkpoint(command_value.handle.checkpoint_key)
         if checkpoint is None:
             return ControllerCommandResolution(kind="rejected", error="controller_command_stale")
         return ControllerCommandResolution(
-            kind="replayed" if was_present else "applied",
+            kind="applied" if applied else "replayed",
             receipt=receipt,
             wake=ControllerWake(
                 action=receipt.outbox_action,

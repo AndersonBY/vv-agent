@@ -928,6 +928,34 @@ def test_distinct_live_cancel_after_signal_is_applied_noop(store: Any) -> None:
     assert checkpoint_to_dict(after_replay) == checkpoint_to_dict(after_second)
 
 
+def test_sqlite_controller_resolution_classification_is_atomic_across_store_instances(tmp_path: Path) -> None:
+    path = tmp_path / "controller-two-clients.sqlite3"
+    first_store = SqliteCheckpointStore(path)
+    second_store = SqliteCheckpointStore(path)
+    key = "controller-two-clients"
+    assert first_store.create_checkpoint(_checkpoint(key))
+    checkpoint = first_store.load_checkpoint(key)
+    assert checkpoint is not None
+    command = ControllerCommand(
+        command_id="controller-two-client-command",
+        handle=DistributedRunHandle(key, checkpoint.root_run_id, checkpoint.trace_id),
+        resume_attempt=checkpoint.resume_attempt,
+        expected_revision=checkpoint.revision,
+        command={"kind": "cancel"},
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            resolutions = list(executor.map(
+                lambda store: store.resolve_controller_command(command),
+                (first_store, second_store),
+            ))
+        assert {resolution.kind for resolution in resolutions} == {"applied", "replayed"}
+        assert resolutions[0].receipt == resolutions[1].receipt
+    finally:
+        first_store.close()
+        second_store.close()
+
+
 def test_redis_host_admission_and_replay_use_atomic_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _redis_store()
     original_get = store._client.get

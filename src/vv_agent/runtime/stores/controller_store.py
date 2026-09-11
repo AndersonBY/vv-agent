@@ -1238,7 +1238,7 @@ class ControllerStoreMixin:
                 raise
             return outcome
 
-    def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
+    def _admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> tuple[ControllerCommandReceipt, bool]:
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
         with self._lock:
             existing = self._controller_command_receipts.get(command_value.command_id)
@@ -1248,7 +1248,7 @@ class ControllerStoreMixin:
                         "controller command id was reused with a different digest", "controller_command_conflict"
                     )
                 self._ensure_controller_wake(existing)
-                return deepcopy(self._controller_command_receipts[command_value.command_id])
+                return deepcopy(self._controller_command_receipts[command_value.command_id]), False
             now_ms = self._lease_now_ms(None)
             current = self._load_controller_checkpoint(command_value.handle.checkpoint_key)
             active = current.active_host_interaction if current is not None else None
@@ -1308,7 +1308,11 @@ class ControllerStoreMixin:
                 else:
                     self._controller_command_outboxes[command_value.command_id] = previous_outbox
                 raise
-            return deepcopy(receipt)
+            return deepcopy(receipt), True
+
+    def admit_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandReceipt:
+        receipt, _applied = self._admit_controller_command(command)
+        return receipt
 
     def get_controller_command_receipt(self, command_id: str) -> ControllerCommandReceipt | None:
         with self._lock:
@@ -1479,9 +1483,8 @@ class ControllerStoreMixin:
     def resolve_controller_command(self, command: ControllerCommand | Mapping[str, Any]) -> ControllerCommandResolution:
         command_value = command if isinstance(command, ControllerCommand) else ControllerCommand.from_dict(command)
         with self._lock:
-            had_receipt = command_value.command_id in self._controller_command_receipts
             try:
-                receipt = self.admit_controller_command(command_value)
+                receipt, applied = self._admit_controller_command(command_value)
             except CheckpointError as exc:
                 return ControllerCommandResolution(kind="rejected", error=getattr(exc, "code", None) or str(exc))
         wake = ControllerWake(
@@ -1494,7 +1497,7 @@ class ControllerStoreMixin:
             ),
             claim_mode="recovery" if receipt.outbox_action == "recovery_dispatch" else "none",
         )
-        kind = "replayed" if had_receipt else "applied"
+        kind = "applied" if applied else "replayed"
         return ControllerCommandResolution(kind=kind, receipt=receipt, wake=wake)
 
     def claim_and_consume_host_interaction_response(self, envelope: Mapping[str, Any]) -> HostInteractionRecoveryResult:
