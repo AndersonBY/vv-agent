@@ -9,14 +9,14 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 
 from vv_agent.checkpoint import CheckpointConfig, CheckpointError, OperationState, ResumePolicy
 from vv_agent.runtime.backends.celery import CeleryBackend
-from vv_agent.runtime.backends.distributed import DistributedRunHandle
+from vv_agent.runtime.backends.distributed import DistributedRunEnvelope, DistributedRunHandle
 from vv_agent.runtime.cancellation import CancelledError
 from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict, checkpoint_to_dict
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
@@ -365,9 +365,14 @@ def test_local_stop_with_foreign_claim_requires_reconciliation(store: Any, kind:
     assert claimed is not None
     controller = SimpleNamespace(store=store, checkpoint_key=key, _owned_claim_token=None)
     if kind == "cancel":
-        result = CeleryBackend._local_cancelled(controller, CancelledError("local cancellation"))
+        result = CeleryBackend._local_cancelled(
+            cast(CheckpointResumeController, controller), CancelledError("local cancellation")
+        )
     else:
-        result = CeleryBackend._local_transport_timeout(controller, SimpleNamespace(job_id="local-timeout"))
+        result = CeleryBackend._local_transport_timeout(
+            cast(CheckpointResumeController, controller),
+            cast(DistributedRunEnvelope, SimpleNamespace(job_id="local-timeout")),
+        )
     assert result.status is AgentStatus.RECONCILIATION_REQUIRED
     assert result.wait_reason == "reconciliation_required"
     assert result.checkpoint_key == key
