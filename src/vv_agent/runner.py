@@ -1867,11 +1867,20 @@ class Runner:
             result_error = _agent_result_error_text(raw_result.error)
             final_output = (
                 None
-                if raw_result.status in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED, AgentStatus.HOST_INTERACTION}
+                if raw_result.status in {
+                    AgentStatus.RECONCILIATION_REQUIRED,
+                    AgentStatus.DEFERRED,
+                    AgentStatus.HOST_INTERACTION,
+                    AgentStatus.SUSPENDED,
+                }
                 else raw_result.final_answer or raw_result.wait_reason or result_error
             )
             reconciliation_required = raw_result.status is AgentStatus.RECONCILIATION_REQUIRED
-            deferred_waiting = raw_result.status in {AgentStatus.DEFERRED, AgentStatus.HOST_INTERACTION}
+            deferred_waiting = raw_result.status in {
+                AgentStatus.DEFERRED,
+                AgentStatus.HOST_INTERACTION,
+                AgentStatus.SUSPENDED,
+            }
             terminal_error_code = raw_result.error_code
             if terminal_error_code is None and raw_result.error is not None:
                 terminal_error_code = raw_result.error.get("code")

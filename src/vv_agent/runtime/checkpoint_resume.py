@@ -1198,7 +1198,12 @@ class CheckpointResumeController:
         self._stop_heartbeat()
 
     def finalize(self, result: AgentResult, *, terminal_event: RunEvent | None = None) -> AgentResult:
-        if result.status in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.DEFERRED, AgentStatus.HOST_INTERACTION}:
+        if result.status in {
+            AgentStatus.RECONCILIATION_REQUIRED,
+            AgentStatus.DEFERRED,
+            AgentStatus.HOST_INTERACTION,
+            AgentStatus.SUSPENDED,
+        }:
             result.checkpoint_key = self.checkpoint_key
             return result
         checkpoint = self.store.load_checkpoint(self.checkpoint_key)
@@ -1356,7 +1361,10 @@ class CheckpointResumeController:
         return deepcopy(authoritative.terminal_result)
 
     def prepare_terminal(self, result: AgentResult) -> AgentResult:
-        if result.status is AgentStatus.RECONCILIATION_REQUIRED or _terminal_abort_reason(result) is not None:
+        if (
+            result.status in {AgentStatus.RECONCILIATION_REQUIRED, AgentStatus.SUSPENDED}
+            or _terminal_abort_reason(result) is not None
+        ):
             return result
         checkpoint = self.store.load_checkpoint(self.checkpoint_key)
         if checkpoint is None:

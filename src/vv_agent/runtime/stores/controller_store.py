@@ -1035,6 +1035,112 @@ def prepare_host_response_consumption(
     return snapshot, staged_record, return_value
 
 
+def prepare_controller_wake_claim(
+    row: Mapping[str, Any] | None,
+    *,
+    claim_token: str,
+    lease_expires_at_ms: int,
+    now_ms: int,
+) -> dict[str, Any] | None:
+    """Apply the storage-independent controller wake claim transition."""
+    if not isinstance(claim_token, str) or not claim_token.strip():
+        raise ValueError("controller wake claim_token must be non-empty")
+    if isinstance(lease_expires_at_ms, bool) or not isinstance(lease_expires_at_ms, int) or lease_expires_at_ms <= now_ms:
+        raise ValueError("controller wake lease must be greater than now_ms")
+    if row is None:
+        return None
+    if row["outbox_action"] == "none" or row["outbox_state"] == "delivered":
+        return dict(row)
+    if row["outbox_state"] == "ambiguous":
+        raise _controller_error("controller wake requires reconciliation", "controller_command_stale")
+    if row["outbox_state"] == "claimed":
+        if row["claim_token"] == claim_token:
+            return dict(row)
+        if int(row["lease_expires_at_ms"] or 0) > now_ms:
+            raise _controller_error("controller wake is claimed by another owner", "controller_command_stale")
+    staged = dict(row)
+    staged.update(
+        outbox_state="claimed",
+        claim_token=claim_token,
+        lease_expires_at_ms=lease_expires_at_ms,
+        attempt=int(row["attempt"]) + 1,
+    )
+    return staged
+
+
+def prepare_controller_wake_completion(
+    row: Mapping[str, Any] | None,
+    *,
+    claim_token: str,
+    attempt: int,
+    outcome: str,
+    now_ms: int,
+    error: str | None = None,
+) -> dict[str, Any] | None:
+    """Apply the storage-independent controller wake completion transition."""
+    if outcome not in {"delivered", "ambiguous"}:
+        raise ValueError("controller wake completion outcome must be delivered or ambiguous")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+        raise ValueError("controller wake attempt is invalid")
+    if row is None:
+        return None
+    if row["outbox_state"] in {"delivered", "ambiguous"}:
+        if row["outbox_state"] == outcome:
+            return dict(row)
+        raise _controller_error("controller wake has already completed", "controller_command_stale")
+    if row["outbox_state"] != "claimed" or row["claim_token"] != claim_token or row["attempt"] != attempt:
+        raise _controller_error("controller wake owner or attempt is stale", "controller_command_stale")
+    staged = dict(row)
+    staged.update(
+        outbox_state=outcome,
+        claim_token=None,
+        lease_expires_at_ms=None,
+        delivered_at_ms=now_ms if outcome == "delivered" else None,
+        last_error=error,
+    )
+    return staged
+
+
+def prepare_controller_wake_reconciliation(
+    row: Mapping[str, Any] | None,
+    *,
+    outcome: str,
+    now_ms: int,
+) -> dict[str, Any] | None:
+    """Apply the storage-independent ambiguous wake reconciliation transition."""
+    if outcome not in {"delivered", "retry"}:
+        raise ValueError("controller wake reconciliation outcome must be delivered or retry")
+    if row is None:
+        return None
+    target = "delivered" if outcome == "delivered" else "pending"
+    if row["outbox_state"] == target:
+        return dict(row)
+    if row["outbox_state"] != "ambiguous":
+        raise _controller_error("controller wake is not ambiguous", "controller_command_stale")
+    staged = dict(row)
+    staged.update(
+        outbox_state=target,
+        delivered_at_ms=now_ms if target == "delivered" else None,
+        last_error=None,
+    )
+    return staged
+
+
+def prepare_controller_wake_reap(
+    row: Mapping[str, Any] | None,
+    *,
+    now_ms: int,
+) -> dict[str, Any] | None:
+    """Apply the storage-independent expired-claim reaping transition."""
+    if row is None:
+        return None
+    if row["outbox_state"] != "claimed" or int(row["lease_expires_at_ms"] or 0) > now_ms:
+        return dict(row)
+    staged = dict(row)
+    staged.update(outbox_state="pending", claim_token=None, lease_expires_at_ms=None)
+    return staged
+
+
 class ControllerStoreMixin:
     """Commit controller snapshots and indexes under the memory-store lock."""
 
@@ -1332,10 +1438,6 @@ class ControllerStoreMixin:
         now_ms: int,
     ) -> dict[str, Any] | None:
         """Claim a pending recovery wake without changing checkpoint state."""
-        if not isinstance(claim_token, str) or not claim_token.strip():
-            raise ValueError("controller wake claim_token must be non-empty")
-        if isinstance(lease_expires_at_ms, bool) or not isinstance(lease_expires_at_ms, int) or lease_expires_at_ms <= now_ms:
-            raise ValueError("controller wake lease must be greater than now_ms")
         with self._lock:
             receipt = self._controller_command_receipts.get(command_id)
             if receipt is None:
@@ -1343,20 +1445,14 @@ class ControllerStoreMixin:
             if receipt.command_digest != command_digest:
                 raise _controller_error("controller command digest conflicts", "controller_command_conflict")
             row = self._ensure_controller_wake(receipt)
-            if row["outbox_action"] == "none" or row["outbox_state"] == "delivered":
-                return deepcopy(row)
-            if row["outbox_state"] == "ambiguous":
-                raise _controller_error("controller wake requires reconciliation", "controller_command_stale")
-            if row["outbox_state"] == "claimed":
-                if row["claim_token"] == claim_token:
-                    return deepcopy(row)
-                if int(row["lease_expires_at_ms"] or 0) > now_ms:
-                    raise _controller_error("controller wake is claimed by another owner", "controller_command_stale")
-            staged = deepcopy(row)
-            staged["outbox_state"] = "claimed"
-            staged["claim_token"] = claim_token
-            staged["lease_expires_at_ms"] = lease_expires_at_ms
-            staged["attempt"] = int(row["attempt"]) + 1
+            staged = prepare_controller_wake_claim(
+                row,
+                claim_token=claim_token,
+                lease_expires_at_ms=lease_expires_at_ms,
+                now_ms=now_ms,
+            )
+            if staged is None:
+                return None
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
@@ -1372,8 +1468,6 @@ class ControllerStoreMixin:
         error: str | None = None,
     ) -> dict[str, Any] | None:
         """Owner-attempt CAS for a recovery wake delivery."""
-        if outcome not in {"delivered", "ambiguous"}:
-            raise ValueError("controller wake completion outcome must be delivered or ambiguous")
         with self._lock:
             receipt = self._controller_command_receipts.get(command_id)
             if receipt is None:
@@ -1381,18 +1475,16 @@ class ControllerStoreMixin:
             if receipt.command_digest != command_digest:
                 raise _controller_error("controller command digest conflicts", "controller_command_conflict")
             row = self._ensure_controller_wake(receipt)
-            if row["outbox_state"] in {"delivered", "ambiguous"}:
-                if row["outbox_state"] == outcome:
-                    return deepcopy(row)
-                raise _controller_error("controller wake has already completed", "controller_command_stale")
-            if row["outbox_state"] != "claimed" or row["claim_token"] != claim_token or row["attempt"] != attempt:
-                raise _controller_error("controller wake owner or attempt is stale", "controller_command_stale")
-            staged = deepcopy(row)
-            staged["outbox_state"] = outcome
-            staged["claim_token"] = None
-            staged["lease_expires_at_ms"] = None
-            staged["delivered_at_ms"] = now_ms if outcome == "delivered" else None
-            staged["last_error"] = error
+            staged = prepare_controller_wake_completion(
+                row,
+                claim_token=claim_token,
+                attempt=attempt,
+                outcome=outcome,
+                now_ms=now_ms,
+                error=error,
+            )
+            if staged is None:
+                return None
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
@@ -1405,8 +1497,6 @@ class ControllerStoreMixin:
         now_ms: int,
     ) -> dict[str, Any] | None:
         """Resolve an ambiguous wake without synthesizing a second command."""
-        if outcome not in {"delivered", "retry"}:
-            raise ValueError("controller wake reconciliation outcome must be delivered or retry")
         with self._lock:
             receipt = self._controller_command_receipts.get(command_id)
             if receipt is None:
@@ -1414,15 +1504,9 @@ class ControllerStoreMixin:
             if receipt.command_digest != command_digest:
                 raise _controller_error("controller command digest conflicts", "controller_command_conflict")
             row = self._ensure_controller_wake(receipt)
-            target = "delivered" if outcome == "delivered" else "pending"
-            if row["outbox_state"] == target:
-                return deepcopy(row)
-            if row["outbox_state"] != "ambiguous":
-                raise _controller_error("controller wake is not ambiguous", "controller_command_stale")
-            staged = deepcopy(row)
-            staged["outbox_state"] = target
-            staged["delivered_at_ms"] = now_ms if target == "delivered" else None
-            staged["last_error"] = None
+            staged = prepare_controller_wake_reconciliation(row, outcome=outcome, now_ms=now_ms)
+            if staged is None:
+                return None
             self._set_controller_wake(staged)
             return deepcopy(staged)
 
@@ -1433,12 +1517,9 @@ class ControllerStoreMixin:
             if receipt is None:
                 return None
             row = self._ensure_controller_wake(receipt)
-            if row["outbox_state"] != "claimed" or int(row["lease_expires_at_ms"] or 0) > now_ms:
-                return deepcopy(row)
-            staged = deepcopy(row)
-            staged["outbox_state"] = "pending"
-            staged["claim_token"] = None
-            staged["lease_expires_at_ms"] = None
+            staged = prepare_controller_wake_reap(row, now_ms=now_ms)
+            if staged is None:
+                return None
             self._set_controller_wake(staged)
             return deepcopy(staged)
 

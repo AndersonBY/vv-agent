@@ -654,6 +654,7 @@ class AgentRuntime:
             if budget_controller.exhaustion is None and result.status not in {
                 AgentStatus.RECONCILIATION_REQUIRED,
                 AgentStatus.DEFERRED,
+                AgentStatus.SUSPENDED,
             }:
                 exhaustion = budget_controller.terminal(
                     suppress_exhaustion=cancelled or operation_failed,

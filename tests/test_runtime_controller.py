@@ -1466,6 +1466,39 @@ def test_controller_recovery_wake_reaper_finds_expired_outbox(store: Any) -> Non
     assert receipt is not None and receipt.outbox_state == "pending"
 
 
+@pytest.mark.skipif(not os.environ.get("VV_AGENT_TEST_REDIS_URL"), reason="requires two real Redis clients")
+def test_real_redis_controller_wake_claim_has_one_winner() -> None:
+    url = os.environ["VV_AGENT_TEST_REDIS_URL"]
+    first = RedisCheckpointStore(url)
+    second = RedisCheckpointStore(url)
+    key = f"real-redis-wake-{uuid4().hex}"
+    _checkpoint_value, request, _outcome = _admit_host(first, key)
+    command = _host_response_command(first, request, key=key, command_id=f"wake-{uuid4().hex}")
+    assert first.resolve_controller_command(command).kind == "applied"
+    barrier = multiprocessing.Barrier(2)
+
+    def claim(store: RedisCheckpointStore, token: str) -> dict[str, Any] | CheckpointError | None:
+        barrier.wait()
+        try:
+            return store.claim_controller_command_wake(
+                command_id=command.command_id,
+                command_digest=command.command_digest or "",
+                claim_token=token,
+                lease_expires_at_ms=60_000,
+                now_ms=1,
+            )
+        except CheckpointError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results: list[dict[str, Any] | CheckpointError | None] = list(
+            pool.map(lambda item: claim(*item), ((first, "owner-a"), (second, "owner-b")))
+        )
+    assert sum(isinstance(result, dict) and result["outbox_state"] == "claimed" for result in results) == 1
+    assert sum(isinstance(result, CheckpointError) and result.code == "controller_command_stale" for result in results) == 1
+    first.delete_checkpoint(key)
+
+
 @pytest.mark.parametrize("store_kind", ["memory", "sqlite"])
 def test_host_response_recovery_dual_worker_one_revision(tmp_path: Path, store_kind: str) -> None:
     store = InMemoryCheckpointStore() if store_kind == "memory" else SqliteCheckpointStore(tmp_path / "recovery-race.sqlite3")

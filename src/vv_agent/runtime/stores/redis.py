@@ -71,6 +71,10 @@ from vv_agent.runtime.state import (
 )
 from vv_agent.runtime.stores.controller_store import (
     prepare_controller_command,
+    prepare_controller_wake_claim,
+    prepare_controller_wake_completion,
+    prepare_controller_wake_reap,
+    prepare_controller_wake_reconciliation,
     prepare_host_interaction,
     prepare_host_response_consumption,
     prepare_host_response_reap,
@@ -1502,10 +1506,6 @@ class RedisCheckpointStore:
         lease_expires_at_ms: int,
         now_ms: int,
     ) -> dict[str, Any] | None:
-        if not isinstance(claim_token, str) or not claim_token.strip():
-            raise ValueError("controller wake claim_token must be non-empty")
-        if isinstance(lease_expires_at_ms, bool) or not isinstance(lease_expires_at_ms, int) or lease_expires_at_ms <= now_ms:
-            raise ValueError("controller wake lease must be greater than now_ms")
         receipt_key = self._controller_receipt_key(command_id)
         outbox_key = self._controller_outbox_key(command_id)
         with self._client.pipeline() as pipe:
@@ -1520,26 +1520,18 @@ class RedisCheckpointStore:
                     if receipt.command_digest != command_digest:
                         pipe.unwatch()
                         raise CheckpointError("controller command digest conflicts", code="controller_command_conflict")
-                    if current["outbox_action"] == "none" or current["outbox_state"] == "delivered":
-                        pipe.unwatch()
-                        return current
-                    if current["outbox_state"] == "ambiguous":
-                        pipe.unwatch()
-                        raise CheckpointError("controller wake requires reconciliation", code="controller_command_stale")
-                    if current["outbox_state"] == "claimed":
-                        if current["claim_token"] == claim_token:
-                            pipe.unwatch()
-                            return current
-                        if int(current["lease_expires_at_ms"] or 0) > now_ms:
-                            pipe.unwatch()
-                            raise CheckpointError("controller wake is claimed by another owner", code="controller_command_stale")
-                    staged = dict(current)
-                    staged.update(
-                        outbox_state="claimed",
+                    staged = prepare_controller_wake_claim(
+                        current,
                         claim_token=claim_token,
                         lease_expires_at_ms=lease_expires_at_ms,
-                        attempt=int(current["attempt"]) + 1,
+                        now_ms=now_ms,
                     )
+                    if staged is None:
+                        pipe.unwatch()
+                        return None
+                    if staged == current:
+                        pipe.unwatch()
+                        return current
                     updated = replace(
                         receipt,
                         outbox_state="claimed",
@@ -1564,8 +1556,6 @@ class RedisCheckpointStore:
         now_ms: int,
         error: str | None = None,
     ) -> dict[str, Any] | None:
-        if outcome not in {"delivered", "ambiguous"}:
-            raise ValueError("controller wake completion outcome must be delivered or ambiguous")
         receipt_key = self._controller_receipt_key(command_id)
         outbox_key = self._controller_outbox_key(command_id)
         with self._client.pipeline() as pipe:
@@ -1580,27 +1570,20 @@ class RedisCheckpointStore:
                     if receipt.command_digest != command_digest:
                         pipe.unwatch()
                         raise CheckpointError("controller command digest conflicts", code="controller_command_conflict")
-                    if current["outbox_state"] in {"delivered", "ambiguous"}:
-                        if current["outbox_state"] == outcome:
-                            pipe.unwatch()
-                            return current
-                        pipe.unwatch()
-                        raise CheckpointError("controller wake has already completed", code="controller_command_stale")
-                    if (
-                        current["outbox_state"] != "claimed"
-                        or current["claim_token"] != claim_token
-                        or current["attempt"] != attempt
-                    ):
-                        pipe.unwatch()
-                        raise CheckpointError("controller wake owner or attempt is stale", code="controller_command_stale")
-                    staged = dict(current)
-                    staged.update(
-                        outbox_state=outcome,
-                        claim_token=None,
-                        lease_expires_at_ms=None,
-                        delivered_at_ms=now_ms if outcome == "delivered" else None,
-                        last_error=error,
+                    staged = prepare_controller_wake_completion(
+                        current,
+                        claim_token=claim_token,
+                        attempt=attempt,
+                        outcome=outcome,
+                        now_ms=now_ms,
+                        error=error,
                     )
+                    if staged is None:
+                        pipe.unwatch()
+                        return None
+                    if staged == current:
+                        pipe.unwatch()
+                        return current
                     updated = replace(receipt, outbox_state=outcome)
                     pipe.multi()
                     self._redis_controller_wake_write(pipe, updated, staged)
@@ -1618,8 +1601,6 @@ class RedisCheckpointStore:
         outcome: str,
         now_ms: int,
     ) -> dict[str, Any] | None:
-        if outcome not in {"delivered", "retry"}:
-            raise ValueError("controller wake reconciliation outcome must be delivered or retry")
         receipt_key = self._controller_receipt_key(command_id)
         outbox_key = self._controller_outbox_key(command_id)
         with self._client.pipeline() as pipe:
@@ -1634,19 +1615,14 @@ class RedisCheckpointStore:
                     if receipt.command_digest != command_digest:
                         pipe.unwatch()
                         raise CheckpointError("controller command digest conflicts", code="controller_command_conflict")
-                    target = "delivered" if outcome == "delivered" else "pending"
-                    if current["outbox_state"] == target:
+                    staged = prepare_controller_wake_reconciliation(current, outcome=outcome, now_ms=now_ms)
+                    if staged is None:
+                        pipe.unwatch()
+                        return None
+                    if staged == current:
                         pipe.unwatch()
                         return current
-                    if current["outbox_state"] != "ambiguous":
-                        pipe.unwatch()
-                        raise CheckpointError("controller wake is not ambiguous", code="controller_command_stale")
-                    staged = dict(current)
-                    staged.update(
-                        outbox_state=target,
-                        delivered_at_ms=now_ms if target == "delivered" else None,
-                        last_error=None,
-                    )
+                    target = str(staged["outbox_state"])
                     updated = replace(receipt, outbox_state=target)
                     pipe.multi()
                     self._redis_controller_wake_write(pipe, updated, staged)
@@ -1668,11 +1644,13 @@ class RedisCheckpointStore:
                         pipe.unwatch()
                         return None
                     receipt, current = snapshot
-                    if current["outbox_state"] != "claimed" or int(current["lease_expires_at_ms"] or 0) > now_ms:
+                    staged = prepare_controller_wake_reap(current, now_ms=now_ms)
+                    if staged is None:
+                        pipe.unwatch()
+                        return None
+                    if staged == current:
                         pipe.unwatch()
                         return current
-                    staged = dict(current)
-                    staged.update(outbox_state="pending", claim_token=None, lease_expires_at_ms=None)
                     updated = replace(receipt, outbox_state="pending")
                     pipe.multi()
                     self._redis_controller_wake_write(pipe, updated, staged)

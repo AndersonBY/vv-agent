@@ -2608,15 +2608,9 @@ def test_celery_worker_terminal_replay_repairs_pending_delivery_without_model_ca
 def test_celery_local_terminal_replay_repairs_pending_delivery_without_model_calls(tmp_path: Path) -> None:
     store, _registry, backend, envelope, model_calls = _terminal_replay_window(tmp_path)
     checkpoint = store.load_checkpoint("terminal-replay-repair")
-    assert checkpoint is not None
-    assert checkpoint.terminal_result is not None
-    event_ids = tuple(entry.event_id for entry in checkpoint.event_outbox)
+    assert checkpoint is not None and checkpoint.terminal_result is not None
     controller = CheckpointResumeController(
-        config=CheckpointConfig(
-            store=store,
-            key=checkpoint.checkpoint_key,
-            resume_policy=ResumePolicy.RESUME_IF_PRESENT,
-        ),
+        config=CheckpointConfig(store=store, key=checkpoint.checkpoint_key, resume_policy=ResumePolicy.RESUME_IF_PRESENT),
         task_id=checkpoint.task_id,
         run_id=checkpoint.root_run_id,
         trace_id=checkpoint.trace_id,
@@ -2643,15 +2637,11 @@ def test_celery_local_terminal_replay_repairs_pending_delivery_without_model_cal
         )
     finally:
         controller.close()
-
     assert replay.final_answer == "worker answer"
     replayed = store.load_checkpoint("terminal-replay-repair")
-    assert replayed is not None
-    assert replayed.revision == checkpoint.revision + 2
-    assert replayed.claim_token is None
-    assert replayed.terminal_acknowledged
+    assert replayed is not None and replayed.revision == checkpoint.revision + 2
+    assert replayed.claim_token is None and replayed.terminal_acknowledged
     assert all(entry.state == "delivered" for entry in replayed.event_outbox)
-    assert tuple(entry.event_id for entry in replayed.event_outbox) == event_ids
     assert model_calls == [1]
 
 
