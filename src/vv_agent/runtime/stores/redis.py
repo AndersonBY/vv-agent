@@ -655,20 +655,11 @@ class RedisCheckpointStore:
                         notification_set_key,
                         dispatch_set_key,
                     )
-                    smembers = getattr(pipe, "smembers", None)
-                    if callable(smembers):
-                        receipt_keys = tuple(smembers(receipt_set_key))
-                        controller_keys = tuple(smembers(controller_set_key))
-                        record_keys = tuple(smembers(record_set_key))
-                        notification_keys = tuple(smembers(notification_set_key))
-                        dispatch_keys = tuple(smembers(dispatch_set_key))
-                    else:
-                        client_smembers = getattr(self._client, "smembers", None)
-                        receipt_keys = tuple(client_smembers(receipt_set_key)) if callable(client_smembers) else ()
-                        controller_keys = tuple(client_smembers(controller_set_key)) if callable(client_smembers) else ()
-                        record_keys = tuple(client_smembers(record_set_key)) if callable(client_smembers) else ()
-                        notification_keys = tuple(client_smembers(notification_set_key)) if callable(client_smembers) else ()
-                        dispatch_keys = tuple(client_smembers(dispatch_set_key)) if callable(client_smembers) else ()
+                    receipt_keys = tuple(pipe.smembers(receipt_set_key))
+                    controller_keys = tuple(pipe.smembers(controller_set_key))
+                    record_keys = tuple(pipe.smembers(record_set_key))
+                    notification_keys = tuple(pipe.smembers(notification_set_key))
+                    dispatch_keys = tuple(pipe.smembers(dispatch_set_key))
                     receipt_keys = tuple(cleanup_member_key(key, "deferred receipt") for key in receipt_keys)
                     controller_keys = tuple(cleanup_member_key(key, "controller receipt") for key in controller_keys)
                     record_keys = tuple(cleanup_member_key(key, "host record") for key in record_keys)
@@ -681,77 +672,6 @@ class RedisCheckpointStore:
                             raw_lease,
                             checkpoint_key=checkpoint_key,
                         )
-                    if not receipt_keys:
-                        # Legacy/test doubles may not expose the reverse set.
-                        # Keep the scan under WATCH; a concurrent modern
-                        # resolver mutating the set invalidates this attempt.
-                        scan_iter = getattr(self._client, "scan_iter", None)
-                        if callable(scan_iter):
-                            for candidate in scan_iter(f"{_DEFERRED_RECEIPT_PREFIX}*"):
-                                candidate = cleanup_member_key(candidate, "deferred receipt")
-                                raw = self._client.get(candidate)
-                                if raw is None:
-                                    continue
-                                try:
-                                    receipt = _receipt_from_storage(raw)
-                                    if receipt.handle.checkpoint_key == checkpoint_key and candidate == self._receipt_key(
-                                        receipt.handle.key
-                                    ):
-                                        receipt_keys = (*receipt_keys, candidate)
-                                except (TypeError, ValueError):
-                                    continue
-                    scan_iter = getattr(self._client, "scan_iter", None)
-                    if callable(scan_iter):
-                        if not controller_keys:
-                            for candidate in scan_iter(f"{_CONTROLLER_RECEIPT_PREFIX}*"):
-                                candidate = cleanup_member_key(candidate, "controller receipt")
-                                raw = self._client.get(candidate)
-                                if raw is None:
-                                    continue
-                                try:
-                                    receipt = _controller_receipt_from_storage(raw)
-                                except (TypeError, ValueError):
-                                    continue
-                                if receipt.handle.checkpoint_key == checkpoint_key and candidate == self._controller_receipt_key(
-                                    receipt.command_id
-                                ):
-                                    controller_keys = (*controller_keys, candidate)
-                        if not record_keys:
-                            for candidate in scan_iter(f"{_HOST_RECORD_PREFIX}*"):
-                                candidate = cleanup_member_key(candidate, "host record")
-                                raw = self._client.get(candidate)
-                                if raw is None:
-                                    continue
-                                try:
-                                    record = _host_record_from_storage(raw, expected_key=candidate)
-                                except (TypeError, ValueError):
-                                    continue
-                                if record.get("checkpoint_key") == checkpoint_key:
-                                    record_keys = (*record_keys, candidate)
-                        if not notification_keys:
-                            for candidate in scan_iter(f"{_HOST_NOTIFICATION_PREFIX}*"):
-                                candidate = cleanup_member_key(candidate, "host notification")
-                                raw = self._client.get(candidate)
-                                if raw is None:
-                                    continue
-                                try:
-                                    notification = _notification_from_storage(raw, expected_key=candidate)
-                                except (TypeError, ValueError):
-                                    continue
-                                if notification.get("checkpoint_key") == checkpoint_key:
-                                    notification_keys = (*notification_keys, candidate)
-                        if not dispatch_keys:
-                            for candidate in scan_iter(f"{_DISPATCH_OUTBOX_PREFIX}*"):
-                                candidate = cleanup_member_key(candidate, "dispatch outbox")
-                                raw = self._client.get(candidate)
-                                if raw is None:
-                                    continue
-                                try:
-                                    dispatch = _dispatch_outbox_from_storage(raw, expected_key=candidate)
-                                except (TypeError, ValueError):
-                                    continue
-                                if dispatch.checkpoint_key == checkpoint_key:
-                                    dispatch_keys = (*dispatch_keys, candidate)
                     for receipt_key in receipt_keys:
                         raw = pipe.get(receipt_key)
                         if raw is None:
@@ -802,7 +722,7 @@ class RedisCheckpointStore:
                                 code="checkpoint_store_conflict",
                             )
                         try:
-                            record = _host_record_from_storage(
+                            _host_record_from_storage(
                                 raw,
                                 expected_checkpoint_key=checkpoint_key,
                                 expected_key=record_key,
@@ -820,7 +740,7 @@ class RedisCheckpointStore:
                                 code="checkpoint_store_conflict",
                             )
                         try:
-                            notification = _notification_from_storage(
+                            _notification_from_storage(
                                 raw,
                                 expected_checkpoint_key=checkpoint_key,
                                 expected_key=notification_key,
@@ -838,7 +758,7 @@ class RedisCheckpointStore:
                                 code="checkpoint_store_conflict",
                             )
                         try:
-                            dispatch = _dispatch_outbox_from_storage(
+                            _dispatch_outbox_from_storage(
                                 raw,
                                 expected_checkpoint_key=checkpoint_key,
                                 expected_key=dispatch_key,
@@ -1192,9 +1112,7 @@ class RedisCheckpointStore:
                     else:
                         pipe.set(lease_key, str(updated.lease_expires_at_ms))
                     pipe.set(receipt_key, receipt_payload)
-                    sadd = getattr(pipe, "sadd", None)
-                    if callable(sadd):
-                        sadd(receipt_set_key, receipt_key)
+                    pipe.sadd(receipt_set_key, receipt_key)
                     pipe.execute()
                     return decision
                 except self._watch_error:
@@ -2450,8 +2368,5 @@ def _lease_from_storage(raw_lease: object | None) -> int | None:
 
 
 def _redis_server_now_ms(client: Any) -> int:
-    time_method = getattr(client, "time", None)
-    if not callable(time_method):
-        return 0
-    seconds, microseconds = time_method()
+    seconds, microseconds = client.time()
     return int(seconds) * 1000 + int(microseconds) // 1000
