@@ -1661,6 +1661,11 @@
                   "kind": "keyword_only",
                   "name": "continuation",
                   "required": false
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "start_admission",
+                  "required": false
                 }
               ]
             }
@@ -1698,6 +1703,11 @@
                 {
                   "kind": "keyword_only",
                   "name": "continuation",
+                  "required": false
+                },
+                {
+                  "kind": "keyword_only",
+                  "name": "start_admission",
                   "required": false
                 }
               ]
