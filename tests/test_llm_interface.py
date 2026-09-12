@@ -434,9 +434,7 @@ def test_llm_stream_throttles_large_tool_call_progress(monkeypatch) -> None:
                 usage=None,
                 content="",
                 reasoning_content=None,
-                tool_calls=[
-                    SimpleNamespace(index=0, id=None, function=SimpleNamespace(name=None, arguments="x"))
-                ],
+                tool_calls=[SimpleNamespace(index=0, id=None, function=SimpleNamespace(name=None, arguments="x"))],
             )
         )
     chunks.append(SimpleNamespace(usage=_FakeUsage(), content="", reasoning_content=None, tool_calls=[]))
