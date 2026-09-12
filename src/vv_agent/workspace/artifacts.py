@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ class BoundedTextPreview:
     original_bytes: int
     visible_bytes: int
     truncated: bool
+    json_bytes: int
 
 
 def bounded_text_preview(text: str) -> BoundedTextPreview:
@@ -37,6 +39,7 @@ def bounded_text_preview(text: str) -> BoundedTextPreview:
             original_bytes=original_bytes,
             visible_bytes=original_bytes,
             truncated=False,
+            json_bytes=len(json.dumps(text, ensure_ascii=False).encode("utf-8")),
         )
 
     content = f"{text[:PREVIEW_HEAD_CHARS]}{PREVIEW_MARKER}{text[-PREVIEW_TAIL_CHARS:]}"
@@ -47,6 +50,7 @@ def bounded_text_preview(text: str) -> BoundedTextPreview:
         original_bytes=original_bytes,
         visible_bytes=len(content.encode("utf-8")),
         truncated=True,
+        json_bytes=len(json.dumps(text, ensure_ascii=False).encode("utf-8")),
     )
 
 
@@ -57,10 +61,12 @@ def bounded_captured_text_preview(path: Path) -> BoundedTextPreview:
     tail = ""
     total_chars = 0
     original_bytes = 0
+    json_bytes = 2
 
     for chunk in _iter_captured_text_chunks(path):
         total_chars += len(chunk)
         original_bytes += len(chunk.encode("utf-8"))
+        json_bytes += len(json.dumps(chunk, ensure_ascii=False)[1:-1].encode("utf-8"))
         if first_count < BOUNDED_TEXT_CHARS:
             visible_chunk = chunk[: BOUNDED_TEXT_CHARS - first_count]
             first_chars.append(visible_chunk)
@@ -74,6 +80,7 @@ def bounded_captured_text_preview(path: Path) -> BoundedTextPreview:
             original_bytes=original_bytes,
             visible_bytes=original_bytes,
             truncated=False,
+            json_bytes=json_bytes,
         )
 
     content = f"{first[:PREVIEW_HEAD_CHARS]}{PREVIEW_MARKER}{tail}"
@@ -84,6 +91,7 @@ def bounded_captured_text_preview(path: Path) -> BoundedTextPreview:
         original_bytes=original_bytes,
         visible_bytes=len(content.encode("utf-8")),
         truncated=True,
+        json_bytes=json_bytes,
     )
 
 

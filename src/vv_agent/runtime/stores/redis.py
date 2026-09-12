@@ -1268,7 +1268,8 @@ class RedisCheckpointStore:
                     record_id = None
                     watch_keys = [data_key, lease_key, receipt_key, command_key, outbox_key]
                     pipe.watch(*watch_keys)
-                    raw_receipt = pipe.get(receipt_key)
+                    # Replay and checkpoint fences must see the same admission.
+                    raw_receipt, raw_outbox, raw, raw_lease = pipe.mget([receipt_key, outbox_key, data_key, lease_key])
                     if raw_receipt is not None:
                         receipt = _controller_receipt_from_storage(raw_receipt)
                         if receipt.command_id != command_value.command_id:
@@ -1276,7 +1277,6 @@ class RedisCheckpointStore:
                             raise CheckpointError(
                                 "redis controller receipt identity conflicts", code="controller_command_conflict"
                             )
-                        raw_outbox = pipe.get(outbox_key)
                         if raw_outbox is None:
                             pipe.unwatch()
                             raise CheckpointError("controller wake outbox is missing", code="controller_command_conflict")
@@ -1298,7 +1298,6 @@ class RedisCheckpointStore:
                             )
                         pipe.unwatch()
                         return receipt, False
-                    raw, raw_lease = pipe.mget([data_key, lease_key])
                     if raw is None:
                         pipe.unwatch()
                         raise CheckpointError("controller command checkpoint was not found", code="controller_command_stale")
@@ -1341,14 +1340,23 @@ class RedisCheckpointStore:
                                 expected_checkpoint_key=checkpoint_key,
                                 expected_key=record_key,
                             )
-                    updated, staged, receipt = prepare_controller_command(
-                        current,
-                        record,
-                        command_value,
-                        now_ms=lease_now_ms,
-                        event_id=run_events.new_event_id(),
-                        created_at=run_events.event_created_at(),
-                    )
+                    try:
+                        updated, staged, receipt = prepare_controller_command(
+                            current,
+                            record,
+                            command_value,
+                            now_ms=lease_now_ms,
+                            event_id=run_events.new_event_id(),
+                            created_at=run_events.event_created_at(),
+                        )
+                    except CheckpointError:
+                        # A host record may change after the checkpoint read.
+                        # Validate WATCH without writes before rejecting; a
+                        # competing admission must retry through receipt replay.
+                        pipe.multi()
+                        pipe.get(receipt_key)
+                        pipe.execute()
+                        raise
                     payload, lease = _checkpoint_to_storage(updated)
                     pipe.multi()
                     pipe.set(data_key, payload)

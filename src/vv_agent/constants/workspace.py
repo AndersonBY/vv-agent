@@ -310,11 +310,12 @@ _DEFAULT_TOOL_SCHEMAS: dict[str, ToolSchema] = {
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a command in the configured workspace shell. Prefer specialized file tools for direct file work. Long commands may run in the background; oversized terminal output returns a head/tail preview and a workspace artifact path for complete recovery.",
+            "description": "Run a command in the configured workspace shell. Return its output when it exits within yield_time_ms, otherwise return a session_id and current output while it keeps running. Use check_background_command to inspect or stop_background_command to stop it. Oversized output has a recoverable workspace artifact.",
             "parameters": {
                 "additionalProperties": False,
                 "properties": {
                     "auto_confirm": {
+                        "default": False,
                         "description": "Pipe yes to the command for non-interactive confirmation prompts.",
                         "type": "boolean",
                     },
@@ -323,12 +324,23 @@ _DEFAULT_TOOL_SCHEMAS: dict[str, ToolSchema] = {
                         "description": "Execution directory (workspace-relative by default; absolute path allowed when outside-workspace access is enabled).",
                         "type": "string",
                     },
-                    "run_in_background": {"description": "Start asynchronously and return a session id.", "type": "boolean"},
                     "stdin": {
                         "description": "Optional stdin content for interactive prompts, confirmation text, heredoc-style input, or commands that read from standard input.",
                         "type": "string",
                     },
-                    "timeout": {"description": "Foreground timeout seconds; bounded by the schema.", "type": "integer"},
+                    "yield_time_ms": {
+                        "default": 1000,
+                        "description": "Maximum initial wait in milliseconds. Zero returns a handle immediately. Reaching this wait does not stop the command.",
+                        "minimum": 0,
+                        "maximum": 10000,
+                        "type": "integer",
+                    },
+                    "timeout_seconds": {
+                        "description": "Optional execution limit in seconds from process start, including time after returning a handle. Omit for no execution deadline. Querying never extends it.",
+                        "minimum": 1,
+                        "maximum": 86400,
+                        "type": "integer",
+                    },
                 },
                 "required": ["command"],
                 "type": "object",
@@ -339,7 +351,20 @@ _DEFAULT_TOOL_SCHEMAS: dict[str, ToolSchema] = {
         "type": "function",
         "function": {
             "name": "check_background_command",
-            "description": "Read the current state and bounded output of a background command by session id. Terminal oversized output uses the same preview-and-artifact result as foreground bash.",
+            "description": "Read the current state and bounded output of a command owned by this task and workspace. This is an immediate snapshot. A missing local session does not establish that its process exited. Oversized output includes a recoverable workspace artifact.",
+            "parameters": {
+                "additionalProperties": False,
+                "properties": {"session_id": {"description": "Session id returned by bash.", "type": "string"}},
+                "required": ["session_id"],
+                "type": "object",
+            },
+        },
+    },
+    "stop_background_command": {
+        "type": "function",
+        "function": {
+            "name": "stop_background_command",
+            "description": "Stop the process tree of a command owned by this task and workspace. Returns bounded output and observed exit status after termination is confirmed; stopping or unknown means termination is not yet confirmed. A missing local session does not establish that its process exited.",
             "parameters": {
                 "additionalProperties": False,
                 "properties": {"session_id": {"description": "Session id returned by bash.", "type": "string"}},

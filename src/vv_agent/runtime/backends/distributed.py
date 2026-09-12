@@ -37,8 +37,8 @@ from vv_agent.types import AgentResult, AgentStatus, AgentTask, SubAgentConfig, 
 DISTRIBUTED_RUN_SCHEMA_VERSION = "vv-agent.distributed-run.v5"
 DISTRIBUTED_WORKER_RESPONSE_SCHEMA_VERSION = "vv-agent.distributed-worker-response.v4"
 DEFAULT_TOOLSET_ID = "vv-agent.builtin-tools"
-DEFAULT_TOOLSET_VERSION = "3"
-DEFAULT_TOOLSET_SCHEMA_DIGEST = "4f535c2bfd1657cec4a8dce5f0d846dc8f683a5470100a8ce83801739b8e3c9a"
+DEFAULT_TOOLSET_VERSION = "4"
+DEFAULT_TOOLSET_SCHEMA_DIGEST = "dfacb96a2c181e1eb56bca920911cb82f5425ad3cab288fd5f1e96651d9eb2c3"
 DEFAULT_CYCLE_NAME = "vv_agent.distributed.run_single_cycle"
 DEFAULT_LEASE_DURATION_MS = 5 * 60 * 1000
 _MAX_U64 = (1 << 64) - 1

@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "canonical": {
     "structured_error_content_required_keys": [
       "ok",
@@ -48,8 +48,13 @@
       ]
     },
     "bash_shell": {
-      "background_field": "explicit_override_only",
-      "invalid_timeout_error_code": "invalid_timeout",
+      "yield_time_ms_default": 1000,
+      "yield_time_ms_range": [0, 10000],
+      "timeout_seconds_range": [1, 86400],
+      "omitted_timeout_seconds": "no_deadline",
+      "deadline_origin": "process_start_monotonic",
+      "running_receipt": "SUCCESS",
+      "owner": ["task_id", "workspace_identity"],
       "shell_prepare_error_code": "invalid_shell_config"
     }
   },
@@ -186,7 +191,7 @@
       "non_zero": {
         "arguments": {
           "command": "printf 'fixture-output\\n'; exit 7",
-          "timeout": 30
+          "timeout_seconds": 30
         },
         "context_metadata": {
           "bash_shell": "bash"
@@ -207,7 +212,7 @@
       "invalid_timeout": {
         "arguments": {
           "command": "echo never-runs",
-          "timeout": "not-an-integer"
+          "timeout_seconds": "not-an-integer"
         },
         "result": {
           "status_code": "ERROR",
@@ -219,8 +224,8 @@
             "error_code": "invalid_tool_arguments",
             "issues": [
               {
-                "instance_path": "/timeout",
-                "schema_path": "/properties/timeout/type",
+                "instance_path": "/timeout_seconds",
+                "schema_path": "/properties/timeout_seconds/type",
                 "rule": "type"
               }
             ]
@@ -234,14 +239,14 @@
       "background_start": {
         "arguments": {
           "command": "sleep 0.1",
-          "run_in_background": true,
-          "timeout": 30
+          "yield_time_ms": 0,
+          "timeout_seconds": 30
         },
         "context_metadata": {
           "bash_shell": "bash"
         },
         "result": {
-          "status_code": "RUNNING",
+          "status_code": "SUCCESS",
           "directive": "continue",
           "content_subset": {
             "status": "running",

@@ -896,14 +896,26 @@ Priority is strict:
 
 ## Built-in Tools
 
-`find_files`, `file_info`, `read_file`, `write_file`, `edit_file`, `search_files`, `todo_write`, `task_finish`, `ask_user`, `bash`, `check_background_command`, `read_image`, `create_sub_task`, `sub_task_status`, `activate_skill`.
+`find_files`, `file_info`, `read_file`, `write_file`, `edit_file`, `search_files`, `todo_write`, `ask_user`, `bash`, `check_background_command`, `stop_background_command`, `read_image`, `create_sub_task`, `sub_task_status`, `activate_skill`.
 
 Custom tools can be registered via `ToolRegistry.register()`.
 
-The `bash` tool supports two background paths:
+`bash` waits up to `yield_time_ms` (default 1000, integer 0..10000) for the
+command to finish, then returns its current output and a `session_id` while the
+process keeps running. Zero requests an immediate handle. Optional
+`timeout_seconds` (integer 1..86400) sets one execution deadline from process
+start; omission means no execution deadline. Querying does not extend it.
 
-- Explicit background: pass `run_in_background=true`, receive a `session_id` immediately, then poll with `check_background_command`.
-- Timeout handoff: if a foreground command reaches `timeout`, it is moved into a background session instead of failing immediately. The tool returns a `session_id`, and the session emits terminal background-command events when that process completes, fails, or times out.
+`check_background_command({"session_id":"bg_..."})` reads a current snapshot;
+`stop_background_command({"session_id":"bg_..."})` requests process-tree
+termination. A successful start or running query is a completed `SUCCESS` /
+`continue` management receipt, so a checkpointed Runner can call its model
+again. The actual process state is in content and metadata. Nonzero observed
+exit codes remain errors. Sessions belong to their initiating task and workspace;
+a missing local record does not establish whether an external process exited.
+Live oversized output includes an immutable artifact for complete recovery.
+See [Bash process management](docs/bash-process-management.md) for examples and
+termination observations.
 
 ## Sub-agents
 

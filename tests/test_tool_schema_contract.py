@@ -38,8 +38,8 @@ def _registry_manifest(registry: ToolRegistry) -> dict[str, Any]:
             }
         )
     return {
-        "contract": "vv-agent-builtin-tools-v3",
-        "schema_version": 3,
+        "contract": "vv-agent-builtin-tools-v4",
+        "schema_version": 4,
         "exposure_contract": {
             "allowed_values": ["direct", "hidden"],
             "model_visible_values": ["direct"],

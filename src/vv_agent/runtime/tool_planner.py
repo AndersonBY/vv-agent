@@ -9,6 +9,7 @@ from vv_agent.constants import (
     CHECK_BACKGROUND_COMMAND_TOOL_NAME,
     CREATE_SUB_TASK_TOOL_NAME,
     READ_IMAGE_TOOL_NAME,
+    STOP_BACKGROUND_COMMAND_TOOL_NAME,
     SUB_TASK_STATUS_TOOL_NAME,
     WORKSPACE_TOOLS,
 )
@@ -121,7 +122,7 @@ def plan_tool_names(task: AgentTask, *, memory_usage_percentage: int | None = No
         tool_names.extend(WORKSPACE_TOOLS)
 
     if task.agent_type == "computer":
-        tool_names.extend([BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME])
+        tool_names.extend([BASH_TOOL_NAME, CHECK_BACKGROUND_COMMAND_TOOL_NAME, STOP_BACKGROUND_COMMAND_TOOL_NAME])
 
     if task.sub_agents_enabled:
         tool_names.extend([CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME])

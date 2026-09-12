@@ -13,6 +13,7 @@ history.
 | `development.md` | Local setup, test commands, linting, live-test workflow, and change hygiene. |
 | `model-settings.md` | `LLM_SETTINGS`, local key files, model defaults, and exact model resolution rules. |
 | `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and typed event producers. |
+| `bash-process-management.md` | Bash initial wait, execution deadline, owner-scoped query/stop, live output, and checkpoint receipts. |
 | `run-budgets.md` | Token, tool, wall-time, and host-cost limits; observations, resume, and distributed behavior. |
 | `output-validation.md` | Default-off typed output validation, one tools-free repair callback, and failure semantics. |
 | `checkpoint-resume.md` | Checkpoint v11, immutable run definitions, model-call ledgers, deferred barriers, ambiguity, host interaction, and durable terminal ordering. |

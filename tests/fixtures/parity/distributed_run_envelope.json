@@ -1,13 +1,60 @@
 {
   "schema_version": "vv-agent.distributed-run.v5",
   "runtime_recipe_cases": [
-    {"name": "client_without_settings_file", "settings_file": "", "llm_client_ref": {"id": "llm.primary", "version": "2"}, "valid": true},
-    {"name": "client_with_settings_file", "settings_file": "/srv/settings.json", "llm_client_ref": {"id": "llm.primary", "version": "2"}, "valid": true},
-    {"name": "file_without_client", "settings_file": "/srv/settings.json", "llm_client_ref": null, "valid": true},
-    {"name": "empty_without_client", "settings_file": "", "llm_client_ref": null, "valid": false},
-    {"name": "blank_without_client", "settings_file": " \t", "llm_client_ref": null, "valid": false},
-    {"name": "null_file_with_client", "settings_file": null, "llm_client_ref": {"id": "llm.primary", "version": "2"}, "valid": false},
-    {"name": "number_file_with_client", "settings_file": 42, "llm_client_ref": {"id": "llm.primary", "version": "2"}, "valid": false}
+    {
+      "name": "client_without_settings_file",
+      "settings_file": "",
+      "llm_client_ref": {
+        "id": "llm.primary",
+        "version": "2"
+      },
+      "valid": true
+    },
+    {
+      "name": "client_with_settings_file",
+      "settings_file": "/srv/settings.json",
+      "llm_client_ref": {
+        "id": "llm.primary",
+        "version": "2"
+      },
+      "valid": true
+    },
+    {
+      "name": "file_without_client",
+      "settings_file": "/srv/settings.json",
+      "llm_client_ref": null,
+      "valid": true
+    },
+    {
+      "name": "empty_without_client",
+      "settings_file": "",
+      "llm_client_ref": null,
+      "valid": false
+    },
+    {
+      "name": "blank_without_client",
+      "settings_file": " \t",
+      "llm_client_ref": null,
+      "valid": false
+    },
+    {
+      "name": "null_file_with_client",
+      "settings_file": null,
+      "llm_client_ref": {
+        "id": "llm.primary",
+        "version": "2"
+      },
+      "valid": false
+    },
+    {
+      "name": "number_file_with_client",
+      "settings_file": 42,
+      "llm_client_ref": {
+        "id": "llm.primary",
+        "version": "2"
+      },
+      "valid": false
+    }
   ],
   "run_definition_schema_rules": {
     "writer_value": "vv-agent.run-definition.v5",
@@ -139,8 +186,8 @@
       "capabilities": {
         "toolset_ref": {
           "id": "vv-agent.builtin-tools",
-          "version": "3",
-          "schema_digest": "4f535c2bfd1657cec4a8dce5f0d846dc8f683a5470100a8ce83801739b8e3c9a"
+          "version": "4",
+          "schema_digest": "dfacb96a2c181e1eb56bca920911cb82f5425ad3cab288fd5f1e96651d9eb2c3"
         },
         "tool_policy": {
           "allowed_tools": [
@@ -531,7 +578,11 @@
       "heartbeat_interval_less_than_positive_lease": true,
       "successful_commit_precedes_concurrent_renewal_error": true,
       "renew_result_schema": "vv-agent.checkpoint-renewal.v1",
-      "renew_result_outcomes": ["renewed", "cancel_requested", "claim_lost"],
+      "renew_result_outcomes": [
+        "renewed",
+        "cancel_requested",
+        "claim_lost"
+      ],
       "cancel_requested_keeps_claim_until_safe_boundary": true,
       "cycle_aborted_on_lease_loss": true
     },

@@ -1,4 +1,4 @@
-from vv_agent.tools.handlers.background import check_background_command
+from vv_agent.tools.handlers.background import check_background_command, stop_background_command
 from vv_agent.tools.handlers.bash import run_bash_command
 from vv_agent.tools.handlers.control import ask_user
 from vv_agent.tools.handlers.image import read_image
@@ -21,6 +21,7 @@ __all__ = [
     "read_image",
     "run_bash_command",
     "search_files",
+    "stop_background_command",
     "sub_task_status",
     "todo_read",
     "todo_write",

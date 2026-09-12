@@ -105,15 +105,16 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
             name=BASH_TOOL_NAME,
             arguments={
                 "command": (f'"{sys.executable}" -c "import time; time.sleep(0.2); print(\'done\')"'),
-                "run_in_background": True,
-                "timeout": 5,
+                "yield_time_ms": 0,
+                "timeout_seconds": 5,
             },
         ),
         context,
     )
     start = require_tool_result(start)
     start_payload = json.loads(start.content)
-    assert start.status_code == ToolResultStatus.RUNNING
+    assert start.status_code == ToolResultStatus.SUCCESS
+    assert start.metadata["status"] == "running"
     assert "command" not in start_payload
     session_id = start_payload["session_id"]
 
@@ -128,7 +129,7 @@ def test_background_command_lifecycle(tmp_path: Path) -> None:
             context,
         )
         probe = require_tool_result(probe)
-        if probe.status_code == ToolResultStatus.RUNNING:
+        if probe.metadata.get("status") in {"running", "stopping", "unknown"}:
             json.loads(probe.content)
             time.sleep(0.05)
             continue
@@ -170,8 +171,6 @@ def test_bash_tool_uses_context_shell_defaults(tmp_path: Path, monkeypatch) -> N
     }
 
     captured: dict[str, object] = {}
-    output_file = tmp_path / "shell-defaults.log"
-    output_file.write_text("ok\n", encoding="utf-8")
 
     def fake_prepare(
         command: str,
@@ -186,30 +185,9 @@ def test_bash_tool_uses_context_shell_defaults(tmp_path: Path, monkeypatch) -> N
         captured["stdin"] = stdin
         captured["shell"] = shell
         captured["windows_shell_priority"] = windows_shell_priority
-        return ["powershell", "-Command", command], stdin
-
-    class _FakeProcess:
-        returncode = 0
-
-        def wait(self, timeout: float | None = None) -> int:
-            captured["wait_timeout"] = timeout
-            return 0
-
-        def poll(self) -> int:
-            return 0
-
-    def fake_start(command: list[str], *, cwd: Path, stdin_text: str | None, env=None):
-        del command, cwd, stdin_text, env
-        return SimpleNamespace(process=_FakeProcess(), output_path=output_file)
+        return [sys.executable, "-c", "print('ok')"], stdin
 
     monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
-    monkeypatch.setattr(bash_handler, "start_captured_process", fake_start)
-    monkeypatch.setattr(
-        bash_handler,
-        "read_captured_output",
-        lambda path, *, limit_chars: Path(path).read_text(encoding="utf-8")[:limit_chars],
-    )
-    monkeypatch.setattr(bash_handler, "remove_captured_output", lambda path: None)
 
     result = registry.execute(
         ToolCall(
@@ -239,8 +217,6 @@ def test_bash_tool_applies_context_bash_env(tmp_path: Path, monkeypatch) -> None
     }
 
     captured: dict[str, object] = {}
-    output_file = tmp_path / "env.log"
-    output_file.write_text("ok\n", encoding="utf-8")
 
     def fake_prepare(
         command: str,
@@ -251,33 +227,18 @@ def test_bash_tool_applies_context_bash_env(tmp_path: Path, monkeypatch) -> None
         windows_shell_priority: list[str] | None = None,
     ) -> tuple[list[str], str | None]:
         del auto_confirm, shell, windows_shell_priority
-        return ["bash", "-lc", command], stdin
+        return [sys.executable, "-c", "print('ok')"], stdin
 
-    class _FakeProcess:
-        returncode = 0
+    real_start = bash_handler.start_captured_process
 
-        def wait(self, timeout: float | None = None) -> int:
-            del timeout
-            return 0
-
-        def poll(self) -> int:
-            return 0
-
-    def fake_start(command: list[str], *, cwd: Path, stdin_text: str | None, env=None):
-        del command, cwd, stdin_text
+    def capture_start(command: list[str], *, cwd: Path, stdin_text: str | None, env=None):
         captured["env"] = env
-        return SimpleNamespace(process=_FakeProcess(), output_path=output_file)
+        return real_start(command, cwd=cwd, stdin_text=stdin_text, env=env)
 
     monkeypatch.setenv("VV_AGENT_SHARED_ENV", "from-process")
     monkeypatch.setenv("VV_AGENT_BASE_ENV", "base-value")
     monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
-    monkeypatch.setattr(bash_handler, "start_captured_process", fake_start)
-    monkeypatch.setattr(
-        bash_handler,
-        "read_captured_output",
-        lambda path, *, limit_chars: Path(path).read_text(encoding="utf-8")[:limit_chars],
-    )
-    monkeypatch.setattr(bash_handler, "remove_captured_output", lambda path: None)
+    monkeypatch.setattr(bash_handler, "start_captured_process", capture_start)
 
     result = registry.execute(
         ToolCall(
@@ -325,6 +286,7 @@ def test_build_process_env_preserves_explicit_windows_python_encoding_overrides(
 
 
 def test_start_captured_process_uses_replace_error_handler_for_decoding(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(process_runtime.sys, "platform", "darwin")
     captured: dict[str, object] = {}
 
     class _FakeProcess:
@@ -385,6 +347,7 @@ def test_start_captured_process_hides_console_window_on_windows(tmp_path: Path, 
 
 
 def test_background_session_uses_replace_error_handler_for_decoding(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(process_runtime.sys, "platform", "darwin")
     captured: dict[str, object] = {}
 
     def fake_prepare(
@@ -420,6 +383,7 @@ def test_background_session_uses_replace_error_handler_for_decoding(tmp_path: Pa
 
     monkeypatch.setattr(background_runtime, "prepare_shell_execution", fake_prepare)
     monkeypatch.setattr(process_runtime.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(background_runtime.BackgroundSessionManager, "_start_watch_thread", lambda self, session_id: None)
 
     manager = background_runtime.BackgroundSessionManager()
     session_id = manager.start(command="echo ok", cwd=tmp_path, timeout_seconds=5)
@@ -427,9 +391,10 @@ def test_background_session_uses_replace_error_handler_for_decoding(tmp_path: Pa
     assert session_id.startswith("bg_")
     assert captured["text"] is True
     assert captured["errors"] == "replace"
+    manager._sessions[session_id].output_path.unlink()
 
 
-def test_background_session_manager_can_adopt_running_process(tmp_path: Path) -> None:
+def test_background_session_manager_can_adopt_running_process(tmp_path: Path, monkeypatch) -> None:
     output_file = tmp_path / "adopt.log"
     output_file.write_text("still running\n", encoding="utf-8")
 
@@ -440,6 +405,7 @@ def test_background_session_manager_can_adopt_running_process(tmp_path: Path) ->
             return None
 
     manager = background_runtime.BackgroundSessionManager()
+    monkeypatch.setattr(manager, "_start_watch_thread", lambda session_id: None)
     session_id = manager.adopt_running_process(
         command="sleep 10",
         cwd=tmp_path,
@@ -457,99 +423,45 @@ def test_background_session_manager_can_adopt_running_process(tmp_path: Path) ->
     assert payload["shell"] == "bash"
 
 
-def test_bash_tool_timeout_moves_process_to_background_and_returns_session(tmp_path: Path, monkeypatch) -> None:
+def test_bash_tool_yield_moves_process_to_background_with_original_start(tmp_path: Path, monkeypatch) -> None:
     registry = build_default_registry()
     context = _context(tmp_path)
     captured: dict[str, object] = {}
-    output_file = tmp_path / "timeout.log"
-    output_file.write_text("partial output\n", encoding="utf-8")
+    manager = bash_handler.background_session_manager
+    real_adopt = manager.adopt_running_process
 
-    def fake_prepare(
-        command: str,
-        *,
-        auto_confirm: bool,
-        stdin: str | None,
-        shell: str | None = None,
-        windows_shell_priority: list[str] | None = None,
-    ) -> tuple[list[str], str | None]:
-        del auto_confirm, stdin, shell, windows_shell_priority
-        return ["bash", "-lc", command], None
+    def capture_adopt(**kwargs):
+        captured.update(kwargs)
+        return real_adopt(**kwargs)
 
-    class _FakeProcess:
-        returncode = None
-
-        def wait(self, timeout: float | None = None) -> int:
-            raise subprocess.TimeoutExpired(cmd=["bash", "-lc", "sleep 10"], timeout=timeout or 0)
-
-        def poll(self):
-            return None
-
-    def fake_start(command: list[str], *, cwd: Path, stdin_text: str | None, env=None):
-        del command, cwd, stdin_text, env
-        return SimpleNamespace(process=_FakeProcess(), output_path=output_file)
-
-    def fake_adopt_running_process(
-        *,
-        command: str,
-        cwd: Path,
-        timeout_seconds: int,
-        process,
-        output_path: Path,
-        shell: str | None = None,
-        started_at: float | None = None,
-        artifact_backend=None,
-        artifact_task_id: str = "",
-        artifact_tool_call_id: str = "",
-    ) -> str:
-        captured["command"] = command
-        captured["cwd"] = cwd
-        captured["timeout_seconds"] = timeout_seconds
-        captured["process"] = process
-        captured["output_path"] = output_path
-        captured["shell"] = shell
-        captured["started_at"] = started_at
-        captured["artifact_backend"] = artifact_backend
-        captured["artifact_task_id"] = artifact_task_id
-        captured["artifact_tool_call_id"] = artifact_tool_call_id
-        return "bg_timeout_123"
-
-    monkeypatch.setattr(bash_handler, "prepare_shell_execution", fake_prepare)
-    monkeypatch.setattr(bash_handler, "start_captured_process", fake_start)
-    monkeypatch.setattr(
-        bash_handler.background_session_manager,
-        "adopt_running_process",
-        fake_adopt_running_process,
-    )
-    monkeypatch.setattr(
-        bash_handler,
-        "read_captured_output",
-        lambda path, *, limit_chars: Path(path).read_text(encoding="utf-8")[:limit_chars],
-    )
-    monkeypatch.setattr(bash_handler, "remove_captured_output", lambda path: None)
+    monkeypatch.setattr(manager, "adopt_running_process", capture_adopt)
+    command = f'"{sys.executable}" -u -c "import time;print(\'partial output\');time.sleep(10)"'
 
     result = registry.execute(
         ToolCall(
             id="c7_timeout",
             name=BASH_TOOL_NAME,
-            arguments={"command": "sleep 10", "timeout": 1},
+            arguments={"command": command, "yield_time_ms": 1000, "timeout_seconds": 5},
         ),
         context,
     )
     result = require_tool_result(result)
 
     payload = json.loads(result.content)
-    assert result.status_code == ToolResultStatus.RUNNING
+    assert result.status_code == ToolResultStatus.SUCCESS
     assert result.error_code is None
     assert payload["status"] == "running"
-    assert payload["session_id"] == "bg_timeout_123"
+    session_id = payload["session_id"]
+    manager.stop_for_tool(session_id, context.workspace_backend, context.task_id, context.tool_call_id, workspace=tmp_path)
     assert "command" not in payload
-    assert payload["transitioned_to_background"] is True
-    assert "check_background_command" in payload["message"]
     assert payload["output"] == "partial output\n"
-    assert captured["command"] == "sleep 10"
+    assert captured["command"] == command
     assert captured["cwd"] == tmp_path
-    assert captured["timeout_seconds"] == 1
-    assert captured["output_path"] == output_file
+    assert captured["timeout_seconds"] == 5
+    assert captured["started_at"] == manager._sessions[session_id].started_at
+    assert time.monotonic() - cast(float, captured["started_at"]) >= 1
+    assert captured["owner_task_id"] == context.task_id
+    assert captured["owner_workspace"] == context.workspace
 
 
 def test_background_session_timeout_kills_process_tree_and_reads_output(tmp_path: Path, monkeypatch) -> None:
@@ -572,20 +484,22 @@ def test_background_session_timeout_kills_process_tree_and_reads_output(tmp_path
         returncode = None
 
         def poll(self):
-            return None
+            return self.returncode
 
     def fake_start(command: list[str], *, cwd: Path, stdin_text: str | None, env=None):
         del command, cwd, stdin_text, env
-        return SimpleNamespace(process=_FakeProcess(), output_path=output_file)
+        return SimpleNamespace(process=_FakeProcess(), output_path=output_file, started_at=time.monotonic())
 
     def fake_kill(process):
         captured["killed"] = True
         process.returncode = -9
+        return True
 
     monkeypatch.setattr(background_runtime, "prepare_shell_execution", fake_prepare)
     monkeypatch.setattr(background_runtime, "start_captured_process", fake_start)
     monkeypatch.setattr(background_runtime, "kill_process_tree", fake_kill)
     manager = background_runtime.BackgroundSessionManager()
+    monkeypatch.setattr(manager, "_start_watch_thread", lambda session_id: None)
     session_id = manager.start(command="sleep 10", cwd=tmp_path, timeout_seconds=1)
     manager._sessions[session_id].started_at -= 5
 
@@ -675,8 +589,7 @@ def test_foreground_bash_artifact_failure_keeps_complete_capture(tmp_path: Path,
     class _FakeProcess:
         returncode = 0
 
-        def wait(self, timeout: float | None = None) -> int:
-            del timeout
+        def poll(self) -> int:
             return 0
 
     class _FailingArtifactBackend(LocalWorkspaceBackend):
@@ -687,8 +600,9 @@ def test_foreground_bash_artifact_failure_keeps_complete_capture(tmp_path: Path,
     monkeypatch.setattr(
         bash_handler,
         "start_captured_process",
-        lambda *args, **kwargs: SimpleNamespace(process=_FakeProcess(), output_path=output_file),
+        lambda *args, **kwargs: SimpleNamespace(process=_FakeProcess(), output_path=output_file, started_at=time.monotonic()),
     )
+    monkeypatch.setattr(background_runtime, "process_tree_is_running", lambda process: False)
     context.workspace_backend = _FailingArtifactBackend(tmp_path)
 
     result = registry.execute(
@@ -718,15 +632,15 @@ def test_foreground_bash_ignores_workspace_artifact_symlink(tmp_path: Path, monk
     class _FakeProcess:
         returncode = 0
 
-        def wait(self, timeout: float | None = None) -> int:
-            del timeout
+        def poll(self) -> int:
             return 0
 
     monkeypatch.setattr(
         bash_handler,
         "start_captured_process",
-        lambda *args, **kwargs: SimpleNamespace(process=_FakeProcess(), output_path=output_file),
+        lambda *args, **kwargs: SimpleNamespace(process=_FakeProcess(), output_path=output_file, started_at=time.monotonic()),
     )
+    monkeypatch.setattr(background_runtime, "process_tree_is_running", lambda process: False)
 
     result = registry.execute(
         ToolCall(id="artifact_symlink", name=BASH_TOOL_NAME, arguments={"command": "printf ignored"}),
@@ -751,7 +665,7 @@ def test_background_bash_reuses_terminal_artifact_across_polls(tmp_path: Path) -
             name=BASH_TOOL_NAME,
             arguments={
                 "command": f'"{sys.executable}" -c "import sys;sys.stdout.write(\'0\'*12001)"',
-                "run_in_background": True,
+                "yield_time_ms": 0,
             },
         ),
         context,
@@ -770,7 +684,7 @@ def test_background_bash_reuses_terminal_artifact_across_polls(tmp_path: Path) -
             context,
         )
         probe = require_tool_result(probe)
-        if probe.status_code is not ToolResultStatus.RUNNING:
+        if probe.metadata.get("status") not in {"running", "stopping", "unknown"}:
             break
         assert time.monotonic() < deadline
         time.sleep(0.05)
@@ -809,7 +723,7 @@ def test_background_bash_artifact_failure_keeps_complete_capture(tmp_path: Path)
             name=BASH_TOOL_NAME,
             arguments={
                 "command": f'"{sys.executable}" -c "import sys;sys.stdout.write(\'x\'*12001)"',
-                "run_in_background": True,
+                "yield_time_ms": 0,
             },
         ),
         context,
@@ -828,7 +742,7 @@ def test_background_bash_artifact_failure_keeps_complete_capture(tmp_path: Path)
             context,
         )
         probe = require_tool_result(probe)
-        if probe.status_code is not ToolResultStatus.RUNNING:
+        if probe.metadata.get("status") not in {"running", "stopping", "unknown"}:
             break
         assert time.monotonic() < deadline
         time.sleep(0.05)

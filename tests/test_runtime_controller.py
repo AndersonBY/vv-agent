@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
@@ -1816,6 +1817,99 @@ def test_redis_controller_admission_recovers_expired_claim_from_redis_time() -> 
     current = store.load_checkpoint(key)
     assert current is not None and current.claim_token is None and current.terminal_result is not None
     store.delete_checkpoint(key)
+
+
+@pytest.mark.parametrize("entrypoint", ["admit_controller_command", "resolve_controller_command"])
+@pytest.mark.parametrize("pause_after", ["receipt", "checkpoint"])
+@pytest.mark.parametrize("kind", ["suspend", "host_interaction_response"])
+def test_real_redis_same_command_concurrent_admission_replays_without_writes(
+    monkeypatch: pytest.MonkeyPatch, entrypoint: str, pause_after: str, kind: str
+) -> None:
+    redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
+    if not redis_url:
+        pytest.skip("VV_AGENT_TEST_REDIS_URL is required for the live Redis integration test")
+    store = RedisCheckpointStore(redis_url)
+    peer = RedisCheckpointStore(redis_url)
+    key = f"redis-command-race-{uuid4().hex}"
+    command_id = f"command-{uuid4().hex}"
+    snapshot_read = Event()
+    allow_return = Event()
+    try:
+        if kind == "host_interaction_response":
+            _checkpoint_value, request, _outcome = _admit_host(store, key)
+            command = _host_response_command(store, request, key=key, command_id=command_id)
+        else:
+            assert store.create_checkpoint(_checkpoint(key))
+            current = store.load_checkpoint(key)
+            assert current is not None
+            command = ControllerCommand(
+                command_id=command_id,
+                handle=DistributedRunHandle(key, current.root_run_id, current.trace_id),
+                resume_attempt=current.resume_attempt,
+                expected_revision=current.revision,
+                command={"kind": "suspend"},
+            )
+        data_key, _lease_key = store._keys(key)
+        receipt_key = store._controller_receipt_key(command_id)
+        pause_key = receipt_key if pause_after == "receipt" else data_key
+        original_pipeline = store._client.pipeline
+
+        def paused_pipeline(*args: Any, **kwargs: Any) -> Any:
+            pipe = original_pipeline(*args, **kwargs)
+            execute_command = pipe.execute_command
+
+            def execute_with_pause(*args: Any, **kwargs: Any) -> Any:
+                value = execute_command(*args, **kwargs)
+                if args[0] in {"GET", "MGET"} and pause_key in args[1:] and not snapshot_read.is_set():
+                    # Hold the real read response, not the store result, while
+                    # the independent client commits the same command.
+                    snapshot_read.set()
+                    assert allow_return.wait(10), "competing admission did not finish"
+                return value
+
+            monkeypatch.setattr(pipe, "execute_command", execute_with_pause)
+            return pipe
+
+        monkeypatch.setattr(store._client, "pipeline", paused_pipeline)
+
+        def admit_peer() -> Any:
+            assert snapshot_read.wait(10), "first admission did not read the selected key"
+            return getattr(peer, entrypoint)(command)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(getattr(store, entrypoint), command)
+            second = executor.submit(admit_peer)
+            try:
+                applied = second.result(timeout=15)
+                # DUMP alone misses byte-identical rewrites. WATCH every key
+                # owned by this checkpoint to prove the replay writes nothing.
+                watched_keys = [*peer._keys(key), receipt_key, f"{receipt_key}:command"]
+                watched_keys += [peer._controller_outbox_key(command_id), peer._controller_receipt_set_key(key)]
+                if kind == "host_interaction_response":
+                    watched_keys += [peer._host_record_key(key, request.interaction_id), peer._host_record_set_key(key)]
+                with peer._client.pipeline() as witness:
+                    witness.watch(*watched_keys)
+                    before = peer.load_checkpoint(key)
+                    allow_return.set()
+                    replayed = first.result(timeout=15)
+                    witness.multi()
+                    witness.ping()
+                    assert witness.execute() == [True]
+                after = peer.load_checkpoint(key)
+                assert after == before
+                assert after is not None and after.revision == command.expected_revision + 1
+                if entrypoint == "resolve_controller_command":
+                    assert [applied.kind, replayed.kind] == ["applied", "replayed"]
+                    assert applied.receipt == replayed.receipt
+                    assert applied.wake == replayed.wake
+                else:
+                    assert applied == replayed
+                assert peer._client.smembers(peer._controller_receipt_set_key(key)) == {receipt_key}
+            finally:
+                allow_return.set()
+    finally:
+        allow_return.set()
+        store.delete_checkpoint(key)
 
 
 def test_real_redis_controller_cas_replay_and_notification_ambiguity() -> None:

@@ -812,15 +812,22 @@ excerpt:
 
 ## 内建工具
 
-`find_files`、`file_info`、`read_file`、`write_file`、`edit_file`、`search_files`、`todo_write`、`task_finish`、`ask_user`、`bash`、`check_background_command`、`read_image`、`create_sub_task`、`sub_task_status`、`activate_skill`。
+`find_files`、`file_info`、`read_file`、`write_file`、`edit_file`、`search_files`、`todo_write`、`ask_user`、`bash`、`check_background_command`、`stop_background_command`、`read_image`、`create_sub_task`、`sub_task_status`、`activate_skill`。
 
 通过 `ToolRegistry.register()` 注册自定义工具。
 
-`bash` 工具支持两种后台路径：
+`bash` 最多等待 `yield_time_ms` 毫秒（默认 1000，整数范围 0..10000）；
+等待结束时命令仍在运行，就返回当前输出与 `session_id`。零表示立即取得管理句柄。
+可选的 `timeout_seconds`（整数范围 1..86400）从真实进程启动时建立一次执行期限；
+省略表示不设置执行期限，后续查询不会延长它。
 
-- 显式后台：传 `run_in_background=true`，立即返回 `session_id`，后续用 `check_background_command` 轮询。
-- 超时转后台：前台命令如果达到 `timeout` 仍未结束，不会直接中断报错，而是自动转入后台 session，并返回 `session_id` 与提示信息；后续同样用 `check_background_command` 查询。
-- 主动终态通知：后台命令完成、失败或超时后，会触发 session 级事件；如果当前 session 正在运行，系统会自动向 Agent 注入一条 steering 提醒。
+`check_background_command({"session_id":"bg_..."})` 立即读取当前状态和输出，
+`stop_background_command({"session_id":"bg_..."})` 请求停止进程树。
+成功启动和运行中查询均返回 `SUCCESS` / `continue`，checkpointed Runner 可以继续
+调用模型；进程自身状态放在 content 和 metadata 中。实际非零退出仍返回错误，
+只有确认停止后才报告终态。句柄归属于启动任务及其 workspace；本地记录丢失不代表
+外部进程已经退出。运行中的大输出同样通过不可变 artifact 完整恢复，确认终态后保留
+原有 session 通知。参见 [Bash 进程管理](docs/bash-process-management.md)。
 
 ## 子 Agent
 

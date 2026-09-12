@@ -743,7 +743,7 @@ class AgentSession:
             return
         payload = event.details
         tool_name = str(payload.get("tool_name") or "").strip().lower()
-        if tool_name not in {"bash", "check_background_command"}:
+        if tool_name not in {"bash", "check_background_command", "stop_background_command"}:
             return
 
         metadata = payload.get("metadata")
@@ -755,10 +755,10 @@ class AgentSession:
             return
 
         status = str(metadata.get("status") or payload.get("status") or "").strip().lower()
-        if status == "running":
+        if status in {"running", "stopping", "unknown"}:
             self._subscribe_background_command(background_session_id)
             return
-        if status in {"completed", "failed", "timeout", "missing"}:
+        if status in {"completed", "failed", "timeout", "stopped", "missing"}:
             self._unsubscribe_background_command(background_session_id)
 
     def _subscribe_background_command(self, background_session_id: str) -> None:

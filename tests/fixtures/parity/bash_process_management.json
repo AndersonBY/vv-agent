@@ -1,0 +1,44 @@
+{
+  "contract": "vv-agent-bash-process-management-v1",
+  "schema_version": 1,
+  "launch_cases": [
+    {"name": "immediate_handle", "yield_time_ms": 0},
+    {"name": "yield_expired", "yield_time_ms": 20}
+  ],
+  "running_receipt": {
+    "status_code": "SUCCESS",
+    "directive": "continue",
+    "process_status": "running",
+    "required_metadata": ["status", "session_id"],
+    "forbidden_metadata": ["output", "stdout", "stderr", "exit_code"]
+  },
+  "owner_binding": ["task_id", "canonical_workspace_root"],
+  "forbidden_owner_error_code": "background_session_forbidden",
+  "missing_status": "missing",
+  "unconfirmed_stop_statuses": ["stopping", "unknown"],
+  "terminal_statuses": ["completed", "failed", "timeout", "stopped"],
+  "invalid_bash_arguments": [
+    {"name": "removed_timeout", "arguments": {"command": "echo never", "timeout": 1}},
+    {"name": "removed_background", "arguments": {"command": "echo never", "run_in_background": true}},
+    {"name": "negative_yield", "arguments": {"command": "echo never", "yield_time_ms": -1}},
+    {"name": "excess_yield", "arguments": {"command": "echo never", "yield_time_ms": 10001}},
+    {"name": "boolean_yield", "arguments": {"command": "echo never", "yield_time_ms": true}},
+    {"name": "string_yield", "arguments": {"command": "echo never", "yield_time_ms": "10"}},
+    {"name": "fractional_yield", "arguments": {"command": "echo never", "yield_time_ms": 0.5}},
+    {"name": "null_yield", "arguments": {"command": "echo never", "yield_time_ms": null}},
+    {"name": "zero_timeout", "arguments": {"command": "echo never", "timeout_seconds": 0}},
+    {"name": "negative_timeout", "arguments": {"command": "echo never", "timeout_seconds": -1}},
+    {"name": "excess_timeout", "arguments": {"command": "echo never", "timeout_seconds": 86401}},
+    {"name": "boolean_timeout", "arguments": {"command": "echo never", "timeout_seconds": true}},
+    {"name": "string_timeout", "arguments": {"command": "echo never", "timeout_seconds": "1"}},
+    {"name": "fractional_timeout", "arguments": {"command": "echo never", "timeout_seconds": 1.5}},
+    {"name": "null_timeout", "arguments": {"command": "echo never", "timeout_seconds": null}}
+  ],
+  "invalid_management_arguments": [
+    {"name": "missing_session", "arguments": {}},
+    {"name": "null_session", "arguments": {"session_id": null}},
+    {"name": "numeric_session", "arguments": {"session_id": 1}},
+    {"name": "additional_wait", "arguments": {"session_id": "unused", "yield_time_ms": 10}}
+  ],
+  "invalid_arguments_error_code": "invalid_tool_arguments"
+}
