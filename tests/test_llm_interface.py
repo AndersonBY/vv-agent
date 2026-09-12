@@ -413,6 +413,54 @@ def test_llm_stream_emits_tool_call_progress_events(monkeypatch) -> None:
     assert stream_events[-1]["estimated_tokens"] == 11
 
 
+def test_llm_stream_throttles_large_tool_call_progress(monkeypatch) -> None:
+    chunks = [
+        SimpleNamespace(
+            usage=None,
+            content="",
+            reasoning_content=None,
+            tool_calls=[
+                SimpleNamespace(
+                    index=0,
+                    id="tc-large",
+                    function=SimpleNamespace(name=TASK_LIST_TOOL_NAME, arguments="{"),
+                )
+            ],
+        )
+    ]
+    for _ in range(1024):
+        chunks.append(
+            SimpleNamespace(
+                usage=None,
+                content="",
+                reasoning_content=None,
+                tool_calls=[
+                    SimpleNamespace(index=0, id=None, function=SimpleNamespace(name=None, arguments="x"))
+                ],
+            )
+        )
+    chunks.append(SimpleNamespace(usage=_FakeUsage(), content="", reasoning_content=None, tool_calls=[]))
+
+    _FakeChatClient.behavior_by_endpoint = {"stream-large": lambda kwargs: chunks}
+    _FakeChatClient.seen_calls = []
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.create_chat_client", _fake_create_chat_client)
+    monkeypatch.setattr("vv_agent.llm.vv_llm_client.format_messages", _passthrough_format_messages)
+    llm = VvLlmClient(
+        endpoint_targets=[EndpointTarget(endpoint_id="stream-large", api_key="k", api_base="https://stream.example/v1")],
+        backend="moonshot",
+        selected_model="kimi-k2.5",
+        randomize_endpoints=False,
+        max_retries_per_endpoint=1,
+        backoff_seconds=0.0,
+    )
+    events: list[dict[str, Any]] = []
+    _complete(llm, model="kimi-k2.5", messages=[Message(role="user", content="hi")], tools=[], stream_callback=events.append)
+
+    progress = [event for event in events if event["event"] == "tool_call_progress"]
+    assert len(progress) < 10
+    assert progress[-1]["arguments_chars"] >= 770
+
+
 def test_llm_stream_collects_reasoning_content(monkeypatch) -> None:
     chunk_1 = SimpleNamespace(
         usage=None,

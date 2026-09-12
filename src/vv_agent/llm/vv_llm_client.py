@@ -1006,6 +1006,14 @@ class VvLlmClient(LLMClient):
 
         if has_arguments_delta:
             arguments_chars = len(str(slot.get("arguments") or ""))
+            # Tool arguments are streamed one provider fragment at a time.  A
+            # large file can otherwise turn this advisory counter into one
+            # durable event per character.  Keep the first two updates for a
+            # responsive UI, then publish only meaningful counter advances.
+            progress_count = int(slot.get("_stream_progress_emitted") or 0)
+            last_progress_chars = int(slot.get("_stream_last_progress_chars") or 0)
+            if progress_count >= 2 and arguments_chars - last_progress_chars < 256:
+                return
             self._emit_stream_event(
                 stream_callback,
                 {
@@ -1017,6 +1025,8 @@ class VvLlmClient(LLMClient):
                     "estimated_tokens": self._estimate_stream_tokens(arguments_chars),
                 },
             )
+            slot["_stream_progress_emitted"] = progress_count + 1
+            slot["_stream_last_progress_chars"] = arguments_chars
 
     def _resolve_tool_call_index(self, tool_delta: Any, default_index: int) -> int:
         index_raw = self._read_field(tool_delta, "index")
