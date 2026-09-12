@@ -4,6 +4,7 @@ import hashlib
 import http.client
 import json
 import os
+import signal
 import socket
 import sys
 import time
@@ -835,7 +836,8 @@ else:
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor disconnected startup")
-def test_supervisor_owner_disconnect_during_ready_still_reaps_detached_tree(tmp_path):
+@pytest.mark.parametrize("root_exited", [False, True])
+def test_supervisor_owner_disconnect_during_ready_still_reaps_detached_tree(tmp_path, root_exited):
     import subprocess
 
     from vv_agent.runtime import processes as process_runtime
@@ -860,6 +862,7 @@ socket.socket = DelayedReadySocket
     child_script.write_text(
         """import os, signal, time
 from pathlib import Path
+Path('root-pid').write_text(str(os.getpid()))
 if os.fork() == 0:
     os.setsid()
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -867,6 +870,7 @@ if os.fork() == 0:
     while not Path('child-release').exists(): time.sleep(.01)
     os._exit(0)
 while not Path('detached-pid').exists(): time.sleep(.01)
+while not Path('root-release').exists(): time.sleep(.01)
 os._exit(7)
 """,
         encoding="utf-8",
@@ -880,14 +884,24 @@ os._exit(7)
     )
     child_control.close()
     try:
-        wait_until(lambda: (tmp_path / "detached-pid").exists())
+        wait_until(lambda: (tmp_path / "detached-pid").exists() and (tmp_path / "detached-pid").read_text().isdigit())
         pid = int((tmp_path / "detached-pid").read_text())
+        root_pid = int((tmp_path / "root-pid").read_text())
+        if root_exited:
+            (tmp_path / "root-release").touch()
+            # The ready message is still blocked, so the supervisor has not
+            # reaped this zombie. A descendant's ready file alone does not
+            # establish that its parent already exited with code 7.
+            wait_until(lambda: process_exited(root_pid))
+        else:
+            assert not process_exited(root_pid)
         control.close()
         gate.touch()
-        assert process.wait(timeout=3) == 7
+        assert process.wait(timeout=3) == (7 if root_exited else -signal.SIGKILL)
         assert process_exited(pid)
     finally:
         control.close()
         gate.touch()
         (tmp_path / "child-release").touch()
+        (tmp_path / "root-release").touch()
         process.wait(timeout=3)
