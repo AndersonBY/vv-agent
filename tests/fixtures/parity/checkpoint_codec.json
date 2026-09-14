@@ -1,8 +1,8 @@
 {
   "contract": "checkpoint_codec",
-  "version": 11,
+  "version": 12,
   "discriminator": {
-    "required_value": "vv-agent.checkpoint.v11",
+    "required_value": "vv-agent.checkpoint.v12",
     "missing_or_unknown_error": "checkpoint_schema_unsupported"
   },
   "message_wire": {
@@ -69,7 +69,7 @@
     ]
   },
   "canonical_checkpoint": {
-    "schema_version": "vv-agent.checkpoint.v11",
+    "schema_version": "vv-agent.checkpoint.v12",
     "run_definition_schema": "vv-agent.run-definition.v5",
     "run_definition": {
       "schema_version": "vv-agent.run-definition.v5",
@@ -357,7 +357,27 @@
         },
         "error_code": null
       }
-    ]
+    ],
+    "history": {
+      "sequence": 0,
+      "cycle_count": 0,
+      "model_call_count": 0,
+      "head_digest": null,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_usage": {
+          "status": "accounting_missing",
+          "read_input_tokens": null,
+          "write_input_tokens": null,
+          "uncached_input_tokens": null,
+          "source": "aggregate"
+        }
+      },
+      "previous_agent_input": null
+    }
   },
   "required_fields": [
     "schema_version",
@@ -389,7 +409,8 @@
     "terminal_result",
     "terminal_acknowledged",
     "active_host_interaction",
-    "suspended_origin"
+    "suspended_origin",
+    "history"
   ],
   "status_rules": {
     "host_interaction_is_non_terminal": true,
@@ -1129,7 +1150,7 @@
     {
       "name": "minimal_running",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1228,13 +1249,33 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       }
     },
     {
       "name": "reconciliation_required_retains_ambiguous_journal",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1352,13 +1393,33 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       }
     },
     {
       "name": "claimed_active_cycle",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1610,13 +1671,33 @@
             },
             "error_code": null
           }
-        ]
+        ],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       }
     },
     {
       "name": "acknowledged_terminal_is_retained",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1748,13 +1829,33 @@
           "resume_observations": []
         },
         "terminal_acknowledged": true,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       }
     },
     {
       "name": "operator_abort_terminal_retains_closed_tool_entries",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -1988,13 +2089,33 @@
           ]
         },
         "terminal_acknowledged": true,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       }
     },
     {
       "name": "unknown_optional_extension_is_preserved",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2101,7 +2222,27 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       }
     }
   ],
@@ -2155,7 +2296,7 @@
     {
       "name": "blank_checkpoint_key",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2254,14 +2395,34 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "checkpoint_key must be non-empty"
     },
     {
       "name": "bad_definition_digest",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2360,14 +2521,34 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "run_definition_digest must be a lowercase SHA-256"
     },
     {
       "name": "zero_resume_attempt",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2466,14 +2647,34 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "resume_attempt must be positive"
     },
     {
       "name": "partial_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2572,14 +2773,34 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "checkpoint claim fields must be all present or all null"
     },
     {
       "name": "claimed_cycle_not_next",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2678,14 +2899,34 @@
         "lease_expires_at_ms": 9,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "claimed_cycle must equal cycle_index + 1"
     },
     {
       "name": "terminal_with_claim",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2817,14 +3058,34 @@
           "resume_observations": []
         },
         "terminal_acknowledged": true,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "terminal checkpoint cannot have an active claim"
     },
     {
       "name": "journal_cycle_not_active",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -2939,14 +3200,34 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "journal cycle_index must equal active claimed cycle"
     },
     {
       "name": "unknown_required_extension",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -3053,7 +3334,27 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "registered_extensions": [],
       "error": "checkpoint_required_extension_unavailable"
@@ -3061,7 +3362,7 @@
     {
       "name": "invalid_extension_namespace",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -3166,7 +3467,27 @@
         "lease_expires_at_ms": null,
         "terminal_result": null,
         "terminal_acknowledged": false,
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "checkpoint_extension_namespace_invalid"
     },
@@ -3184,7 +3505,7 @@
     {
       "name": "unknown_top_level_is_rejected",
       "payload": {
-        "schema_version": "vv-agent.checkpoint.v11",
+        "schema_version": "vv-agent.checkpoint.v12",
         "run_definition_schema": "vv-agent.run-definition.v5",
         "run_definition": {
           "schema_version": "vv-agent.run-definition.v5",
@@ -3286,7 +3607,27 @@
         "vendor_future": {
           "preserve": true
         },
-        "model_calls": []
+        "model_calls": [],
+        "history": {
+          "sequence": 0,
+          "cycle_count": 0,
+          "model_call_count": 0,
+          "head_digest": null,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_usage": {
+              "status": "accounting_missing",
+              "read_input_tokens": null,
+              "write_input_tokens": null,
+              "uncached_input_tokens": null,
+              "source": "aggregate"
+            }
+          },
+          "previous_agent_input": null
+        }
       },
       "error": "checkpoint_unknown_field"
     },
@@ -3320,6 +3661,100 @@
       "active_state_representative": "started",
       "terminal_result_preserved": true,
       "error": "checkpoint_status_invalid"
+    },
+    {
+      "name": "nonpositive_cycle",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace": {
+          "cycle_index": 1,
+          "cycles": [
+            {
+              "index": 0,
+              "assistant_message": "first",
+              "tool_calls": [],
+              "tool_results": [],
+              "memory_compacted": false
+            }
+          ]
+        }
+      },
+      "error": "checkpoint_history_invalid",
+      "writes": []
+    },
+    {
+      "name": "duplicate_cycles",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace": {
+          "cycle_index": 1,
+          "cycles": [
+            {
+              "index": 1,
+              "assistant_message": "first",
+              "tool_calls": [],
+              "tool_results": [],
+              "memory_compacted": false
+            },
+            {
+              "index": 1,
+              "assistant_message": "first",
+              "tool_calls": [],
+              "tool_results": [],
+              "memory_compacted": false
+            }
+          ]
+        }
+      },
+      "error": "checkpoint_history_invalid",
+      "writes": []
+    },
+    {
+      "name": "unordered_cycles",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace": {
+          "cycle_index": 1,
+          "cycles": [
+            {
+              "index": 2,
+              "assistant_message": "first",
+              "tool_calls": [],
+              "tool_results": [],
+              "memory_compacted": false
+            },
+            {
+              "index": 1,
+              "assistant_message": "first",
+              "tool_calls": [],
+              "tool_results": [],
+              "memory_compacted": false
+            }
+          ]
+        }
+      },
+      "error": "checkpoint_history_invalid",
+      "writes": []
+    },
+    {
+      "name": "future_cycle",
+      "base_valid_case": "minimal_running",
+      "mutation": {
+        "replace": {
+          "cycle_index": 1,
+          "cycles": [
+            {
+              "index": 3,
+              "assistant_message": "first",
+              "tool_calls": [],
+              "tool_results": [],
+              "memory_compacted": false
+            }
+          ]
+        }
+      },
+      "error": "checkpoint_history_invalid",
+      "writes": []
     }
   ],
   "extension_limits": {
@@ -3342,7 +3777,7 @@
             "escaped": "quote\" slash\\ newline\n",
             "numbers": {
               "one": 1,
-              "small": 1e-7,
+              "small": 1e-07,
               "negative_zero": 0
             },
             "array": [
@@ -3481,5 +3916,93 @@
     "top_level_whole_object_store": "reject",
     "extension_optional": "preserve_without_restore",
     "extension_required": "block_resume"
+  },
+  "history_archive_cases": {
+    "one_committed_cycle": {
+      "batch": {
+        "schema_version": "vv-agent.checkpoint-history.v1",
+        "checkpoint_key": "fresh",
+        "sequence": 1,
+        "previous_digest": null,
+        "cycles": [
+          {
+            "index": 1,
+            "assistant_message": "first",
+            "tool_calls": [],
+            "tool_results": [],
+            "memory_compacted": false
+          }
+        ],
+        "model_calls": [
+          {
+            "call_id": "history-call-1",
+            "operation_id": "history-operation-1",
+            "attempt": 1,
+            "operation": "agent_cycle",
+            "cycle_index": 1,
+            "backend": "test",
+            "model": "test-model",
+            "status": "completed",
+            "usage": {
+              "schema_version": "vv-agent.token-usage.v1",
+              "input_tokens": 4,
+              "output_tokens": 2,
+              "total_tokens": 6,
+              "reasoning_tokens": 0,
+              "usage_source": "provider_reported",
+              "cache_usage": {
+                "status": "accounting_missing",
+                "read_input_tokens": null,
+                "write_input_tokens": null,
+                "uncached_input_tokens": null,
+                "source": null
+              },
+              "provider_usage": {}
+            },
+            "error_code": null
+          }
+        ]
+      },
+      "frontier": {
+        "sequence": 1,
+        "cycle_count": 1,
+        "model_call_count": 1,
+        "head_digest": "d551cc514a8c467d5b7584b4eeb7c1e288eb2f0d4960b2497905a04d782e1ab8",
+        "usage": {
+          "input_tokens": 4,
+          "output_tokens": 2,
+          "total_tokens": 6,
+          "reasoning_tokens": 0,
+          "cache_usage": {
+            "status": "accounting_missing",
+            "read_input_tokens": null,
+            "write_input_tokens": null,
+            "uncached_input_tokens": null,
+            "source": "aggregate"
+          }
+        },
+        "previous_agent_input": {
+          "cycle_index": 1,
+          "input_tokens": 4
+        }
+      },
+      "retained_cycle_indices": [
+        2
+      ],
+      "retained_model_call_ids": []
+    },
+    "reject": [
+      "missing_history",
+      "unknown_history_field",
+      "boolean_sequence",
+      "invalid_head_digest",
+      "mismatched_previous_digest",
+      "foreign_checkpoint_key",
+      "duplicate_archived_identity",
+      "archive_tail_overlap",
+      "changed_committed_cycle",
+      "changed_definitive_model_call",
+      "frontier_ahead_of_archive"
+    ]
   }
 }

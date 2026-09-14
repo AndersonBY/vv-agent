@@ -227,7 +227,7 @@ unresolved tools with unknown-effect observations and rejects their late
 results. `test_deferred_tools.py` exercises the real Runner producer and
 controller/receipt replay through memory, reopened SQLite and Redis stores.
 
-Checkpoint records require `vv-agent.checkpoint.v11`; run definitions require
+Checkpoint records require `vv-agent.checkpoint.v12`; run definitions require
 `vv-agent.run-definition.v5`; distributed envelopes require
 `vv-agent.distributed-run.v5`. The frozen definition stores `prompt_bundle`,
 not a second independently editable flattened system prompt. Readers reject every other shape before claim or
@@ -242,7 +242,7 @@ fields, to rebuild the tool message. Ordinary failed entries forbid
 `resume_observation`; `tool_outcome_unknown` requires it, and synthetic
 `tool_cancelled` closures remain resultless.
 
-The checkpoint owns the complete run-level model-call ledger. A started journal
+The checkpoint and its immutable same-store archive own the complete run-level model-call ledger. A started journal
 entry and started event become durable together. After dispatch, the terminal
 journal state, ledger record, budget observation, and terminal event become
 durable together. Journal, started event, terminal event, and ledger must agree

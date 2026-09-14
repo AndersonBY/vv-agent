@@ -518,6 +518,47 @@ class ModelCallRecord:
 
 
 @dataclass(slots=True)
+class TaskTokenUsageTotals:
+    """Cumulative accounting totals without the growing model-call ledger."""
+
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
+    total_tokens: int | None = 0
+    reasoning_tokens: int | None = 0
+    cache_usage: CacheUsage = field(default_factory=lambda: CacheUsage(source="aggregate"))
+
+    def __post_init__(self) -> None:
+        for name in ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens"):
+            value = _optional_non_negative_int(getattr(self, name))
+            if value is not None and value > MAX_WIRE_INTEGER:
+                raise ValueError("token usage totals must be JSON-safe integers")
+        if not isinstance(self.cache_usage, CacheUsage) or self.cache_usage.source != "aggregate":
+            raise ValueError("token usage totals require aggregate cache usage")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "cache_usage": self.cache_usage.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TaskTokenUsageTotals:
+        _require_exact_keys(
+            data, {"input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "cache_usage"}, "TaskTokenUsageTotals"
+        )
+        return cls(
+            input_tokens=data["input_tokens"],
+            output_tokens=data["output_tokens"],
+            total_tokens=data["total_tokens"],
+            reasoning_tokens=data["reasoning_tokens"],
+            cache_usage=CacheUsage.from_dict(data["cache_usage"]),
+        )
+
+
+@dataclass(slots=True)
 class TaskTokenUsage:
     input_tokens: int | None = 0
     output_tokens: int | None = 0

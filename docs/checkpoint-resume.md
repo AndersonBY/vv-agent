@@ -10,7 +10,7 @@ The current public API inventory is `vv-agent-public-api-v7`/schema 7. The
 ## Opt In
 
 Durable execution is disabled unless a `CheckpointConfig` is attached to the
-run. Enabled records require `schema_version=vv-agent.checkpoint.v11` and
+run. Enabled records require `schema_version=vv-agent.checkpoint.v12` and
 `run_definition_schema=vv-agent.run-definition.v5`; no other record shape is
 read or repaired.
 
@@ -44,6 +44,51 @@ Use the same key and the same immutable run definition to recover after a
 process restart. `resume_if_present` creates the checkpoint when absent and
 recovers it when present. `require_existing` refuses to create a new record;
 `new` refuses to reuse an existing key.
+
+## History And Read Boundaries
+
+`load_checkpoint(key)` returns a bounded execution frontier: the latest
+committed cycle and active cycle, their model-call records, current model
+context, active journals/outbox, and the `history` cursor. SQLite and Redis
+append retired complete records atomically with the checkpoint CAS. The
+archive retains the original receipts; context compaction does not erase it.
+
+`store.load_checkpoint_history(key)` explicitly reads and verifies the archived
+prefix and returns `cycles` and `model_calls`. Ordinary scheduling, claim and
+progress paths must not call this method. `Runner` returns complete public
+results; a host reading a retained terminal directly can call
+`runtime.checkpoint_history.hydrate_checkpoint_result(store, checkpoint,
+checkpoint.terminal_result)` to obtain the same full result. The terminal
+stored inside the frontier contains only the current tail.
+
+`AfterCycleSnapshot.cumulative_token_usage` is `TaskTokenUsageTotals`: exact
+cumulative input/output/total/reasoning and cache totals, including archived
+calls, without a growing model-call list. Missing accounting remains null.
+The complete ledger stays in the public final `TaskTokenUsage` result.
+
+Only completed records are stored incrementally. Current `messages` are still
+fully serialized at each checkpoint write. Retained checkpoint size is bounded
+when active context size is fixed; an uncompacted context that grows each cycle
+can still make cumulative writes quadratic. Full public result materialization
+also reads the complete requested history.
+
+Run both workloads to distinguish these costs:
+
+```bash
+uv run pytest -s tests/test_checkpoint_history_growth.py
+```
+
+The fixed-context test measures cumulative serialization and SQLite writes
+(or Redis socket traffic when `VV_AGENT_TEST_REDIS_URL` is set). The real
+`Runner.run_sync` workload adds 4 KiB per cycle at 20 and 40 cycles without
+compaction, verifies preserved output and full public history, and reports
+cumulative SQLite JSON binding bytes separately from checkpoint size. Its
+write ratio is an observation, not a linear-growth pass criterion. Binding
+bytes are not measurements of disk, WAL, or network traffic.
+
+Checkpoint retention deletes the associated history in the same store.
+Checkpoint v12 does not open v11 records or databases. Existing runs require
+their pinned runtime until an explicitly validated offline transition exists.
 
 ## Frozen Run Definition
 
@@ -244,7 +289,7 @@ worker; durable cross-process approval continuation remains a separate protocol.
 
 ## Scope And Limits
 
-Checkpoint v11 provides durable resume, deferred barriers, host-interaction recovery, and explicit ambiguity. It does not make
+Checkpoint v12 provides durable resume, deferred barriers, host-interaction recovery, and explicit ambiguity. It does not make
 an arbitrary external API exactly-once, recover a provider response that was
 never durably received, make host hooks transactional, or atomically commit an
 unrelated state store and event store. Authentication, tenant isolation,

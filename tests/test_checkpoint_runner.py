@@ -40,7 +40,7 @@ from vv_agent.runtime import BaseRuntimeHook, BeforeToolCallEvent
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.checkpoint_codec import checkpoint_to_dict
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
-from vv_agent.runtime.state import CheckpointRenewal, RenewOutcome
+from vv_agent.runtime.state import CheckpointRenewal, CheckpointStore, RenewOutcome
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.tools.outputs import ToolOutputError
 from vv_agent.types import (
@@ -75,7 +75,7 @@ def _provider(factory: Callable[[], Any]) -> FactoryModelProvider:
 
 
 def _config(
-    store: InMemoryCheckpointStore,
+    store: CheckpointStore,
     *,
     key: str,
     provider: FactoryModelProvider,

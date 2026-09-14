@@ -52,6 +52,7 @@ from vv_agent.events import (
 )
 from vv_agent.llm.base import LlmRequest
 from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY
+from vv_agent.runtime.checkpoint_history import compact_checkpoint, hydrate_checkpoint_result
 from vv_agent.runtime.controller import HostInteractionAdmissionContext
 from vv_agent.runtime.model_calls import (
     ModelCallCoordinator,
@@ -232,6 +233,19 @@ class CheckpointResumeController:
             raise TypeError("checkpoint model accounting must be a ModelCallCoordinator")
         self._model_accounting = accounting
         accounting.ledger.replace(self._require_checkpoint().model_calls)
+        accounting.ledger.previous_archived_input = deepcopy(self._require_checkpoint().history["previous_agent_input"])
+
+    def _sync_history_frontier(self) -> None:
+        checkpoint = self._require_checkpoint()
+        compact_checkpoint(checkpoint)
+        if self._runtime_cycles is not None:
+            self._runtime_cycles[:] = deepcopy(checkpoint.cycles)
+        if self._model_accounting is not None:
+            self._model_accounting.ledger.replace(checkpoint.model_calls)
+            self._model_accounting.ledger.previous_archived_input = deepcopy(checkpoint.history["previous_agent_input"])
+
+    def hydrate_result(self, result: AgentResult) -> AgentResult:
+        return hydrate_checkpoint_result(self.store, self._require_checkpoint(), result)
 
     @property
     def next_claim_mode(self) -> ClaimMode:
@@ -426,7 +440,7 @@ class CheckpointResumeController:
         assert existing is not None
         self._validate_existing_definition(existing)
         if existing.terminal_result is not None:
-            replay = deepcopy(existing.terminal_result)
+            replay = hydrate_checkpoint_result(self.store, existing, existing.terminal_result)
             replay.checkpoint_key = key
             self.checkpoint = existing
             self.terminal_replay = replay
@@ -1151,7 +1165,6 @@ class CheckpointResumeController:
                 code="checkpoint_cycle_conflict",
             )
         self._assert_heartbeat()
-        self._refresh_snapshot(messages=messages, cycles=cycles, shared_state=shared_state)
         checkpoint.status = AgentStatus.RUNNING
         claim_token = checkpoint.claim_token
         self._assert_heartbeat()
@@ -1162,6 +1175,9 @@ class CheckpointResumeController:
             )
         self._progress()
         self._deliver_pending_outbox()
+        # Only the atomic cycle commit publishes the completed transcript;
+        # earlier progress must remain replayable from the durable journals.
+        self._refresh_snapshot(messages=messages, cycles=cycles, shared_state=shared_state)
         checkpoint.cycle_index = cycle_index
         revision = checkpoint.revision
         if not self.store.commit_checkpoint(
@@ -1192,6 +1208,7 @@ class CheckpointResumeController:
         checkpoint.event_outbox = [entry for entry in checkpoint.event_outbox if entry.state == "pending"]
         checkpoint.model_call_journal = []
         checkpoint.tool_journal = []
+        self._sync_history_frontier()
         self._first_claim_is_recovery = False
         self._owned_claim_token = None
         self._active_claim_mode = None
@@ -1216,7 +1233,7 @@ class CheckpointResumeController:
             self.checkpoint = checkpoint
             self._deliver_pending_outbox()
             self._acknowledge_terminal()
-            return deepcopy(checkpoint.terminal_result)
+            return hydrate_checkpoint_result(self.store, checkpoint, checkpoint.terminal_result)
         self.checkpoint = checkpoint
         if checkpoint.cancel_requested and _terminal_abort_reason(result) is None:
             cancelled = _checkpoint_control_result(
@@ -1263,6 +1280,9 @@ class CheckpointResumeController:
         terminal = deepcopy(result)
         terminal.checkpoint_key = checkpoint.checkpoint_key
         terminal.token_usage = summarize_task_token_usage(checkpoint.model_calls)
+        if checkpoint.history["sequence"] and checkpoint.cycles:
+            first_retained = checkpoint.cycles[0].index
+            terminal.cycles = [cycle for cycle in terminal.cycles if cycle.index >= first_retained]
         checkpoint.status = terminal.status
         checkpoint.terminal_result = terminal
         control_reason = _terminal_abort_reason(terminal)
@@ -1342,7 +1362,7 @@ class CheckpointResumeController:
                 self.checkpoint = authoritative
                 self._deliver_pending_outbox()
                 self._acknowledge_terminal()
-                return deepcopy(authoritative.terminal_result)
+                return hydrate_checkpoint_result(self.store, authoritative, authoritative.terminal_result)
             raise CheckpointError(
                 "checkpoint terminal finalization lost its revision",
                 code="checkpoint_store_conflict",
@@ -1358,7 +1378,7 @@ class CheckpointResumeController:
         self._pending_preterminal_events.clear()
         self._deliver_pending_outbox()
         self._acknowledge_terminal()
-        return deepcopy(authoritative.terminal_result)
+        return hydrate_checkpoint_result(self.store, authoritative, authoritative.terminal_result)
 
     def prepare_terminal(self, result: AgentResult) -> AgentResult:
         if (
@@ -1374,7 +1394,7 @@ class CheckpointResumeController:
             )
         self.checkpoint = checkpoint
         if checkpoint.terminal_result is not None:
-            return deepcopy(checkpoint.terminal_result)
+            return hydrate_checkpoint_result(self.store, checkpoint, checkpoint.terminal_result)
         unresolved = self._unresolved_operation(checkpoint)
         if unresolved is None or (result.status is AgentStatus.WAIT_USER and unresolved.kind is OperationKind.TOOL):
             return result

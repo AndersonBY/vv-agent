@@ -256,6 +256,11 @@
           "rust": "vv_agent::TaskTokenUsage"
         },
         {
+          "id": "result.task_token_usage_totals",
+          "python": "vv_agent.TaskTokenUsageTotals",
+          "rust": "vv_agent::TaskTokenUsageTotals"
+        },
+        {
           "id": "result.host_cost",
           "python": "vv_agent.HostCost",
           "rust": "vv_agent::HostCost"

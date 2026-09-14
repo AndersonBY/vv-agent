@@ -1,14 +1,14 @@
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
--- SQLite enforces scalar lifecycle/fence relations below.  The strict v11 codec
+-- SQLite enforces scalar lifecycle/fence relations below.  The strict v12 codec
 -- (not SQLite JSON1) validates closed HostInteractionRequest and
 -- HostInteractionResponse objects, RFC 8785 digests, forbidden fields, and
 -- the 65,536-byte UTF-8 limits before any CAS transaction begins.
 
 CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_key TEXT PRIMARY KEY,
-    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v11'),
+    schema_version TEXT NOT NULL CHECK (schema_version = 'vv-agent.checkpoint.v12'),
     run_definition_schema TEXT NOT NULL CHECK (run_definition_schema = 'vv-agent.run-definition.v5'),
     run_definition TEXT NOT NULL,
     task_id TEXT NOT NULL,
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     lease_expires_at_ms INTEGER,
     terminal_result TEXT,
     terminal_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK (terminal_acknowledged IN (0, 1)),
+    history TEXT NOT NULL,
     CHECK (status <> 'deferred' OR (claim_token IS NULL AND claimed_cycle IS NULL AND lease_expires_at_ms IS NULL)),
     CHECK (status <> 'deferred' OR tool_journal <> '[]'),
     CHECK (
@@ -61,6 +62,22 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 
 CREATE INDEX IF NOT EXISTS checkpoints_status_idx
     ON checkpoints(status);
+
+CREATE TABLE IF NOT EXISTS checkpoint_history (
+    checkpoint_key TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    payload TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    PRIMARY KEY (checkpoint_key, sequence),
+    FOREIGN KEY (checkpoint_key) REFERENCES checkpoints(checkpoint_key) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS checkpoint_history_call_ids (
+    checkpoint_key TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    PRIMARY KEY (checkpoint_key, call_id),
+    FOREIGN KEY (checkpoint_key) REFERENCES checkpoints(checkpoint_key) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS host_interaction_records (
     record_id TEXT PRIMARY KEY,

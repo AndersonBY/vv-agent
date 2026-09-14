@@ -14,6 +14,7 @@ from vv_agent.deferred import (
     DeferredToolHandle,
 )
 from vv_agent.runtime.checkpoint_codec import clone_checkpoint
+from vv_agent.runtime.checkpoint_history import CheckpointHistory, compact_checkpoint, decode_history_batches
 from vv_agent.runtime.dispatch_outbox import (
     DispatchOutboxClaim,
     DispatchOutboxRecord,
@@ -55,10 +56,46 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
 
     def __init__(self) -> None:
         self._store: dict[str, Checkpoint] = {}
+        self._history: dict[str, list[dict[str, Any]]] = {}
+        self._history_call_ids: dict[str, set[str]] = {}
         self._deferred_receipts: dict[str, DeferredResolutionReceipt] = {}
         self._lock = RLock()
         self._init_controller_indexes()
         self._distributed_dispatch_outboxes: dict[str, DispatchOutboxRecord] = {}
+
+    def _save_checkpoint(self, checkpoint: Checkpoint) -> None:
+        archived_ids = self._history_call_ids.get(checkpoint.checkpoint_key, set())
+        if any(record.call_id in archived_ids for record in checkpoint.model_calls):
+            raise CheckpointError("model-call identity already archived", code="checkpoint_history_invalid")
+        batch = compact_checkpoint(checkpoint)
+        if batch is not None:
+            history = self._history.setdefault(checkpoint.checkpoint_key, [])
+            if len(history) + 1 != batch["sequence"]:
+                raise CheckpointError("history append frontier mismatch", code="checkpoint_history_invalid")
+            history.append(deepcopy(batch))
+            self._history_call_ids.setdefault(checkpoint.checkpoint_key, set()).update(
+                record["call_id"] for record in batch["model_calls"]
+            )
+        self._store[checkpoint.checkpoint_key] = checkpoint
+
+    def _restore_checkpoint(self, checkpoint: Checkpoint) -> None:
+        removed = self._history.get(checkpoint.checkpoint_key, [])[checkpoint.history["sequence"] :]
+        self._history_call_ids.get(checkpoint.checkpoint_key, set()).difference_update(
+            record["call_id"] for batch in removed for record in batch["model_calls"]
+        )
+        self._history[checkpoint.checkpoint_key] = self._history.get(checkpoint.checkpoint_key, [])[
+            : checkpoint.history["sequence"]
+        ]
+        self._store[checkpoint.checkpoint_key] = checkpoint
+
+    def load_checkpoint_history(self, checkpoint_key: str) -> CheckpointHistory:
+        with self._lock:
+            checkpoint = self._store.get(checkpoint_key)
+            if checkpoint is None:
+                if self._history.get(checkpoint_key):
+                    raise CheckpointError("orphan checkpoint history", code="checkpoint_history_invalid")
+                return CheckpointHistory()
+            return decode_history_batches(checkpoint, deepcopy(self._history.get(checkpoint_key, [])))
 
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool:
         snapshot = clone_checkpoint(checkpoint)
@@ -66,7 +103,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
         with self._lock:
             if snapshot.checkpoint_key in self._store:
                 return False
-            self._store[snapshot.checkpoint_key] = snapshot
+            self._save_checkpoint(snapshot)
             return True
 
     def load_checkpoint(self, checkpoint_key: str) -> Checkpoint | None:
@@ -140,7 +177,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             snapshot.claim_token = current.claim_token
             snapshot.claimed_cycle = current.claimed_cycle
             snapshot.lease_expires_at_ms = current.lease_expires_at_ms
-            self._store[snapshot.checkpoint_key] = snapshot
+            self._save_checkpoint(snapshot)
             return True
 
     def suspend_checkpoint(
@@ -173,7 +210,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
             snapshot.event_cursor = deepcopy(current.event_cursor)
             snapshot.cancel_requested = current.cancel_requested
-            self._store[snapshot.checkpoint_key] = snapshot
+            self._save_checkpoint(snapshot)
             return True
 
     def commit_checkpoint(
@@ -217,7 +254,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                     tool_journal=[],
                 )
             )
-            self._store[snapshot.checkpoint_key] = snapshot
+            self._save_checkpoint(snapshot)
             return True
 
     def finalize_checkpoint(self, checkpoint: Checkpoint, *, expected_revision: int) -> bool:
@@ -240,7 +277,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
             snapshot.event_cursor = deepcopy(current.event_cursor)
             snapshot.revision = expected_revision + 1
-            self._store[snapshot.checkpoint_key] = snapshot
+            self._save_checkpoint(snapshot)
             return True
 
     def finalize_claimed_checkpoint(
@@ -262,7 +299,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             )
             if terminal is None:
                 return False
-            self._store[terminal.checkpoint_key] = terminal
+            self._save_checkpoint(terminal)
             return True
 
     def record_event_delivery(
@@ -289,7 +326,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             )
             if delivered is None:
                 return False
-            self._store[checkpoint_key] = delivered
+            self._save_checkpoint(delivered)
             return True
 
     def renew_checkpoint_claim(
@@ -350,7 +387,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             if updated is None:
                 return False
             if updated is not current:
-                self._store[updated.checkpoint_key] = updated
+                self._save_checkpoint(updated)
             return True
 
     def acknowledge_terminal(self, checkpoint_key: str, *, expected_revision: int) -> bool:
@@ -370,6 +407,8 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
 
     def delete_checkpoint(self, checkpoint_key: str) -> None:
         with self._lock:
+            self._history.pop(checkpoint_key, None)
+            self._history_call_ids.pop(checkpoint_key, None)
             self._store.pop(checkpoint_key, None)
             self._deferred_receipts = {
                 key: receipt
@@ -574,7 +613,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             if updated is None:
                 return False
             if updated is not current:
-                self._store[updated.checkpoint_key] = updated
+                self._save_checkpoint(updated)
             return True
 
     def resolve_deferred(self, handle: DeferredToolHandle, result: Any) -> DeferredResolveDecision:
@@ -587,7 +626,7 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
                 created_at=run_events.event_created_at(),
             )
             if updated is not None:
-                self._store[updated.checkpoint_key] = updated
+                self._save_checkpoint(updated)
                 assert decision.receipt is not None
                 self._deferred_receipts[handle.key] = decision.receipt
             return decision
@@ -615,5 +654,5 @@ class InMemoryCheckpointStore(ControllerStoreMixin):
             if updated is None:
                 return False
             if updated is not current:
-                self._store[updated.checkpoint_key] = updated
+                self._save_checkpoint(updated)
             return True

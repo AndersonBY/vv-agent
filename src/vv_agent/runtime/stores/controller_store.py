@@ -6,7 +6,7 @@ import time
 from collections.abc import Mapping, MutableMapping
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import vv_agent.events as run_events
 from vv_agent.checkpoint import CheckpointError, OperationState, ResumeObservation, canonical_json_sha256
@@ -1147,6 +1147,11 @@ class ControllerStoreMixin:
     _store: MutableMapping[str, Any]
     _lock: Any
 
+    if TYPE_CHECKING:
+
+        def _save_checkpoint(self, checkpoint: Any) -> None: ...
+        def _restore_checkpoint(self, checkpoint: Any) -> None: ...
+
     def _init_controller_indexes(self) -> None:
         self._host_interaction_records: dict[tuple[str, str], dict[str, Any]] = {}
         self._controller_command_receipts: dict[str, ControllerCommandReceipt] = {}
@@ -1325,14 +1330,14 @@ class ControllerStoreMixin:
             previous_record = self._host_interaction_records.get(record_key)
             previous_notification = self._host_interaction_notifications.get(notification_id)
             try:
-                self._store[key] = snapshot
+                self._save_checkpoint(snapshot)
                 self._host_interaction_records[record_key] = record
                 self._host_interaction_notifications[notification_id] = notification
             except BaseException:
                 if previous_checkpoint is None:
                     self._store.pop(key, None)
                 else:
-                    self._store[key] = previous_checkpoint
+                    self._restore_checkpoint(previous_checkpoint)
                 if previous_record is None:
                     self._host_interaction_records.pop(record_key, None)
                 else:
@@ -1385,7 +1390,7 @@ class ControllerStoreMixin:
             previous_command = self._controller_commands.get(command_value.command_id)
             previous_outbox = self._controller_command_outboxes.get(command_value.command_id)
             try:
-                self._store[checkpoint_key] = checkpoint
+                self._save_checkpoint(checkpoint)
                 if staged_record is not None and record_key is not None:
                     self._host_interaction_records[record_key] = staged_record
                 self._controller_command_receipts[command_value.command_id] = receipt
@@ -1395,7 +1400,7 @@ class ControllerStoreMixin:
                 if previous_checkpoint is None:
                     self._store.pop(checkpoint_key, None)
                 else:
-                    self._store[checkpoint_key] = previous_checkpoint
+                    self._restore_checkpoint(previous_checkpoint)
                 if record_key is not None:
                     if previous_record is None:
                         self._host_interaction_records.pop(record_key, None)
@@ -1630,13 +1635,13 @@ class ControllerStoreMixin:
             previous_checkpoint = self._store.get(checkpoint_key)
             previous_record = self._host_interaction_records.get(record_key)
             try:
-                self._store[checkpoint_key] = snapshot
+                self._save_checkpoint(snapshot)
                 self._host_interaction_records[record_key] = staged_record
             except BaseException:
                 if previous_checkpoint is None:
                     self._store.pop(checkpoint_key, None)
                 else:
-                    self._store[checkpoint_key] = previous_checkpoint
+                    self._restore_checkpoint(previous_checkpoint)
                 if previous_record is None:
                     self._host_interaction_records.pop(record_key, None)
                 else:

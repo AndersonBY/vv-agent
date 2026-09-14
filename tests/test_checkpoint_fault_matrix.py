@@ -464,6 +464,7 @@ def test_f6_durable_tool_receipt_replays_without_external_calls() -> None:
 
     assert resumed.status is AgentStatus.COMPLETED
     assert (model_calls, tool_calls) == (1, 1)
+    assert [cycle.index for cycle in resumed.raw_result.cycles] == [1, 2]
 
 
 def test_f7_committed_cycle_resumes_at_next_cycle() -> None:

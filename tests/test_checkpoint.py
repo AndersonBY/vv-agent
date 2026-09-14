@@ -173,6 +173,21 @@ class _FakeRedisPipeline:
     def smembers(self, key: str) -> Set[str]:
         return self._client.smembers(key)
 
+    def sismember(self, key: str, value: str) -> bool:
+        return self._client.sismember(key, value)
+
+    def hget(self, key: str, field: str) -> str | None:
+        return self._client.hget(key, field)
+
+    def hgetall(self, key: str) -> dict[str, str]:
+        return self._client.hgetall(key)
+
+    def hset(self, key: str, field: str, value: str) -> None:
+        if self._transaction:
+            self._commands.append(("hset", key, json.dumps([field, value])))
+        else:
+            self._client.hset(key, field, value)
+
     def multi(self) -> None:
         self._transaction = True
 
@@ -206,6 +221,10 @@ class _FakeRedisPipeline:
             if command in {"set", "set_nx"}:
                 assert value is not None
                 results.append(self._client.set(key, value, nx=command == "set_nx"))
+            elif command == "hset":
+                assert value is not None
+                field, payload = json.loads(value)
+                results.append(self._client.hset(key, field, payload))
             elif command == "sadd":
                 assert value is not None
                 results.append(self._client.sadd(key, value))
@@ -230,6 +249,7 @@ class _FakeRedisClient:
     def __init__(self) -> None:
         self._values: dict[str, str] = {}
         self._sets: dict[str, set[str]] = {}
+        self._hashes: dict[str, dict[str, str]] = {}
         self.server_now_ms = 0
 
     def set(self, key: str, value: str, *, nx: bool = False) -> bool:
@@ -243,6 +263,18 @@ class _FakeRedisClient:
 
     def mget(self, keys: list[str]) -> list[str | None]:
         return [self._values.get(key) for key in keys]
+
+    def hget(self, key: str, field: str) -> str | None:
+        return self._hashes.get(key, {}).get(field)
+
+    def hgetall(self, key: str) -> dict[str, str]:
+        return dict(self._hashes.get(key, {}))
+
+    def hset(self, key: str, field: str, value: str) -> int:
+        fields = self._hashes.setdefault(key, {})
+        inserted = field not in fields
+        fields[field] = value
+        return int(inserted)
 
     def sadd(self, key: str, value: str) -> int:
         members = self._sets.setdefault(key, set())
@@ -262,11 +294,15 @@ class _FakeRedisClient:
     def smembers(self, key: str) -> Set[str]:
         return set(self._sets.get(key, set()))
 
+    def sismember(self, key: str, value: str) -> bool:
+        return value in self._sets.get(key, set())
+
     def delete(self, *keys: str) -> int:
         deleted = 0
         for key in keys:
             deleted += int(self._values.pop(key, None) is not None)
             deleted += int(self._sets.pop(key, None) is not None)
+            deleted += int(self._hashes.pop(key, None) is not None)
         return deleted
 
     def pipeline(self) -> _FakeRedisPipeline:
@@ -1430,6 +1466,10 @@ def test_checkpoint_invalid_fixture_cases_have_stable_codes() -> None:
         "unknown_top_level_is_rejected": "checkpoint_unknown_field",
         "cancel_requested_not_boolean": "checkpoint_status_invalid",
         "terminal_result_with_active_tool_journal_is_invalid": "checkpoint_status_invalid",
+        "nonpositive_cycle": "checkpoint_history_invalid",
+        "duplicate_cycles": "checkpoint_history_invalid",
+        "unordered_cycles": "checkpoint_history_invalid",
+        "future_cycle": "checkpoint_history_invalid",
     }
     for case in fixture["invalid_cases"]:
         registered = [] if case["name"] == "unknown_required_extension" else None

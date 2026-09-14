@@ -457,6 +457,43 @@ class AgentRuntime:
         initial_budget_usage: BudgetUsageSnapshot | None = None,
         checkpoint_controller: CheckpointResumeController | None = None,
     ) -> AgentResult:
+        """Execute the task and return its complete public history and usage."""
+        result = self._run_active(
+            task,
+            workspace=workspace,
+            shared_state=shared_state,
+            initial_messages=initial_messages,
+            prepared_initial_messages=prepared_initial_messages,
+            user_message=user_message,
+            before_cycle_messages=before_cycle_messages,
+            interruption_messages=interruption_messages,
+            ctx=ctx,
+            sub_task_manager=sub_task_manager,
+            budget_limits=budget_limits,
+            host_cost_meter=host_cost_meter,
+            initial_budget_usage=initial_budget_usage,
+            checkpoint_controller=checkpoint_controller,
+        )
+        return checkpoint_controller.hydrate_result(result) if checkpoint_controller is not None else result
+
+    def _run_active(
+        self,
+        task: AgentTask,
+        *,
+        workspace: str | Path | None = None,
+        shared_state: dict[str, Any] | None = None,
+        initial_messages: list[Message] | None = None,
+        prepared_initial_messages: list[Message] | None = None,
+        user_message: str | None = None,
+        before_cycle_messages: BeforeCycleMessageProvider | None = None,
+        interruption_messages: InterruptionMessageProvider | None = None,
+        ctx: ExecutionContext | None = None,
+        sub_task_manager: SubTaskManager | None = None,
+        budget_limits: RunBudgetLimits | None = None,
+        host_cost_meter: HostCostMeter | None = None,
+        initial_budget_usage: BudgetUsageSnapshot | None = None,
+        checkpoint_controller: CheckpointResumeController | None = None,
+    ) -> AgentResult:
         workspace_path = self._prepare_workspace(workspace)
         if checkpoint_controller is None:
             self._freeze_loaded_session_memory_bundle(task=task, workspace_path=workspace_path)
@@ -540,7 +577,14 @@ class AgentRuntime:
                 )
 
         result: AgentResult | None = None
-        if budget_controller is not None:
+        if budget_controller is not None and checkpoint_controller is not None:
+            result = checkpoint_controller.deferred_pending_result(
+                messages=messages,
+                cycles=[],
+                shared_state=shared,
+                token_usage=runtime_ctx.model_call_ledger.usage(),
+            )
+        if budget_controller is not None and result is None:
             cancelled = bool(runtime_ctx.cancellation_token is not None and runtime_ctx.cancellation_token.cancelled)
             if cancelled:
                 result = AgentResult(
@@ -567,6 +611,17 @@ class AgentRuntime:
                         controller=budget_controller,
                         exhaustion=exhaustion,
                     )
+
+        if result is not None and checkpoint_controller is not None:
+            # Early budget/cancellation results skip the backend's normal restore.
+            checkpoint_controller.bind_runtime_state(
+                messages=result.messages,
+                cycles=result.cycles,
+                shared_state=result.shared_state,
+                budget_snapshot_provider=(lambda: budget_controller.snapshot) if budget_controller is not None else None,
+            )
+            if result.status is AgentStatus.FAILED:
+                result.partial_output = _last_assistant_output(result.cycles)
 
         if result is None:
             self._emit_observation("agent_started", ctx=runtime_ctx, model=task.model)
@@ -678,7 +733,7 @@ class AgentRuntime:
             self._emit_observation(
                 "run_cancelled",
                 ctx=runtime_ctx,
-                cycle=len(result.cycles) or None,
+                cycle=result.cycles[-1].index if result.cycles else None,
                 reason=self._preview_text(_agent_result_error_text(result.error) or "Operation was cancelled"),
                 completion_reason=result.completion_reason.value,
                 partial_output=self._preview_text(result.partial_output or ""),
@@ -690,7 +745,7 @@ class AgentRuntime:
             self._emit_observation(
                 "run_max_cycles",
                 ctx=runtime_ctx,
-                cycle=len(result.cycles),
+                cycle=result.cycles[-1].index if result.cycles else 0,
                 final_answer=self._preview_text(result.final_answer or ""),
                 error=self._preview_text(_agent_result_error_text(result.error) or ""),
                 completion_reason=result.completion_reason.value,
@@ -1277,7 +1332,7 @@ class AgentRuntime:
                 cycle=cycle_record,
                 messages=messages,
                 shared_state=shared_state,
-                cumulative_token_usage=self._task_token_usage(ctx),
+                cumulative_token_usage=self._cumulative_task_token_usage(ctx),
                 available_tool_names=available_tool_names,
                 disallowed_tool_names=disallowed,
                 native_outcome=native_outcome,
@@ -1460,6 +1515,16 @@ class AgentRuntime:
         if ctx is None:
             return TaskTokenUsage()
         return ctx.model_call_ledger.usage()
+
+    @staticmethod
+    def _cumulative_task_token_usage(ctx: ExecutionContext | None) -> Any:
+        if ctx is not None:
+            controller = ctx.metadata.get("_vv_agent_checkpoint_controller")
+            if isinstance(controller, CheckpointResumeController):
+                from vv_agent.runtime.checkpoint_history import cumulative_checkpoint_usage
+
+                return cumulative_checkpoint_usage(controller._require_checkpoint())
+        return AgentRuntime._task_token_usage(ctx)
 
     def _emit_observation(
         self,

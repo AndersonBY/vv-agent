@@ -16,7 +16,7 @@ history.
 | `bash-process-management.md` | Bash initial wait, execution deadline, owner-scoped query/stop, live output, and checkpoint receipts. |
 | `run-budgets.md` | Token, tool, wall-time, and host-cost limits; observations, resume, and distributed behavior. |
 | `output-validation.md` | Default-off typed output validation, one tools-free repair callback, and failure semantics. |
-| `checkpoint-resume.md` | Checkpoint v11, immutable run definitions, model-call ledgers, deferred barriers, ambiguity, host interaction, and durable terminal ordering. |
+| `checkpoint-resume.md` | Checkpoint v12, immutable run definitions, model-call ledgers, deferred barriers, ambiguity, host interaction, and durable terminal ordering. |
 | `app-server.md` | JSONL protocol, lifecycle, approval, schema generation, CLI startup, and host boundary. |
 
 ## Existing Entry Points

@@ -1,5 +1,5 @@
 {
-  "schema_version": "vv-agent.after-cycle-hook.v1",
+  "schema_version": "vv-agent.after-cycle-hook.v2",
   "default_behavior": {
     "configured_hooks": [],
     "invocation_count": 0,
@@ -49,7 +49,20 @@
       "milestone",
       "answer_confidence",
       "lease_policy"
-    ]
+    ],
+    "cumulative_token_usage": {
+      "type": "TaskTokenUsageTotals",
+      "closed_fields": [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "reasoning_tokens",
+        "cache_usage"
+      ],
+      "includes_archived_model_calls_in_totals": true,
+      "includes_model_call_records": false,
+      "cache_usage_source": "aggregate"
+    }
   },
   "decision": {
     "closed_fields": [

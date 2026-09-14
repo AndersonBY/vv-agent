@@ -1,14 +1,15 @@
 {
   "contract": "checkpoint_store",
   "version": 10,
-  "checkpoint_schema": "vv-agent.checkpoint.v11",
+  "checkpoint_schema": "vv-agent.checkpoint.v12",
   "run_definition_schema": "vv-agent.run-definition.v5",
   "checkpoint_state_columns": {
     "active_host_interaction": "complete closed vv-agent.host-interaction-request.v1 JSON object (including prompt and schema_version) or null",
     "suspended_origin": "closed JSON origin object or null",
     "crash_reload": "load both fields and host_interaction_records before deciding whether to wake or wait",
     "cancel_requested": "required boolean cancellation signal",
-    "old_schema": "vv-agent.checkpoint.v9 is rejected; no fallback reader"
+    "old_schema": "vv-agent.checkpoint.v9 is rejected; no fallback reader",
+    "history": "bounded archive frontier with authenticated immutable cycle/model-call prefix and cumulative usage; active tail remains in checkpoint"
   },
   "resume_observation": {
     "schema_version": "vv-agent.resume-observation.v1",
@@ -543,7 +544,7 @@
       "failed_or_stale": 2,
       "replay": 3
     },
-      "host_interaction_recovery_obtains_checkpoint_execution_claim": true,
+    "host_interaction_recovery_obtains_checkpoint_execution_claim": true,
     "host_interaction_recovery_releases_record_claim_in_same_cas": true,
     "host_interaction_recovery_retains_checkpoint_claim_after_consume": true,
     "host_interaction_recovery_crash_before_commit_rolls_back": true,
@@ -2630,5 +2631,42 @@
     "barrier_tests_for_concurrency": true,
     "sigkill_canary": true,
     "sleep_only_timing_assertions_forbidden": true
+  },
+  "history_archive": {
+    "batch_schema": "vv-agent.checkpoint-history.v1",
+    "checkpoint_frontier_fields": [
+      "sequence",
+      "cycle_count",
+      "model_call_count",
+      "head_digest",
+      "usage",
+      "previous_agent_input"
+    ],
+    "archive_batch_fields": [
+      "schema_version",
+      "checkpoint_key",
+      "sequence",
+      "previous_digest",
+      "cycles",
+      "model_calls"
+    ],
+    "digest": "lowercase_sha256_rfc8785_complete_batch",
+    "sqlite_table": "checkpoint_history",
+    "redis_hash_suffix": ":history",
+    "redis_field": "decimal_sequence_starting_at_one",
+    "append_boundary": "same_revision_CAS_and_transaction_as_checkpoint_outbox_budget_and_receipts",
+    "retention": "latest_committed_cycle_plus_active_cycle_and_journal_referenced_model_calls",
+    "archived_facts_immutable": true,
+    "load_checkpoint": "bounded_active_frontier_without_archive_read",
+    "load_checkpoint_history": "explicit_complete_archived_prefix_verified_against_frontier",
+    "public_result": "hydrate_complete_cycles_and_model_ledger_at_explicit_result_boundary",
+    "cleanup": "same_checkpoint_retention_boundary",
+    "growth_acceptance": "fixed_active_context_and_fixed_new_cycle_data_produce_bounded_checkpoint_bytes_and_linear_cumulative_serialized_read_write_bytes",
+    "history_read_return_fields": [
+      "cycles",
+      "model_calls",
+      "frontier"
+    ],
+    "hydration_frontier_mismatch": "checkpoint_history_changed"
   }
 }

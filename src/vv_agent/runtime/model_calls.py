@@ -86,15 +86,21 @@ class ModelCallIdentity:
 @dataclass(slots=True)
 class ModelCallLedger:
     _records: list[ModelCallRecord] = field(default_factory=list, repr=False)
+    _call_ids: set[str] = field(default_factory=set, repr=False)
+    previous_archived_input: dict[str, Any] | None = field(default=None, repr=False)
 
     def replace(self, records: list[ModelCallRecord]) -> None:
         candidate = summarize_task_token_usage(records)
         self._records = deepcopy(candidate.model_calls)
+        self._call_ids = {record.call_id for record in records}
 
     def append(self, record: ModelCallRecord) -> None:
-        candidate = [*self._records, deepcopy(record)]
-        summarize_task_token_usage(candidate)
-        self._records = candidate
+        if not isinstance(record, ModelCallRecord):
+            raise TypeError("model_call must be a ModelCallRecord")
+        if record.call_id in self._call_ids:
+            raise ValueError("model_call_id_duplicate")
+        self._records.append(deepcopy(record))
+        self._call_ids.add(record.call_id)
 
     def records(self) -> list[ModelCallRecord]:
         return deepcopy(self._records)
@@ -110,6 +116,8 @@ class ModelCallLedger:
                 and record.status is ModelCallStatus.COMPLETED
             ):
                 return record.usage.input_tokens
+        if self.previous_archived_input is not None and self.previous_archived_input["cycle_index"] < cycle_index:
+            return self.previous_archived_input["input_tokens"]
         return None
 
 

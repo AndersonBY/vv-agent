@@ -277,7 +277,10 @@ server.serve_forever()
         assert receipt(call_id).result_digest == original.result_digest
         stored = store.load_checkpoint(key)
         assert stored is not None
-        retained = next(tool for cycle in stored.cycles for tool in cycle.tool_results if tool.tool_call_id == call_id)
+        historical = store.load_checkpoint_history(key)
+        retained = next(
+            tool for cycle in [*historical.cycles, *stored.cycles] for tool in cycle.tool_results if tool.tool_call_id == call_id
+        )
         assert retained.to_dict() == original.result
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", int((tmp_path / "port").read_text())), timeout=0.2)
@@ -522,7 +525,7 @@ os._exit(0)
     )
     ctx = context(tmp_path)
     session_id = assert_running(call(ctx, "bash", {"command": command, "yield_time_ms": 20}))
-    wait_until(lambda: (tmp_path / "child-ready").exists())
+    wait_until(lambda: (tmp_path / "child-ready").exists() and (tmp_path / "child-ready").read_text().strip().isdigit())
     wait_until(lambda: process_exited(int((tmp_path / "parent-pid").read_text())))
     active = call(ctx, "check_background_command", {"session_id": session_id})
     assert_running(active)
@@ -571,7 +574,7 @@ os._exit(7)
         arguments["timeout_seconds"] = 1
     started = call(ctx, "bash", arguments)
     session_id = started.metadata["session_id"]
-    wait_until(lambda: (tmp_path / "child-ready").exists())
+    wait_until(lambda: (tmp_path / "child-ready").exists() and (tmp_path / "child-ready").read_text().strip().isdigit())
     pid = int((tmp_path / "child-ready").read_text())
     try:
         parent = int((tmp_path / "parent-pid").read_text())

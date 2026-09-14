@@ -1771,7 +1771,7 @@ class Runner:
             if checkpoint_cycle_already_advanced or (
                 tool_result is not None and approval_exhaustion is None and tool_result.directive is ToolDirective.CONTINUE
             ):
-                raw_result = runtime.run(
+                raw_result = runtime._run_active(
                     task,
                     workspace=cls._resolve_workspace(run_config.workspace),
                     shared_state=approval_shared_state,
@@ -1834,7 +1834,7 @@ class Runner:
                         raw_result.error = None
         else:
             try:
-                raw_result = runtime.run(
+                raw_result = runtime._run_active(
                     task,
                     workspace=cls._resolve_workspace(run_config.workspace),
                     shared_state=run_config.shared_state,
@@ -1859,6 +1859,7 @@ class Runner:
         output_coercion_error: Exception | None = None
         try:
             if checkpoint_controller is not None and not terminal_replayed:
+                raw_result = checkpoint_controller.hydrate_result(raw_result)
                 try:
                     raw_result = checkpoint_controller.prepare_terminal(raw_result)
                 except CheckpointReconciliationRequired as interruption:

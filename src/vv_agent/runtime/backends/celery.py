@@ -33,6 +33,7 @@ from vv_agent.runtime.backends.distributed import (
     toolset_schema_digest,
 )
 from vv_agent.runtime.cancellation import CancelledError
+from vv_agent.runtime.checkpoint_history import hydrate_checkpoint_result
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.dispatch_outbox import (
@@ -153,7 +154,7 @@ class CeleryBackend:
                 return self._handle_terminal_response(
                     response=DistributedWorkerResponse.terminal_replay(
                         checkpoint_revision=checkpoint.revision,
-                        result=checkpoint.terminal_result,
+                        result=hydrate_checkpoint_result(checkpoint_controller.store, checkpoint, checkpoint.terminal_result),
                     ),
                     cycle_index=checkpoint.cycle_index,
                     checkpoint_controller=checkpoint_controller,
@@ -512,13 +513,14 @@ class CeleryBackend:
         response = delivery.response
 
         if checkpoint.terminal_result is not None:
+            retained_result = hydrate_checkpoint_result(store, checkpoint, checkpoint.terminal_result)
             if (
                 response is not None
                 and response.response_type == "terminal_replay"
                 and (
                     response.checkpoint_revision != checkpoint.revision
                     or response.result is None
-                    or response.result.to_dict() != checkpoint.terminal_result.to_dict()
+                    or response.result.to_dict() != retained_result.to_dict()
                 )
             ):
                 raise CheckpointError(
@@ -529,7 +531,7 @@ class CeleryBackend:
                 action="terminal_replay",
                 handle=handle,
                 checkpoint_revision=checkpoint.revision,
-                result=deepcopy(checkpoint.terminal_result),
+                result=retained_result,
             )
 
         if response is not None and response.response_type == "terminal_replay":
@@ -748,7 +750,8 @@ class CeleryBackend:
             if (
                 checkpoint.terminal_result is None
                 or response.checkpoint_revision != checkpoint.revision
-                or checkpoint.terminal_result.to_dict() != result.to_dict()
+                or hydrate_checkpoint_result(checkpoint_controller.store, checkpoint, checkpoint.terminal_result).to_dict()
+                != result.to_dict()
             ):
                 raise CheckpointError(
                     "distributed terminal replay does not match the durable checkpoint",

@@ -57,6 +57,7 @@ _KNOWN_FIELDS = frozenset(
         "lease_expires_at_ms",
         "terminal_result",
         "terminal_acknowledged",
+        "history",
     }
 )
 _MIN_I64 = -(1 << 63)
@@ -103,10 +104,11 @@ def checkpoint_to_dict(
         "lease_expires_at_ms": checkpoint.lease_expires_at_ms,
         "terminal_result": (checkpoint.terminal_result.to_dict() if checkpoint.terminal_result is not None else None),
         "terminal_acknowledged": checkpoint.terminal_acknowledged,
+        "history": checkpoint.history,
     }
     payload["active_host_interaction"] = checkpoint.active_host_interaction
     payload["suspended_origin"] = checkpoint.suspended_origin
-    return _json_object(payload, "checkpoint v11")
+    return _json_object(payload, "checkpoint v12")
 
 
 def checkpoint_from_dict(
@@ -116,7 +118,7 @@ def checkpoint_from_dict(
     registered_extensions: Iterable[Any] | None = None,
 ) -> Checkpoint:
     if not isinstance(payload, dict):
-        raise ValueError("checkpoint v11 payload must be an object")
+        raise ValueError("checkpoint v12 payload must be an object")
     unknown_fields = set(payload) - _KNOWN_FIELDS
     if unknown_fields:
         names = ", ".join(sorted(unknown_fields))
@@ -185,6 +187,7 @@ def checkpoint_from_dict(
         schema_version=CHECKPOINT_SCHEMA,
         run_definition_schema=run_definition_schema,
         run_definition=run_definition,
+        history=_object(payload.get("history"), "checkpoint history"),
         checkpoint_key=payload.get("checkpoint_key"),
         task_id=payload.get("task_id"),
         root_run_id=payload.get("root_run_id"),
@@ -197,7 +200,7 @@ def checkpoint_from_dict(
         active_host_interaction=payload.get("active_host_interaction"),
         suspended_origin=payload.get("suspended_origin"),
         messages=[Message.from_dict(_object(item, "checkpoint message")) for item in messages_raw],
-        cycles=[CycleRecord.from_dict(_object(item, "checkpoint cycle")) for item in cycles_raw],
+        cycles=_checkpoint_cycles(cycles_raw),
         model_calls=[ModelCallRecord.from_dict(_object(item, "checkpoint model call")) for item in model_calls_raw],
         shared_state=shared_state,
         budget_usage=BudgetUsageSnapshot.from_dict(budget_raw) if budget_raw is not None else None,
@@ -234,7 +237,7 @@ def checkpoint_to_json(
             checkpoint,
             max_extension_state_bytes=max_extension_state_bytes,
         ),
-        "checkpoint v11",
+        "checkpoint v12",
     ).decode("utf-8")
 
 
@@ -245,16 +248,23 @@ def checkpoint_from_json(
     registered_extensions: Iterable[Any] | None = None,
 ) -> Checkpoint:
     if not isinstance(payload, str | bytes):
-        raise TypeError("checkpoint v11 JSON must be str or bytes")
+        raise TypeError("checkpoint v12 JSON must be str or bytes")
     try:
         decoded = _strict_json_loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("checkpoint v11 JSON is invalid") from exc
+        raise ValueError("checkpoint v12 JSON is invalid") from exc
     return checkpoint_from_dict(
         decoded,
         max_extension_state_bytes=max_extension_state_bytes,
         registered_extensions=registered_extensions,
     )
+
+
+def _checkpoint_cycles(cycles: list[Any]) -> list[CycleRecord]:
+    try:
+        return [CycleRecord.from_dict(_object(item, "checkpoint cycle")) for item in cycles]
+    except (TypeError, ValueError) as exc:
+        raise CheckpointError("invalid checkpoint cycles", code="checkpoint_history_invalid") from exc
 
 
 def clone_checkpoint(checkpoint: Checkpoint) -> Checkpoint:

@@ -23,6 +23,7 @@ from vv_agent.runtime.checkpoint_codec import (
     checkpoint_to_dict,
     checkpoint_to_json,
 )
+from vv_agent.runtime.checkpoint_history import CheckpointHistory, compact_checkpoint, decode_history_batches
 from vv_agent.runtime.controller import (
     ControllerCommand,
     ControllerCommandReceipt,
@@ -140,12 +141,77 @@ class RedisCheckpointStore:
                 except Exception:
                     pipe.unwatch()
                     raise
-        raise RuntimeError("redis checkpoint v11 creation exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 creation exceeded transaction retry limit")
 
     def load_checkpoint(self, checkpoint_key: str) -> Checkpoint | None:
         data_key, lease_key = self._keys(checkpoint_key)
         raw, lease = self._client.mget([data_key, lease_key])
         return None if raw is None else _checkpoint_from_storage(raw, lease, checkpoint_key=checkpoint_key)
+
+    def load_checkpoint_history(self, checkpoint_key: str) -> CheckpointHistory:
+        data_key, lease_key = self._keys(checkpoint_key)
+        history_key = f"{data_key}:history"
+        with self._client.pipeline() as pipe:
+            for _attempt in range(_TRANSACTION_MAX_ATTEMPTS):
+                try:
+                    pipe.watch(data_key, lease_key, history_key)
+                    raw, lease = pipe.mget([data_key, lease_key])
+                    stored = pipe.hgetall(history_key)
+                    pipe.multi()
+                    pipe.execute()
+                    break
+                except self._watch_error:
+                    continue
+            else:
+                raise RuntimeError("redis checkpoint history read exceeded transaction retry limit")
+        if raw is None:
+            if stored:
+                raise CheckpointError("orphan checkpoint history", code="checkpoint_history_invalid")
+            return CheckpointHistory()
+        checkpoint = _checkpoint_from_storage(raw, lease, checkpoint_key=checkpoint_key)
+        batches = []
+        for sequence, payload in stored.items():
+            sequence = sequence.decode("utf-8") if isinstance(sequence, bytes) else sequence
+            batch = _strict_json_loads(payload)
+            if not isinstance(batch, dict) or str(batch.get("sequence")) != sequence:
+                raise CheckpointError("invalid checkpoint history sequence", code="checkpoint_history_invalid")
+            batches.append(batch)
+        batches.sort(key=lambda batch: batch["sequence"])
+        return decode_history_batches(checkpoint, batches)
+
+    @staticmethod
+    def _prepare_checkpoint_write(pipe: Any, checkpoint: Checkpoint) -> tuple[str, int | None, dict[str, Any] | None]:
+        snapshot = deepcopy(checkpoint)
+        call_ids_key = f"{RedisCheckpointStore.data_key(snapshot.checkpoint_key)}:history:call_ids"
+        if snapshot.model_calls:
+            pipe.watch(call_ids_key)
+            for record in snapshot.model_calls:
+                # SISMEMBER also checks key type before MULTI so an invalid
+                # index cannot fail after the checkpoint SET has executed.
+                if pipe.sismember(call_ids_key, record.call_id):
+                    raise CheckpointError("model call identity is already archived", code="checkpoint_history_invalid")
+        batch = compact_checkpoint(snapshot)
+        if batch is not None:
+            history_key = f"{RedisCheckpointStore.data_key(snapshot.checkpoint_key)}:history"
+            pipe.watch(history_key)
+            # HGET also rejects a wrong-type key before MULTI: Redis command
+            # errors inside EXEC would not roll back the checkpoint SET.
+            previous = pipe.hget(history_key, str(batch["sequence"]))
+            if previous is not None and _strict_json_loads(previous) != batch:
+                raise CheckpointError("checkpoint history identity conflict", code="checkpoint_history_invalid")
+        payload, lease = _checkpoint_to_storage(snapshot)
+        return payload, lease, batch
+
+    @staticmethod
+    def _queue_checkpoint_history(pipe: Any, data_key: str, batch: dict[str, Any] | None) -> None:
+        if batch is not None:
+            pipe.hset(
+                f"{data_key}:history",
+                str(batch["sequence"]),
+                canonical_json_bytes(batch, "checkpoint history batch").decode("utf-8"),
+            )
+            for record in batch["model_calls"]:
+                pipe.sadd(f"{data_key}:history:call_ids", record["call_id"])
 
     def claim_checkpoint(
         self,
@@ -197,9 +263,10 @@ class RedisCheckpointStore:
                     checkpoint.claim_token = claim_token
                     checkpoint.claimed_cycle = cycle_index
                     checkpoint.lease_expires_at_ms = lease_expires_at_ms
-                    payload, _lease = _checkpoint_to_storage(checkpoint)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, checkpoint)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     pipe.set(lease_key, str(lease_expires_at_ms))
                     pipe.execute()
                     return checkpoint
@@ -208,7 +275,7 @@ class RedisCheckpointStore:
                     raise
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 claim exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 claim exceeded transaction retry limit")
 
     def progress_checkpoint(
         self,
@@ -251,14 +318,15 @@ class RedisCheckpointStore:
                     snapshot.claim_token = current.claim_token
                     snapshot.claimed_cycle = current.claimed_cycle
                     snapshot.lease_expires_at_ms = current.lease_expires_at_ms
-                    payload, _lease = _checkpoint_to_storage(snapshot)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, snapshot)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 progress exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 progress exceeded transaction retry limit")
 
     def suspend_checkpoint(
         self,
@@ -303,15 +371,16 @@ class RedisCheckpointStore:
                     snapshot.event_outbox = merge_event_outbox(current.event_outbox, snapshot.event_outbox)
                     snapshot.event_cursor = deepcopy(current.event_cursor)
                     snapshot.cancel_requested = current.cancel_requested
-                    payload, _lease = _checkpoint_to_storage(snapshot)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, snapshot)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     pipe.delete(lease_key)
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 suspend exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 suspend exceeded transaction retry limit")
 
     def commit_checkpoint(
         self,
@@ -367,15 +436,16 @@ class RedisCheckpointStore:
                         model_call_journal=[],
                         tool_journal=[],
                     )
-                    payload, _lease = _checkpoint_to_storage(committed)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, committed)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     pipe.delete(lease_key)
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 commit exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 commit exceeded transaction retry limit")
 
     def finalize_checkpoint(
         self,
@@ -384,7 +454,7 @@ class RedisCheckpointStore:
         expected_revision: int,
     ) -> bool:
         if checkpoint.terminal_result is None or checkpoint.claim_token is not None:
-            raise ValueError("finalized checkpoint v11 must be terminal and unclaimed")
+            raise ValueError("finalized checkpoint v12 must be terminal and unclaimed")
         checkpoint = prepare_unclaimed_terminal(checkpoint)
         data_key, lease_key = self._keys(checkpoint.checkpoint_key)
         with self._client.pipeline() as pipe:
@@ -409,15 +479,16 @@ class RedisCheckpointStore:
                     checkpoint.event_outbox = merge_event_outbox(current.event_outbox, checkpoint.event_outbox)
                     checkpoint.event_cursor = deepcopy(current.event_cursor)
                     terminal = replace(checkpoint, revision=expected_revision + 1)
-                    payload, _lease = _checkpoint_to_storage(terminal)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, terminal)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     pipe.delete(lease_key)
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 finalization exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 finalization exceeded transaction retry limit")
 
     def finalize_claimed_checkpoint(
         self,
@@ -446,15 +517,16 @@ class RedisCheckpointStore:
                     if terminal is None:
                         pipe.unwatch()
                         return False
-                    payload, _lease = _checkpoint_to_storage(terminal)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, terminal)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     pipe.delete(lease_key)
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis claimed checkpoint v11 finalization exceeded transaction retry limit")
+        raise RuntimeError("redis claimed checkpoint v12 finalization exceeded transaction retry limit")
 
     def record_event_delivery(
         self,
@@ -487,16 +559,17 @@ class RedisCheckpointStore:
                     if delivered is None:
                         pipe.unwatch()
                         return False
-                    payload, _lease = _checkpoint_to_storage(delivered)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, delivered)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     if delivered.claim_token is None:
                         pipe.delete(lease_key)
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 event delivery exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 event delivery exceeded transaction retry limit")
 
     def renew_checkpoint_claim(
         self,
@@ -534,7 +607,7 @@ class RedisCheckpointStore:
                     )
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 renewal exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 renewal exceeded transaction retry limit")
 
     def record_tool_receipt(
         self,
@@ -575,9 +648,10 @@ class RedisCheckpointStore:
                     if authoritative is None or authoritative is current:
                         pipe.unwatch()
                         return authoritative is not None
-                    payload, _lease = _checkpoint_to_storage(authoritative)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, authoritative)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     if authoritative.lease_expires_at_ms is not None:
                         pipe.set(lease_key, str(authoritative.lease_expires_at_ms))
                     pipe.execute()
@@ -587,7 +661,7 @@ class RedisCheckpointStore:
                     raise
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 tool receipt exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 tool receipt exceeded transaction retry limit")
 
     def acknowledge_terminal(self, checkpoint_key: str, *, expected_revision: int) -> bool:
         data_key, lease_key = self._keys(checkpoint_key)
@@ -610,15 +684,16 @@ class RedisCheckpointStore:
                         return False
                     checkpoint.revision += 1
                     checkpoint.terminal_acknowledged = True
-                    payload, _lease = _checkpoint_to_storage(checkpoint)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, checkpoint)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     pipe.delete(lease_key)
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 acknowledgement exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 acknowledgement exceeded transaction retry limit")
 
     def delete_checkpoint(self, checkpoint_key: str) -> None:
         def cleanup_member_key(member: object, label: str) -> str:
@@ -776,6 +851,8 @@ class RedisCheckpointStore:
                     for key in (
                         data_key,
                         lease_key,
+                        f"{data_key}:history",
+                        f"{data_key}:history:call_ids",
                         receipt_set_key,
                         controller_set_key,
                         record_set_key,
@@ -794,7 +871,7 @@ class RedisCheckpointStore:
                     return
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 cleanup exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 cleanup exceeded transaction retry limit")
 
     def claim_distributed_dispatch(
         self,
@@ -1026,16 +1103,17 @@ class RedisCheckpointStore:
                         return False
                     # Same-value transaction is the Redis writeability proof;
                     # the lifecycle outbox has no fixed cardinality/byte cap.
-                    payload, _lease = _checkpoint_to_storage(current)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, current)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     if current.lease_expires_at_ms is not None:
                         pipe.set(lease_key, str(current.lease_expires_at_ms))
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 outbox preflight exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 outbox preflight exceeded transaction retry limit")
 
     def admit_deferred_batch(
         self,
@@ -1069,9 +1147,10 @@ class RedisCheckpointStore:
                     if updated is None:
                         pipe.unwatch()
                         return False
-                    payload, _lease = _checkpoint_to_storage(updated)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     if updated.claim_token is None:
                         pipe.delete(lease_key)
                     else:
@@ -1080,7 +1159,7 @@ class RedisCheckpointStore:
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 deferred admission exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 deferred admission exceeded transaction retry limit")
 
     def resolve_deferred(self, handle: DeferredToolHandle, result: Any) -> DeferredResolveDecision:
         """Resolve one handle with a receipt-first Redis WATCH/MULTI CAS."""
@@ -1107,10 +1186,11 @@ class RedisCheckpointStore:
                         return decision
                     receipt = decision.receipt
                     assert receipt is not None
-                    payload, _lease = _checkpoint_to_storage(updated)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, updated)
                     receipt_payload = _receipt_to_storage(receipt)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     if updated.claim_token is None:
                         pipe.delete(lease_key)
                     else:
@@ -1121,7 +1201,7 @@ class RedisCheckpointStore:
                     return decision
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 deferred resolution exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 deferred resolution exceeded transaction retry limit")
 
     def accept_deferred_batch(
         self,
@@ -1159,15 +1239,16 @@ class RedisCheckpointStore:
                     if updated is current:
                         pipe.unwatch()
                         return True
-                    payload, _lease = _checkpoint_to_storage(updated)
+                    payload, _lease, history_batch = self._prepare_checkpoint_write(pipe, updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     pipe.delete(lease_key)
                     pipe.execute()
                     return True
                 except self._watch_error:
                     continue
-        raise RuntimeError("redis checkpoint v11 deferred reconciliation exceeded transaction retry limit")
+        raise RuntimeError("redis checkpoint v12 deferred reconciliation exceeded transaction retry limit")
 
     def produce_host_interaction(
         self,
@@ -1235,9 +1316,10 @@ class RedisCheckpointStore:
                         admission_context=admission_context,
                         created_at=run_events.event_created_at(),
                     )
-                    payload, lease = _checkpoint_to_storage(updated)
+                    payload, lease, history_batch = self._prepare_checkpoint_write(pipe, updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     if lease is None:
                         pipe.delete(lease_key)
                     else:
@@ -1357,9 +1439,10 @@ class RedisCheckpointStore:
                         pipe.get(receipt_key)
                         pipe.execute()
                         raise
-                    payload, lease = _checkpoint_to_storage(updated)
+                    payload, lease, history_batch = self._prepare_checkpoint_write(pipe, updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     if lease is None:
                         pipe.delete(lease_key)
                     else:
@@ -1761,9 +1844,10 @@ class RedisCheckpointStore:
                     if result.kind != "applied":
                         pipe.unwatch()
                         return result
-                    payload, lease = _checkpoint_to_storage(updated)
+                    payload, lease, history_batch = self._prepare_checkpoint_write(pipe, updated)
                     pipe.multi()
                     pipe.set(data_key, payload)
+                    self._queue_checkpoint_history(pipe, data_key, history_batch)
                     if lease is None:
                         pipe.delete(lease_key)
                     else:
@@ -2318,7 +2402,7 @@ def _host_interaction_outcome(
 def _checkpoint_to_storage(checkpoint: Checkpoint) -> tuple[str, int | None]:
     payload = checkpoint_to_dict(checkpoint)
     lease = payload.pop("lease_expires_at_ms")
-    return canonical_json_bytes(payload, "redis checkpoint v11").decode("utf-8"), lease
+    return canonical_json_bytes(payload, "redis checkpoint v12").decode("utf-8"), lease
 
 
 def _receipt_to_storage(receipt: DeferredResolutionReceipt) -> str:
@@ -2344,9 +2428,9 @@ def _checkpoint_from_storage(
     try:
         payload = _strict_json_loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("redis checkpoint v11 payload is invalid") from exc
+        raise ValueError("redis checkpoint v12 payload is invalid") from exc
     if not isinstance(payload, dict):
-        raise ValueError("redis checkpoint v11 payload must be an object")
+        raise ValueError("redis checkpoint v12 payload must be an object")
     if payload.get("checkpoint_key") != checkpoint_key:
         raise CheckpointError(
             "redis checkpoint payload key does not match the requested key",
@@ -2360,11 +2444,11 @@ def _lease_from_storage(raw_lease: object | None) -> int | None:
     if raw_lease is None:
         return None
     if isinstance(raw_lease, bool) or not isinstance(raw_lease, str | bytes | int):
-        raise ValueError("redis checkpoint v11 lease must be an integer")
+        raise ValueError("redis checkpoint v12 lease must be an integer")
     try:
         return int(raw_lease)
     except ValueError as exc:
-        raise ValueError("redis checkpoint v11 lease must be an integer") from exc
+        raise ValueError("redis checkpoint v12 lease must be an integer") from exc
 
 
 def _redis_server_now_ms(client: Any) -> int:

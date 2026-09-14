@@ -978,7 +978,7 @@ def _run_single_cycle(
             )
         return DistributedWorkerResponse.terminal_candidate(
             checkpoint_revision=current.revision,
-            result=result,
+            result=controller.hydrate_result(result),
         )
     finally:
         controller.close()

@@ -6,7 +6,7 @@
     "deferred_resolution_is_separate": true,
     "terminal_successor_is_separate": true,
     "ask_user_terminal_semantics_unchanged": true,
-    "checkpoint_schema": "vv-agent.checkpoint.v11",
+    "checkpoint_schema": "vv-agent.checkpoint.v12",
     "cancel_requested_field": "required boolean",
     "cycle_aborted_event": "RunEvent v5",
     "forbidden_wire_members": [
@@ -3139,10 +3139,7 @@
     },
     {
       "name": "suspend_and_resume_origin",
-      "commands": [
-        "suspend",
-        "resume"
-      ],
+      "commands": ["suspend", "resume"],
       "checkpoint_states": [
         "running",
         "suspended",

@@ -1,7 +1,7 @@
 {
   "contract": "checkpoint_resume",
   "version": 10,
-  "checkpoint_schema": "vv-agent.checkpoint.v11",
+  "checkpoint_schema": "vv-agent.checkpoint.v12",
   "run_definition_schema": "vv-agent.run-definition.v5",
   "checkpoint_wire": {
     "required_fields": [

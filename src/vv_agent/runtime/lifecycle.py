@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from vv_agent.checkpoint import utf16_sort_key
-from vv_agent.types import CompletionReason, CycleRecord, Message, TaskTokenUsage
+from vv_agent.types import CompletionReason, CycleRecord, Message, TaskTokenUsage, TaskTokenUsageTotals
 
 AFTER_CYCLE_CONTROL_STATE_KEY = "_vv_agent_after_cycle_control"
 AFTER_CYCLE_CONTROL_SCHEMA = "vv-agent.after-cycle-control.v1"
@@ -72,7 +72,7 @@ class AfterCycleSnapshot:
     cycle: CycleRecord
     messages: tuple[Message, ...]
     shared_state: Mapping[str, Any]
-    cumulative_token_usage: TaskTokenUsage
+    cumulative_token_usage: TaskTokenUsageTotals
     available_tool_names: tuple[str, ...]
     disallowed_tool_names: tuple[str, ...]
     native_outcome: NativeCycleOutcome
@@ -87,7 +87,7 @@ class AfterCycleSnapshot:
         cycle: CycleRecord,
         messages: list[Message],
         shared_state: dict[str, Any],
-        cumulative_token_usage: TaskTokenUsage,
+        cumulative_token_usage: TaskTokenUsage | TaskTokenUsageTotals,
         available_tool_names: list[str],
         disallowed_tool_names: list[str],
         native_outcome: NativeCycleOutcome,
@@ -100,7 +100,13 @@ class AfterCycleSnapshot:
             cycle=deepcopy(cycle),
             messages=tuple(deepcopy(messages)),
             shared_state=MappingProxyType(deepcopy(shared_state)),
-            cumulative_token_usage=deepcopy(cumulative_token_usage),
+            cumulative_token_usage=TaskTokenUsageTotals.from_dict(
+                {
+                    name: value
+                    for name, value in cumulative_token_usage.to_dict().items()
+                    if name not in {"schema_version", "model_calls"}
+                }
+            ),
             available_tool_names=tuple(available_tool_names),
             disallowed_tool_names=tuple(disallowed_tool_names),
             native_outcome=native_outcome,

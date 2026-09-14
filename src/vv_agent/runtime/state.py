@@ -33,6 +33,7 @@ from vv_agent.deferred import (
     ToolCallOutcome,
     validate_definitive_result,
 )
+from vv_agent.runtime.checkpoint_history import CheckpointHistory, empty_history, validate_history
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -48,7 +49,7 @@ from vv_agent.types import (
 if TYPE_CHECKING:
     from vv_agent.runtime.controller import HostInteractionAdmissionContext
 
-CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v11"
+CHECKPOINT_SCHEMA = "vv-agent.checkpoint.v12"
 HOST_INTERACTION_REQUEST_SCHEMA = "vv-agent.host-interaction-request.v1"
 _HOST_INTERACTION_REQUEST_FIELDS = frozenset(
     {
@@ -956,6 +957,7 @@ class Checkpoint:
     terminal_acknowledged: bool = False
     schema_version: str = CHECKPOINT_SCHEMA
     run_definition_schema: str = RUN_DEFINITION_SCHEMA
+    history: dict[str, Any] = field(default_factory=empty_history)
 
 
 @runtime_checkable
@@ -963,6 +965,8 @@ class CheckpointStore(Protocol):
     def create_checkpoint(self, checkpoint: Checkpoint) -> bool: ...
 
     def load_checkpoint(self, checkpoint_key: str) -> Checkpoint | None: ...
+
+    def load_checkpoint_history(self, checkpoint_key: str) -> CheckpointHistory: ...
 
     def claim_checkpoint(
         self,
@@ -1174,6 +1178,7 @@ class CheckpointStore(Protocol):
 def validate_checkpoint(checkpoint: Checkpoint) -> None:
     if not isinstance(checkpoint, Checkpoint):
         raise TypeError("checkpoint must be a Checkpoint")
+    validate_history(checkpoint.history)
     if checkpoint.schema_version != CHECKPOINT_SCHEMA:
         raise CheckpointError(
             f"unsupported checkpoint schema_version; expected {CHECKPOINT_SCHEMA}",
@@ -1265,6 +1270,15 @@ def validate_checkpoint(checkpoint: Checkpoint) -> None:
         raise TypeError("checkpoint messages must contain Message values")
     if not isinstance(checkpoint.cycles, list) or not all(isinstance(item, CycleRecord) for item in checkpoint.cycles):
         raise TypeError("checkpoint cycles must contain CycleRecord values")
+    previous_cycle = 0
+    for cycle in checkpoint.cycles:
+        try:
+            _positive_wire_integer(cycle.index, "cycle index")
+        except ValueError as exc:
+            raise CheckpointError(str(exc), code="checkpoint_history_invalid") from exc
+        if not previous_cycle < cycle.index <= (checkpoint.claimed_cycle or checkpoint.cycle_index + 1):
+            raise CheckpointError("checkpoint cycles must be ordered through the active cycle", code="checkpoint_history_invalid")
+        previous_cycle = cycle.index
     if not isinstance(checkpoint.model_calls, list) or not all(
         isinstance(item, ModelCallRecord) for item in checkpoint.model_calls
     ):
@@ -1532,6 +1546,7 @@ def validate_checkpoint_creation(checkpoint: Checkpoint) -> None:
         or not has_only_creation_event
         or checkpoint.model_call_journal
         or checkpoint.tool_journal
+        or checkpoint.history != empty_history()
     ):
         raise CheckpointError(
             "new checkpoints must not carry persisted lifecycle state",
@@ -1826,6 +1841,19 @@ def checkpoint_definition_matches(current: Checkpoint, snapshot: Checkpoint) -> 
         and canonical_json_bytes(current.run_definition) == canonical_json_bytes(snapshot.run_definition)
         and current.resume_attempt == snapshot.resume_attempt
         and current.terminal_acknowledged is snapshot.terminal_acknowledged
+        and checkpoint_history_matches(current, snapshot)
+    )
+
+
+def checkpoint_history_matches(current: Checkpoint, snapshot: Checkpoint) -> bool:
+    committed_cycles = [cycle for cycle in current.cycles if cycle.index <= current.cycle_index]
+    active_cycle = current.claimed_cycle or current.cycle_index + 1
+    return (
+        current.history == snapshot.history
+        and snapshot.cycles[: len(committed_cycles)] == committed_cycles
+        and snapshot.model_calls[: len(current.model_calls)] == current.model_calls
+        and all(cycle.index == active_cycle for cycle in snapshot.cycles[len(committed_cycles) :])
+        and all(record.cycle_index == active_cycle for record in snapshot.model_calls[len(current.model_calls) :])
     )
 
 

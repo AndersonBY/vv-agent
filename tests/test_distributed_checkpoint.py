@@ -3219,7 +3219,8 @@ def test_real_tool_host_interaction_retains_receipt_before_waiting(tmp_path: Pat
         terminal = store.load_checkpoint(handle.checkpoint_key)
         assert terminal is not None
         assert terminal.terminal_acknowledged and terminal.claim_token is None
-        assert len(terminal.model_calls) == 2
+        assert len(terminal.model_calls) == 1
+        assert len(store.load_checkpoint_history(handle.checkpoint_key).model_calls) + len(terminal.model_calls) == 2
         assert (
             Runner.finalize_distributed(agent, "Choose a region.", decision=finish, run_config=run_config).final_output
             == result.final_output

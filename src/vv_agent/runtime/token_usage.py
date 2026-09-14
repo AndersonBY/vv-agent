@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from vv_agent.types import CacheUsage, CacheUsageStatus, ModelCallRecord, TaskTokenUsage, TokenUsage, UsageSource
+from vv_agent.types import (
+    CacheUsage,
+    CacheUsageStatus,
+    ModelCallRecord,
+    TaskTokenUsage,
+    TokenUsage,
+    UsageSource,
+    _aggregate_cache_usage,
+)
 
 
 def normalize_token_usage(
@@ -108,10 +116,22 @@ def normalize_token_usage(
 
 
 def summarize_task_token_usage(model_calls: list[ModelCallRecord]) -> TaskTokenUsage:
-    summary = TaskTokenUsage()
-    for model_call in model_calls:
-        summary.add_model_call(model_call)
-    return summary
+    identities: set[str] = set()
+    totals: dict[str, int | None] = dict.fromkeys(("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens"), 0)
+    for record in model_calls:
+        if not isinstance(record, ModelCallRecord):
+            raise TypeError("model_call must be a ModelCallRecord")
+        if record.call_id in identities:
+            raise ValueError("model_call_id_duplicate")
+        identities.add(record.call_id)
+        for name, total in totals.items():
+            value = getattr(record.usage, name)
+            totals[name] = None if total is None or value is None else total + value
+    return TaskTokenUsage(
+        **totals,
+        cache_usage=_aggregate_cache_usage([record.usage.cache_usage for record in model_calls]),
+        model_calls=list(model_calls),
+    )
 
 
 def _read_nested_int(source: dict[str, Any], *path_options: tuple[str, ...]) -> int | None:
