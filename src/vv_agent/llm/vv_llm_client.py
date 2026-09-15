@@ -577,13 +577,12 @@ class VvLlmClient(LLMClient):
             normalized_model = resolved_model.lower()
 
         if stream and normalized_model.startswith("qwen3"):
-            if normalized_model.endswith("-thinking"):
-                if normalized_model not in _QWEN_THINKING_KEEP_SUFFIX_MODELS_LOWER:
-                    resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-thinking")
-                    normalized_model = resolved_model.lower()
-                extra_body = {"enable_thinking": True}
-            else:
-                extra_body = {"enable_thinking": False}
+            # qwen3.x 全系支持思考模式, DashScope 混合思考模型在
+            # enable_thinking=false 时禁止携带非 none 的 reasoning_effort。
+            if normalized_model.endswith("-thinking") and normalized_model not in _QWEN_THINKING_KEEP_SUFFIX_MODELS_LOWER:
+                resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-thinking")
+                normalized_model = resolved_model.lower()
+            extra_body = {"enable_thinking": True}
 
         if normalized_model.startswith(("glm-4.", "glm-5")) and normalized_model.endswith("-thinking"):
             resolved_model = self._remove_suffix_case_insensitive(resolved_model, "-thinking")
