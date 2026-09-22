@@ -2170,6 +2170,10 @@ def prepare_tool_receipt(
         snapshot.event_outbox,
         [EventOutboxEntry.pending(event["event_id"], event)],
     )
+    # Recovery stages its resolved audit in the caller snapshot.  Commit it
+    # with the receipt under the same claim/revision fence, preserving the
+    # authoritative bytes of every event already retained by the store.
+    snapshot.event_outbox = merge_event_outbox(snapshot.event_outbox, checkpoint.event_outbox)
     snapshot.revision = expected_revision + 1
     validate_checkpoint(snapshot)
     return snapshot

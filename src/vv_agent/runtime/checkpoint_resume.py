@@ -1597,6 +1597,13 @@ class CheckpointResumeController:
                     observation=observation,
                     ambiguity_emitted=True,
                 )
+            if decision.kind is ReconciliationDecisionKind.ABORT:
+                self._abort_unknown_operation(entry, observation, decision)
+            # A resolution belongs to the ambiguous source attempt, not the
+            # attempt that RETRY is about to create.  Include the decision so
+            # retained destination-attempt retry events cannot collide with it.
+            source_attempt = entry.attempt
+            receipt: ToolExecutionResult | None = None
             if decision.kind is ReconciliationDecisionKind.RETRY:
                 entry.state = OperationState.PLANNED
                 entry.attempt += 1
@@ -1613,16 +1620,7 @@ class CheckpointResumeController:
                 if entry.kind is OperationKind.TOOL:
                     assert decision.result is not None
                     entry.resume_observation = None
-                    call = ToolCall(
-                        id=entry.tool_call_id or "",
-                        name=entry.tool_name or "tool",
-                        arguments=deepcopy(entry.arguments or {}),
-                    )
-                    self.finish_tool(
-                        cycle_index=entry.cycle_index,
-                        call=call,
-                        result=ToolExecutionResult.from_dict(decision.result),
-                    )
+                    receipt = ToolExecutionResult.from_dict(decision.result)
                 else:
                     entry.state = OperationState.SUCCEEDED
                     entry.response = deepcopy(decision.response)
@@ -1631,24 +1629,16 @@ class CheckpointResumeController:
             elif decision.kind is ReconciliationDecisionKind.RECORD_FAILURE:
                 assert decision.error is not None
                 if entry.kind is OperationKind.TOOL:
-                    call = ToolCall(
-                        id=entry.tool_call_id or "",
-                        name=entry.tool_name or "tool",
-                        arguments=deepcopy(entry.arguments or {}),
-                    )
                     if decision.error.code == "tool_outcome_unknown":
                         entry.resume_observation = observation
                     else:
                         entry.resume_observation = None
-                    self.finish_tool(
-                        cycle_index=entry.cycle_index,
-                        call=call,
-                        result=ToolExecutionResult(
-                            tool_call_id=call.id,
-                            content=decision.error.message,
-                            status_code=ToolResultStatus.ERROR,
-                            error_code=decision.error.code,
-                        ),
+                    receipt = ToolExecutionResult(
+                        tool_call_id=entry.tool_call_id or "",
+                        content=decision.error.message,
+                        status_code=ToolResultStatus.ERROR,
+                        error_code=decision.error.code,
+                        metadata={"retryable": True} if decision.error.retryable else {},
                     )
                 else:
                     entry.state = OperationState.FAILED
@@ -1657,10 +1647,12 @@ class CheckpointResumeController:
                         message=decision.error.message,
                         retryable=decision.error.retryable,
                     )
-            elif decision.kind is ReconciliationDecisionKind.ABORT:
-                self._abort_unknown_operation(entry, observation, decision)
-            self._progress()
-            self._emit(
+            if receipt is not None:
+                # Reject non-definitive provider results before staging a
+                # resolved audit or entering finish_tool's ambiguity path.
+                validate_definitive_result(receipt)
+            self._queue_outbox_event(
+                checkpoint,
                 ReconciliationResolvedEvent(
                     run_id=self.run_id,
                     trace_id=self.trace_id,
@@ -1672,10 +1664,24 @@ class CheckpointResumeController:
                     event_id=self._stable_event_id(
                         "reconciliation_resolved",
                         entry.operation_id,
-                        str(entry.attempt),
+                        str(source_attempt),
+                        decision.kind.value,
                     ),
-                )
+                ),
             )
+            if receipt is not None:
+                self.finish_tool(
+                    cycle_index=entry.cycle_index,
+                    call=ToolCall(
+                        id=entry.tool_call_id or "",
+                        name=entry.tool_name or "tool",
+                        arguments=deepcopy(entry.arguments or {}),
+                    ),
+                    result=receipt,
+                )
+            else:
+                self._progress()
+            self._deliver_pending_outbox()
 
     def _reconciliation_decision(
         self,

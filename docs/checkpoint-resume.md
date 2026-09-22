@@ -159,6 +159,17 @@ event identity and its authoritative timestamp; ordinary receipt conflicts are
 typed `tool_receipt_conflict` zero-write outcomes, while deferred resolution
 conflicts are typed `deferred_resolution_conflict` zero-write outcomes.
 
+Recovery captures the source attempt before applying a decision and includes
+that attempt plus the decision in the stable `reconciliation_resolved` event
+coordinates. Retry progress commits its new attempt and audit together; tool
+resolution stages the audit in the snapshot passed to `record_tool_receipt`,
+which commits both the complete receipt and outbox in one claim/revision CAS.
+Recovery delivers the stored event bytes after that commit, without consulting
+the provider again for a resolved attempt. Retained current-schema events keep
+their original IDs, timestamps, and digests. The paired regression scenarios
+use the locked checkpoint and operation-journal fixtures in
+`tests/test_checkpoint_reconciliation.py`.
+
 Definitive `ERROR` receipts persist the complete canonical `ToolExecutionResult`
 and its `result_digest`, including metadata, directive, and legal artifact or
 cursor recovery fields. `OperationError` is only the normalized projection of
