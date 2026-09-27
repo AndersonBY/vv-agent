@@ -986,6 +986,7 @@ class MemoryManager:
                 self.artifact_scope,
                 candidate.tool_call_id,
                 message.content,
+                reuse_existing=True,
             )
         except Exception:
             return None

@@ -1347,3 +1347,121 @@ def _deferred_checkpoint(
         claimed_cycle=cycle_index,
     )
     return store.load_checkpoint(handle.checkpoint_key)
+
+
+@pytest.mark.parametrize("compact", [False, True], ids=["request-drift", "microcompact-replay"])
+def test_deferred_resume_never_turns_the_same_cycle_into_new_model_calls(monkeypatch, compact: bool) -> None:
+    from vv_agent.memory.manager import MemoryManager
+    from vv_agent.microcompaction import MicrocompactionPolicy
+    from vv_agent.runtime.cycle_runner import CycleRunner
+    from vv_agent.runtime.engine import AgentRuntime
+    from vv_agent.types import Message
+
+    store = InMemoryCheckpointStore()
+    workspace = MemoryWorkspaceBackend()
+    handles: list[DeferredToolHandle] = []
+    calls: list[Any] = []
+
+    @function_tool(name="verify", params_json_schema=_EMPTY_SCHEMA)
+    def verify(context: ToolContext) -> ToolCallOutcome:
+        outcome = context.defer()
+        assert outcome.handle is not None
+        handles.append(outcome.handle)
+        return outcome
+
+    class Model(ScriptedLLM):
+        def __init__(self):
+            super().__init__(steps=[])
+
+        def complete(self, request):
+            calls.append(request)
+            if len(calls) == 1:
+                return LLMResponse(content="", tool_calls=[ToolCall(id="verify-once", name="verify", arguments={})])
+            assert any(m.role == "tool" and m.content == "verified" for m in request.messages)
+            return LLMResponse(content="done")
+
+    provider = _provider(Model)
+    messages = [Message(role="user", content="request")]
+    for index in range(3):
+        messages.extend(
+            [
+                Message(
+                    role="assistant",
+                    content="search",
+                    tool_calls=[
+                        {
+                            "id": f"old-{index}",
+                            "type": "function",
+                            "function": {"name": "search", "arguments": "{}"},
+                        }
+                    ],
+                ),
+                Message(role="tool", content=("old result " * 1_000), tool_call_id=f"old-{index}"),
+            ]
+        )
+    if compact:
+        monkeypatch.setattr(
+            AgentRuntime,
+            "_build_memory_manager",
+            lambda *args, **kwargs: MemoryManager(
+                compact_threshold=4_000,
+                model="test-model",
+                model_context_window=4_000,
+                reserved_output_tokens=0,
+                autocompact_buffer_tokens=0,
+                workspace_backend=workspace,
+                recovery_tool_available=True,
+                artifact_scope="replay-test",
+                microcompaction_policy=MicrocompactionPolicy(keep_recent_cycles=0, min_result_chars=100),
+            ),
+        )
+    else:
+        original = CycleRunner._complete_llm
+        sequence = iter(("first", "changed"))
+
+        def drifting_request(self, **kwargs):
+            kwargs["messages"] = [*kwargs["messages"], Message(role="user", content=next(sequence))]
+            return original(self, **kwargs)
+
+        monkeypatch.setattr(CycleRunner, "_complete_llm", drifting_request)
+
+    def run():
+        return Runner.run_sync(
+            Agent(name="verify", instructions="Verify once, then finish.", model="test-model", tools=[verify]),
+            "request",
+            run_config=RunConfig(
+                model_provider=provider,
+                max_cycles=2,
+                initial_messages=messages,
+                workspace_backend=workspace,
+                checkpoint_config=CheckpointConfig(
+                    key="stable-request",
+                    store=store,
+                    resume_policy=ResumePolicy.RESUME_IF_PRESENT,
+                    capability_refs={"workspace": {"id": "memory", "version": "1"}},
+                ),
+            ),
+        )
+
+    first = run()
+    assert first.status is AgentStatus.DEFERRED
+    assert len(handles) == len(calls) == 1
+    decision = store.resolve_deferred(handles[0], ToolExecutionResult(tool_call_id="verify-once", content="verified"))
+    assert decision.kind == "applied_ready"
+    if compact:
+        resumed = run()
+        assert resumed.status is AgentStatus.COMPLETED
+        assert len(calls) == 2 and len(handles) == 1
+        assert any(m.role == "tool" and m.content == "verified" for m in resumed.raw_result.messages)
+    else:
+        before_checkpoint = store.load_checkpoint("stable-request")
+        assert before_checkpoint is not None
+        before = checkpoint_to_dict(before_checkpoint)
+        with pytest.raises(CheckpointError) as caught:
+            run()
+        assert caught.value.code == "checkpoint_journal_integrity_mismatch"
+        assert len(calls) == len(handles) == 1
+        after_checkpoint = store.load_checkpoint("stable-request")
+        assert after_checkpoint is not None
+        after = checkpoint_to_dict(after_checkpoint)
+        assert after["model_call_journal"] == before["model_call_journal"]

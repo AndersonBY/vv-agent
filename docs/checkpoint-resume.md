@@ -134,6 +134,12 @@ and `ambiguous`.
 
 - A durable model response or tool receipt is replayed without another external
   call.
+- Rebuilding microcompacted context reuses a content-addressed private artifact
+  for the same task, tool call and complete text. Existing bytes are verified
+  before reuse; corruption leaves the full original context intact.
+- A changed request cannot bypass a retained model slot by allocating another
+  generated ordinal. Recovery reports `checkpoint_journal_integrity_mismatch`
+  before claiming or making another model call.
 - A planned operation may execute normally.
 - A started operation without a receipt becomes ambiguous after recovery.
 - A model retry requires `retry_with_duplicate_risk` or a reconciliation

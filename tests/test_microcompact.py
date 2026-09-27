@@ -424,3 +424,29 @@ def test_microcompact_minimum_boundary_has_no_candidate(length: int) -> None:
 
     assert plan is not None
     assert plan.candidate_count == 0
+
+
+def test_rebuilding_same_context_reuses_identical_verified_artifacts() -> None:
+    backend = MemoryWorkspaceBackend()
+    messages = _messages()
+    first = _manager(backend).compact_with_result(messages, cycle_index=4, total_tokens=1_100)
+    second = _manager(backend).compact_with_result(messages, cycle_index=4, total_tokens=1_100)
+    assert first.archived_count > 0
+    assert first.messages == second.messages
+    for message in first.messages:
+        if message.artifact_ref is not None:
+            assert backend.read_bytes(message.artifact_ref.path).decode() in {m.content for m in messages}
+
+
+def test_rebuilt_artifact_conflict_does_not_overwrite_or_hide_original(monkeypatch) -> None:
+    backend = MemoryWorkspaceBackend()
+    messages = _messages()
+    first = _manager(backend).compact_with_result(messages, cycle_index=4, total_tokens=1_100)
+    artifact = next(m.artifact_ref for m in first.messages if m.artifact_ref is not None)
+    original = backend.read_bytes(artifact.path)
+    monkeypatch.setattr(MemoryWorkspaceBackend, "read_bytes", lambda _self, _path: b"corrupt")
+    rebuilt = _manager(backend).compact_with_result(messages, cycle_index=4, total_tokens=1_100)
+    assert rebuilt.artifact_failure_count > 0
+    assert rebuilt.messages[3] == messages[3]
+    monkeypatch.undo()
+    assert backend.read_bytes(artifact.path) == original

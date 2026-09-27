@@ -100,6 +100,8 @@ def persist_text_artifact(
     task_id: str,
     tool_call_id: str,
     text: str,
+    *,
+    reuse_existing: bool = False,
 ) -> ToolArtifactRef:
     task_segment = _artifact_segment(task_id, "task")
     call_segment = _artifact_segment(tool_call_id, "call")
@@ -108,13 +110,18 @@ def persist_text_artifact(
     last_collision: FileExistsError | None = None
 
     for _ in range(32):
-        suffix = uuid.uuid4().hex
+        suffix = digest if reuse_existing else uuid.uuid4().hex
         path = f".vv-agent/artifacts/{task_segment}/{call_segment}-{suffix}.txt"
         try:
             written = backend.write_text_exclusive(path, text)
         except FileExistsError as exc:
-            last_collision = exc
-            continue
+            if not reuse_existing:
+                last_collision = exc
+                continue
+            # Rebuilding a model request must retain the same immutable reference.
+            if backend.read_bytes(path) != data:
+                raise OSError(errno.EIO, "existing artifact differs from selected text") from exc
+            written = len(data)
         if isinstance(written, bool) or not isinstance(written, int) or written != len(data):
             raise OSError(
                 errno.EIO,

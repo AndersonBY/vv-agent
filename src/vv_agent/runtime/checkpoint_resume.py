@@ -667,12 +667,6 @@ class CheckpointResumeController:
             model=model,
         )
         operation_id = initial_identity.operation_id
-        self._ensure_claim(cycle_index)
-        if self._require_checkpoint().status is AgentStatus.DEFERRED:
-            raise CheckpointError(
-                "deferred checkpoint cannot dispatch a model operation",
-                code="checkpoint_not_claimable",
-            )
         entry = self._find_model_operation_for_request(
             cycle_index=cycle_index,
             operation_id=operation_id,
@@ -681,11 +675,26 @@ class CheckpointResumeController:
             model=model,
             request_digest=digest,
         )
-        if entry is not None and entry.request_digest != digest:
+        if entry is None and self._find_operation(OperationKind.MODEL, operation_id=operation_id) is not None:
             raise CheckpointError(
                 "model request does not match the durable operation slot",
                 code="checkpoint_journal_integrity_mismatch",
             )
+        self._ensure_claim(cycle_index)
+        if self._require_checkpoint().status is AgentStatus.DEFERRED:
+            raise CheckpointError(
+                "deferred checkpoint cannot dispatch a model operation",
+                code="checkpoint_not_claimable",
+            )
+        # Claim/reconciliation reloads the checkpoint and may replace journal entries.
+        entry = self._find_model_operation_for_request(
+            cycle_index=cycle_index,
+            operation_id=operation_id,
+            operation=operation,
+            backend=backend,
+            model=model,
+            request_digest=digest,
+        )
         if entry is None:
             # No exact durable identity exists for this invocation, so this is
             # a legitimate new operation.  Only now may terminal ledger
