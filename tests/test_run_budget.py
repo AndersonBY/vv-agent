@@ -21,7 +21,7 @@ from vv_agent.budget import (
     RunBudgetLimits,
     UnavailableMetricPolicy,
 )
-from vv_agent.events import DiagnosticEvent
+from vv_agent.events import DiagnosticEvent, MemoryCompactCompleted, ModelCallStartedEvent
 from vv_agent.llm import LlmRequest
 from vv_agent.llm.scripted import ScriptStep
 from vv_agent.model import ScriptedModelProvider
@@ -319,7 +319,8 @@ def test_public_runner_budget_cases_match_contract(case: dict[str, Any], tmp_pat
         )
         for name in tool_names
     ]
-    meter = _Meter([HostCost.from_dict(reading) for reading in case["host_cost_readings"]])
+    readings: list[HostCost | None | Exception] = [HostCost.from_dict(reading) for reading in case["host_cost_readings"]]
+    meter = _Meter(readings[:2] + readings[1:2] + readings[2:])
     cancellation = CancellationToken()
     if case["pre_cancelled"]:
         cancellation.cancel("cancelled by fixture")
@@ -485,6 +486,7 @@ def test_post_tool_host_cost_exhaustion_precedes_tool_finish(tmp_path: Path) -> 
             HostCost(unit="credits", amount_microunits=0),
             HostCost(unit="credits", amount_microunits=0),
             HostCost(unit="credits", amount_microunits=0),
+            HostCost(unit="credits", amount_microunits=0),
             HostCost(unit="credits", amount_microunits=120),
         ]
     )
@@ -553,6 +555,7 @@ def test_completed_tool_cancellation_wins_without_losing_budget_usage(tmp_path: 
 
     meter = _Meter(
         [
+            HostCost(unit="credits", amount_microunits=0),
             HostCost(unit="credits", amount_microunits=0),
             HostCost(unit="credits", amount_microunits=0),
             HostCost(unit="credits", amount_microunits=0),
@@ -704,3 +707,84 @@ def test_per_run_budget_replaces_configured_runner_default_as_a_whole(tmp_path: 
     assert result.budget_exhaustion is None
     assert result.budget_usage is not None
     assert result.budget_usage.total_tokens == 2
+
+
+@pytest.mark.parametrize("dimension", ["total_tokens", "uncached_input_tokens", "host_cost"])
+@pytest.mark.parametrize("summary_usage", [9, 10, 11])
+def test_full_compaction_rechecks_model_admission(tmp_path: Path, dimension: str, summary_usage: int) -> None:
+    from vv_agent.types import Message
+    from vv_agent.workspace import MemoryWorkspaceBackend
+
+    meter = _Meter([HostCost(unit="credits", amount_microunits=0)])
+
+    def summary(_request: LlmRequest) -> LLMResponse:
+        meter._last = HostCost(unit="credits", amount_microunits=summary_usage)
+        return LLMResponse(
+            content="{}",
+            raw={
+                "usage": {
+                    "prompt_tokens": summary_usage,
+                    "completion_tokens": 0,
+                    "total_tokens": summary_usage,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                }
+            },
+        )
+
+    limits = (
+        RunBudgetLimits(max_host_cost=HostCost(unit="credits", amount_microunits=10))
+        if dimension == "host_cost"
+        else RunBudgetLimits(max_total_tokens=10)
+        if dimension == "total_tokens"
+        else RunBudgetLimits(max_uncached_input_tokens=10)
+    )
+    result = Runner.run_sync(
+        Agent(name="compaction-budget", instructions="Return done.", model=MODEL, no_tool_policy="finish"),
+        "continue",
+        run_config=RunConfig(
+            workspace=tmp_path,
+            workspace_backend=MemoryWorkspaceBackend(),
+            model_provider=_provider(
+                [
+                    summary,
+                    LLMResponse(
+                        content="done",
+                        raw={
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 0,
+                                "total_tokens": 1,
+                                "prompt_tokens_details": {"cached_tokens": 0},
+                            }
+                        },
+                    ),
+                ]
+            ).with_token_limits(1000, 0),
+            max_cycles=2,
+            budget_limits=limits,
+            host_cost_meter=meter if dimension == "host_cost" else None,
+            metadata={"reserved_output_tokens": 0, "autocompact_buffer_tokens": 0},
+            initial_messages=[
+                Message(role="user", content="history " * 1000),
+                Message(role="assistant", content="previous step"),
+                Message(role="user", content="continue"),
+            ],
+        ),
+    )
+    calls = [
+        event.operation.value
+        for event in result.events
+        if isinstance(event, ModelCallStartedEvent) and event.type == "model_call_started"
+    ]
+    assert any(isinstance(event, MemoryCompactCompleted) and event.mode == "summary" for event in result.events) == (
+        summary_usage <= 10
+    )
+    assert calls == (["memory_compaction", "agent_cycle"] if summary_usage < 10 else ["memory_compaction"])
+    assert result.budget_usage is not None
+    assert result.budget_usage.cycles == 1
+    if summary_usage < 10:
+        assert result.final_output == "done"
+    else:
+        assert result.budget_exhaustion is not None
+        assert result.budget_exhaustion.reason.value == ("limit_reached" if summary_usage == 10 else "limit_exceeded")
+        assert result.budget_exhaustion.observed == summary_usage

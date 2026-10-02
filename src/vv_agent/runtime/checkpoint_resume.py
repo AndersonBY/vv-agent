@@ -172,6 +172,7 @@ class CheckpointResumeController:
         event_sink: Callable[[RunEvent], None],
         event_store: RunEventStore | None = None,
         lease_duration_ms: int = DEFAULT_CHECKPOINT_LEASE_MS,
+        deadline_unix_ms: int | None = None,
         preloaded_checkpoint: Checkpoint | None = None,
     ) -> None:
         if config.store is None:
@@ -194,6 +195,7 @@ class CheckpointResumeController:
         self.event_sink = event_sink
         self.event_store = event_store
         self.lease_duration_ms = lease_duration_ms
+        self.deadline_unix_ms = deadline_unix_ms
         self.preloaded_checkpoint = deepcopy(preloaded_checkpoint)
         self.checkpoint: Checkpoint | None = None
         self.terminal_replay: AgentResult | None = None
@@ -473,6 +475,7 @@ class CheckpointResumeController:
         self._owned_claim_token = claim_token
         self._active_claim_mode = "recovery"
         self._first_claim_is_recovery = False
+        self._renew_claim_before_dispatch()
         self._start_heartbeat()
 
     def resolve_deferred(self, handle: Any, result: ToolExecutionResult) -> Any:
@@ -747,6 +750,7 @@ class CheckpointResumeController:
             )
             self._emit_operation_replayed(entry)
             raise RuntimeError(f"{error.code}: {error.message}")
+        accounting.check_admission(cycle_index)
         if entry is None:
             entry = OperationJournalEntry(
                 kind=OperationKind.MODEL,
@@ -1488,7 +1492,7 @@ class CheckpointResumeController:
                 checkpoint.checkpoint_key,
                 cycle_index,
                 claim_token=claim_token,
-                lease_expires_at_ms=now_ms + self.lease_duration_ms,
+                lease_expires_at_ms=self._lease_expiry(now_ms),
                 now_ms=now_ms,
                 claim_mode=claim_mode,
             )
@@ -2361,10 +2365,13 @@ class CheckpointResumeController:
         self._stop_heartbeat()
         self._heartbeat_stop = threading.Event()
         self._heartbeat_error = None
-        interval_seconds = max(self.lease_duration_ms / 3 / 1000, 0.01)
 
         def heartbeat() -> None:
-            while not self._heartbeat_stop.wait(interval_seconds):
+            while True:
+                remaining_ms = (checkpoint.lease_expires_at_ms or 0) - self._now_ms()
+                interval_seconds = min(self.lease_duration_ms, max(remaining_ms, 0)) / 3 / 1000
+                if self._heartbeat_stop.wait(interval_seconds):
+                    return
                 if not self._heartbeat_tick(checkpoint, claim_token):
                     return
 
@@ -2385,7 +2392,7 @@ class CheckpointResumeController:
             )
             return False
         known_lease_expires_at_ms = checkpoint.lease_expires_at_ms
-        requested_lease_expires_at_ms = now_ms + self.lease_duration_ms
+        requested_lease_expires_at_ms = self._lease_expiry(now_ms)
         try:
             renewed = self.store.renew_checkpoint_claim(
                 checkpoint.checkpoint_key,
@@ -2462,7 +2469,7 @@ class CheckpointResumeController:
                 code="checkpoint_lease_lost",
             )
         known_lease_expires_at_ms = checkpoint.lease_expires_at_ms
-        requested_lease_expires_at_ms = now_ms + self.lease_duration_ms
+        requested_lease_expires_at_ms = self._lease_expiry(now_ms)
         try:
             renewed = self.store.renew_checkpoint_claim(
                 checkpoint.checkpoint_key,
@@ -2530,10 +2537,16 @@ class CheckpointResumeController:
             assert self._heartbeat_error is not None
             raise self._heartbeat_error
 
-    @staticmethod
-    def _local_claim_is_live(checkpoint: Checkpoint, claim_token: str, now_ms: int) -> bool:
+    def _lease_expiry(self, now_ms: int) -> int:
+        if self.deadline_unix_ms is not None and now_ms >= self.deadline_unix_ms:
+            raise CheckpointError("distributed cycle deadline expired", code="checkpoint_lease_lost")
+        expiry = now_ms + self.lease_duration_ms
+        return min(expiry, self.deadline_unix_ms) if self.deadline_unix_ms is not None else expiry
+
+    def _local_claim_is_live(self, checkpoint: Checkpoint, claim_token: str, now_ms: int) -> bool:
         return bool(
-            checkpoint.claim_token == claim_token
+            (self.deadline_unix_ms is None or now_ms < self.deadline_unix_ms)
+            and checkpoint.claim_token == claim_token
             and checkpoint.lease_expires_at_ms is not None
             and checkpoint.lease_expires_at_ms > now_ms
         )

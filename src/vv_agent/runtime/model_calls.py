@@ -178,6 +178,7 @@ class ModelCallCoordinator:
         parent_run_id: str | None,
         event_sink: Callable[[RunEvent], None] | None,
         budget_observer: Callable[[int, TokenUsage], ModelCallBudgetObservation] | None = None,
+        budget_admission: Callable[[int], None] | None = None,
         durable_dispatcher: DurableModelDispatcher | None = None,
     ) -> None:
         self.ledger = ledger
@@ -188,6 +189,7 @@ class ModelCallCoordinator:
         self.parent_run_id = parent_run_id
         self.event_sink = event_sink
         self.budget_observer = budget_observer
+        self.budget_admission = budget_admission
         self.durable_dispatcher = durable_dispatcher
         self._slot_counts: dict[tuple[int, str], int] = {}
 
@@ -218,6 +220,7 @@ class ModelCallCoordinator:
                 accounting=self,
             )
 
+        self.check_admission(cycle_index)
         identity = self.new_identity(
             cycle_index=cycle_index,
             operation_slot=operation_slot,
@@ -249,6 +252,10 @@ class ModelCallCoordinator:
             identity=identity,
             budget_exhaustion=terminal.budget.exhaustion,
         )
+
+    def check_admission(self, cycle_index: int) -> None:
+        if self.budget_admission is not None:
+            self.budget_admission(cycle_index)
 
     def new_identity(
         self,

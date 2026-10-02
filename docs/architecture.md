@@ -365,3 +365,11 @@ and `tests/test_tools.py`.
 - Cancellation, streaming, hooks, memory compaction, and execution backends must
   compose without changing public result shapes.
 - New public behavior needs tests in the closest `tests/test_*.py` module.
+
+`read_file` and existing-artifact validation scan native Local, Memory, S3,
+and discovery-filtered backends in chunks. SHA-256, UTF-8 validation, line
+statistics, and page output derive from the same byte stream; no page or
+baseline is published before full-source validation finishes. This bounds
+extra memory for native backends while retaining full-source I/O on each page.
+Custom backends retain their existing `read_bytes` behavior. No new public
+workspace capability or cursor wire is introduced.

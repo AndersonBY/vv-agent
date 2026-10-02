@@ -14,6 +14,7 @@ from vv_agent.tools.base import ToolContext
 from vv_agent.tools.handlers.common import to_json
 from vv_agent.tools.handlers.sensitive_paths import is_sensitive_path
 from vv_agent.types import ToolExecutionResult, ToolResultCursor, ToolResultStatus
+from vv_agent.workspace.streaming import scan_text
 
 READ_FILE_MAX_LINES = 2_000
 READ_FILE_MAX_CHARS = 12_000
@@ -652,67 +653,30 @@ def read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionR
 
     show_line_numbers = bool(arguments.get("show_line_numbers", False))
 
+    page = _ReadPage(start_line, end_line_int, cursor.offset_chars if cursor is not None else None, show_line_numbers)
     try:
-        raw = backend.read_bytes(path)
+        scanned = scan_text(backend, path, page.consume)
     except (OSError, ValueError) as exc:
-        return _workspace_error(
-            str(exc),
-            error_code="workspace_backend_error",
-            path=path,
-        )
-    source_digest = _content_hash(raw)
+        return _workspace_error(str(exc), error_code="workspace_backend_error", path=path)
+    source_digest = scanned.sha256
     if cursor is not None and cursor.sha256 != source_digest:
-        return _workspace_error(
-            "source changed after cursor was issued",
-            error_code="stale_cursor",
-            path=path,
-        )
-    try:
-        text, _has_bom = _decode_workspace_text(raw)
-    except ValueError:
-        return _workspace_error(
-            "Unsupported file encoding for read_file.",
-            error_code="unsupported_encoding",
-            path=path,
-        )
-    if cursor is not None:
-        start_offset = cursor.offset_chars
-        if start_offset > len(text):
-            return _workspace_error(
-                "cursor offset is outside the source",
-                error_code="cursor_offset_invalid",
-                path=path,
-            )
-    else:
-        start_offset = _line_start_offset(text, start_line)
-
-    end_offset = len(text) if cursor is not None else max(_line_end_offset(text, end_line_int), start_offset)
-    content, next_offset = _bounded_source_slice(
-        text,
-        start_offset=start_offset,
-        end_offset=end_offset,
-        show_line_numbers=show_line_numbers,
-    )
-    truncated = next_offset < end_offset
-    original_bytes = (
-        _rendered_source_size_bytes(
-            text,
-            start_offset=start_offset,
-            end_offset=end_offset,
-            show_line_numbers=show_line_numbers,
-        )
-        if truncated
-        else None
-    )
+        return _workspace_error("source changed after cursor was issued", error_code="stale_cursor", path=path)
+    if not scanned.valid_utf8:
+        return _workspace_error("Unsupported file encoding for read_file.", error_code="unsupported_encoding", path=path)
+    if cursor is not None and cursor.offset_chars > page.offset:
+        return _workspace_error("cursor offset is outside the source", error_code="cursor_offset_invalid", path=path)
+    content = "".join(page.output)
+    next_offset = page.next_offset
+    truncated = page.truncated
+    original_bytes = page.original_bytes if truncated else None
     is_partial = start_line != 1 or end_line_int is not None or cursor is not None or truncated
-    _record_file_baseline(
-        context,
-        path=path,
-        raw=raw,
-        text=text,
-        is_partial=is_partial,
-        source=READ_FILE_BASELINE_SOURCE,
-    )
+    _get_file_baselines(context)[_baseline_key(path)] = {
+        "hash": source_digest,
+        "size": scanned.size_bytes,
+        "line_ending": page.line_ending,
+        "is_partial": is_partial,
+        "source": READ_FILE_BASELINE_SOURCE,
+    }
 
     return ToolExecutionResult(
         tool_call_id="",
@@ -740,87 +704,67 @@ def _normalize_cursor_path(path: str) -> str:
     return "" if normalized == "." else normalized
 
 
-def _line_start_offset(text: str, start_line: int) -> int:
-    if start_line <= 1:
-        return 0
-    lines_seen = 1
-    for offset, character in enumerate(text):
-        if character == "\n":
-            lines_seen += 1
-            if lines_seen == start_line:
-                return offset + 1
-    return len(text)
+class _ReadPage:
+    def __init__(self, start_line: int, end_line: int | None, offset: int | None, show_line_numbers: bool) -> None:
+        self.start_line = start_line
+        self.end_line = end_line
+        self.requested_offset = offset
+        self.show_line_numbers = show_line_numbers
+        self.output: list[str] = []
+        self.offset = 0
+        self.next_offset = offset or 0
+        self.line = 1
+        self.at_line_start = True
+        self.previous = ""
+        self.visible_chars = 0
+        self.output_lines = 0
+        self.original_bytes = 0
+        self.truncated = False
+        self.lf = 0
+        self.crlf = 0
+        self.first = True
 
+    @property
+    def line_ending(self) -> str:
+        return "crlf" if self.crlf and self.crlf == self.lf else "mixed" if self.crlf else "lf"
 
-def _line_end_offset(text: str, end_line: int | None) -> int:
-    if end_line is None:
-        return len(text)
-    lines_seen = 1
-    for offset, character in enumerate(text):
-        if character == "\n":
-            if lines_seen == end_line:
-                return offset
-            lines_seen += 1
-    return len(text)
-
-
-def _bounded_source_slice(
-    text: str,
-    *,
-    start_offset: int,
-    end_offset: int,
-    show_line_numbers: bool,
-) -> tuple[str, int]:
-    prefix_text = text[:start_offset]
-    start_line = prefix_text.count("\n") + 1
-    output: list[str] = []
-    visible_chars = 0
-    consumed = 0
-    line_count = 0
-    at_line_start = start_offset == 0 or prefix_text.endswith("\n")
-
-    for character in text[start_offset:end_offset]:
-        if at_line_start and line_count >= READ_FILE_MAX_LINES:
-            break
-        prefix = f"{start_line + line_count}: " if show_line_numbers and at_line_start else ""
-        added_chars = len(prefix) + 1
-        if visible_chars + added_chars > READ_FILE_MAX_CHARS:
-            break
-        if prefix:
-            output.append(prefix)
-        output.append(character)
-        visible_chars += added_chars
-        consumed += 1
-        at_line_start = character == "\n"
-        if at_line_start:
-            line_count += 1
-
-    return "".join(output), start_offset + consumed
-
-
-def _rendered_source_size_bytes(
-    text: str,
-    *,
-    start_offset: int,
-    end_offset: int,
-    show_line_numbers: bool,
-) -> int:
-    source_slice = text[start_offset:end_offset]
-    size_bytes = len(source_slice.encode("utf-8"))
-    if not show_line_numbers or not source_slice:
-        return size_bytes
-
-    line_number = text.count("\n", 0, start_offset) + 1
-    at_line_start = start_offset == 0 or text[start_offset - 1] == "\n"
-    if at_line_start:
-        size_bytes += len(str(line_number)) + 2
-
-    for index, character in enumerate(source_slice):
-        if character == "\n" and index + 1 < len(source_slice):
-            line_number += 1
-            size_bytes += len(str(line_number)) + 2
-
-    return size_bytes
+    def consume(self, text: str) -> None:
+        for character in text:
+            if self.first:
+                self.first = False
+                if character == "\ufeff":
+                    continue
+            selected = (
+                self.offset >= self.requested_offset
+                if self.requested_offset is not None
+                else self.line >= self.start_line
+                and (self.end_line is None or self.line < self.end_line or (self.line == self.end_line and character != "\n"))
+            )
+            if selected:
+                prefix = f"{self.line}: " if self.show_line_numbers and self.at_line_start else ""
+                self.original_bytes += len(prefix.encode("utf-8")) + len(character.encode("utf-8"))
+                added_chars = len(prefix) + 1
+                if (
+                    self.truncated
+                    or self.visible_chars + added_chars > READ_FILE_MAX_CHARS
+                    or (self.at_line_start and self.output_lines >= READ_FILE_MAX_LINES)
+                ):
+                    self.truncated = True
+                else:
+                    self.output.extend((prefix, character))
+                    self.visible_chars += added_chars
+                    self.next_offset = self.offset + 1
+                    if character == "\n":
+                        self.output_lines += 1
+            elif not self.truncated and self.requested_offset is None and self.line < self.start_line:
+                self.next_offset = self.offset + 1
+            if character == "\n":
+                self.lf += 1
+                self.crlf += self.previous == "\r"
+                self.line += 1
+            self.at_line_start = character == "\n"
+            self.previous = character
+            self.offset += 1
 
 
 def write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolExecutionResult:

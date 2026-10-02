@@ -339,3 +339,10 @@ uv run pytest tests/test_event_validation.py tests/test_events_contract.py
 The fault suite covers F1-F8 deterministic persistence boundaries and a real
 SIGKILL canary against SQLite. Full adoption additionally requires the Rust
 suite and the central cross-repository workflow against the same contract lock.
+
+Celery cycle workers pass the envelope deadline into the checkpoint controller.
+Initial claims, periodic renewals, and pre-dispatch renewals are capped at that
+deadline. Recovery claims are renewed with the same cap before execution.
+Heartbeat waits use at most one third of the actual remaining lease, including
+leases shorter than 10 ms. Expiry stops new dispatch through the existing lease-loss
+boundary and preserves durable journals for recovery.

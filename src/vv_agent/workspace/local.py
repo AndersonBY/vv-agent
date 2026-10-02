@@ -139,6 +139,12 @@ class LocalWorkspaceBackend:
         target, _logical_path = self._resolve_read_target(path)
         return target.read_bytes()
 
+    def _read_bytes_chunks(self, path: str) -> Iterable[bytes]:
+        target, _logical_path = self._resolve_read_target(path)
+        with target.open("rb") as source:
+            while chunk := source.read(65_536):
+                yield chunk
+
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
         if is_reserved_artifact_path(path):
             raise PermissionError("artifact paths are immutable")

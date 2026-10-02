@@ -214,6 +214,17 @@ class _RunBudgetController:
             cycle_index=cycle_index,
         )
 
+    def model_call_start(self, cycle_index: int) -> None:
+        if self.ctx is not None:
+            self.ctx.check_cancelled()
+        exhaustion = self._observe(
+            BudgetEnforcementBoundary.CYCLE_START,
+            self.evaluator._model_call_start,
+            cycle_index=cycle_index,
+        )
+        if exhaustion is not None:
+            raise ModelCallBudgetExhausted(exhaustion)
+
     def model_call_complete(
         self,
         cycle_index: int,
@@ -641,6 +652,7 @@ class AgentRuntime:
             parent_run_id=self._metadata_str(runtime_ctx.metadata, "_vv_agent_parent_run_id", "parent_run_id"),
             event_sink=runtime_ctx.event_handler,
             budget_observer=(budget_controller.model_call_complete if budget_controller is not None else None),
+            budget_admission=(budget_controller.model_call_start if budget_controller is not None else None),
             durable_dispatcher=checkpoint_controller,
         )
         if checkpoint_controller is not None:

@@ -320,3 +320,48 @@ def test_search_files_uses_unicode_output_budget_and_omits_zero_sensitive_count(
     assert result.content.startswith("Found 1 matches in 1 files for pattern 'token'")
     assert "Shown: 3 lines, 30000 characters" in result.content
     assert "sensitive_files_omitted" not in result.metadata
+
+
+def test_read_file_streams_full_source_and_rejects_changed_tail(tmp_path: Path, monkeypatch) -> None:
+    from vv_agent.tools.handlers.workspace_io import FILE_BASELINES_STATE_KEY
+
+    registry, context = _tool_runtime(tmp_path)
+    text = "\ufeff" + "x" * 65533 + "中\r\n" + "🙂" * 100_000
+    path = tmp_path / "large.txt"
+    path.write_bytes(text.encode("utf-8"))
+
+    def forbid_unbounded(_self, _path):
+        raise AssertionError("unbounded read")
+
+    monkeypatch.setattr(LocalWorkspaceBackend, "read_bytes", forbid_unbounded)
+    first = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large.txt", "show_line_numbers": True})
+    assert first.status_code is ToolResultStatus.SUCCESS and first.truncated
+    assert first.content == "1: " + "x" * 11997
+    assert context.shared_state[FILE_BASELINES_STATE_KEY]["large.txt"]["size"] == len(text.encode("utf-8"))
+    cursor = first.cursor.to_dict()
+    second = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large.txt", "cursor": cursor})
+    assert second.status_code is ToolResultStatus.SUCCESS
+    with path.open("ab") as source:
+        source.write(b"changed tail")
+    stale = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large.txt", "cursor": cursor})
+    assert stale.error_code == "stale_cursor"
+    path.write_bytes(b"visible" + b"x" * 65536 + b"\xff")
+    invalid = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large.txt"})
+    assert invalid.error_code == "unsupported_encoding"
+
+
+def test_read_file_peak_allocations_stay_below_source_size(tmp_path: Path) -> None:
+    import tracemalloc
+
+    registry, context = _tool_runtime(tmp_path)
+    with (tmp_path / "large.txt").open("wb") as source:
+        for _ in range(32):
+            source.write(b"x" * 65536)
+    tracemalloc.start()
+    try:
+        result = _execute(registry, context, READ_FILE_TOOL_NAME, {"path": "large.txt"})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.status_code is ToolResultStatus.SUCCESS and result.truncated
+    assert peak < 1_000_000

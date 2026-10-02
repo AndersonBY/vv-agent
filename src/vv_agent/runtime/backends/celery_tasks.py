@@ -504,11 +504,15 @@ def _rebuild_runtime(
     return runtime, context, sub_task_manager, tool_policy, host_cost_meter
 
 
-def _consume_pending_host_response(*, store: Any, checkpoint: Checkpoint, lease_duration_ms: int) -> tuple[Checkpoint, bool]:
+def _consume_pending_host_response(
+    *, store: Any, checkpoint: Checkpoint, lease_duration_ms: int, deadline_unix_ms: int | None
+) -> tuple[Checkpoint, bool]:
     """Consume one admitted host response before the ordinary claim path."""
     if checkpoint.status is not AgentStatus.RUNNING or checkpoint.claim_token is not None:
         return checkpoint, False
     now_ms = time.time_ns() // 1_000_000
+    if deadline_unix_ms is not None and now_ms >= deadline_unix_ms:
+        raise CheckpointError("distributed cycle deadline expired", code="checkpoint_lease_lost")
     wakes = store.reap_controller_command_wakes(checkpoint.checkpoint_key, now_ms)
     for wake in wakes:
         if not isinstance(wake, Mapping) or wake.get("outbox_state") != "pending":
@@ -588,7 +592,9 @@ def _consume_pending_host_response(*, store: Any, checkpoint: Checkpoint, lease_
             command_id=command_id,
             command_digest=command_digest,
             claim_token=claim_token,
-            lease_expires_at_ms=now_ms + max(lease_duration_ms, 1_000),
+            lease_expires_at_ms=(
+                min(now_ms + lease_duration_ms, deadline_unix_ms) if deadline_unix_ms is not None else now_ms + lease_duration_ms
+            ),
             now_ms=now_ms,
         )
         if not isinstance(claimed_wake, Mapping) or claimed_wake.get("outbox_state") != "claimed":
@@ -691,6 +697,7 @@ def _run_single_cycle(
         event_sink=event_sink,
         event_store=event_store,
         lease_duration_ms=envelope.lease_duration_ms,
+        deadline_unix_ms=envelope.deadline_unix_ms,
         preloaded_checkpoint=existing,
     )
     if existing.terminal_result is not None:
@@ -775,6 +782,7 @@ def _run_single_cycle(
                 store=store,
                 checkpoint=existing,
                 lease_duration_ms=envelope.lease_duration_ms,
+                deadline_unix_ms=envelope.deadline_unix_ms,
             )
             if owns_recovery:
                 controller.checkpoint = recovered

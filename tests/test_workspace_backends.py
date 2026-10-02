@@ -502,3 +502,28 @@ class TestMemoryWorkspaceBackend:
         assert backend.exists("deep") is True
         assert backend.exists("deep/nested") is True
         assert backend.exists("deep/nested/dir") is True
+
+
+def test_s3_streaming_validation_uses_bounded_reads_and_closes_body() -> None:
+    from vv_agent.workspace.streaming import scan_text
+
+    class Body(BytesIO):
+        def read(self, size: int | None = -1, /) -> bytes:
+            assert size is not None
+            assert 0 < size <= 65536
+            return super().read(size)
+
+    body = Body(("中" * 100_000).encode("utf-8"))
+
+    class Client(_FakeS3Client):
+        def get_object(self, **kwargs: Any) -> dict[str, BytesIO]:
+            return {"Body": body}
+
+    client = Client()
+    backend = object.__new__(S3WorkspaceBackend)
+    backend._bucket = "bucket"
+    backend._prefix = ""
+    backend._client = client
+    scanned = scan_text(backend, "large.txt", lambda _text: None)
+    assert scanned.valid_utf8 and scanned.size_bytes == 300_000
+    assert body.closed

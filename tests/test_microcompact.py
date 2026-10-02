@@ -450,3 +450,26 @@ def test_rebuilt_artifact_conflict_does_not_overwrite_or_hide_original(monkeypat
     assert rebuilt.messages[3] == messages[3]
     monkeypatch.undo()
     assert backend.read_bytes(artifact.path) == original
+
+
+def test_existing_artifact_validation_uses_bounded_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tracemalloc
+
+    backend = MemoryWorkspaceBackend()
+    artifact = persist_text_artifact(backend, "large", "call", "x" * (2 * 1024 * 1024))
+    manager = _manager(backend)
+
+    def forbid_unbounded(_self: MemoryWorkspaceBackend, _path: str) -> bytes:
+        raise AssertionError("unbounded artifact read")
+
+    monkeypatch.setattr(MemoryWorkspaceBackend, "read_bytes", forbid_unbounded)
+    tracemalloc.start()
+    try:
+        intact = manager._artifact_is_intact(artifact)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert intact
+    assert peak < 1_000_000
+    monkeypatch.setitem(backend._files, backend._norm(artifact.path), b"changed tail")
+    assert not manager._artifact_is_intact(artifact)

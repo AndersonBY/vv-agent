@@ -192,6 +192,7 @@ def _heartbeat_controller(store: InMemoryCheckpointStore, key: str) -> tuple[Che
     controller.checkpoint = claimed
     controller.store = store
     controller.lease_duration_ms = 1_000
+    controller.deadline_unix_ms = None
     controller._owned_claim_token = "heartbeat-claim"
     controller._heartbeat_error = None
     controller._heartbeat_stop = SimpleNamespace(set=lambda: None)

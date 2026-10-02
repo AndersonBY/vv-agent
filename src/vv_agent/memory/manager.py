@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -1005,11 +1004,12 @@ class MemoryManager:
         if backend is None:
             return False
         try:
-            content = backend.read_bytes(artifact.path)
-            content.decode("utf-8")
-        except (OSError, UnicodeDecodeError, ValueError):
+            from vv_agent.workspace.streaming import scan_text
+
+            scanned = scan_text(backend, artifact.path, lambda _text: None)
+        except (OSError, ValueError):
             return False
-        return len(content) == artifact.size_bytes and hashlib.sha256(content).hexdigest() == artifact.sha256
+        return scanned.valid_utf8 and scanned.size_bytes == artifact.size_bytes and scanned.sha256 == artifact.sha256
 
     def _build_tool_call_id_to_info_map(self, messages: list[Message]) -> dict[str, dict[str, str]]:
         tool_call_id_to_info: dict[str, dict[str, str]] = {}

@@ -145,6 +145,11 @@ class DiscoveryFilteredWorkspaceBackend:
     def read_bytes(self, path: str) -> bytes:
         return self._backend.read_bytes(path)
 
+    def _read_bytes_chunks(self, path: str) -> Iterable[bytes]:
+        from vv_agent.workspace.streaming import read_chunks
+
+        return read_chunks(self._backend, path)
+
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
         return self._backend.write_text(path, content, append=append)
 

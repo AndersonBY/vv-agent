@@ -155,6 +155,14 @@ class S3WorkspaceBackend:
         resp = self._client.get_object(Bucket=self._bucket, Key=self._key(path))
         return resp["Body"].read()
 
+    def _read_bytes_chunks(self, path: str) -> Iterable[bytes]:
+        body = self._client.get_object(Bucket=self._bucket, Key=self._key(path))["Body"]
+        try:
+            while chunk := body.read(65_536):
+                yield chunk
+        finally:
+            body.close()
+
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
         if is_reserved_artifact_path(path):
             raise PermissionError("artifact paths are immutable")

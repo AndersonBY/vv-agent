@@ -71,6 +71,15 @@ class MemoryWorkspaceBackend:
                 raise FileNotFoundError(path)
             return self._files[key]
 
+    def _read_bytes_chunks(self, path: str) -> Iterable[bytes]:
+        key = self._norm(path)
+        with self._lock:
+            if key not in self._files:
+                raise FileNotFoundError(path)
+            data = self._files[key]
+        for offset in range(0, len(data), 65_536):
+            yield data[offset : offset + 65_536]
+
     def write_text(self, path: str, content: str, *, append: bool = False) -> int:
         key = self._norm(path)
         if is_reserved_artifact_path(key):

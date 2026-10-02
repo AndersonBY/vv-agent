@@ -3361,3 +3361,101 @@ def test_registered_celery_task_forwards_transport_redelivery_metadata(
         "transport_redelivered": True,
         "transport_retry_count": 3,
     }
+
+
+@pytest.mark.parametrize("phase", ["model", "setup", "recovery"])
+@pytest.mark.parametrize("lease_duration_ms", [1, 2, 10, 120_000])
+def test_cycle_deadline_caps_claim_and_blocks_late_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, lease_duration_ms: int
+) -> None:
+    from vv_agent.runtime.backends import celery_tasks
+
+    now = [2_000_000_000_000]
+    monkeypatch.setattr(celery_tasks.time, "time_ns", lambda: now[0] * 1_000_000)
+    controllers: list[CheckpointResumeController] = []
+    monkeypatch.setattr(CheckpointResumeController, "_start_heartbeat", lambda self: controllers.append(self))
+    store = InMemoryCheckpointStore()
+    expiries: list[int] = []
+    original_renew = store.renew_checkpoint_claim
+    for method in ("claim_checkpoint", "renew_checkpoint_claim"):
+        original = getattr(store, method)
+
+        def recording(*args: Any, original: Any = original, **kwargs: Any) -> Any:
+            expiries.append(kwargs["lease_expires_at_ms"])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, method, recording)
+    checkpoint_ref, llm_ref = CapabilityRef("checkpoint.deadline", "1"), CapabilityRef("llm.deadline", "1")
+    registry = DistributedCapabilityRegistry()
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    calls: list[str] = []
+
+    def complete(_request: Any) -> LLMResponse:
+        calls.append("model")
+        controller = controllers[-1]
+        checkpoint = controller._require_checkpoint()
+        if phase == "recovery":
+            borrowed_expiry = now[0] + 120_000
+            original_renew(
+                checkpoint.checkpoint_key,
+                claim_token=checkpoint.claim_token or "",
+                lease_expires_at_ms=borrowed_expiry,
+                now_ms=now[0],
+            )
+            checkpoint.lease_expires_at_ms = borrowed_expiry
+            controller.adopt_existing_claim(claim_token=checkpoint.claim_token or "", claimed_cycle=1)
+            assert checkpoint.lease_expires_at_ms <= deadline
+        assert controller._heartbeat_tick(checkpoint, checkpoint.claim_token or "")
+        now[0] += 2000
+        return LLMResponse(
+            content="write",
+            tool_calls=[ToolCall(id="late-write", name="write_file", arguments={"path": "late.txt", "content": "late"})],
+        )
+
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[complete]))
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path),
+        capabilities=DistributedCapabilities(llm_client_ref=llm_ref, checkpoint_store_ref=checkpoint_ref),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(
+        celery_app=app, runtime_recipe=recipe, capability_registry=registry, dispatch_timeout_seconds=1, lease_duration_ms=120_000
+    )
+    Runner.start_distributed(
+        Agent(name="deadline", instructions="Write once.", model="test-model"),
+        "write",
+        run_config=RunConfig(
+            model_provider=_provider(lambda: ScriptedLLM(steps=[])),
+            execution_backend=backend,
+            checkpoint_config=CheckpointConfig(key="deadline", store=store),
+        ),
+    )
+    deadline = now[0] + 50
+    app.envelopes[0]["deadline_unix_ms"] = deadline
+    if phase == "setup":
+        rebuild = celery_tasks._rebuild_runtime
+
+        def slow_setup(*args: Any, **kwargs: Any) -> Any:
+            runtime = rebuild(*args, **kwargs)
+            now[0] = deadline
+            return runtime
+
+        monkeypatch.setattr(celery_tasks, "_rebuild_runtime", slow_setup)
+    if phase != "setup":
+        with pytest.raises(CheckpointError) as caught:
+            run_single_cycle(envelope_dict=app.envelopes[0], capability_registry=registry)
+        assert caught.value.code == "checkpoint_lease_lost"
+    else:
+        response = run_single_cycle(envelope_dict=app.envelopes[0], capability_registry=registry)
+        assert response["result"]["status"] == "failed"
+    assert calls == (["model"] if phase != "setup" else [])
+    if phase != "setup":
+        assert expiries and all(expiry <= deadline for expiry in expiries)
+    else:
+        assert not expiries
+    assert not (tmp_path / "late.txt").exists()
+    retained = store.load_checkpoint("deadline")
+    assert retained is not None and retained.terminal_result is None
