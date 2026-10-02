@@ -820,6 +820,7 @@ def _run_single_cycle(
         parent_run_id=None,
         event_sink=ctx.event_handler,
         budget_observer=(budget_controller.model_call_complete if budget_controller is not None else None),
+        budget_admission=(budget_controller.model_call_start if budget_controller is not None else None),
         durable_dispatcher=controller,
     )
     controller.bind_model_accounting(ctx.model_call_coordinator)

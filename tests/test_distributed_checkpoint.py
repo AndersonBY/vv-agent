@@ -27,6 +27,7 @@ from vv_agent.checkpoint import AmbiguousModelPolicy, AmbiguousToolPolicy, Check
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult
 from vv_agent.llm import ScriptedLLM
+from vv_agent.model import ScriptedModelProvider
 from vv_agent.model_settings import ModelSettings, RetrySettings
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.backends.celery import CeleryBackend, register_cycle_task
@@ -3422,7 +3423,11 @@ def test_cycle_deadline_caps_claim_and_blocks_late_dispatch(
     )
     app = _EnqueueOnlyApp()
     backend = CeleryBackend(
-        celery_app=app, runtime_recipe=recipe, capability_registry=registry, dispatch_timeout_seconds=1, lease_duration_ms=120_000
+        celery_app=app,
+        runtime_recipe=recipe,
+        capability_registry=registry,
+        dispatch_timeout_seconds=1,
+        lease_duration_ms=lease_duration_ms,
     )
     Runner.start_distributed(
         Agent(name="deadline", instructions="Write once.", model="test-model"),
@@ -3433,6 +3438,7 @@ def test_cycle_deadline_caps_claim_and_blocks_late_dispatch(
             checkpoint_config=CheckpointConfig(key="deadline", store=store),
         ),
     )
+    assert app.envelopes[0]["lease_duration_ms"] == lease_duration_ms
     deadline = now[0] + 50
     app.envelopes[0]["deadline_unix_ms"] = deadline
     if phase == "setup":
@@ -3459,3 +3465,100 @@ def test_cycle_deadline_caps_claim_and_blocks_late_dispatch(
     assert not (tmp_path / "late.txt").exists()
     retained = store.load_checkpoint("deadline")
     assert retained is not None and retained.terminal_result is None
+
+
+@pytest.mark.parametrize("dimension", ["total_tokens", "uncached_input_tokens", "host_cost"])
+@pytest.mark.parametrize("summary_usage", [9, 10, 11])
+def test_distributed_compaction_rechecks_model_admission(tmp_path: Path, dimension: str, summary_usage: int) -> None:
+    store = InMemoryCheckpointStore()
+    registry = DistributedCapabilityRegistry()
+    checkpoint_ref, llm_ref, meter_ref = (
+        CapabilityRef("checkpoint.compaction-budget", "1"),
+        CapabilityRef("llm.compaction-budget", "1"),
+        CapabilityRef("meter.compaction-budget", "1"),
+    )
+    registry.register("checkpoint_store", checkpoint_ref, store)
+    calls: list[str] = []
+    host_usage = [0]
+
+    class Meter:
+        def read(self) -> HostCost:
+            return HostCost(unit="credits", amount_microunits=host_usage[0])
+
+    meter = Meter()
+
+    def response(content: str, usage: int) -> LLMResponse:
+        return LLMResponse(
+            content=content,
+            raw={
+                "usage": {
+                    "prompt_tokens": usage,
+                    "completion_tokens": 0,
+                    "total_tokens": usage,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                }
+            },
+        )
+
+    def summary(_request: Any) -> LLMResponse:
+        calls.append("memory_compaction")
+        host_usage[0] = summary_usage
+        return response("{}", summary_usage)
+
+    def primary(_request: Any) -> LLMResponse:
+        calls.append("agent_cycle")
+        host_usage[0] += 1
+        return response("done", 1)
+
+    registry.register("llm_client", llm_ref, ScriptedLLM(steps=[summary, primary]))
+    capability_refs = {"behavior_affecting_run_metadata": CapabilityRef("metadata.compaction-budget", "1").to_dict()}
+    if dimension == "host_cost":
+        registry.register("host_cost_meter", meter_ref, meter)
+        capability_refs["host_cost_meter"] = meter_ref.to_dict()
+    recipe = RuntimeRecipe(
+        settings_file=str(tmp_path / "unused.py"),
+        backend="test",
+        model="test-model",
+        workspace=str(tmp_path),
+        capabilities=DistributedCapabilities(
+            checkpoint_store_ref=checkpoint_ref,
+            llm_client_ref=llm_ref,
+            host_cost_meter_ref=meter_ref if dimension == "host_cost" else None,
+        ),
+    )
+    app = _EnqueueOnlyApp()
+    backend = CeleryBackend(celery_app=app, runtime_recipe=recipe, capability_registry=registry)
+    limits = (
+        RunBudgetLimits(max_host_cost=HostCost(unit="credits", amount_microunits=10))
+        if dimension == "host_cost"
+        else RunBudgetLimits(max_total_tokens=10)
+        if dimension == "total_tokens"
+        else RunBudgetLimits(max_uncached_input_tokens=10)
+    )
+    Runner.start_distributed(
+        Agent(name="compaction-budget", instructions="Return done.", model="test-model", no_tool_policy="finish"),
+        "continue",
+        run_config=RunConfig(
+            model_provider=ScriptedModelProvider.from_steps("test", "test-model", []).with_token_limits(1000, 0),
+            execution_backend=backend,
+            checkpoint_config=CheckpointConfig(key="compaction-budget", store=store, capability_refs=capability_refs),
+            budget_limits=limits,
+            host_cost_meter=meter if dimension == "host_cost" else None,
+            metadata={"reserved_output_tokens": 0, "autocompact_buffer_tokens": 0},
+            initial_messages=[
+                Message(role="user", content="history " * 1000),
+                Message(role="assistant", content="previous step"),
+                Message(role="user", content="continue"),
+            ],
+        ),
+    )
+    worker_response = run_single_cycle(envelope_dict=app.envelopes[0], capability_registry=registry)
+    result = worker_response["result"]
+    assert calls == (["memory_compaction", "agent_cycle"] if summary_usage < 10 else ["memory_compaction"])
+    assert result["budget_usage"]["cycles"] == 1
+    if summary_usage < 10:
+        assert result["status"] == "completed"
+    else:
+        assert result["completion_reason"] == "budget_exhausted"
+        assert result["budget_exhaustion"]["reason"] == ("limit_reached" if summary_usage == 10 else "limit_exceeded")
+        assert result["budget_exhaustion"]["observed"] == summary_usage

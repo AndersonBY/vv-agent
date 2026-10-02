@@ -94,3 +94,6 @@ including a primary request immediately following compaction in the same cycle.
 This uses the existing `cycle_start` admission boundary without incrementing
 the started-cycle count. Completed checkpoint model receipts replay without
 another admission check or usage charge.
+Celery workers bind the same admission callback when reconstructing their
+model coordinator. Distributed compaction boundary regressions live in
+`tests/test_distributed_checkpoint.py`.
