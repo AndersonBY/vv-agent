@@ -1642,6 +1642,7 @@ class Runner:
                 "_vv_agent_input": user_input,
                 "_vv_agent_model_settings": resolved_model_settings,
                 "_vv_agent_model_provider": run_config.model_provider,
+                "_vv_agent_run_config": run_config,
                 "_vv_agent_resolved_backend": resolved.backend,
                 "_vv_agent_resolved_model": resolved.model_id,
                 "_vv_agent_run_context": guardrail_context,
@@ -2568,24 +2569,6 @@ class Runner:
                     "child_status": snapshot.status.value,
                 },
             )
-        if tool.metadata.get("mode") == "agent_as_tool" and isinstance(tool.metadata.get("agent"), Agent):
-            child_agent = tool.metadata["agent"]
-            child = cls._run_child_agent(
-                child_agent,
-                arguments=arguments,
-                parent_config=run_config,
-                context=context,
-            )
-            return ToolExecutionResult(
-                tool_call_id="",
-                content=child.final_output or "",
-                metadata={
-                    "agent": child_agent.name,
-                    "mode": tool.metadata.get("mode"),
-                    "child_status": child.status.value,
-                    "child_run_id": child.run_id,
-                },
-            )
         return tool.to_tool_execution_result(tool.invoke(context, arguments))
 
     @staticmethod
@@ -2997,6 +2980,30 @@ class Runner:
                     metadata=dict(metadata),
                 )
         return None
+
+    @classmethod
+    def _agent_tool_parent_config(cls, context: ToolContext | None) -> RunConfig | None:
+        if context is None or context.ctx is None:
+            return None
+        runtime_metadata = context.ctx.metadata
+        parent_config = runtime_metadata.get("_vv_agent_run_config")
+        if not isinstance(parent_config, RunConfig):
+            parent_config = BackgroundAgentTask._inherited_run_config(context, None)
+        parent_config = cls._tool_run_config_from_context(context=context, fallback=parent_config)
+        provider = runtime_metadata.get("_vv_agent_model_provider", parent_config.model_provider)
+        if provider is None:
+            return None
+        return replace(
+            parent_config,
+            model_provider=provider,
+            cancellation_token=context.ctx.cancellation_token,
+            workspace=context.workspace,
+            workspace_backend=context.workspace_backend,
+            execution_backend=runtime_metadata.get("execution_backend", parent_config.execution_backend),
+            budget_limits=runtime_metadata.get("_vv_agent_budget_limits", parent_config.budget_limits),
+            memory_providers=runtime_metadata.get("_vv_agent_memory_providers", parent_config.memory_providers),
+            context=getattr(context.run_context, "context", parent_config.context),
+        )
 
     @classmethod
     def _run_child_agent(
