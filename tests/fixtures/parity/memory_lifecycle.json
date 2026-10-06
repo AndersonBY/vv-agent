@@ -265,7 +265,14 @@
       "reclaimed_tokens_semantics": "actual_prompt_token_reduction_after_successful_replacements",
       "artifact_failure_count_semantics": "selected_results_left_inline_because_archive_persistence_failed",
       "changed_is_content_aware": true,
-      "mode_is_strongest_applied_stage": true
+      "mode_is_strongest_applied_stage": true,
+      "mode_semantics": {
+        "none": "no_change",
+        "micro": "only_archive_backed_result_replacement",
+        "structural": "information_preserving_cleanup_or_warning_only",
+        "summary": "accepted_prefix_summary_and_raw_tail",
+        "emergency": "accepted_resummary_with_smaller_raw_tail_target"
+      }
     },
     "microcompact_planning": {
       "single_plan_and_apply_pass_per_cycle": true,
@@ -314,7 +321,10 @@
       {
         "attempt": 2,
         "strategy": "emergency",
-        "drop_ratio": 0.4
+        "drop_ratio": 0.4,
+        "requires_summary": true,
+        "drops_without_summary": false,
+        "keep_recent_messages_formula": "max(1, floor(keep_recent_messages * (1 - clamp(drop_ratio, 0, 0.95))))"
       }
     ],
     "result_metadata": {
@@ -428,7 +438,9 @@
       "budget_exhaustion",
       "checkpoint_ambiguity",
       "checkpoint_integrity_failure"
-    ]
+    ],
+    "baseline_includes_summary_and_raw_tail": true,
+    "on_compaction_requires_accepted_summary": true
   },
   "artifacts": {
     "logical_root": ".vv-agent/artifacts/",
@@ -448,6 +460,667 @@
       "sha256",
       "total_chars",
       "truncated_chars"
-    ]
-  }
+    ],
+    "survives_summary": true,
+    "survives_recompression": true,
+    "summary_references_require_recovery_surface": true
+  },
+  "summary_pipeline": {
+    "stages": [
+      "prepare_shared_message_view",
+      "select_atomic_raw_tail",
+      "single_microcompact_pass_outside_summary_tail_unless_forced",
+      "summarize_previous_summary_and_complete_prefix",
+      "validate_summary_and_merge_evidence",
+      "commit_only_if_smaller_and_within_budget"
+    ],
+    "force_skips_pruning": true,
+    "second_pruner": false,
+    "processed_image_stripping": false,
+    "empty_assistant_removal_only_if_no_content_reasoning_image_or_tool_calls": true,
+    "malformed_tool_blocks": "do_not_commit; existing_recovery_boundary_owns_validation",
+    "failure_result": "safely_pruned_complete_transcript",
+    "file_recovery": "paths_only_no_automatic_exists_stat_or_read",
+    "summary_event_limit_applies_to": "summary_output_only_never_input",
+    "summary_input_overflow": "fail_preserve_history_no_chunking",
+    "session_memory_on_compaction": "only_after_accepted_replacement",
+    "token_baseline": "summary_plus_raw_tail",
+    "system_prompt": "frozen",
+    "control_outcomes_propagate": [
+      "cancellation",
+      "budget_exhaustion",
+      "checkpoint_ambiguity",
+      "checkpoint_integrity_failure"
+    ],
+    "case_fixture": "memory_local.json#summary_compaction",
+    "prune_only_case": {
+      "name": "prune_below_full_threshold_keeps_all_pairs",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "system"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "old",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你",
+            "tool_call_id": "old",
+            "artifact_ref": {
+              "path": ".vv-agent/artifacts/run/old.txt",
+              "media_type": "text/plain",
+              "encoding": "utf-8",
+              "size_bytes": 2700,
+              "sha256": "fce601bc9585f6d3e686e0820b8f22ac4de5fc797ddcb315b3314f624aab9923"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "recent",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你",
+            "tool_call_id": "recent"
+          }
+        ],
+        "force": false,
+        "cycle_index": 1000,
+        "compact_threshold": 1800,
+        "keep_recent_messages": 2,
+        "microcompaction_policy": {
+          "trigger_ratio": 0.75,
+          "target_ratio": 0.6,
+          "keep_recent_cycles": 1,
+          "min_result_chars": 500
+        },
+        "existing_artifact_text": "你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你"
+      },
+      "token_estimator": {
+        "input_messages": 2000,
+        "candidate_messages": 1600,
+        "old_result": 800,
+        "replacement_result": 400
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "system"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "old",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "<Tool Result Compact>\ntool_name: lookup\nartifact_path: .vv-agent/artifacts/run/old.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\n你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你\n...<snip>...\n你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你\n</Tool Result Compact>",
+            "tool_call_id": "old",
+            "artifact_ref": {
+              "path": ".vv-agent/artifacts/run/old.txt",
+              "media_type": "text/plain",
+              "encoding": "utf-8",
+              "size_bytes": 2700,
+              "sha256": "fce601bc9585f6d3e686e0820b8f22ac4de5fc797ddcb315b3314f624aab9923"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "recent",
+                "type": "function",
+                "function": {
+                  "name": "lookup",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你",
+            "tool_call_id": "recent"
+          }
+        ],
+        "mode": "micro",
+        "changed": true,
+        "archived_count": 1,
+        "reclaimed_tokens": 400,
+        "summary_calls": 0
+      }
+    }
+  },
+  "emergency_cases": [
+    {
+      "name": "emergency_resummarizes_more_tail",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "系统指令"
+          },
+          {
+            "role": "user",
+            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "name": "memory_summary",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "media_type": "text/plain",
+                      "encoding": "utf-8",
+                      "size_bytes": 26,
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                    }
+                  }
+                ],
+                "cursors": [
+                  {
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "path": "logs/output.txt",
+                      "offset_chars": 20,
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "c5",
+                "type": "function",
+                "function": {
+                  "name": "run_tests",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "12 passed",
+            "tool_call_id": "c5"
+          },
+          {
+            "role": "user",
+            "content": "检查部署配置"
+          },
+          {
+            "role": "assistant",
+            "content": "配置待检查"
+          }
+        ],
+        "keep_recent_messages": 4,
+        "force": true,
+        "cycle_index": 1000,
+        "summary_response": "{\"current_work_state\":\"12 tests passed; deployment configuration pending.\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}",
+        "drop_ratio": 0.4,
+        "emergency_keep": 2
+      },
+      "expected_summary_input": {
+        "previous_summary": [
+          {
+            "role": "user",
+            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "name": "memory_summary"
+          }
+        ],
+        "conversation_prefix": [
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "c5",
+                "type": "function",
+                "function": {
+                  "name": "run_tests",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "12 passed",
+            "tool_call_id": "c5"
+          }
+        ]
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "系统指令"
+          },
+          {
+            "role": "user",
+            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"12 tests passed; deployment configuration pending.\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "name": "memory_summary",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "media_type": "text/plain",
+                      "encoding": "utf-8",
+                      "size_bytes": 26,
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                    }
+                  }
+                ],
+                "cursors": [
+                  {
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "path": "logs/output.txt",
+                      "offset_chars": 20,
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "role": "user",
+            "content": "检查部署配置"
+          },
+          {
+            "role": "assistant",
+            "content": "配置待检查"
+          }
+        ],
+        "changed": true,
+        "summary_calls": 1,
+        "raw_tail": [
+          {
+            "role": "user",
+            "content": "检查部署配置"
+          },
+          {
+            "role": "assistant",
+            "content": "配置待检查"
+          }
+        ],
+        "workspace_file_reads": 0,
+        "workspace_file_stats": 0,
+        "mode": "emergency"
+      },
+      "token_estimator": {
+        "input_messages": 1000,
+        "candidate_messages": 600
+      }
+    },
+    {
+      "name": "emergency_exhausted_atomic_tail",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "系统指令"
+          },
+          {
+            "role": "user",
+            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "name": "memory_summary",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "media_type": "text/plain",
+                      "encoding": "utf-8",
+                      "size_bytes": 26,
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                    }
+                  }
+                ],
+                "cursors": [
+                  {
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "path": "logs/output.txt",
+                      "offset_chars": 20,
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "p1",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"path\":\"a.py\"}"
+                }
+              },
+              {
+                "id": "p2",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"path\":\"b.py\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "a",
+            "tool_call_id": "p1"
+          },
+          {
+            "role": "tool",
+            "content": "b",
+            "tool_call_id": "p2"
+          }
+        ],
+        "keep_recent_messages": 2,
+        "drop_ratio": 0.4,
+        "emergency_keep": 1
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "系统指令"
+          },
+          {
+            "role": "user",
+            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "name": "memory_summary",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "media_type": "text/plain",
+                      "encoding": "utf-8",
+                      "size_bytes": 26,
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                    }
+                  }
+                ],
+                "cursors": [
+                  {
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "path": "logs/output.txt",
+                      "offset_chars": 20,
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "p1",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"path\":\"a.py\"}"
+                }
+              },
+              {
+                "id": "p2",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"path\":\"b.py\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "a",
+            "tool_call_id": "p1"
+          },
+          {
+            "role": "tool",
+            "content": "b",
+            "tool_call_id": "p2"
+          }
+        ],
+        "changed": false,
+        "summary_calls": 0,
+        "error": "CompactionExhaustedError"
+      }
+    },
+    {
+      "name": "emergency_failed_summary_exhausted",
+      "input": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "系统指令"
+          },
+          {
+            "role": "user",
+            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "name": "memory_summary",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "media_type": "text/plain",
+                      "encoding": "utf-8",
+                      "size_bytes": 26,
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                    }
+                  }
+                ],
+                "cursors": [
+                  {
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "path": "logs/output.txt",
+                      "offset_chars": 20,
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "c5",
+                "type": "function",
+                "function": {
+                  "name": "run_tests",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "12 passed",
+            "tool_call_id": "c5"
+          },
+          {
+            "role": "user",
+            "content": "检查部署配置"
+          },
+          {
+            "role": "assistant",
+            "content": "配置待检查"
+          }
+        ],
+        "keep_recent_messages": 4,
+        "force": true,
+        "cycle_index": 1000,
+        "summary_response": "",
+        "drop_ratio": 0.4,
+        "emergency_keep": 2
+      },
+      "expected": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "系统指令"
+          },
+          {
+            "role": "user",
+            "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+            "name": "memory_summary",
+            "metadata": {
+              "_vv_agent_compaction": {
+                "artifacts": [
+                  {
+                    "tool_call_id": "c1",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"auth.py\"}",
+                    "artifact_ref": {
+                      "path": ".vv-agent/artifacts/run/c1-H.txt",
+                      "media_type": "text/plain",
+                      "encoding": "utf-8",
+                      "size_bytes": 26,
+                      "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                    }
+                  }
+                ],
+                "cursors": [
+                  {
+                    "tool_call_id": "c2",
+                    "tool_name": "read_file",
+                    "arguments": "{\"path\":\"logs/output.txt\"}",
+                    "cursor": {
+                      "kind": "read_file",
+                      "path": "logs/output.txt",
+                      "offset_chars": 20,
+                      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "c5",
+                "type": "function",
+                "function": {
+                  "name": "run_tests",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "12 passed",
+            "tool_call_id": "c5"
+          },
+          {
+            "role": "user",
+            "content": "检查部署配置"
+          },
+          {
+            "role": "assistant",
+            "content": "配置待检查"
+          }
+        ],
+        "changed": false,
+        "summary_calls": 1,
+        "error": "CompactionExhaustedError"
+      }
+    }
+  ]
 }

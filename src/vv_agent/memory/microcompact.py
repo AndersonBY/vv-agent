@@ -47,18 +47,23 @@ def plan_microcompact(
     result_retentions: Mapping[str, ToolResultRetention],
     artifact_path_estimate_for: Callable[[str], str],
     estimate_message_tokens: Callable[[Message], int],
+    excerpt_head_chars: int = 200,
+    excerpt_tail_chars: int = 200,
 ) -> MicrocompactPlan:
     if not messages or current_tokens <= target_tokens:
         return MicrocompactPlan(current_tokens=max(current_tokens, 0), target_tokens=max(target_tokens, 0))
 
-    tool_call_names = _build_tool_call_name_map(messages)
+    del current_cycle
+    tool_call_names: dict[str, str] = {}
     inferred_cycles = _infer_message_cycles(messages)
     max_inferred_cycle = inferred_cycles[-1] if inferred_cycles else 0
-    effective_current_cycle = max(max(int(current_cycle), 0), max_inferred_cycle + 1)
+    effective_current_cycle = max_inferred_cycle + 1
     protected_cycle = max(effective_current_cycle - policy.keep_recent_cycles, 0)
     candidates: list[MicrocompactCandidate] = []
 
     for index, (message, inferred_cycle) in enumerate(zip(messages, inferred_cycles, strict=False)):
+        if message.role == "assistant":
+            tool_call_names = _build_tool_call_name_map([message])
         tool_name = _candidate_tool_name(
             message,
             inferred_cycle=inferred_cycle,
@@ -78,6 +83,8 @@ def plan_microcompact(
             excerpt_source,
             artifact_path=artifact_path,
             tool_name=tool_name,
+            excerpt_head_chars=excerpt_head_chars,
+            excerpt_tail_chars=excerpt_tail_chars,
         )
         marker_message = replace(message, content=marker)
         reclaimable = max(estimate_message_tokens(message) - estimate_message_tokens(marker_message), 0)
@@ -227,7 +234,7 @@ def _infer_message_cycles(messages: list[Message]) -> list[int]:
     current_cycle = 0
     inferred_cycles: list[int] = []
     for message in messages:
-        if message.role == "assistant":
+        if message.role == "assistant" and message.name != "memory_summary":
             current_cycle += 1
         inferred_cycles.append(current_cycle)
     return inferred_cycles

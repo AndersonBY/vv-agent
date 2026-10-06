@@ -4939,3 +4939,155 @@ def test_incomplete_deferred_batch_reconciles_unclassified_wait_user_across_stor
     finally:
         controller.close()
         store.delete_checkpoint(key)
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "sqlite", "redis"])
+def test_summary_replay_reuses_receipt_and_request_digest(
+    store_kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from support import model_call_context
+    from support.compaction import case_manager, fixture, messages
+
+    from vv_agent.llm import LlmRequest
+    from vv_agent.model_settings import ModelSettings
+    from vv_agent.types import LLMResponse, ModelCallOperation
+
+    case = fixture("checkpoint_resume")["summary_receipt_replay"]
+    inputs = case["input"]
+    key = "summary-receipt-" + store_kind
+    store = _store(store_kind, tmp_path, key)
+    seed = _minimal_checkpoint(key=key)
+    seed.cycle_index = inputs["cycle_index"] - 1
+    seed.messages = messages(inputs["messages"])
+    assert store.create_checkpoint(seed)
+    dispatches = []
+
+    def controller():
+        result = CheckpointResumeController(
+            config=CheckpointConfig(store=store, key=key, resume_policy=ResumePolicy.REQUIRE_EXISTING),
+            task_id=seed.task_id,
+            run_id=seed.root_run_id,
+            trace_id=seed.trace_id,
+            run_definition=seed.run_definition,
+            run_definition_digest=seed.run_definition_digest,
+            initial_messages=seed.messages,
+            initial_shared_state={},
+            initial_budget_usage=None,
+            extensions=[],
+            reconciliation_provider=None,
+            event_sink=lambda _event: None,
+        )
+        assert result.admit() is None
+        return result
+
+    def run_summary(current, original, *, fail_after_receipt=False):
+        ctx = model_call_context()
+        ctx.model_call_coordinator.durable_dispatcher = current
+        current.bind_model_accounting(ctx.model_call_coordinator)
+
+        def summarize(prompt, *_args):
+            request = LlmRequest(
+                model="test-model",
+                messages=[Message(role="user", content=prompt)],
+                model_settings=ModelSettings(temperature=0, top_p=1),
+            )
+
+            def invoke():
+                dispatches.append(prompt)
+                return LLMResponse(
+                    content=inputs["retained_summary_response"],
+                    raw={"usage": inputs["retained_model_call"]["usage"]["provider_usage"]},
+                )
+
+            result = ctx.model_call_coordinator.dispatch(
+                operation=ModelCallOperation.MEMORY_COMPACTION,
+                cycle_index=inputs["cycle_index"],
+                operation_slot="memory_compaction_1",
+                backend="test",
+                model="test-model",
+                request=request,
+                invoke=invoke,
+            )
+            if fail_after_receipt:
+                raise SystemExit("fault after summary receipt")
+            return result.response.content
+
+        harness_case = {"input": inputs, "token_estimator": inputs["token_estimator"]}
+        manager, _ = case_manager(
+            harness_case,
+            monkeypatch,
+            language=inputs["language"],
+            summary_event_limit=inputs["summary_event_limit"],
+            summary_callback=summarize,
+        )
+        result = manager.compact(original, force=True)
+        return result, ctx
+
+    first = controller()
+    try:
+        with pytest.raises(SystemExit, match="after summary receipt"):
+            run_summary(first, messages(inputs["messages"]), fail_after_receipt=True)
+        retained = store.load_checkpoint(key)
+        assert retained is not None
+        assert retained.model_call_journal[0].to_dict() == inputs["retained_receipt"]
+        assert retained.messages == messages(inputs["messages"])
+    finally:
+        first.close()
+
+    def expire_claim():
+        retained = store.load_checkpoint(key)
+        retained.lease_expires_at_ms = 1
+        if store_kind == "memory":
+            store._store[key].lease_expires_at_ms = 1
+        elif store_kind == "sqlite":
+            with sqlite3.connect(store._db_path) as connection:
+                connection.execute("UPDATE checkpoints SET lease_expires_at_ms=1 WHERE checkpoint_key=?", (key,))
+        else:
+            from vv_agent.runtime.stores.redis import _checkpoint_to_storage
+
+            data, lease = _checkpoint_to_storage(retained)
+            data_key, lease_key = store._keys(key)
+            store._client.set(data_key, data)
+            store._client.set(lease_key, str(lease))
+
+    accounting_case = fixture("token_usage")["compaction_cases"][3]
+    for _ in range(2):
+        expire_claim()
+        replay = controller()
+        try:
+            (output, changed), ctx = run_summary(replay, messages(inputs["messages"]))
+            assert changed
+            assert [m.to_dict() for m in output] == case["expected"]["messages"]
+            records = [record.to_dict() for record in ctx.model_call_ledger.records()]
+            assert records == accounting_case["expected"]["model_calls"]
+            assert records == case["expected"]["model_calls"]
+            assert len(dispatches) == 1
+            assert ctx.model_call_ledger.usage().total_tokens == inputs["retained_model_call"]["usage"]["total_tokens"]
+            altered = messages(inputs["messages"])
+            next(m for m in altered if m.content == "继续验证").content = "重新验证"
+            with pytest.raises(CheckpointError) as error:
+                run_summary(replay, altered)
+            assert error.value.code == case["changed_request"]["expected_error"]
+            assert len(dispatches) == 1
+            retained = store.load_checkpoint(key)
+            assert len(retained.model_call_journal) == 1
+            assert retained.tool_journal == []
+        finally:
+            replay.close()
+
+    # Persist accepted messages, reopen the checkpoint, and consume the committed view.
+    expire_claim()
+    committed = controller()
+    try:
+        (output, _), _ctx = run_summary(committed, messages(inputs["messages"]))
+        snapshot = committed._require_checkpoint()
+        snapshot.messages = output
+        assert store.progress_checkpoint(snapshot, claim_token=snapshot.claim_token, expected_revision=snapshot.revision)
+        restored = store.load_checkpoint(key)
+        assert restored is not None
+        assert [m.to_dict() for m in restored.messages] == case["after_transcript_commit"]["messages"]
+        (unchanged, changed), _ = run_summary(committed, restored.messages)
+        assert not changed and unchanged == restored.messages
+        assert len(dispatches) == 1
+    finally:
+        committed.close()

@@ -720,7 +720,7 @@ def test_full_compaction_rechecks_model_admission(tmp_path: Path, dimension: str
     def summary(_request: LlmRequest) -> LLMResponse:
         meter._last = HostCost(unit="credits", amount_microunits=summary_usage)
         return LLMResponse(
-            content="{}",
+            content='{"progress":["history summarized"]}',
             raw={
                 "usage": {
                     "prompt_tokens": summary_usage,
@@ -759,11 +759,11 @@ def test_full_compaction_rechecks_model_admission(tmp_path: Path, dimension: str
                         },
                     ),
                 ]
-            ).with_token_limits(1000, 0),
+            ).with_token_limits(6000, 0),
             max_cycles=2,
             budget_limits=limits,
             host_cost_meter=meter if dimension == "host_cost" else None,
-            metadata={"reserved_output_tokens": 0, "autocompact_buffer_tokens": 0},
+            metadata={"reserved_output_tokens": 0, "autocompact_buffer_tokens": 5900, "memory_keep_recent_messages": 1},
             initial_messages=[
                 Message(role="user", content="history " * 1000),
                 Message(role="assistant", content="previous step"),

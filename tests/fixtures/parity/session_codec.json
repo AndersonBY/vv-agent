@@ -24,13 +24,19 @@
       "sha256"
     ],
     "artifact_ref_closed": true,
-    "unknown_message_fields": "reject"
+    "unknown_message_fields": "reject",
+    "reserved_metadata": {
+      "_vv_agent_compaction": "memory_local.json#evidence_manifest"
+    }
   },
   "model_projection": {
     "strip_host_only_fields": [
       "artifact_ref"
     ],
-    "content_is_unchanged": true
+    "content_is_unchanged": true,
+    "strip_host_only_metadata_keys": [
+      "_vv_agent_compaction"
+    ]
   },
   "canonical_cases": [
     {
@@ -126,6 +132,86 @@
         "content": "<Tool Result Compact>\ntool_name: web_search\nartifact_path: .vv-agent/artifacts/run-7/call-search.txt\nretrieval_hint: use read_file on artifact_path if needed\nexcerpt:\nfirst result\n...<snip>...\nlast result\n</Tool Result Compact>",
         "name": "web_search",
         "tool_call_id": "call_search"
+      }
+    },
+    {
+      "name": "summary_evidence_round_trips",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "tool_call_id": "c1",
+                "tool_name": "read_file",
+                "arguments": "{\"path\":\"auth.py\"}",
+                "artifact_ref": {
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "media_type": "text/plain",
+                  "encoding": "utf-8",
+                  "size_bytes": 26,
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                }
+              }
+            ],
+            "cursors": [
+              {
+                "tool_call_id": "c2",
+                "tool_name": "read_file",
+                "arguments": "{\"path\":\"logs/output.txt\"}",
+                "cursor": {
+                  "kind": "read_file",
+                  "path": "logs/output.txt",
+                  "offset_chars": 20,
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "canonical": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "tool_call_id": "c1",
+                "tool_name": "read_file",
+                "arguments": "{\"path\":\"auth.py\"}",
+                "artifact_ref": {
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "media_type": "text/plain",
+                  "encoding": "utf-8",
+                  "size_bytes": 26,
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                }
+              }
+            ],
+            "cursors": [
+              {
+                "tool_call_id": "c2",
+                "tool_name": "read_file",
+                "arguments": "{\"path\":\"logs/output.txt\"}",
+                "cursor": {
+                  "kind": "read_file",
+                  "path": "logs/output.txt",
+                  "offset_chars": 20,
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "model_projection": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary"
       }
     }
   ],
@@ -397,6 +483,195 @@
           "size_bytes": 26,
           "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76",
           "original_bytes": 26
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_missing_artifacts",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "cursors": []
+          }
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_missing_cursors",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": []
+          }
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_unknown_field",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [],
+            "cursors": [],
+            "extra": true
+          }
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_artifacts_not_array",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": null,
+            "cursors": []
+          }
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_record_missing_arguments",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "tool_call_id": "c1",
+                "tool_name": "read_file",
+                "artifact_ref": {
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "media_type": "text/plain",
+                  "encoding": "utf-8",
+                  "size_bytes": 26,
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                }
+              }
+            ],
+            "cursors": []
+          }
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_record_unknown_field",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "tool_call_id": "c1",
+                "tool_name": "read_file",
+                "arguments": "{\"path\":\"auth.py\"}",
+                "artifact_ref": {
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "media_type": "text/plain",
+                  "encoding": "utf-8",
+                  "size_bytes": 26,
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                },
+                "extra": true
+              }
+            ],
+            "cursors": []
+          }
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_arguments_not_object_json",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "tool_call_id": "c1",
+                "tool_name": "read_file",
+                "arguments": "[]",
+                "artifact_ref": {
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "media_type": "text/plain",
+                  "encoding": "utf-8",
+                  "size_bytes": 26,
+                  "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                }
+              }
+            ],
+            "cursors": []
+          }
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_artifact_bad_hash",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [
+              {
+                "tool_call_id": "c1",
+                "tool_name": "read_file",
+                "arguments": "{\"path\":\"auth.py\"}",
+                "artifact_ref": {
+                  "path": ".vv-agent/artifacts/run/c1-H.txt",
+                  "media_type": "text/plain",
+                  "encoding": "utf-8",
+                  "size_bytes": 26,
+                  "sha256": "BAD"
+                }
+              }
+            ],
+            "cursors": []
+          }
+        }
+      }
+    },
+    {
+      "name": "summary_evidence_cursor_bad_offset",
+      "input": {
+        "role": "user",
+        "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+        "name": "memory_summary",
+        "metadata": {
+          "_vv_agent_compaction": {
+            "artifacts": [],
+            "cursors": [
+              {
+                "tool_call_id": "c2",
+                "tool_name": "read_file",
+                "arguments": "{\"path\":\"logs/output.txt\"}",
+                "cursor": {
+                  "kind": "read_file",
+                  "path": "logs/output.txt",
+                  "offset_chars": -1,
+                  "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                }
+              }
+            ]
+          }
         }
       }
     }

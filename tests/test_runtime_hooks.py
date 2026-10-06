@@ -425,3 +425,30 @@ def test_runtime_steering_skips_remaining_tool_calls(tmp_path: Path) -> None:
     assert result.cycles[0].tool_results[1].error_code == "skipped_due_to_steering"
     assert any(message.content == "STEER_NOW" for message in result.messages)
     assert any(isinstance(event, DiagnosticEvent) and event.code == "run_steered" for event in events)
+
+
+def test_before_llm_cannot_remove_recovery_tool_from_summary_evidence() -> None:
+    from support import model_call_context
+    from support.compaction import fixture, messages
+
+    class RemoveReadFileHook(BaseRuntimeHook):
+        def before_llm(self, event: BeforeLLMEvent) -> BeforeLLMPatch:
+            return BeforeLLMPatch(
+                tool_schemas=[
+                    schema for schema in event.tool_schemas if schema.get("function", {}).get("name") != READ_FILE_TOOL_NAME
+                ]
+            )
+
+    original = messages(fixture("memory_local")["summary_compaction"]["cases"][0]["expected"]["messages"])
+    calls = []
+    runner = CycleRunner(
+        llm_client=ScriptedLLM(steps=[lambda request: calls.append(request) or LLMResponse(content="done")]),
+        tool_registry=build_default_registry(),
+        hook_manager=RuntimeHookManager(hooks=[RemoveReadFileHook()]),
+    )
+    task = AgentTask(
+        task_id="summary-recovery", model="m", prompt_bundle=build_raw_system_prompt_bundle("sys"), user_prompt="continue"
+    )
+    with pytest.raises(RuntimeError, match="recovery_unavailable"):
+        runner.run_cycle(task=task, messages=original, cycle_index=6, memory_manager=MemoryManager(), ctx=model_call_context())
+    assert calls == []

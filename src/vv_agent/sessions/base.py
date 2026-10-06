@@ -7,7 +7,7 @@ import re
 from typing import Any, Protocol, cast
 
 from vv_agent.checkpoint import canonical_json_bytes
-from vv_agent.types import Message, Role, ToolArtifactRef
+from vv_agent.types import Message, Role, ToolArtifactRef, validate_compaction_metadata
 
 SESSION_COMMIT_SCHEMA = "vv-agent.session-commit.v1"
 SESSION_COMMIT_ID_PREFIX = "vv-agent:checkpoint-v2:session:"
@@ -263,6 +263,7 @@ def _decode_canonical_message(data: dict[str, Any]) -> Message:
         except (TypeError, ValueError) as exc:
             raise ValueError('"artifact_ref" is invalid') from exc
 
+    validate_compaction_metadata(metadata)
     return Message(
         role=cast(Role, role),
         content=content,

@@ -5,25 +5,24 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+from vv_agent.checkpoint import CheckpointError, canonical_json_bytes
+from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
 from vv_agent.memory.microcompact import (
     EXCERPT_METADATA_KEY,
     MicrocompactCandidate,
     MicrocompactPlan,
     build_compacted_tool_content,
     has_recovery_envelope,
-    is_microcompacted_tool_content,
     plan_microcompact,
     replace_with_compacted_marker,
 )
-from vv_agent.memory.post_compact_restore import PostCompactRestoreConfig, restore_key_files
 from vv_agent.memory.session_memory import SessionMemory
 from vv_agent.memory.token_utils import compute_compaction_threshold, count_messages_tokens
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.tools.metadata import ToolResultRetention
-from vv_agent.types import Message, ToolArtifactRef
+from vv_agent.types import COMPACTION_METADATA_KEY, Message, ToolArtifactRef, ToolExecutionResult, validate_compaction_metadata
 from vv_agent.workspace.artifacts import persist_text_artifact
 from vv_agent.workspace.base import WorkspaceBackend
 
@@ -57,9 +56,13 @@ _COMPRESS_MEMORY_PROMPTS = {
 请逐步思考: 哪些信息必须保留, 哪些用户原话不能丢, 哪些文件/错误/当前状态会影响后续继续执行。
 </analysis>
 
-<Conversation History>
-{messages}
-</Conversation History>
+<Previous Summary>
+{previous_summary_jcs}
+</Previous Summary>
+
+<Conversation Prefix>
+{conversation_prefix_jcs}
+</Conversation Prefix>
 
 请将以上对话压缩为结构化 JSON「Task Status Summary」, 让 Agent 能快速恢复任务, 并保留用户约束、关键决策、文件操作与当前工作状态。
 
@@ -96,9 +99,13 @@ Think step by step about what information is critical to preserve, especially th
 the current work state, file operations, and any errors that were resolved.
 </analysis>
 
-<Conversation History>
-{messages}
-</Conversation History>
+<Previous Summary>
+{previous_summary_jcs}
+</Previous Summary>
+
+<Conversation Prefix>
+{conversation_prefix_jcs}
+</Conversation Prefix>
 
 Please compress the conversation into a structured JSON "Task Status Summary".
 This summary should allow the Agent to quickly resume the task
@@ -186,18 +193,13 @@ class MemoryManager:
     language: str = "zh-CN"
     warning_threshold_percentage: int = 90
     include_memory_warning: bool = False
-    tool_result_compact_threshold: int = 2_000
-    tool_result_keep_last: int = 3
     tool_result_excerpt_head: int = 200
     tool_result_excerpt_tail: int = 200
-    tool_calls_keep_last: int = 3
-    assistant_no_tool_keep_last: int = 1
     microcompaction_policy: MicrocompactionPolicy = field(default_factory=MicrocompactionPolicy)
     tool_result_retentions: dict[str, ToolResultRetention] = field(default_factory=dict)
     workspace_backend: WorkspaceBackend | None = None
     recovery_tool_available: bool = False
     artifact_scope: str = "run"
-    workspace: Path | None = None
     summary_event_limit: int = 40
     summary_backend: str | None = None
     summary_model: str | None = None
@@ -280,12 +282,10 @@ class MemoryManager:
         if not messages:
             return MemoryCompactionResult(messages=messages, mode="none", changed=False)
 
-        cleaned = [msg for msg in messages if not (msg.role == "system" and msg.name == _MEMORY_SUMMARY_NAME)]
-        summary_removed = len(cleaned) != len(messages)
-        sanitized_messages, sanitized = self._sanitize_empty_assistant_messages(cleaned)
-        working_messages = sanitized_messages
-        if summary_removed or sanitized:
-            strongest_mode = "structural"
+        # Apply a precomputed plan to exactly the view it was built against.
+        working_messages = list(messages)
+        if self._summary_parts(working_messages, self.keep_recent_messages) is None:
+            return MemoryCompactionResult(messages=working_messages, mode="none", changed=False)
 
         message_length = self._calculate_effective_length(
             working_messages,
@@ -320,6 +320,11 @@ class MemoryManager:
                     0,
                 )
 
+        sanitized_messages = filter_empty_assistant_messages(microcompacted_messages)
+        if sanitized_messages != microcompacted_messages:
+            strongest_mode = "structural"
+            microcompacted_messages = sanitized_messages
+
         if not force and message_length <= self.autocompact_threshold:
             maybe_warned_messages, warning_inserted = self._maybe_append_memory_warning(
                 microcompacted_messages,
@@ -336,32 +341,9 @@ class MemoryManager:
                 artifact_failure_count=microcompact_result.artifact_failure_count,
             )
 
-        before_structural_tokens = self._calculate_message_length(microcompacted_messages)
-        compacted_messages, compacted = self._compact_messages(microcompacted_messages, cycle_index=cycle_index)
-        if compacted:
-            strongest_mode = _strongest_compaction_mode(strongest_mode, "structural")
-        after_structural_tokens = self._calculate_message_length(compacted_messages)
-        message_length = max(
-            message_length + after_structural_tokens - before_structural_tokens,
-            0,
-        )
-        if not force and message_length <= self.autocompact_threshold:
-            return self._compaction_result(
-                original_messages,
-                compacted_messages,
-                strongest_mode,
-                archived_count=microcompact_result.archived_count,
-                reclaimed_tokens=microcompact_result.reclaimed_tokens,
-                artifact_failure_count=microcompact_result.artifact_failure_count,
-            )
-
-        summarized_messages, summarized = self.compress_memory(compacted_messages, cycle_index=cycle_index)
+        summarized_messages, summarized = self.compress_memory(microcompacted_messages, cycle_index=cycle_index)
         if summarized:
             strongest_mode = _strongest_compaction_mode(strongest_mode, "summary")
-        if summarized and self.session_memory is not None:
-            self.session_memory.on_compaction(
-                current_tokens=self._calculate_message_length(summarized_messages),
-            )
         return self._compaction_result(
             original_messages,
             summarized_messages,
@@ -402,31 +384,8 @@ class MemoryManager:
         cycle_index: int | None = None,
         drop_ratio: float = 0.2,
     ) -> list[Message]:
-        # Kept for API symmetry with other compaction entry points.
-        del cycle_index
-        if len(messages) <= 2:
-            return list(messages)
-
-        system_message = messages[0] if messages and messages[0].role == "system" else None
-        non_system = list(messages[1:] if system_message else messages)
-        if not non_system:
-            return [system_message] if system_message else []
-
-        keep_count = max(self.keep_recent_messages, 1)
-        clamped_ratio = min(max(drop_ratio, 0.0), 0.95)
-        max_droppable = max(len(non_system) - keep_count, 0)
-        drop_count = min(max(1, int(len(non_system) * clamped_ratio)), max_droppable) if max_droppable else 0
-        start_index = min(drop_count, len(non_system))
-        if len(non_system) - start_index < keep_count:
-            start_index = max(len(non_system) - keep_count, 0)
-        start_index = self._adjust_compaction_start_for_tool_context(non_system, start_index)
-
-        kept = non_system[start_index:]
-        kept, _ = self._normalize_orphan_tool_messages(kept)
-        kept, _ = self._sanitize_empty_assistant_messages(kept)
-        if system_message is not None:
-            return [system_message, *kept]
-        return kept
+        keep = max(1, int(self.keep_recent_messages * (1 - min(max(drop_ratio, 0.0), 0.95))))
+        return self._summarize_prefix(messages, keep_recent=keep)[0]
 
     def compress_memory(
         self,
@@ -434,52 +393,220 @@ class MemoryManager:
         *,
         cycle_index: int | None = None,
     ) -> tuple[list[Message], bool]:
-        summary_messages = self.strip_session_memory_context(messages)
-        if len(summary_messages) <= 2:
-            return summary_messages, False
+        return self._summarize_prefix(messages, keep_recent=self.keep_recent_messages)
 
-        # Collect tool-call info before compaction to preserve arguments in artifact metadata.
-        tool_call_id_to_info = self._build_tool_call_id_to_info_map(summary_messages)
-        compacted_messages, _ = self._compact_messages(summary_messages, cycle_index=cycle_index)
-        artifacts = self._collect_compacted_artifacts(compacted_messages, tool_call_id_to_info)
+    @staticmethod
+    def _summary_parts(
+        messages: list[Message],
+        keep_recent: int,
+    ) -> tuple[list[Message], list[Message], list[Message], list[Message]] | None:
+        # Validate each original contiguous block; never repair or match ids globally.
+        blocks: list[tuple[int, int]] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            if message.role == "tool":
+                return None
+            end = index + 1
+            if message.tool_calls:
+                if message.role != "assistant":
+                    return None
+                ids = [call.get("id") for call in message.tool_calls]
+                if any(not isinstance(call_id, str) or not call_id for call_id in ids) or len(set(ids)) != len(ids):
+                    return None
+                end += len(ids)
+                results = messages[index + 1 : end]
+                # A short slice is only possible at EOF: retain that unfinished
+                # block in the tail. A non-tool interruption inside a batch or
+                # a mismatched result is still invalid.
+                if any(
+                    result.role != "tool" or result.tool_call_id != call_id for result, call_id in zip(results, ids, strict=False)
+                ):
+                    return None
+            blocks.append((index, end))
+            index = end
+        retained_ids = {id(message) for message in filter_empty_assistant_messages(messages)}
+        raw_indices = [
+            i for i, m in enumerate(messages) if id(m) in retained_ids and m.role != "system" and m.name != _MEMORY_SUMMARY_NAME
+        ]
+        tail_count = max(keep_recent, 1)
+        cut = raw_indices[-tail_count] if len(raw_indices) > tail_count else (raw_indices[0] if raw_indices else 0)
+        for start, end in blocks:
+            if start < cut < end:
+                cut = start
+        systems = [m for m in messages if m.role == "system" and m.name != _MEMORY_SUMMARY_NAME]
+        previous = [m for m in messages if m.name == _MEMORY_SUMMARY_NAME]
+        prefix = [messages[i] for i in raw_indices if i < cut]
+        tail = [messages[i] for i in raw_indices if i >= cut]
+        return systems, previous, prefix, tail
 
-        prompt = self._build_compress_memory_prompt(compacted_messages)
-        compressed_memory = self._normalize_summary_output(self._generate_summary(prompt, compacted_messages, artifacts))
-        summary_data = self._parse_summary_payload(compressed_memory)
-        restored_context = restore_key_files(
-            summary_data,
-            self.workspace,
-            PostCompactRestoreConfig(token_model=self.model),
+    def _summarize_prefix(self, messages: list[Message], *, keep_recent: int) -> tuple[list[Message], bool]:
+        parts = self._summary_parts(messages, keep_recent)
+        if parts is None or not parts[2] or self.summary_callback is None:
+            return list(messages), False
+        systems, previous, prefix, tail = parts
+        prompt = self._build_compress_memory_prompt(prefix, previous=previous)
+        summary = self._normalize_summary_payload(
+            self._parse_summary_payload(self._normalize_summary_output(self._generate_summary(prompt)))
         )
-
-        if restored_context:
-            compressed_memory = f"{compressed_memory}\n\n{restored_context}"
-
-        if artifacts:
-            artifact_section = ["<Persisted Artifacts>"]
-            for artifact in artifacts:
-                tool_name = artifact.get("tool", "unknown")
-                tool_args = artifact.get("arguments", "")
-                artifact_section.append(f"- {artifact['path']} (tool: {tool_name}, arguments: {tool_args})")
-            artifact_section.append("</Persisted Artifacts>")
-            compressed_memory = f"{compressed_memory}\n\n" + "\n".join(artifact_section)
-
-        original_request = self._extract_original_user_request(compacted_messages)
-        new_messages = [compacted_messages[0]]
-        new_messages.append(
-            Message(
-                role="user",
-                content=(
-                    "<Original User Request>\n"
-                    f"{original_request}\n"
-                    "</Original User Request>\n\n"
-                    "<Compressed Agent Memory>\n"
-                    f"{compressed_memory}\n"
-                    "</Compressed Agent Memory>"
-                ),
-            )
+        if not any(value for key, value in summary.items() if key not in {"summary_version", "user_constraints"}):
+            return list(messages), False
+        try:
+            evidence = self._collect_evidence(previous, prefix)
+        except (TypeError, ValueError):
+            return list(messages), False
+        if (evidence["artifacts"] or evidence["cursors"]) and not self.recovery_tool_available:
+            return list(messages), False
+        paths = summary["files_examined_or_modified"]
+        seen = {item["path"] for item in paths}
+        prior_paths = []
+        for message in previous:
+            match = _COMPRESSED_AGENT_MEMORY_PATTERN.search(message.content)
+            if match:
+                prior_paths.extend(
+                    self._normalize_summary_payload(self._parse_summary_payload(match.group(1)))["files_examined_or_modified"]
+                )
+        for item in [*prior_paths, *self._collect_file_actions(prefix, first_path_wins=True)]:
+            if item["path"] not in seen:
+                paths.append(item)
+                seen.add(item["path"])
+        originals = "\n\n".join(summary["original_user_messages"])
+        content = (
+            f"<Original User Request>\n{originals}\n</Original User Request>\n\n"
+            f"<Compressed Agent Memory>\n{canonical_json_bytes(summary).decode()}\n</Compressed Agent Memory>\n\n"
+            + self._render_evidence(evidence)
         )
-        return new_messages, True
+        candidate = [
+            *systems,
+            Message(role="user", name=_MEMORY_SUMMARY_NAME, content=content, metadata={COMPACTION_METADATA_KEY: evidence}),
+            *tail,
+        ]
+        tokens = self._calculate_message_length(candidate)
+        if tokens >= self._calculate_message_length(messages) or tokens > self.effective_context_window:
+            return list(messages), False
+        if self.session_memory is not None:
+            self.session_memory.on_compaction(current_tokens=tokens)
+        return candidate, True
+
+    @staticmethod
+    def _normalize_summary_payload(payload: dict[str, object]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {"summary_version": "2.0"}
+        for key in (
+            "original_user_messages",
+            "user_constraints",
+            "decisions",
+            "progress",
+            "key_facts",
+            "open_issues",
+            "next_steps",
+        ):
+            value = payload.get(key)
+            normalized[key] = list(value) if isinstance(value, list) and all(isinstance(item, str) for item in value) else []
+        state = payload.get("current_work_state")
+        normalized["current_work_state"] = state if isinstance(state, str) else ""
+        for key, fields in (
+            ("files_examined_or_modified", ("path", "action", "summary")),
+            ("errors_and_fixes", ("error", "fix", "file")),
+        ):
+            records = payload.get(key)
+            normalized[key] = []
+            for item in records if isinstance(records, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                if key == "files_examined_or_modified":
+                    if (
+                        not isinstance(item.get("path"), str)
+                        or not item["path"].strip()
+                        or item.get("action") not in ("read", "created", "modified", "deleted")
+                    ):
+                        continue
+                elif not isinstance(item.get("error"), str):
+                    continue
+                normalized[key].append({field: item[field] if isinstance(item.get(field), str) else "" for field in fields})
+        return normalized
+
+    @staticmethod
+    def _collect_evidence(previous: list[Message], prefix: list[Message]) -> dict[str, list[dict[str, Any]]]:
+        evidence: dict[str, list[dict[str, Any]]] = {"artifacts": [], "cursors": []}
+        seen: dict[str, set[bytes]] = {"artifacts": set(), "cursors": set()}
+
+        def merge(manifest: dict[str, Any]) -> None:
+            validate_compaction_metadata({COMPACTION_METADATA_KEY: manifest})
+            for key in evidence:
+                for record in manifest[key]:
+                    identity = canonical_json_bytes(record)
+                    if identity not in seen[key]:
+                        seen[key].add(identity)
+                        evidence[key].append(record)
+
+        for message in previous:
+            if COMPACTION_METADATA_KEY in message.metadata:
+                merge(message.metadata[COMPACTION_METADATA_KEY])
+        calls: dict[str, Any] = {}
+        for message in prefix:
+            if message.role == "assistant":
+                calls = {call["id"]: call["function"] for call in message.tool_calls or []}
+            if message.role != "tool":
+                continue
+            function = calls[message.tool_call_id]
+            arguments = json.loads(function["arguments"])
+            common = {
+                "tool_call_id": message.tool_call_id,
+                "tool_name": function["name"],
+                "arguments": canonical_json_bytes(arguments).decode(),
+            }
+            refs: dict[str, Any] = {"artifacts": [], "cursors": []}
+            if message.artifact_ref is not None:
+                refs["artifacts"].append({**common, "artifact_ref": message.artifact_ref.to_dict()})
+            if has_recovery_envelope(message.content):
+                body, _, raw = message.content.rpartition("\n")
+                envelope = json.loads(raw)
+                if set(envelope) != {"vv_agent_recovery"}:
+                    raise ValueError("invalid recovery envelope")
+                recovery = envelope["vv_agent_recovery"]
+                if not isinstance(recovery, dict) or set(recovery) - {
+                    "truncated",
+                    "truncation_reason",
+                    "original_bytes",
+                    "visible_bytes",
+                    "artifact",
+                    "cursor",
+                }:
+                    raise ValueError("invalid recovery fields")
+                result = ToolExecutionResult.from_dict(
+                    {
+                        "tool_call_id": message.tool_call_id,
+                        "content": body,
+                        "status_code": "SUCCESS",
+                        "directive": "continue",
+                        **recovery,
+                    }
+                )
+                if result.artifact:
+                    refs["artifacts"].append({**common, "artifact_ref": result.artifact.to_dict()})
+                if result.cursor:
+                    refs["cursors"].append({**common, "cursor": result.cursor.to_dict()})
+            merge(refs)
+        return evidence
+
+    @staticmethod
+    def _render_evidence(evidence: dict[str, list[dict[str, Any]]]) -> str:
+        lines = ["<Persisted Artifacts>"]
+        for key, pointer in (("artifacts", "artifact_ref"), ("cursors", "cursor")):
+            for record in evidence[key]:
+                visible = {field: record[field] for field in ("tool_call_id", "tool_name", "arguments")}
+                if key == "artifacts":
+                    visible.update(
+                        artifact_path=record[pointer]["path"], retrieval_hint="use read_file on artifact_path if needed"
+                    )
+                else:
+                    visible.update(
+                        path=record[pointer]["path"],
+                        offset_chars=record[pointer]["offset_chars"],
+                        retrieval_hint="use read_file on path if needed",
+                    )
+                lines.append("- " + canonical_json_bytes(visible).decode())
+        return "\n".join([*lines, "</Persisted Artifacts>"])
 
     def apply_session_memory_context(self, messages: list[Message]) -> list[Message]:
         self._capture_base_system_prompt(messages)
@@ -602,7 +729,7 @@ class MemoryManager:
             or current_tokens <= self.microcompact_trigger_threshold
         ):
             return None
-        return plan_microcompact(
+        plan = plan_microcompact(
             messages,
             current_cycle=cycle_index,
             current_tokens=current_tokens,
@@ -611,7 +738,16 @@ class MemoryManager:
             result_retentions=self.tool_result_retentions,
             artifact_path_estimate_for=self._estimate_tool_artifact_path,
             estimate_message_tokens=self._estimate_message_tokens,
+            excerpt_head_chars=self.tool_result_excerpt_head,
+            excerpt_tail_chars=self.tool_result_excerpt_tail,
         )
+        if current_tokens > self.autocompact_threshold:
+            parts = self._summary_parts(messages, self.keep_recent_messages)
+            if parts is None:
+                return None
+            protected = {id(message) for message in parts[3]}
+            plan = replace(plan, candidates=tuple(c for c in plan.candidates if id(messages[c.message_index]) not in protected))
+        return plan
 
     def apply_microcompaction(
         self,
@@ -636,6 +772,8 @@ class MemoryManager:
                 self._compaction_excerpt(message),
                 artifact_path=artifact.path,
                 tool_name=candidate.tool_name,
+                excerpt_head_chars=self.tool_result_excerpt_head,
+                excerpt_tail_chars=self.tool_result_excerpt_tail,
             )
             replacement = replace_with_compacted_marker(
                 message,
@@ -702,59 +840,6 @@ class MemoryManager:
         )
         return extracted > 0
 
-    @staticmethod
-    def _is_empty_content(content: str) -> bool:
-        return not content.strip()
-
-    @staticmethod
-    def _has_reasoning_content(message: Message) -> bool:
-        return bool(message.reasoning_content and message.reasoning_content.strip())
-
-    def _sanitize_empty_assistant_messages(self, messages: list[Message]) -> tuple[list[Message], bool]:
-        updated = False
-        sanitized: list[Message] = []
-        for message in messages:
-            if (
-                message.role == "assistant"
-                and not message.tool_calls
-                and self._is_empty_content(message.content)
-                and not self._has_reasoning_content(message)
-            ):
-                updated = True
-                continue
-            sanitized.append(message)
-        return sanitized, updated
-
-    def _adjust_compaction_start_for_tool_context(self, messages: list[Message], start_index: int) -> int:
-        if start_index <= 0 or start_index >= len(messages):
-            return max(start_index, 0)
-
-        required_tool_call_ids = {
-            str(message.tool_call_id or "").strip()
-            for message in messages[start_index:]
-            if message.role == "tool" and str(message.tool_call_id or "").strip()
-        }
-        if not required_tool_call_ids:
-            return start_index
-
-        adjusted_start = start_index
-        for index in range(start_index - 1, -1, -1):
-            message = messages[index]
-            if message.role != "assistant" or not message.tool_calls:
-                continue
-            message_tool_call_ids = {
-                str(tool_call.get("id") or "").strip()
-                for tool_call in message.tool_calls
-                if isinstance(tool_call, dict) and str(tool_call.get("id") or "").strip()
-            }
-            if not message_tool_call_ids.intersection(required_tool_call_ids):
-                continue
-            adjusted_start = index
-            required_tool_call_ids.difference_update(message_tool_call_ids)
-            if not required_tool_call_ids:
-                break
-        return adjusted_start
-
     def _maybe_append_memory_warning(self, messages: list[Message], *, message_length: int) -> tuple[list[Message], bool]:
         if not self.include_memory_warning:
             return messages, False
@@ -773,193 +858,6 @@ class MemoryManager:
         warned = list(messages)
         warned.append(Message(role="user", content=warning_text))
         return warned, True
-
-    def _compact_messages(self, messages: list[Message], *, cycle_index: int | None) -> tuple[list[Message], bool]:
-        updated = False
-        compacted = messages
-
-        compacted, stripped = self._strip_stale_tool_calls(compacted)
-        updated = updated or stripped
-
-        compacted, normalized = self._normalize_orphan_tool_messages(compacted)
-        updated = updated or normalized
-
-        compacted, collapsed_assistant = self._collapse_assistant_no_tool_messages(compacted)
-        updated = updated or collapsed_assistant
-
-        compacted, compacted_images = self._compact_processed_image_messages(compacted)
-        updated = updated or compacted_images
-
-        compacted, compacted_tools = self._compact_tool_messages(compacted, cycle_index=cycle_index)
-        updated = updated or compacted_tools
-
-        compacted, sanitized = self._sanitize_empty_assistant_messages(compacted)
-        updated = updated or sanitized
-
-        return compacted, updated
-
-    def _strip_stale_tool_calls(self, messages: list[Message]) -> tuple[list[Message], bool]:
-        keep_count = max(self.tool_calls_keep_last, 0)
-        tool_call_indices = [idx for idx, message in enumerate(messages) if message.role == "assistant" and message.tool_calls]
-        keep_indices = set(tool_call_indices[-keep_count:]) if keep_count else set()
-
-        updated = False
-        stripped: list[Message] = []
-        for idx, message in enumerate(messages):
-            if message.role == "assistant" and message.tool_calls and idx not in keep_indices:
-                updated = True
-                new_message = replace(message, tool_calls=None)
-                if self._is_empty_content(new_message.content) and not self._has_reasoning_content(new_message):
-                    continue
-                stripped.append(new_message)
-                continue
-            stripped.append(message)
-        return stripped, updated
-
-    def _normalize_orphan_tool_messages(self, messages: list[Message]) -> tuple[list[Message], bool]:
-        updated = False
-        pending_tool_calls: dict[str, int] = {}
-        normalized: list[Message] = []
-        for message in messages:
-            if message.role == "assistant" and message.tool_calls:
-                for tool_call in message.tool_calls:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    raw_tool_call_id = tool_call.get("id")
-                    tool_call_id = str(raw_tool_call_id or "").strip()
-                    if not tool_call_id:
-                        continue
-                    pending_tool_calls[tool_call_id] = pending_tool_calls.get(tool_call_id, 0) + 1
-                normalized.append(message)
-                continue
-
-            if message.role == "tool":
-                tool_call_id = str(message.tool_call_id or "").strip()
-                if not tool_call_id:
-                    updated = True
-                    continue
-                remaining = pending_tool_calls.get(tool_call_id, 0)
-                if remaining <= 0:
-                    updated = True
-                    continue
-                pending_tool_calls[tool_call_id] = remaining - 1
-            normalized.append(message)
-        return normalized, updated
-
-    def _collapse_assistant_no_tool_messages(self, messages: list[Message]) -> tuple[list[Message], bool]:
-        keep_last = max(self.assistant_no_tool_keep_last, 0)
-        if keep_last <= 0:
-            return messages, False
-
-        updated = False
-        collapsed: list[Message] = []
-        run_buffer: list[Message] = []
-
-        def flush_buffer() -> None:
-            nonlocal updated
-            if not run_buffer:
-                return
-            if len(run_buffer) > keep_last:
-                updated = True
-                collapsed.extend(run_buffer[-keep_last:])
-            else:
-                collapsed.extend(run_buffer)
-            run_buffer.clear()
-
-        for message in messages:
-            if message.role == "assistant" and not message.tool_calls:
-                run_buffer.append(message)
-                continue
-            flush_buffer()
-            collapsed.append(message)
-
-        flush_buffer()
-        return collapsed, updated
-
-    def _compact_processed_image_messages(self, messages: list[Message]) -> tuple[list[Message], bool]:
-        assistant_indices = [idx for idx, message in enumerate(messages) if message.role == "assistant"]
-        if not assistant_indices:
-            return messages, False
-
-        updated = False
-        compacted: list[Message] = []
-        for idx, message in enumerate(messages):
-            if message.role == "user" and message.image_url:
-                has_following_assistant = any(assistant_index > idx for assistant_index in assistant_indices)
-                if has_following_assistant:
-                    updated = True
-                    compacted.append(
-                        replace(
-                            message,
-                            content=f"{message.content} [image payload compacted]".strip(),
-                            image_url=None,
-                        )
-                    )
-                    continue
-            compacted.append(message)
-        return compacted, updated
-
-    def _compact_tool_messages(self, messages: list[Message], *, cycle_index: int | None) -> tuple[list[Message], bool]:
-        if self.tool_result_compact_threshold <= 0 or not self.recovery_tool_available:
-            return messages, False
-
-        tool_call_id_to_info = self._build_tool_call_id_to_info_map(messages)
-        tool_indices = [idx for idx, message in enumerate(messages) if message.role == "tool"]
-        keep_count = max(self.tool_result_keep_last, 0)
-        keep_indices = set(tool_indices[-keep_count:]) if keep_count else set()
-
-        updated = False
-        compacted: list[Message] = []
-        for idx, message in enumerate(messages):
-            if message.role != "tool" or idx in keep_indices:
-                compacted.append(message)
-                continue
-
-            if len(message.content) <= self.tool_result_compact_threshold:
-                compacted.append(message)
-                continue
-            if self._is_compacted_tool_content(message.content):
-                compacted.append(message)
-                continue
-
-            tool_info = tool_call_id_to_info.get(message.tool_call_id or "")
-            tool_name = (tool_info.get("name") if tool_info else None) or "unknown"
-            candidate = MicrocompactCandidate(
-                message_index=idx,
-                tool_name=tool_name,
-                tool_call_id=str(message.tool_call_id or ""),
-                existing_artifact=self._message_artifact_ref(message),
-                estimated_reclaimable_tokens=max(
-                    self._estimate_message_tokens(message),
-                    0,
-                ),
-            )
-            artifact = self._archive_tool_message(message, candidate)
-            if artifact is None:
-                compacted.append(message)
-                continue
-            compacted_content = build_compacted_tool_content(
-                self._compaction_excerpt(message),
-                artifact_path=artifact.path,
-                tool_name=tool_name,
-                excerpt_head_chars=self.tool_result_excerpt_head,
-                excerpt_tail_chars=self.tool_result_excerpt_tail,
-            )
-            compacted.append(
-                replace_with_compacted_marker(
-                    message,
-                    candidate,
-                    artifact=artifact,
-                    marker=compacted_content,
-                )
-            )
-            updated = True
-
-        return compacted, updated
-
-    @staticmethod
-    def _is_compacted_tool_content(content: str) -> bool:
-        return is_microcompacted_tool_content(content)
 
     def _estimate_tool_artifact_path(self, tool_call_id: str) -> str:
         del tool_call_id
@@ -987,17 +885,17 @@ class MemoryManager:
                 message.content,
                 reuse_existing=True,
             )
-        except Exception:
+        except Exception as exc:
+            from vv_agent.runtime.cancellation import CancelledError
+
+            if isinstance(exc, (CancelledError, CheckpointError)) or getattr(exc, "vv_agent_control_flow", False):
+                raise
             return None
 
     @staticmethod
     def _compaction_excerpt(message: Message) -> str:
         excerpt = message.metadata.get(EXCERPT_METADATA_KEY)
         return excerpt if isinstance(excerpt, str) else message.content
-
-    @staticmethod
-    def _message_artifact_ref(message: Message) -> ToolArtifactRef | None:
-        return message.artifact_ref if isinstance(message.artifact_ref, ToolArtifactRef) else None
 
     def _artifact_is_intact(self, artifact: ToolArtifactRef) -> bool:
         backend = self.workspace_backend
@@ -1007,96 +905,49 @@ class MemoryManager:
             from vv_agent.workspace.streaming import scan_text
 
             scanned = scan_text(backend, artifact.path, lambda _text: None)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, CheckpointError):
+                raise
             return False
         return scanned.valid_utf8 and scanned.size_bytes == artifact.size_bytes and scanned.sha256 == artifact.sha256
 
-    def _build_tool_call_id_to_info_map(self, messages: list[Message]) -> dict[str, dict[str, str]]:
-        tool_call_id_to_info: dict[str, dict[str, str]] = {}
-        for message in messages:
-            if message.role != "assistant" or not message.tool_calls:
-                continue
-            for tool_call in message.tool_calls:
-                if not isinstance(tool_call, dict):
-                    continue
-                tool_call_id = tool_call.get("id")
-                function_payload = tool_call.get("function")
-                if not tool_call_id or not isinstance(function_payload, dict):
-                    continue
+    def _build_compress_memory_prompt(self, messages: list[Message], *, previous: list[Message] | None = None) -> str:
+        template = _COMPRESS_MEMORY_PROMPTS.get(self.language, _COMPRESS_MEMORY_PROMPTS["en-US"])
 
-                info: dict[str, str] = {}
-                tool_name = function_payload.get("name")
-                if isinstance(tool_name, str) and tool_name:
-                    info["name"] = tool_name
-                tool_arguments = function_payload.get("arguments")
-                if isinstance(tool_arguments, str) and tool_arguments:
-                    info["arguments"] = tool_arguments
-                if info:
-                    tool_call_id_to_info[str(tool_call_id)] = info
-        return tool_call_id_to_info
+        def project(message: Message) -> dict[str, Any]:
+            value = message.to_dict()
+            value.pop("artifact_ref", None)
+            if "image_url" in value:
+                del value["image_url"]
+                value["content"] = f"[image omitted from summary input: {message.content or 'image'}]"
+            metadata = value.get("metadata", {})
+            metadata.pop(COMPACTION_METADATA_KEY, None)
+            if not metadata:
+                value.pop("metadata", None)
+            return value
 
-    def _collect_compacted_artifacts(
-        self,
-        messages: list[Message],
-        tool_call_id_to_info: dict[str, dict[str, str]] | None = None,
-    ) -> list[dict[str, str]]:
-        artifacts: list[dict[str, str]] = []
-        for message in messages:
-            if message.role != "tool":
-                continue
-            if not self._is_compacted_tool_content(message.content):
-                continue
-
-            artifact_info: dict[str, str] = {}
-            if message.artifact_ref is not None:
-                artifact_info["path"] = message.artifact_ref.path
-            for line in message.content.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("tool_name:"):
-                    artifact_info["tool"] = stripped[len("tool_name:") :].strip()
-                elif stripped.startswith("artifact_path:"):
-                    path = stripped[len("artifact_path:") :].strip()
-                    if path and path != "N/A":
-                        artifact_info["path"] = path
-
-            if tool_call_id_to_info:
-                tool_call_id = message.tool_call_id
-                if tool_call_id and tool_call_id in tool_call_id_to_info:
-                    tool_info = tool_call_id_to_info[tool_call_id]
-                    if "tool" not in artifact_info and "name" in tool_info:
-                        artifact_info["tool"] = tool_info["name"]
-                    if "arguments" in tool_info:
-                        artifact_info["arguments"] = tool_info["arguments"]
-
-            if artifact_info.get("path"):
-                artifacts.append(artifact_info)
-        return artifacts
-
-    def _build_compress_memory_prompt(self, messages: list[Message]) -> str:
-        prompt_template = _COMPRESS_MEMORY_PROMPTS.get(self.language, _COMPRESS_MEMORY_PROMPTS["en-US"])
-        serialized_messages = [message.to_openai_message() for message in messages]
-        return prompt_template.format(
-            messages=json.dumps(serialized_messages, ensure_ascii=False),
+        return template.format(
+            previous_summary_jcs=canonical_json_bytes([project(m) for m in previous or []]).decode(),
+            conversation_prefix_jcs=canonical_json_bytes([project(m) for m in messages]).decode(),
             event_limit=max(self.summary_event_limit, 1),
         )
 
-    def _generate_summary(
-        self,
-        prompt: str,
-        messages: list[Message],
-        artifacts: list[dict[str, str]],
-    ) -> str:
+    def _generate_summary(self, prompt: str) -> str:
         if self.summary_callback is not None:
             try:
                 summarized = self.summary_callback(prompt, self.summary_backend, self.summary_model)
-                if isinstance(summarized, str) and summarized.strip():
-                    return summarized.strip()
+                if isinstance(summarized, str):
+                    return summarized
             except Exception as exc:
-                if getattr(exc, "vv_agent_control_flow", False):
+                from vv_agent.runtime.cancellation import CancelledError
+                from vv_agent.runtime.checkpoint_resume import CheckpointReconciliationRequired
+
+                if isinstance(exc, (CancelledError, CheckpointError, CheckpointReconciliationRequired)) or getattr(
+                    exc, "vv_agent_control_flow", False
+                ):
                     raise
                 logging.getLogger(__name__).debug("Memory summary callback failed", exc_info=True)
-
-        return self._build_local_summary(messages, artifacts)
+        return ""
 
     def _build_local_summary(self, messages: list[Message], artifacts: list[dict[str, str]]) -> str:
         events = self._build_summary_events(messages[2:])
@@ -1163,19 +1014,6 @@ class MemoryManager:
                 return parsed
         return {}
 
-    def _extract_original_user_request(self, messages: list[Message]) -> str:
-        for message in messages[1:]:
-            if message.role != "user":
-                continue
-            content = message.content.strip()
-            if not content:
-                continue
-            match = _ORIGINAL_USER_REQUEST_PATTERN.search(content)
-            if match:
-                return match.group(1).strip()
-            return content
-        return ""
-
     def _collect_original_user_messages(self, messages: list[Message]) -> list[str]:
         user_messages: list[str] = []
         seen: set[str] = set()
@@ -1205,7 +1043,7 @@ class MemoryManager:
                         append_unique(previous_original)
 
             original_match = _ORIGINAL_USER_REQUEST_PATTERN.search(content)
-            if original_match:
+            if original_match and not compressed_match:
                 append_unique(original_match.group(1))
 
             if compressed_match or original_match or "<Compressed Agent Memory>" in content:
@@ -1213,7 +1051,7 @@ class MemoryManager:
             append_unique(content)
         return user_messages
 
-    def _collect_file_actions(self, messages: list[Message]) -> list[dict[str, str]]:
+    def _collect_file_actions(self, messages: list[Message], *, first_path_wins: bool = False) -> list[dict[str, str]]:
         action_priority = {"modified": 0, "created": 1, "deleted": 2, "read": 3}
         tool_action_map = {
             "read_file": "read",
@@ -1240,8 +1078,8 @@ class MemoryManager:
                 if action is None:
                     continue
                 arguments = self._parse_tool_arguments(function_payload.get("arguments"))
-                path = self._extract_file_path_from_arguments(arguments)
-                if not path:
+                path = arguments.get("path") if first_path_wins else self._extract_file_path_from_arguments(arguments)
+                if not isinstance(path, str) or not path.strip():
                     continue
 
                 summary = self._summarize_file_action(tool_name, path)
@@ -1251,6 +1089,8 @@ class MemoryManager:
                     ordered_paths.append(path)
                     continue
 
+                if first_path_wins:
+                    continue
                 if action_priority[action] < action_priority.get(existing["action"], 99):
                     existing["action"] = action
                 existing["summary"] = summary

@@ -21,7 +21,7 @@ def filter_empty_assistant_messages(messages: list[Message]) -> list[Message]:
         if message.role != "assistant":
             result.append(message)
             continue
-        if _get_text_content(message).strip():
+        if message.image_url or _get_text_content(message).strip():
             result.append(message)
             continue
         if _get_tool_calls(message):

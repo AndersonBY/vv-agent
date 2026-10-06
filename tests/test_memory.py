@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
+
+import pytest
+from support.compaction import fixture, section
+from support.compaction import messages as current_messages
 
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig, SessionMemoryEntry
 from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
 from vv_agent.microcompaction import MicrocompactionPolicy
+from vv_agent.tools.metadata import ToolResultRetention
 from vv_agent.types import Message
-from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
+from vv_agent.workspace import MemoryWorkspaceBackend
 
 
 def _fake_summary(_prompt: str, _backend: str | None, _model: str | None) -> str:
@@ -46,32 +50,6 @@ def _build_manager(**overrides: Any) -> MemoryManager:
     }
     params.update(overrides)
     return MemoryManager(**params)
-
-
-def test_memory_compacts_when_threshold_exceeded_to_summary_block() -> None:
-    manager = _build_manager(
-        model_context_window=60,
-        reserved_output_tokens=10,
-        autocompact_buffer_tokens=10,
-        keep_recent_messages=3,
-        summary_callback=_fake_summary,
-    )
-    messages = [
-        Message(role="system", content="system"),
-        Message(role="user", content="u" * 40),
-        Message(role="assistant", content="a" * 40),
-        Message(role="tool", content="t" * 40, tool_call_id="call1"),
-        Message(role="assistant", content="b" * 40),
-        Message(role="user", content="c" * 40),
-        Message(role="assistant", content="d" * 40),
-    ]
-
-    compacted, changed = manager.compact(messages)
-    assert changed is True
-    assert len(compacted) == 2
-    assert compacted[0].role == "system"
-    assert compacted[1].role == "user"
-    assert "<Compressed Agent Memory>" in compacted[1].content
 
 
 def test_memory_compress_prompt_includes_original_user_messages_and_file_fields() -> None:
@@ -132,154 +110,6 @@ def test_memory_does_not_compact_when_small() -> None:
     assert compacted == messages
 
 
-def test_memory_replaces_previous_summary_with_compressed_block() -> None:
-    manager = _build_manager(
-        model_context_window=40,
-        reserved_output_tokens=10,
-        autocompact_buffer_tokens=10,
-        keep_recent_messages=2,
-        summary_callback=_fake_summary,
-    )
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="system", name="memory_summary", content="old summary"),
-        Message(role="user", content="x" * 20),
-        Message(role="assistant", content="y" * 20),
-        Message(role="user", content="z" * 20),
-    ]
-
-    compacted, changed = manager.compact(messages, force=True)
-    assert changed is True
-    assert len(compacted) == 2
-    assert all(msg.name != "memory_summary" for msg in compacted)
-    assert "<Compressed Agent Memory>" in compacted[1].content
-
-
-def test_memory_compaction_keeps_tool_boundary_consistent() -> None:
-    manager = _build_manager(keep_recent_messages=2, summary_callback=_fake_summary)
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="u" * 30),
-        Message(
-            role="assistant",
-            content="plan tools",
-            tool_calls=[
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "read_file", "arguments": "{}"},
-                }
-            ],
-        ),
-        Message(role="tool", content="tool result 1", tool_call_id="call_1"),
-        Message(role="tool", content="tool result 2", tool_call_id="call_1"),
-        Message(role="assistant", content="next step"),
-        Message(role="user", content="continue"),
-        Message(role="assistant", content="done"),
-    ]
-
-    compacted, changed = manager.compact(messages, force=True)
-    assert changed is True
-    assert len(compacted) == 2
-    assert all(msg.role != "tool" for msg in compacted)
-
-
-def test_memory_compacts_large_tool_result_to_workspace_artifact(tmp_path: Path) -> None:
-    backend = LocalWorkspaceBackend(tmp_path)
-    manager = _build_manager(
-        model_context_window=50,
-        reserved_output_tokens=10,
-        autocompact_buffer_tokens=10,
-        keep_recent_messages=2,
-        workspace=tmp_path,
-        workspace_backend=backend,
-        recovery_tool_available=True,
-        artifact_scope="memory-artifact",
-        tool_result_compact_threshold=30,
-        tool_result_keep_last=0,
-        summary_callback=_fake_summary,
-    )
-    large_tool_result = "x" * 200
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="read file"),
-        Message(
-            role="assistant",
-            content="",
-            tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
-        ),
-        Message(role="tool", content=large_tool_result, tool_call_id="call_1"),
-        Message(role="assistant", content="continue"),
-    ]
-
-    compacted, changed = manager.compact(messages, cycle_index=3)
-    assert changed is True
-    assert len(compacted) == 2
-    artifact_path = next(
-        line.removeprefix("- ").split(" ", 1)[0]
-        for line in compacted[1].content.splitlines()
-        if line.startswith("- .vv-agent/artifacts/")
-    )
-    assert artifact_path.startswith(".vv-agent/artifacts/memory-artifact/")
-    assert backend.read_text(artifact_path) == large_tool_result
-    assert "<Persisted Artifacts>" in compacted[1].content
-    assert "call_1-" in compacted[1].content
-    assert "tool: read_file" in compacted[1].content
-
-
-def test_memory_compacts_processed_image_payload() -> None:
-    manager = _build_manager(keep_recent_messages=2)
-    image_payload = "data:image/png;base64," + ("a" * 400)
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="original request"),
-        Message(role="user", content="[Image loaded] img.png", image_url=image_payload),
-        Message(role="assistant", content="image parsed"),
-        Message(role="assistant", content="next"),
-    ]
-
-    compacted, changed = manager._compact_processed_image_messages(messages)
-    assert changed is True
-    image_messages = [msg for msg in compacted if msg.content.startswith("[Image loaded]")]
-    assert image_messages
-    assert image_messages[0].image_url is None
-    assert "image payload compacted" in image_messages[0].content
-
-
-def test_memory_uses_token_based_length_with_recent_tool_ids() -> None:
-    manager = _build_manager(
-        model_context_window=120,
-        reserved_output_tokens=10,
-        autocompact_buffer_tokens=10,
-        tool_result_compact_threshold=20,
-        tool_result_keep_last=0,
-    )
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="hello"),
-        Message(
-            role="assistant",
-            content="plan",
-            tool_calls=[
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "bash", "arguments": "{}"},
-                }
-            ],
-        ),
-        Message(role="tool", content="x" * 400, tool_call_id="call_1"),
-    ]
-
-    compacted, changed = manager.compact(messages, total_tokens=100, recent_tool_call_ids=set())
-    assert changed is False
-    assert compacted == messages
-
-    compacted2, changed2 = manager.compact(messages, total_tokens=100, recent_tool_call_ids={"call_1"})
-    assert changed2 is True
-    assert len(compacted2) == 2
-
-
 def test_memory_thresholds_respect_configured_ceiling() -> None:
     manager = MemoryManager(
         model_context_window=200_000,
@@ -304,36 +134,6 @@ def test_memory_thresholds_fall_back_to_model_limit_when_smaller() -> None:
     assert manager.autocompact_threshold == 43_000
 
 
-def test_memory_recomputes_local_length_after_structural_compaction() -> None:
-    manager = _build_manager(
-        compact_threshold=300,
-        model_context_window=300,
-        reserved_output_tokens=0,
-        autocompact_buffer_tokens=0,
-        workspace_backend=MemoryWorkspaceBackend(),
-        recovery_tool_available=True,
-        tool_result_compact_threshold=20,
-        tool_result_keep_last=0,
-    )
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="read file"),
-        Message(
-            role="assistant",
-            content="",
-            tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
-        ),
-        Message(role="tool", content="large result " * 200, tool_call_id="call_1"),
-        Message(role="assistant", content="continue"),
-    ]
-
-    compacted, changed = manager.compact(messages, total_tokens=None, recent_tool_call_ids=set())
-
-    assert changed is True
-    assert len(compacted) > 2
-    assert all("<Compressed Agent Memory>" not in message.content for message in compacted)
-
-
 def test_memory_compaction_persists_session_memory_without_rewriting_current_prompt() -> None:
     observed_prompts: list[str] = []
 
@@ -350,7 +150,7 @@ def test_memory_compaction_persists_session_memory_without_rewriting_current_pro
         )
     )
     manager = _build_manager(
-        model_context_window=70,
+        model_context_window=4000,
         reserved_output_tokens=10,
         autocompact_buffer_tokens=10,
         keep_recent_messages=2,
@@ -360,15 +160,15 @@ def test_memory_compaction_persists_session_memory_without_rewriting_current_pro
     )
     messages = [
         Message(role="system", content="sys"),
-        Message(role="user", content="u" * 40),
-        Message(role="assistant", content="a" * 40),
+        Message(role="user", content="u " * 1000),
+        Message(role="assistant", content="a " * 1000),
         Message(role="user", content="c" * 40),
     ]
 
     compacted, changed = manager.compact(messages, cycle_index=2, total_tokens=150, force=True)
 
     assert changed is True
-    assert len(compacted) == 2
+    assert compacted[-2:] == messages[-2:]
     assert session_memory.state.entries
     assert session_memory.state.last_extracted_message_index == -1
     assert observed_prompts
@@ -405,136 +205,6 @@ def test_session_memory_extraction_does_not_mutate_current_prompt() -> None:
     assert "keep the Python API small" not in updated[0].content
 
 
-def test_memory_compaction_strips_analysis_and_restores_key_files(tmp_path: Path) -> None:
-    file_path = tmp_path / "demo.py"
-    file_path.write_text("print('restored')\n", encoding="utf-8")
-
-    def summary_with_analysis(_prompt: str, _backend: str | None, _model: str | None) -> str:
-        return (
-            "<analysis>drafting scratchpad</analysis>\n"
-            "{"
-            '"summary_version":"2.0",'
-            '"original_user_messages":["please update demo.py"],'
-            '"user_constraints":["keep behavior"],'
-            '"decisions":["edit demo.py"],'
-            '"files_examined_or_modified":[{"path":"demo.py","action":"modified","summary":"updated demo"}],'
-            '"errors_and_fixes":[],'
-            '"progress":["edited file"],'
-            '"key_facts":[],'
-            '"open_issues":[],'
-            '"current_work_state":"waiting for verification",'
-            '"next_steps":["run tests"]'
-            "}"
-        )
-
-    manager = _build_manager(
-        model_context_window=60,
-        reserved_output_tokens=10,
-        autocompact_buffer_tokens=10,
-        keep_recent_messages=2,
-        workspace=tmp_path,
-        summary_callback=summary_with_analysis,
-    )
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="please update demo.py"),
-        Message(role="assistant", content="reviewing"),
-        Message(role="user", content="keep behavior"),
-        Message(role="assistant", content="editing"),
-    ]
-
-    compacted, changed = manager.compact(messages, force=True)
-
-    assert changed is True
-    assert "<analysis>" not in compacted[1].content
-    assert '"original_user_messages":["please update demo.py"]' in compacted[1].content
-    assert "<Post-Compaction File Context>" in compacted[1].content
-    assert 'path="demo.py"' in compacted[1].content
-    assert "print('restored')" in compacted[1].content
-
-
-def test_memory_second_compaction_preserves_original_user_messages() -> None:
-    manager = _build_manager(
-        model_context_window=60,
-        reserved_output_tokens=10,
-        autocompact_buffer_tokens=10,
-        keep_recent_messages=2,
-        summary_callback=None,
-    )
-    first_messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="please preserve this exact request"),
-        Message(role="assistant", content="working"),
-    ]
-
-    first_compacted, first_changed = manager.compact(first_messages, force=True)
-    assert first_changed is True
-
-    second_messages = [
-        first_compacted[0],
-        first_compacted[1],
-        Message(role="assistant", content="made progress"),
-        Message(role="user", content="and keep this follow-up too"),
-    ]
-
-    second_compacted, second_changed = manager.compact(second_messages, force=True)
-
-    assert second_changed is True
-    assert '"original_user_messages": ["please preserve this exact request", "and keep this follow-up too"]' in (
-        second_compacted[1].content
-    )
-
-
-def test_memory_force_compact_bypasses_threshold() -> None:
-    manager = _build_manager(
-        model_context_window=400,
-        reserved_output_tokens=50,
-        autocompact_buffer_tokens=50,
-        summary_callback=_fake_summary,
-    )
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="hello"),
-        Message(role="assistant", content="world"),
-        Message(role="user", content="continue"),
-    ]
-
-    compacted, changed = manager.compact(messages, force=True)
-
-    assert changed is True
-    assert len(compacted) == 2
-    assert "<Compressed Agent Memory>" in compacted[1].content
-
-
-def test_memory_emergency_compact_preserves_recent_tool_context() -> None:
-    manager = _build_manager(keep_recent_messages=2)
-    messages = [
-        Message(role="system", content="sys"),
-        Message(role="user", content="old request"),
-        Message(
-            role="assistant",
-            content="call tool",
-            tool_calls=[
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "read_file", "arguments": "{}"},
-                }
-            ],
-        ),
-        Message(role="tool", content="tool result", tool_call_id="call_1"),
-        Message(role="assistant", content="recent analysis"),
-        Message(role="user", content="latest ask"),
-    ]
-
-    compacted = manager.emergency_compact(messages, drop_ratio=0.5)
-
-    assert compacted[0].role == "system"
-    assert all(message.content != "old request" for message in compacted)
-    assert any(message.role == "assistant" and message.tool_calls for message in compacted)
-    assert any(message.role == "tool" and message.tool_call_id == "call_1" for message in compacted)
-
-
 def test_memory_compact_uses_microcompact_before_full_summary() -> None:
     manager = _build_manager(
         compact_threshold=1_000,
@@ -547,7 +217,6 @@ def test_memory_compact_uses_microcompact_before_full_summary() -> None:
         ),
         workspace_backend=MemoryWorkspaceBackend(),
         recovery_tool_available=True,
-        tool_result_compact_threshold=2_000,
         summary_callback=_fake_summary,
     )
     messages = [
@@ -576,71 +245,276 @@ def test_memory_compact_uses_microcompact_before_full_summary() -> None:
     assert all("<Compressed Agent Memory>" not in message.content for message in compacted)
 
 
-def test_memory_normalize_orphan_tool_messages_respects_message_order_with_reused_call_id() -> None:
-    manager = MemoryManager(
-        tool_calls_keep_last=1,
-        assistant_no_tool_keep_last=10,
-    )
-    messages = [
+def test_below_threshold_return_preserves_all_tool_pairs_without_summary() -> None:
+    case = fixture("memory_local")["summary_compaction"]["cases"][0]
+    original = current_messages(case["input"]["messages"])
+    manager = MemoryManager(compact_threshold=1, reserved_output_tokens=0, autocompact_buffer_tokens=0)
+    result, changed = manager.compact(original, cycle_index=1000)
+    assert result == original
+    assert changed is False
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_structural_return_never_discards_image_without_summary(role: str) -> None:
+    original = [
         Message(role="system", content="sys"),
-        Message(
-            role="assistant",
-            content="first capture request",
-            tool_calls=[
-                {
-                    "id": "screen_capture:4",
-                    "type": "function",
-                    "function": {"name": "screen_capture", "arguments": "{}"},
-                }
-            ],
-        ),
-        Message(role="tool", content="first result", tool_call_id="screen_capture:4"),
-        Message(role="assistant", content="narration"),
-        Message(
-            role="assistant",
-            content="second capture request",
-            tool_calls=[
-                {
-                    "id": "screen_capture:4",
-                    "type": "function",
-                    "function": {"name": "screen_capture", "arguments": "{}"},
-                }
-            ],
-        ),
-        Message(role="tool", content="second result", tool_call_id="screen_capture:4"),
+        Message(role=role, content="", image_url="data:image/png;base64,AAAA"),
+        Message(role="assistant", content="image processed"),
     ]
-
-    compacted, changed = manager._compact_messages(messages, cycle_index=1)
-    assert changed is True
-
-    assistant_tool_call_indices = [idx for idx, msg in enumerate(compacted) if msg.role == "assistant" and msg.tool_calls]
-    tool_indices = [idx for idx, msg in enumerate(compacted) if msg.role == "tool" and msg.tool_call_id == "screen_capture:4"]
-    assert len(assistant_tool_call_indices) == 1
-    assert len(tool_indices) == 1
-    assert tool_indices[0] > assistant_tool_call_indices[0]
-    assert compacted[tool_indices[0]].content == "second result"
+    result, changed = MemoryManager(compact_threshold=1).compact(original, force=True)
+    assert result == original
+    assert changed is False
 
 
-def test_memory_normalize_orphan_tool_messages_drops_excess_tool_results_per_call_id() -> None:
-    manager = MemoryManager()
-    messages = [
+@pytest.mark.parametrize("force", [True, False])
+def test_full_compaction_does_not_run_a_second_pruner(force: bool) -> None:
+    captured = []
+    backend = MemoryWorkspaceBackend()
+    original = [Message(role="user", content="request")]
+    for index in range(6):
+        original.extend(
+            [
+                Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=[{"id": str(index), "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+                ),
+                Message(role="tool", tool_call_id=str(index), content=f"result {index} " * 1000),
+            ]
+        )
+    manager = MemoryManager(
+        compact_threshold=1,
+        model_context_window=100000,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        keep_recent_messages=2,
+        workspace_backend=backend,
+        recovery_tool_available=True,
+        tool_result_retentions={"lookup": ToolResultRetention.PRESERVE},
+        summary_callback=lambda prompt, *_: captured.append(prompt) or '{"progress":["done"]}',
+    )
+    result = manager.compact_with_result(original, cycle_index=1000, force=force)
+    assert result.mode == "summary"
+    assert result.archived_count == 0
+    prefix = section(captured[0], "Conversation Prefix")
+    assert [item["content"] for item in prefix if item["role"] == "tool"] == [
+        m.content for m in original[:-2] if m.role == "tool"
+    ]
+    assert result.messages[-2:] == original[-2:]
+
+
+def test_microcompact_plan_indices_match_applied_messages() -> None:
+    original = [
+        Message(role="system", content="sys"),
+        Message(role="assistant", content=""),
+        Message(role="system", name="memory_summary", content="keep old summary"),
         Message(
             role="assistant",
-            content="call",
-            tool_calls=[
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "bash", "arguments": "{}"},
-                }
-            ],
+            content="",
+            tool_calls=[{"id": "old", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
         ),
-        Message(role="tool", content="first", tool_call_id="call_1"),
-        Message(role="tool", content="second", tool_call_id="call_1"),
+        Message(role="tool", content="result " * 1500, tool_call_id="old"),
+        Message(role="assistant", content="recent"),
     ]
+    manager = MemoryManager(
+        compact_threshold=10000,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
+        microcompaction_policy=MicrocompactionPolicy(keep_recent_cycles=1),
+    )
+    plan = manager.plan_microcompaction(original, cycle_index=1000, current_tokens=8000)
+    assert plan and [c.message_index for c in plan.candidates] == [4]
+    result = manager.compact_with_result(
+        original, cycle_index=1000, total_tokens=8000, microcompact_plan=plan, microcompact_planned=True
+    )
+    assert result.archived_count == 1
+    assert next(m for m in result.messages if m.role == "tool").content.startswith(COMPACT_MARKER_OPENING)
+    assert original[2] in result.messages
+    assert original[4].content == "result " * 1500
 
-    normalized, changed = manager._normalize_orphan_tool_messages(messages)
-    assert changed is True
-    tool_messages = [msg for msg in normalized if msg.role == "tool"]
-    assert len(tool_messages) == 1
-    assert tool_messages[0].content == "first"
+
+@pytest.mark.parametrize(
+    "variant", fixture("memory_local")["summary_compaction"]["control_failure_case"]["variants"], ids=lambda v: v["name"]
+)
+def test_summary_control_failures_propagate(variant: dict[str, Any]) -> None:
+    from vv_agent.checkpoint import CheckpointError
+    from vv_agent.runtime.cancellation import CancelledError
+
+    inputs = fixture("memory_local")["summary_compaction"]["control_failure_case"]["input"]
+    from vv_agent.budget import BudgetExhaustion
+    from vv_agent.runtime.model_calls import ModelCallBudgetExhausted
+
+    error = CancelledError("cancelled") if variant["name"] == "cancellation" else CheckpointError("control", code=variant["name"])
+    if variant["name"] == "budget_exhaustion":
+        error = ModelCallBudgetExhausted(
+            BudgetExhaustion(
+                dimension="total_tokens",
+                reason="limit_exceeded",
+                limit=10,
+                observed=11,
+                attempted_increment=None,
+                overshoot=1,
+                unit="tokens",
+                enforcement_boundary="model_call_complete",
+            )
+        )
+
+    def callback(*_args):
+        raise error
+
+    manager = MemoryManager(keep_recent_messages=2, recovery_tool_available=True, summary_callback=callback)
+    original = current_messages(inputs["messages"])
+    with pytest.raises(type(error)):
+        manager.compact(original, force=True)
+    assert [m.to_dict() for m in original] == inputs["messages"]
+
+
+def test_prompt_substitution_does_not_reinterpret_history() -> None:
+    manager = MemoryManager(language="en-US", summary_event_limit=0)
+    message = Message(role="user", content="{event_limit} {previous_summary_jcs} {conversation_prefix_jcs}")
+    prompt = manager._build_compress_memory_prompt([message])
+    assert section(prompt, "Conversation Prefix")[0]["content"] == message.content
+    assert "Preserve up to 1 critical events" in prompt
+
+
+def test_summary_raw_tail_stays_unpruned_after_empty_assistant_filtering() -> None:
+    original = [Message(role="user", content="history " * 500)]
+    for index in range(2):
+        original.extend(
+            [
+                Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=[{"id": str(index), "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+                ),
+                Message(role="tool", content="evidence " * 1000, tool_call_id=str(index)),
+            ]
+        )
+    original.extend([Message(role="assistant", content=""), Message(role="assistant", content="")])
+    manager = MemoryManager(
+        compact_threshold=100,
+        model_context_window=100000,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        keep_recent_messages=2,
+        workspace_backend=MemoryWorkspaceBackend(),
+        recovery_tool_available=True,
+        microcompaction_policy=MicrocompactionPolicy(keep_recent_cycles=0),
+        summary_callback=lambda *_: '{"progress":["done"]}',
+    )
+    result = manager.compact_with_result(original, cycle_index=1000)
+    assert result.mode == "summary"
+    assert result.messages[-2:] == original[3:5]
+    assert result.archived_count == 1
+
+
+@pytest.mark.parametrize("stage", ["archive", "session_memory"])
+def test_compaction_stages_propagate_cancellation(stage: str) -> None:
+    from vv_agent.runtime.cancellation import CancelledError
+
+    class CancelledBackend(MemoryWorkspaceBackend):
+        def write_text_exclusive(self, path: str, content: str) -> int:
+            raise CancelledError("cancelled archive")
+
+    def cancelled_extract(*_args):
+        raise CancelledError("cancelled extraction")
+
+    session = (
+        SessionMemory(
+            SessionMemoryConfig(min_tokens_before_extraction=1, min_text_messages=1, extraction_callback=cancelled_extract)
+        )
+        if stage == "session_memory"
+        else None
+    )
+    manager = MemoryManager(
+        compact_threshold=1000,
+        keep_recent_messages=1,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        workspace_backend=CancelledBackend(),
+        recovery_tool_available=True,
+        microcompaction_policy=MicrocompactionPolicy(keep_recent_cycles=0),
+        session_memory=session,
+    )
+    original = [
+        Message(role="user", content="request"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{"id": "old", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+        ),
+        Message(role="tool", content="evidence " * 1000, tool_call_id="old"),
+        Message(role="assistant", content="recent"),
+    ]
+    with pytest.raises(CancelledError):
+        manager.compact(original, cycle_index=1000)
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_prefix_images_only_leave_after_accepted_summary(accepted: bool) -> None:
+    captured = []
+    original = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="go"),
+        Message(role="user", content="screenshot", image_url="data:image/png;base64,PREFIX"),
+        Message(role="assistant", content="UI state " * 2000),
+        Message(role="user", content="", image_url="data:image/png;base64,TAIL"),
+    ]
+    manager = MemoryManager(
+        keep_recent_messages=1,
+        summary_callback=lambda prompt, *_: (
+            captured.append(prompt) or ('{"current_work_state":"UI inspected."}' if accepted else "")
+        ),
+    )
+    output, changed = manager.compact(original, force=True)
+    assert changed is accepted
+    assert captured
+    prefix = section(captured[0], "Conversation Prefix")
+    assert len(prefix) == 3
+    assert prefix[1] == {"role": "user", "content": "[image omitted from summary input: screenshot]"}
+    assert "data:image/" not in captured[0]
+    assert output[-1] == original[-1]
+    if not accepted:
+        assert output == original
+
+
+def test_trailing_partial_tool_block_stays_in_tail() -> None:
+    case = next(
+        c
+        for c in fixture("memory_local")["summary_compaction"]["cases"]
+        if c["name"] == "trailing_incomplete_block_stays_in_tail"
+    )
+    original = current_messages(case["input"]["messages"])
+    original.append(Message(role="tool", content="first result", tool_call_id="p1"))
+    captured = []
+    manager = MemoryManager(
+        keep_recent_messages=1, summary_callback=lambda prompt, *_: captured.append(prompt) or case["input"]["summary_response"]
+    )
+    output, changed = manager.compact(original, force=True)
+    assert changed
+    assert output[-2:] == original[-2:]
+    prefix = section(captured[0], "Conversation Prefix")
+    assert prefix == [message.to_dict() for message in original[1:-2]]
+
+
+@pytest.mark.parametrize(
+    "language, expected", [("en-US", "Preserve up to 1 critical events"), ("zh-CN", "最多保留 1 条关键进展")]
+)
+def test_summary_event_limit_bounds_instruction_not_input(language: str, expected: str) -> None:
+    original = [Message(role="system", content="sys")]
+    original.extend(Message(role="user", content=f"message {i} " * 200) for i in range(6))
+    original.append(Message(role="assistant", content="tail"))
+    captured = []
+    manager = MemoryManager(
+        keep_recent_messages=1,
+        language=language,
+        summary_event_limit=1,
+        summary_callback=lambda prompt, *_: captured.append(prompt) or '{"progress":["one","two","three"]}',
+    )
+    output, changed = manager.compact(original, force=True)
+    assert changed
+    assert expected in captured[0]
+    assert section(captured[0], "Conversation Prefix") == [m.to_dict() for m in original[1:-1]]
+    assert section(output[1].content, "Compressed Agent Memory")["progress"] == ["one", "two", "three"]

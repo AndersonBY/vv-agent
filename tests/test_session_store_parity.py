@@ -417,3 +417,20 @@ def test_sqlite_rejects_newer_schema_without_mutating_it(tmp_path: Path) -> None
     assert version == 3
     assert columns == ["session_id", "item_index", "payload"]
     assert len(rows) == 4
+
+
+def test_summary_tail_session_roundtrip_matches_checkpoint_fixture(tmp_path: Path) -> None:
+    from support.compaction import fixture, messages
+
+    expected = fixture("checkpoint_resume")["summary_receipt_replay"]["expected"]["messages"]
+    path = tmp_path / "summary-tail.sqlite"
+    session = SQLiteSessionStore(path).session("summary-tail")
+    session.add_items(messages(expected))
+    restored = SQLiteSessionStore(path).session("summary-tail").get_items()
+    assert [message.to_dict() for message in restored] == expected
+    for message in restored:
+        assert "_vv_agent_compaction" not in message.to_openai_message().get("metadata", {})
+    for case in json.loads(CODEC_FIXTURE.read_text())["invalid_cases"]:
+        if case["name"].startswith("summary_evidence_"):
+            with pytest.raises((ValueError, TypeError)):
+                Message.from_dict(case["input"])

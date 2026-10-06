@@ -57,6 +57,7 @@ def _manager(
 ) -> MemoryManager:
     return MemoryManager(
         compact_threshold=1_000,
+        keep_recent_messages=1,
         model="unknown-provider-model",
         model_context_window=1_000,
         reserved_output_tokens=0,

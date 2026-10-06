@@ -126,7 +126,7 @@ cache total only when every included cycle reports that metric.
 | `src/vv_agent/llm/` | LLM protocol adapters, scripted test clients, prompt cache behavior, and `vv-llm` client bridge. |
 | `src/vv_agent/runtime/` | Core loop, cycle execution, hooks, cancellation, backends, checkpoint stores, and sub-task coordination. |
 | `src/vv_agent/tools/` | Tool registry, OpenAI-compatible schemas, dispatcher, and built-in handlers. |
-| `src/vv_agent/memory/` | Token counting, compaction, micro-compaction, session memory, and post-compaction file restoration. |
+| `src/vv_agent/memory/` | Token counting, history-preserving summary compaction, archive-backed microcompaction, and session memory. |
 | `src/vv_agent/prompt/` | System prompt construction and prompt-cache section tracking. |
 | `src/vv_agent/workspace/` | Local, memory, and S3-compatible workspace storage backends. |
 | `src/vv_agent/skills/` | Skill metadata parsing, validation, normalization, and prompt rendering. |
@@ -373,3 +373,39 @@ baseline is published before full-source validation finishes. This bounds
 extra memory for native backends while retaining full-source I/O on each page.
 Custom backends retain their existing `read_bytes` behavior. No new public
 workspace capability or cursor wire is introduced.
+
+## History-Preserving Compaction
+
+`MemoryManager` uses one microcompaction planner/application pass. Relative
+transcript age protects recent assistant turns even after recompression. The
+planner and application share message indices; empty assistant filtering runs
+only after a precomputed plan has been applied. Complete tool blocks and images
+are never stripped to make room. Invalid blocks leave history unchanged, except
+an ordered incomplete final tool block remains intact in the raw tail.
+
+Normal summaries retain at least `keep_recent_messages` raw messages (default
+10), moving the cut left across an atomic assistant/tool-results block, including
+an incomplete final block. Image notifications and steering messages after tool
+results are independent messages. Prefix images become deterministic text
+placeholders (`[image omitted from summary input: <content or image>]`) in the
+summary request, without `image_url`; raw-tail images remain unchanged. Only an
+accepted summary removes original prefix images. Force skips pruning. Emergency uses the same accepted-summary
+path with `max(1, floor(keep_recent_messages * (1 - clamp(ratio, 0, 0.95))))`.
+
+The localized prompt carries JCS `Previous Summary` and `Conversation Prefix`
+sections without truncation. Callback output is extracted and normalized to the
+closed summary 2.0 shape. Empty effective content, failed callbacks, insufficient
+summary-route input capacity, unavailable recovery, oversized candidates and
+candidates without token reduction cannot replace history. Control-flow errors
+propagate. The standalone local-summary helper serves its fixture only; it is
+never a fallback authorizing history replacement.
+
+Accepted output contains original system messages, one user `memory_summary`,
+and the unchanged tail. `_vv_agent_compaction` metadata merges complete artifact
+and cursor records, previous evidence first, with stable whole-record JCS
+deduplication. Hashes remain host-only; the `Persisted Artifacts` section exposes
+paths and normal read hints. File actions merge by first-seen path without
+filesystem access. A final check after `before_llm` requires a visible recovery
+tool for summary evidence as well as compacted tool markers. Session Memory
+receives `on_compaction` only after acceptance; its token baseline includes the
+tail and the frozen system prompt remains unchanged.

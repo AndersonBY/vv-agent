@@ -3503,7 +3503,7 @@ def test_distributed_compaction_rechecks_model_admission(tmp_path: Path, dimensi
     def summary(_request: Any) -> LLMResponse:
         calls.append("memory_compaction")
         host_usage[0] = summary_usage
-        return response("{}", summary_usage)
+        return response('{"progress":["history summarized"]}', summary_usage)
 
     def primary(_request: Any) -> LLMResponse:
         calls.append("agent_cycle")
@@ -3539,12 +3539,12 @@ def test_distributed_compaction_rechecks_model_admission(tmp_path: Path, dimensi
         Agent(name="compaction-budget", instructions="Return done.", model="test-model", no_tool_policy="finish"),
         "continue",
         run_config=RunConfig(
-            model_provider=ScriptedModelProvider.from_steps("test", "test-model", []).with_token_limits(1000, 0),
+            model_provider=ScriptedModelProvider.from_steps("test", "test-model", []).with_token_limits(6000, 0),
             execution_backend=backend,
             checkpoint_config=CheckpointConfig(key="compaction-budget", store=store, capability_refs=capability_refs),
             budget_limits=limits,
             host_cost_meter=meter if dimension == "host_cost" else None,
-            metadata={"reserved_output_tokens": 0, "autocompact_buffer_tokens": 0},
+            metadata={"reserved_output_tokens": 0, "autocompact_buffer_tokens": 5900, "memory_keep_recent_messages": 1},
             initial_messages=[
                 Message(role="user", content="history " * 1000),
                 Message(role="assistant", content="previous step"),
