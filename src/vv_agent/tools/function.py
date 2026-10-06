@@ -89,9 +89,12 @@ class FunctionTool:
             except FutureTimeoutError:
                 future.cancel()
                 return ToolOutputError(
-                    message=f"Tool {self.name} timed out after {self.timeout_seconds:g} seconds.",
+                    message=(
+                        f"Tool {self.name} did not finish within {self.timeout_seconds:g} seconds and may still be running. "
+                        "Its outcome and side effects are unknown; verify the current state before calling it again."
+                    ),
                     error_code="tool_timeout",
-                    retryable=True,
+                    retryable=False,
                 )
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
