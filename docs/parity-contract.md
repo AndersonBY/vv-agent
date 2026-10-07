@@ -410,14 +410,12 @@ Then run the Rust gate and central cross-repository workflow with exact refs.
 Record final revisions and the workflow URL in the central support matrix only
 after every gate passes.
 
-## Contract 23.0.0 Draft Adoption
+## Contract 23.0.0 Adoption
 
-The local lock and generated snapshot select the unpublished draft at contract
-revision `0370f88a008b7cf649d737a5124201e02141fee3`, fixture manifest
+The lock and generated snapshot select the published `v23.0.0` release at
+contract revision `ad2d4974545f987e237aed421cc4f65680e9a8dc`, fixture manifest
 `0e4c98ac3d22c959e2b1dd5969f55b56491c0b2eab1dbacaf38f68298bcf7d98`.
-The snapshot script accepts a local deterministic ZIP. Its local artifact path
-is recorded in the lock until the reviewed contract is published; this is not
-a published release or centrally verified adoption.
+Central verification is recorded in the contract support matrix.
 
 `tests/test_memory_local_contract.py` exercises complete-prefix prompts, atomic
 raw tails, A2 extraction/normalization, evidence merge, failure preservation and
