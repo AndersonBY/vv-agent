@@ -804,14 +804,20 @@ resolved auto-compaction threshold is exceeded.
     - `vv_llm.chat_clients.utils.get_message_token_counts(...)`
     - If tokenizer resolution fails, use a local CJK-aware estimate
 - Compaction pipeline:
-  1. Archive-backed microcompaction: after usage crosses the typed policy's
-     trigger, plan old tool results oldest-first and replace successfully
-     archived results until usage reaches the target
-  2. Session Memory extraction: persist key facts before full summarization so they survive later compactions
-  3. Structural cleanup (stale tool calls, orphan tool messages, assistant-no-tool collapse, old tool result artifactization)
-  4. If still over threshold, generate a compressed memory summary that preserves original user messages, file operations, current work state, and resolved errors
-  5. If the provider still returns prompt-too-long, retry with forced compaction once, then progressively stronger emergency tail-dropping
-  6. After full compaction, re-inject relevant workspace files into `<Post-Compaction File Context>` under a bounded token budget
+  1. One microcompaction pass archives eligible old tool results. Age is relative
+     to assistant turns in the current transcript. Failed persistence keeps the
+     original result; calls and results stay paired. A planned summary protects its raw tail.
+  2. If still over threshold, summarize the previous summary and complete history
+     prefix. `memory_keep_recent_messages` defaults to 10 raw messages; a cut inside
+     a tool block moves left to retain the assistant and every corresponding result.
+  3. Extract and normalize the model response, then replace the prefix only after
+     effective-content, context-budget, recovery and token-reduction checks pass.
+     Failure retains history; system messages and the raw tail remain unchanged.
+  4. Summary metadata preserves artifact/cursor evidence deterministically. The
+     model sees paths and retrieval hints; file references never trigger automatic reads.
+  5. Prompt-too-long retries force a summary, then re-summarize with smaller tails.
+     No successful shrink reaches the existing exhaustion boundary. Enabled Session
+     Memory updates its baseline to the accepted summary plus tail.
 - Compaction events:
   - New `memory_compact_started` producers include the typed trigger and the
     complete resolved capacity snapshot plus the micro target, candidate count,
@@ -878,12 +884,8 @@ them into `AgentTask.metadata`:
 - `session_memory_max_tokens`
 - `session_memory_min_text_messages`
 - `session_memory_storage_dir`
-- `tool_result_compact_threshold`
-- `tool_result_keep_last`
 - `tool_result_excerpt_head`
 - `tool_result_excerpt_tail`
-- `tool_calls_keep_last`
-- `assistant_no_tool_keep_last`
 - `summary_event_limit`
 
 ### Memory summary model selection priority

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import posixpath
 import re
 from collections.abc import Set as AbstractSet
@@ -108,6 +109,37 @@ class CycleStatus(StrEnum):
     FAILED = "failed"
 
 
+COMPACTION_METADATA_KEY = "_vv_agent_compaction"
+
+
+def validate_compaction_metadata(metadata: dict[str, Any]) -> None:
+    if COMPACTION_METADATA_KEY not in metadata:
+        return
+    manifest = metadata[COMPACTION_METADATA_KEY]
+    if not isinstance(manifest, dict) or set(manifest) != {"artifacts", "cursors"}:
+        raise ValueError("invalid compaction evidence manifest")
+    for key, pointer, decoder in (
+        ("artifacts", "artifact_ref", ToolArtifactRef.from_dict),
+        ("cursors", "cursor", ToolResultCursor.from_dict),
+    ):
+        records = manifest[key]
+        if not isinstance(records, list):
+            raise ValueError("compaction evidence must be arrays")
+        for record in records:
+            if not isinstance(record, dict) or set(record) != {"tool_call_id", "tool_name", "arguments", pointer}:
+                raise ValueError("invalid compaction evidence record fields")
+            for identity in ("tool_call_id", "tool_name"):
+                if not isinstance(record[identity], str) or not record[identity]:
+                    raise ValueError("invalid compaction evidence identity")
+            raw = record["arguments"]
+            if not isinstance(raw, str):
+                raise ValueError("compaction evidence arguments must be object JSON")
+            arguments = json.loads(raw)
+            if not isinstance(arguments, dict) or canonical_json_bytes(arguments).decode() != raw:
+                raise ValueError("compaction evidence arguments must be canonical object JSON")
+            decoder(record[pointer])
+
+
 @dataclass(slots=True)
 class Message:
     role: Role
@@ -152,6 +184,7 @@ class Message:
             d["reasoning_content"] = self.reasoning_content
         if self.image_url is not None:
             d["image_url"] = self.image_url
+        validate_compaction_metadata(self.metadata)
         if self.metadata:
             d["metadata"] = dict(self.metadata)
         if self.artifact_ref is not None:
@@ -179,6 +212,7 @@ class Message:
         metadata = data.get("metadata", {})
         if not isinstance(metadata, dict) or not all(isinstance(key, str) for key in metadata):
             raise TypeError("Message field 'metadata' must be a dict with string keys")
+        validate_compaction_metadata(metadata)
         raw_artifact_ref = data.get("artifact_ref")
         if "artifact_ref" in data and not isinstance(raw_artifact_ref, dict):
             raise TypeError("Message field 'artifact_ref' must be an object")

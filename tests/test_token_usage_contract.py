@@ -130,3 +130,60 @@ def test_native_cache_write_usage_is_normalized_without_public_aliases() -> None
     assert usage.input_tokens == 1000
     assert usage.cache_usage.write_input_tokens == 100
     assert usage.cache_usage.uncached_input_tokens == 400
+
+
+@pytest.mark.parametrize("case", _contract()["compaction_cases"][:3], ids=lambda case: case["name"])
+def test_compaction_accounting_real_producer(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    from support import model_call_context
+    from support.compaction import case_manager, fixture, messages, prune_case_manager
+
+    from vv_agent.llm import LlmRequest
+    from vv_agent.types import LLMResponse, Message
+
+    inputs, expected = case["input"], case["expected"]
+    filename, pointer = inputs["transcript_ref"].split("#")
+    transcript = fixture(filename.removesuffix(".json"))
+    for key in pointer.strip("/").split("/"):
+        transcript = transcript[int(key)] if isinstance(transcript, list) else transcript[key]
+    ctx = model_call_context()
+    ctx.model_call_ledger.replace([ModelCallRecord.from_dict(record) for record in inputs["existing_model_calls"]])
+    before = ctx.model_call_ledger.usage().total_tokens
+    dispatched = []
+    allocations = iter(inputs["allocated_operations"])
+    responses = iter(inputs["provider_responses"])
+
+    def summarize(prompt: str, *_args: Any) -> str:
+        allocation = next(allocations)
+
+        def invoke() -> LLMResponse:
+            dispatched.append(prompt)
+            raw = next(responses)
+            return LLMResponse(content=raw["content"], raw={"usage": raw["usage"]})
+
+        result = ctx.model_call_coordinator.dispatch(
+            operation=ModelCallOperation.MEMORY_COMPACTION,
+            cycle_index=allocation["cycle_index"],
+            operation_slot=allocation["operation_id"].removeprefix(f"op_model_cycle_{allocation['cycle_index']}_"),
+            backend=allocation["backend"],
+            model=allocation["model"],
+            request=LlmRequest(model=allocation["model"], messages=[Message(role="user", content=prompt)]),
+            invoke=invoke,
+        )
+        return result.response.content
+
+    if inputs["action"] == "compact":
+        manager = prune_case_manager(transcript, monkeypatch)
+        result = manager.compact_with_result(messages(transcript["input"]["messages"]), cycle_index=1000).messages
+    else:
+        manager, _ = case_manager(transcript, monkeypatch, summary_callback=summarize)
+        original = messages(transcript["input"]["messages"])
+        result = (
+            manager.emergency_compact(original, cycle_index=5, drop_ratio=transcript["input"]["drop_ratio"])
+            if inputs["action"] == "emergency_compact"
+            else manager.compact(original, cycle_index=5, force=True)[0]
+        )
+    assert [message.to_dict() for message in result] == transcript["expected"]["messages"]
+    assert [record.to_dict() for record in ctx.model_call_ledger.records()] == expected["model_calls"]
+    assert len(dispatched) == expected["new_model_dispatches"]
+    assert len(ctx.model_call_ledger.records()) - len(inputs["existing_model_calls"]) == expected["new_model_call_records"]
+    assert ctx.model_call_ledger.usage().total_tokens - before == expected["new_budget_total_tokens"]

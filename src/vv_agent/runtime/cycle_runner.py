@@ -156,7 +156,9 @@ class CycleRunner:
             final_recovery_tool_available = self._tool_schemas_include_recovery(request_tool_schemas)
             memory_manager.recovery_tool_available = final_recovery_tool_available
             if not final_recovery_tool_available and any(
-                message.role == "tool" and is_microcompacted_tool_content(message.content) for message in request_messages
+                (message.role == "tool" and is_microcompacted_tool_content(message.content))
+                or any(message.metadata.get("_vv_agent_compaction", {}).get(key) for key in ("artifacts", "cursors"))
+                for message in request_messages
             ):
                 raise RuntimeError(
                     "microcompaction_recovery_unavailable: compacted tool results require a model-visible read_file tool"
@@ -278,7 +280,7 @@ class CycleRunner:
                         mode=("emergency" if before_retry_compact != compacted_messages else "none"),
                         changed=before_retry_compact != compacted_messages,
                     )
-                memory_compacted = True
+                memory_compacted = memory_compacted or before_retry_compact != compacted_messages
 
         llm_response = self.hook_manager.apply_after_llm(
             task=task,

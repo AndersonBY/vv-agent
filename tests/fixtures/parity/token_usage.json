@@ -732,5 +732,333 @@
         "input_tokens": -1
       }
     }
-  ]
+  ],
+  "compaction_cases": [
+    {
+      "name": "prune_only",
+      "input": {
+        "existing_model_calls": [],
+        "transcript_ref": "memory_lifecycle.json#/summary_pipeline/prune_only_case",
+        "action": "compact",
+        "provider_responses": [],
+        "allocated_operations": []
+      },
+      "expected": {
+        "model_calls": [],
+        "new_model_dispatches": 0,
+        "new_model_call_records": 0,
+        "new_budget_total_tokens": 0
+      }
+    },
+    {
+      "name": "normal_summary",
+      "input": {
+        "existing_model_calls": [],
+        "transcript_ref": "memory_local.json#/summary_compaction/cases/0",
+        "action": "compact_force",
+        "provider_responses": [
+          {
+            "content": "{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}",
+            "tool_calls": [],
+            "usage": {
+              "prompt_tokens": 1000,
+              "completion_tokens": 120,
+              "total_tokens": 1120,
+              "prompt_tokens_details": {
+                "cached_tokens": 640
+              }
+            }
+          }
+        ],
+        "allocated_operations": [
+          {
+            "operation_id": "op_model_cycle_5_memory_compaction_1",
+            "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+            "attempt": 1,
+            "cycle_index": 5,
+            "backend": "test",
+            "model": "test-model",
+            "operation": "memory_compaction"
+          }
+        ]
+      },
+      "expected": {
+        "model_calls": [
+          {
+            "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+            "operation_id": "op_model_cycle_5_memory_compaction_1",
+            "attempt": 1,
+            "operation": "memory_compaction",
+            "cycle_index": 5,
+            "backend": "test",
+            "model": "test-model",
+            "status": "completed",
+            "usage": {
+              "schema_version": "vv-agent.token-usage.v1",
+              "input_tokens": 1000,
+              "output_tokens": 120,
+              "total_tokens": 1120,
+              "reasoning_tokens": null,
+              "usage_source": "provider_reported",
+              "cache_usage": {
+                "status": "provider_reported",
+                "read_input_tokens": 640,
+                "write_input_tokens": null,
+                "uncached_input_tokens": 360,
+                "source": "provider_usage"
+              },
+              "provider_usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "total_tokens": 1120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 640
+                }
+              }
+            },
+            "error_code": null
+          }
+        ],
+        "new_model_dispatches": 1,
+        "new_model_call_records": 1,
+        "new_budget_total_tokens": 1120
+      }
+    },
+    {
+      "name": "emergency_resummary",
+      "input": {
+        "existing_model_calls": [
+          {
+            "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+            "operation_id": "op_model_cycle_5_memory_compaction_1",
+            "attempt": 1,
+            "operation": "memory_compaction",
+            "cycle_index": 5,
+            "backend": "test",
+            "model": "test-model",
+            "status": "completed",
+            "usage": {
+              "schema_version": "vv-agent.token-usage.v1",
+              "input_tokens": 1000,
+              "output_tokens": 120,
+              "total_tokens": 1120,
+              "reasoning_tokens": null,
+              "usage_source": "provider_reported",
+              "cache_usage": {
+                "status": "provider_reported",
+                "read_input_tokens": 640,
+                "write_input_tokens": null,
+                "uncached_input_tokens": 360,
+                "source": "provider_usage"
+              },
+              "provider_usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "total_tokens": 1120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 640
+                }
+              }
+            },
+            "error_code": null
+          }
+        ],
+        "transcript_ref": "memory_lifecycle.json#/emergency_cases/0",
+        "action": "emergency_compact",
+        "provider_responses": [
+          {
+            "content": "{\"current_work_state\":\"12 tests passed; deployment configuration pending.\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}",
+            "tool_calls": [],
+            "usage": {
+              "prompt_tokens": 1000,
+              "completion_tokens": 120,
+              "total_tokens": 1120,
+              "prompt_tokens_details": {
+                "cached_tokens": 640
+              }
+            }
+          }
+        ],
+        "allocated_operations": [
+          {
+            "operation_id": "op_model_cycle_5_memory_compaction_2",
+            "call_id": "op_model_cycle_5_memory_compaction_2:attempt:1",
+            "attempt": 1,
+            "cycle_index": 5,
+            "backend": "test",
+            "model": "test-model",
+            "operation": "memory_compaction"
+          }
+        ]
+      },
+      "expected": {
+        "model_calls": [
+          {
+            "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+            "operation_id": "op_model_cycle_5_memory_compaction_1",
+            "attempt": 1,
+            "operation": "memory_compaction",
+            "cycle_index": 5,
+            "backend": "test",
+            "model": "test-model",
+            "status": "completed",
+            "usage": {
+              "schema_version": "vv-agent.token-usage.v1",
+              "input_tokens": 1000,
+              "output_tokens": 120,
+              "total_tokens": 1120,
+              "reasoning_tokens": null,
+              "usage_source": "provider_reported",
+              "cache_usage": {
+                "status": "provider_reported",
+                "read_input_tokens": 640,
+                "write_input_tokens": null,
+                "uncached_input_tokens": 360,
+                "source": "provider_usage"
+              },
+              "provider_usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "total_tokens": 1120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 640
+                }
+              }
+            },
+            "error_code": null
+          },
+          {
+            "call_id": "op_model_cycle_5_memory_compaction_2:attempt:1",
+            "operation_id": "op_model_cycle_5_memory_compaction_2",
+            "attempt": 1,
+            "operation": "memory_compaction",
+            "cycle_index": 5,
+            "backend": "test",
+            "model": "test-model",
+            "status": "completed",
+            "usage": {
+              "schema_version": "vv-agent.token-usage.v1",
+              "input_tokens": 1000,
+              "output_tokens": 120,
+              "total_tokens": 1120,
+              "reasoning_tokens": null,
+              "usage_source": "provider_reported",
+              "cache_usage": {
+                "status": "provider_reported",
+                "read_input_tokens": 640,
+                "write_input_tokens": null,
+                "uncached_input_tokens": 360,
+                "source": "provider_usage"
+              },
+              "provider_usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "total_tokens": 1120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 640
+                }
+              }
+            },
+            "error_code": null
+          }
+        ],
+        "new_model_dispatches": 1,
+        "new_model_call_records": 1,
+        "new_budget_total_tokens": 1120
+      }
+    },
+    {
+      "name": "summary_receipt_replay",
+      "input": {
+        "existing_model_calls": [
+          {
+            "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+            "operation_id": "op_model_cycle_5_memory_compaction_1",
+            "attempt": 1,
+            "operation": "memory_compaction",
+            "cycle_index": 5,
+            "backend": "test",
+            "model": "test-model",
+            "status": "completed",
+            "usage": {
+              "schema_version": "vv-agent.token-usage.v1",
+              "input_tokens": 1000,
+              "output_tokens": 120,
+              "total_tokens": 1120,
+              "reasoning_tokens": null,
+              "usage_source": "provider_reported",
+              "cache_usage": {
+                "status": "provider_reported",
+                "read_input_tokens": 640,
+                "write_input_tokens": null,
+                "uncached_input_tokens": 360,
+                "source": "provider_usage"
+              },
+              "provider_usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "total_tokens": 1120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 640
+                }
+              }
+            },
+            "error_code": null
+          }
+        ],
+        "replayed_receipt_call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+        "transcript_ref": "checkpoint_resume.json#/summary_receipt_replay",
+        "action": "resume_after_summary_receipt",
+        "provider_responses": [],
+        "allocated_operations": []
+      },
+      "expected": {
+        "model_calls": [
+          {
+            "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+            "operation_id": "op_model_cycle_5_memory_compaction_1",
+            "attempt": 1,
+            "operation": "memory_compaction",
+            "cycle_index": 5,
+            "backend": "test",
+            "model": "test-model",
+            "status": "completed",
+            "usage": {
+              "schema_version": "vv-agent.token-usage.v1",
+              "input_tokens": 1000,
+              "output_tokens": 120,
+              "total_tokens": 1120,
+              "reasoning_tokens": null,
+              "usage_source": "provider_reported",
+              "cache_usage": {
+                "status": "provider_reported",
+                "read_input_tokens": 640,
+                "write_input_tokens": null,
+                "uncached_input_tokens": 360,
+                "source": "provider_usage"
+              },
+              "provider_usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 120,
+                "total_tokens": 1120,
+                "prompt_tokens_details": {
+                  "cached_tokens": 640
+                }
+              }
+            },
+            "error_code": null
+          }
+        ],
+        "new_model_dispatches": 0,
+        "new_model_call_records": 0,
+        "new_budget_total_tokens": 0
+      }
+    }
+  ],
+  "compaction_case_execution": {
+    "transcript_ref": "fixture filename plus RFC6901 JSON pointer; resolve exact input and expected message arrays before invoking the named real producer",
+    "provider_responses": "scripted framework model route responses; opaque unmetered callbacks do not prove accounting",
+    "expected_ledger": "compare actual complete ledger, dispatch count and budget delta after producer action",
+    "cycle_index": "use allocated operation cycle_index or retained receipt cycle_index for this accounting harness"
+  }
 }

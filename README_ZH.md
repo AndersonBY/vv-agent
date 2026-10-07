@@ -728,14 +728,16 @@ UI、用户和工作区解析、产品存储、浏览器或 IM 集成，以及�
     - `vv_llm.chat_clients.utils.get_message_token_counts(...)`
     - 如果 tokenizer 不可用，再用本地 CJK 感知估算
 - 压缩流程：
-  1. archive-backed microcompaction：使用量超过类型化 policy 的 trigger 后，
-     按最旧优先规划旧 tool result；只有完整归档成功才替换，并在达到 target
-     后停止
-  2. Session Memory 提取：在全量摘要前抽取并持久化关键事实，避免后续压缩丢失
-  3. 结构化清理（陈旧 tool_calls、孤儿 tool 消息、assistant 无工具消息折叠、旧 tool 结果 artifact 化）
-  4. 若仍超阈值，再生成增强版压缩记忆总结，显式保留用户原始消息、文件操作、当前工作状态和错误修复信息
-  5. 如果 provider 仍返回 prompt-too-long，再执行一次强制压缩，之后逐步加大 emergency tail-dropping 重试
-  6. 全量压缩后，会在预算内自动恢复相关工作区文件内容到 `<Post-Compaction File Context>`
+  1. 仅通过 microcompaction 归档旧工具结果；年龄按当前 transcript 的相对 assistant 轮次计算。
+     归档失败保留原文，调用骨架始终保留，计划摘要时保护原始尾部。
+  2. 若仍超阈值，对旧摘要和完整历史前缀生成摘要。`memory_keep_recent_messages`
+     默认保留最近 10 条原始消息，切点向前调整以保留完整工具调用及结果块。
+  3. 模型结果经提取、归一化和有效内容检查后，只有候选实际缩小且符合预算才替换前缀。
+     失败保留历史；原 system prompt 和原始尾部保持不变。
+  4. summary message 的 metadata 确定性保留 artifact/cursor 引用，模型只看到路径及读取提示。
+     文件列表仅保留路径，不自动读取或注入文件正文。
+  5. prompt-too-long 先强制摘要，随后以更小尾部重新摘要；不能缩小时走现有 exhausted 边界。
+     启用的 Session Memory 在成功替换后以摘要加尾部更新 token baseline。
 - 压缩事件：
   - 新的 `memory_compact_started` producer 会携带 typed trigger、完整容量解析
     快照、micro target、候选数量和预计可回收 token。
@@ -794,12 +796,8 @@ excerpt:
 - `session_memory_max_tokens`
 - `session_memory_min_text_messages`
 - `session_memory_storage_dir`
-- `tool_result_compact_threshold`
-- `tool_result_keep_last`
 - `tool_result_excerpt_head`
 - `tool_result_excerpt_tail`
-- `tool_calls_keep_last`
-- `assistant_no_tool_keep_last`
 - `summary_event_limit`
 
 ### 记忆总结模型选择优先级

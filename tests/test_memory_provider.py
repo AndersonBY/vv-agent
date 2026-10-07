@@ -125,11 +125,12 @@ def _build_runner() -> CycleRunner:
 def _build_memory_manager() -> MemoryManager:
     return MemoryManager(
         model="gpt-5.4",
-        model_context_window=60,
+        model_context_window=4000,
+        keep_recent_messages=1,
         model_max_output_tokens=32,
         reserved_output_tokens=10,
         reserved_output_source="task_metadata",
-        autocompact_buffer_tokens=10,
+        autocompact_buffer_tokens=3950,
         summary_callback=lambda _prompt, _backend, _model: (
             '{"summary_version":"2.0","original_user_messages":["original"],'
             '"user_constraints":[],"decisions":[],"files_examined_or_modified":[],'
@@ -150,7 +151,7 @@ def _run_compacting_cycle(provider: RecordingMemoryProvider, emitted: list[Any])
         ),
         messages=[
             Message(role="system", content="sys"),
-            Message(role="user", content="u" * 80),
+            Message(role="user", content="u" * 8000),
             Message(role="assistant", content="a" * 80),
             Message(role="user", content="c" * 80),
         ],
@@ -179,16 +180,16 @@ def test_cycle_runner_calls_memory_providers_and_emits_compact_events() -> None:
     assert cycle_record.memory_compacted is True
     assert provider.started[0].to_dict()["estimated_tokens"] == 160
     assert provider.started[0].message_count == 4
-    assert provider.started[0].metadata["messages"][1].content == "u" * 80
+    assert provider.started[0].metadata["messages"][1].content == "u" * 8000
     assert provider.started[0].trigger == "full_threshold"
     assert provider.started[0].configured_threshold == 250_000
     assert provider.started[0].effective_threshold == 40
     assert provider.started[0].microcompact_threshold == 30
-    assert provider.started[0].model_context_window == 60
+    assert provider.started[0].model_context_window == 4000
     assert provider.started[0].model_max_output_tokens == 32
     assert provider.started[0].reserved_output_tokens == 10
     assert provider.started[0].reserved_output_source == "task_metadata"
-    assert provider.started[0].autocompact_buffer_tokens == 10
+    assert provider.started[0].autocompact_buffer_tokens == 3950
     assert provider.completed[0].before_count == 4
     assert provider.completed[0].after_count < 4
     assert provider.completed[0].mode == "summary"

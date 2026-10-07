@@ -38,7 +38,7 @@ from vv_agent.events import (
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.session_memory import load_session_memory_context
-from vv_agent.memory.token_utils import resolve_model_token_limits
+from vv_agent.memory.token_utils import count_messages_tokens, resolve_model_token_limits
 from vv_agent.model import ModelProvider, ModelRef
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import build_raw_system_prompt_bundle, build_system_prompt_bundle
@@ -1846,19 +1846,14 @@ class AgentRuntime:
             language=str(metadata.get("language", "zh-CN")),
             warning_threshold_percentage=warning_threshold,
             include_memory_warning=bool(metadata.get("include_memory_warning", False)),
-            tool_result_compact_threshold=read_int("tool_result_compact_threshold", 2000),
-            tool_result_keep_last=read_int("tool_result_keep_last", 3),
             tool_result_excerpt_head=read_int("tool_result_excerpt_head", 200),
             tool_result_excerpt_tail=read_int("tool_result_excerpt_tail", 200),
-            tool_calls_keep_last=read_int("tool_calls_keep_last", 3),
-            assistant_no_tool_keep_last=read_int("assistant_no_tool_keep_last", 1),
             microcompaction_policy=task.microcompaction_policy,
             tool_result_retentions=tool_result_retentions,
             workspace_backend=workspace_backend
             or self._workspace_backend
             or (LocalWorkspaceBackend(workspace_path) if task.use_workspace else None),
             artifact_scope=task.task_id,
-            workspace=workspace_path if task.use_workspace else None,
             summary_event_limit=read_int("summary_event_limit", 40, minimum=1),
             summary_backend=summary_backend,
             summary_model=summary_model,
@@ -1902,6 +1897,7 @@ class AgentRuntime:
         client = self._memory_summary_clients.get(cache_key)
         effective_backend = backend_name
         effective_model = model_name
+        summary_context_window = None
         if client is None:
             if self.model_provider is None:
                 if backend_name:
@@ -1916,12 +1912,14 @@ class AgentRuntime:
                 client = self.model_provider.client(resolved)
                 effective_backend = resolved.backend
                 effective_model = resolved.model_id
+                summary_context_window = resolved.context_length
             self._memory_summary_clients[cache_key] = client
         elif self.model_provider is not None:
             model_ref = ModelRef.backend(backend_name, model_name) if backend_name else ModelRef.named(model_name)
             resolved = self.model_provider.resolve(model_ref)
             effective_backend = resolved.backend
             effective_model = resolved.model_id
+            summary_context_window = resolved.context_length
         elif ctx is not None:
             effective_backend = str(ctx.metadata.get("_vv_agent_resolved_backend") or "direct")
             effective_model = str(ctx.metadata.get("_vv_agent_resolved_model") or model_name)
@@ -1931,6 +1929,18 @@ class AgentRuntime:
             messages=[Message(role="user", content=prompt)],
             tools=[],
         )
+        if operation is ModelCallOperation.MEMORY_COMPACTION:
+            if summary_context_window is None:
+                summary_context_window, _ = resolve_model_token_limits(effective_model)
+            if (
+                summary_context_window
+                and count_messages_tokens(
+                    [message.to_openai_message() for message in request.messages],
+                    model=effective_model,
+                )
+                >= summary_context_window
+            ):
+                return None
         cycle_index = ctx.metadata.get("_vv_agent_active_cycle_index") if ctx is not None else None
 
         def invoke() -> Any:

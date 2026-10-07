@@ -58,7 +58,9 @@ def _build_task() -> AgentTask:
 def _build_memory_manager(**overrides: Any) -> MemoryManager:
     params: dict[str, Any] = {
         "model": "gpt-5.4",
-        "model_context_window": 60,
+        "model_context_window": 4000,
+        "compact_threshold": 3000,
+        "keep_recent_messages": 1,
         "reserved_output_tokens": 10,
         "autocompact_buffer_tokens": 10,
         "summary_callback": _fake_summary,
@@ -85,8 +87,8 @@ def test_cycle_runner_retries_prompt_too_long_with_forced_compaction() -> None:
     )
     messages = [
         Message(role="system", content="sys"),
-        Message(role="user", content="u" * 40),
-        Message(role="assistant", content="a" * 40),
+        Message(role="user", content="u " * 800),
+        Message(role="assistant", content="a " * 800),
         Message(role="user", content="c" * 40),
     ]
 
@@ -140,8 +142,8 @@ def test_cycle_runner_retries_prompt_too_long_then_emergency_compact(monkeypatch
         task=_build_task(),
         messages=[
             Message(role="system", content="sys"),
-            Message(role="user", content="u" * 40),
-            Message(role="assistant", content="a" * 40),
+            Message(role="user", content="u " * 800),
+            Message(role="assistant", content="a " * 800),
             Message(role="user", content="c" * 40),
         ],
         cycle_index=1,
@@ -171,8 +173,8 @@ def test_cycle_runner_raises_compaction_exhausted_after_max_ptl_retries() -> Non
     )
     messages = [
         Message(role="system", content="sys"),
-        Message(role="user", content="u" * 40),
-        Message(role="assistant", content="a" * 40),
+        Message(role="user", content="u " * 800),
+        Message(role="assistant", content="a " * 800),
         Message(role="user", content="c" * 40),
     ]
 
@@ -246,7 +248,6 @@ def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:
             min_result_chars=200,
         ),
         workspace_backend=MemoryWorkspaceBackend(),
-        tool_result_compact_threshold=2_000,
     )
     messages = [
         Message(role="system", content="sys"),
@@ -294,7 +295,8 @@ def test_cycle_runner_keeps_the_frozen_prompt_after_session_memory_extraction() 
         tool_registry=build_default_registry(),
     )
     memory_manager = _build_memory_manager(
-        model_context_window=70,
+        model_context_window=4000,
+        compact_threshold=100,
         reserved_output_tokens=10,
         autocompact_buffer_tokens=10,
         base_system_prompt="sys",

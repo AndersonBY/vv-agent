@@ -1047,3 +1047,79 @@ def test_memory_summary_model_defaults_to_task_model_without_backend(tmp_path: P
     manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path)
     assert manager.summary_backend is None
     assert manager.summary_model == "task-model"
+
+
+def test_runtime_multimodal_history_with_steering_still_compacts(tmp_path: Path) -> None:
+    from support.compaction import section
+
+    from vv_agent.memory import MemoryManager
+
+    def image_result(_context: ToolContext, _arguments: dict[str, object]) -> ToolExecutionResult:
+        return ToolExecutionResult(tool_call_id="", content="observed UI state " * 600, image_url="data:image/png;base64,AAAA")
+
+    def text_result(_context: ToolContext, _arguments: dict[str, object]) -> ToolExecutionResult:
+        return ToolExecutionResult(tool_call_id="", content="checked application state " * 600)
+
+    registry = build_default_registry()
+    registry.register_tool(name="_image_probe", handler=image_result, description="Capture image.")
+    registry.register_tool(name="_text_probe", handler=text_result, description="Inspect state.")
+    llm = ScriptedLLM(
+        steps=[
+            LLMResponse(
+                content="inspect",
+                tool_calls=[
+                    ToolCall(id=f"img{i}", name="_image_probe", arguments={}),
+                    ToolCall(id=f"txt{i}", name="_text_probe", arguments={}),
+                ],
+            )
+            for i in range(2)
+        ]
+        + [LLMResponse(content="done")]
+    )
+    checks = 0
+
+    def steering() -> list[Message]:
+        nonlocal checks
+        checks += 1
+        return [Message(role="user", content="Also inspect the second screenshot")] if checks == 2 else []
+
+    task = AgentTask(
+        task_id="image-compaction",
+        model="test-model",
+        prompt_bundle=build_raw_system_prompt_bundle("sys"),
+        user_prompt="go",
+        native_multimodal=True,
+        no_tool_policy="finish",
+        max_cycles=3,
+        extra_tool_names=["_image_probe", "_text_probe"],
+        memory_compact_threshold=1_000_000,
+        metadata={"model_context_window": 2_000_000},
+    )
+    runtime = AgentRuntime(llm_client=llm, tool_registry=registry, default_workspace=tmp_path)
+    result = runtime.run(task, interruption_messages=steering)
+    assert result.status is AgentStatus.COMPLETED
+    original = result.messages
+    snapshot = [message.to_dict() for message in original]
+    for index, message in enumerate(original):
+        if message.tool_calls:
+            assert [m.tool_call_id for m in original[index + 1 : index + 3]] == [c["id"] for c in message.tool_calls]
+            assert original[index + 3].role == "user" and original[index + 3].image_url
+    assert any(m.content == "Also inspect the second screenshot" for m in original)
+    assert original[-2].image_url
+    captured = []
+    manager = MemoryManager(
+        keep_recent_messages=2,
+        summary_callback=lambda prompt, *_: captured.append(prompt) or '{"current_work_state":"Screenshots checked."}',
+    )
+    assert manager._summary_parts(original, 2) is not None
+    output, changed = manager.compact(original, force=True)
+    assert changed
+    assert len(output) == 4
+    assert output[-2:] == original[-2:]
+    prefix = section(captured[0], "Conversation Prefix")
+    assert len(prefix) == len(original) - 3
+    assert any(m["content"] == "[image omitted from summary input: image]" for m in prefix)
+    assert "data:image/" not in captured[0]
+    assert all("image_url" not in m for m in prefix)
+    assert any(m["content"] == "Also inspect the second screenshot" for m in prefix)
+    assert [message.to_dict() for message in original] == snapshot

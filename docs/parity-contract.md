@@ -409,3 +409,37 @@ uv build
 Then run the Rust gate and central cross-repository workflow with exact refs.
 Record final revisions and the workflow URL in the central support matrix only
 after every gate passes.
+
+## Contract 23.0.0 Adoption
+
+The lock and generated snapshot select the published `v23.0.0` release at
+contract revision `ad2d4974545f987e237aed421cc4f65680e9a8dc`, fixture manifest
+`0e4c98ac3d22c959e2b1dd5969f55b56491c0b2eab1dbacaf38f68298bcf7d98`.
+Central verification is recorded in the contract support matrix.
+
+`tests/test_memory_local_contract.py` exercises complete-prefix prompts, atomic
+raw tails, A2 extraction/normalization, evidence merge, failure preservation and
+relative-age planner cases. `tests/test_memory_lifecycle_contract.py` covers the
+prune-only and emergency producers, route capacity, providers and Session Memory.
+`tests/test_token_usage_contract.py` dispatches canonical summary responses through
+real model-call accounting. `tests/test_checkpoint.py` verifies durable summary
+receipt replay before transcript replacement across the supported stores.
+Session codec and checkpoint readers validate the closed reserved manifest;
+model projections omit its integrity metadata.
+
+Deleted manager settings and restoration APIs have no compatibility readers or
+aliases. Resume sanitization remains separate from compaction. Existing policy,
+model-call, event and checkpoint discriminators remain unchanged.
+
+Open parity gap: Rust adoption of this draft, bidirectional live checkpoint
+exchange, both full gates and central cross-repository verification remain
+required. Python-only results do not mark this contract verified.
+
+Prefix images use the canonical text placeholder and never pin later history in
+the raw tail. The summary route remains text-only. A final tool block containing
+only an ordered initial subset of results (including none) is retained intact;
+missing results in the middle, duplicates and out-of-order results still fail.
+`test_runtime_multimodal_history_with_steering_still_compacts` uses real runtime
+tool batches, image notifications and steering. The bilingual
+`test_summary_event_limit_bounds_instruction_not_input` verifies the event-limit
+instruction without truncating summary input or normalizing away returned events.

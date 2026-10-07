@@ -354,3 +354,22 @@ deadline. Recovery claims are renewed with the same cap before execution.
 Heartbeat waits use at most one third of the actual remaining lease, including
 leases shorter than 10 ms. Expiry stops new dispatch through the existing lease-loss
 boundary and preserves durable journals for recovery.
+
+## Summary Receipt Replay
+
+History-preserving compaction commits transcript replacement only after a valid,
+normalized summary passes budget and reduction checks. Its model request includes
+localized instructions and deterministic JCS previous-summary/prefix sections.
+A fault after the `memory_compaction` receipt and accounting CAS but before
+transcript replacement reuses that receipt with the same request digest and
+operation identity. Replay adds no dispatch, model-call record or budget charge;
+changed input fails at the existing journal integrity boundary.
+
+Summary messages persist `_vv_agent_compaction` artifact/cursor manifests through
+Message, session and checkpoint codecs. Readers reject malformed reserved
+metadata. The model sees the deterministic `Persisted Artifacts` projection,
+without hashes or byte counts. No automatic file read occurs during summary
+construction or replay. After transcript replacement, the summary and unchanged
+raw tail resume directly; prior transcripts are not re-summarized implicitly.
+Older contract runtimes stay pinned to their releases; there is no compatibility
+decoder or request-digest migration.

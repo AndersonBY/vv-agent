@@ -8,7 +8,6 @@ from .microcompact import (
     MicrocompactPlan,
     plan_microcompact,
 )
-from .post_compact_restore import PostCompactRestoreConfig, restore_key_files
 from .provider import (
     MemoryCompactCompleted,
     MemoryCompactStarted,
@@ -35,13 +34,11 @@ __all__ = [
     "MemorySearchRequest",
     "MemorySearchResult",
     "MicrocompactPlan",
-    "PostCompactRestoreConfig",
     "SessionMemory",
     "SessionMemoryConfig",
     "SessionMemoryEntry",
     "SessionMemoryState",
     "plan_microcompact",
-    "restore_key_files",
     "sanitize_for_resume",
     "token_utils",
 ]

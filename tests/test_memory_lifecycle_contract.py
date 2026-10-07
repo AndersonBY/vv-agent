@@ -28,7 +28,7 @@ from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentStatus, AgentTask, LLMResponse, Message
-from vv_agent.workspace import LocalWorkspaceBackend, MemoryWorkspaceBackend
+from vv_agent.workspace import MemoryWorkspaceBackend
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "memory_lifecycle.json"
 _CONTRACT = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
@@ -203,8 +203,8 @@ def test_runtime_routes_summary_through_configured_backend_model_pair(tmp_path: 
         user_prompt="continue",
         initial_messages=[
             Message(role="system", content="system"),
-            Message(role="user", content="u" * 160),
-            Message(role="assistant", content="a" * 160),
+            Message(role="user", content="u " * 1000),
+            Message(role="assistant", content="a " * 1000),
             Message(role="user", content="c" * 160),
         ],
         max_cycles=1,
@@ -213,7 +213,8 @@ def test_runtime_routes_summary_through_configured_backend_model_pair(tmp_path: 
         metadata={
             "memory_summary_backend": contract["backend"],
             "memory_summary_model": contract["model"],
-            "model_context_window": 60,
+            "model_context_window": 4000,
+            "memory_keep_recent_messages": 1,
             "reserved_output_tokens": 10,
             "autocompact_buffer_tokens": 10,
             "session_memory_enabled": False,
@@ -325,6 +326,7 @@ class RecordingMemoryProvider:
 def _ptl_memory_manager() -> MemoryManager:
     return MemoryManager(
         compact_threshold=10_000,
+        keep_recent_messages=1,
         model="main-model",
         model_context_window=20_000,
         reserved_output_tokens=0,
@@ -380,8 +382,8 @@ def test_ptl_forced_and_emergency_attempts_notify_providers(
         task=_ptl_task(),
         messages=[
             Message(role="system", content="system"),
-            Message(role="user", content="first"),
-            Message(role="assistant", content="working"),
+            Message(role="user", content="first " * 1000),
+            Message(role="assistant", content="working " * 1000),
             Message(role="user", content="continue"),
         ],
         cycle_index=2,
@@ -567,6 +569,7 @@ def test_public_memory_manager_microcompacts_before_warning_on_both_threshold_pa
 ) -> None:
     manager = MemoryManager(
         compact_threshold=4_000,
+        keep_recent_messages=2,
         model="main-model",
         model_context_window=4_000,
         reserved_output_tokens=0,
@@ -603,6 +606,7 @@ def test_microcompaction_preserves_provider_usage_baseline_for_full_compaction()
 
     manager = MemoryManager(
         compact_threshold=4_000,
+        keep_recent_messages=2,
         model="main-model",
         model_context_window=4_000,
         reserved_output_tokens=0,
@@ -814,7 +818,8 @@ def test_direct_runtime_memory_logs_are_emitted_and_observer_failures_are_isolat
         no_tool_policy="finish",
         memory_compact_threshold=40,
         metadata={
-            "model_context_window": 60,
+            "model_context_window": 4000,
+            "memory_keep_recent_messages": 1,
             "reserved_output_tokens": 10,
             "autocompact_buffer_tokens": 10,
             "session_memory_enabled": False,
@@ -843,15 +848,16 @@ def test_memory_provider_attempt_errors_are_fail_open() -> None:
             task=_ptl_task(),
             messages=[
                 Message(role="system", content="system"),
-                Message(role="user", content="u" * 120),
-                Message(role="assistant", content="a" * 120),
+                Message(role="user", content="u " * 1000),
+                Message(role="assistant", content="a " * 1000),
                 Message(role="user", content="c" * 120),
             ],
             cycle_index=2,
             memory_manager=MemoryManager(
                 compact_threshold=40,
                 model="main-model",
-                model_context_window=60,
+                model_context_window=4000,
+                keep_recent_messages=1,
                 reserved_output_tokens=10,
                 autocompact_buffer_tokens=10,
                 summary_callback=lambda _prompt, _backend, _model: _summary_payload(),
@@ -883,7 +889,8 @@ def test_session_memory_compaction_does_not_refresh_the_current_prompt() -> None
     manager = MemoryManager(
         compact_threshold=40,
         model="main-model",
-        model_context_window=60,
+        model_context_window=4000,
+        keep_recent_messages=1,
         reserved_output_tokens=10,
         autocompact_buffer_tokens=10,
         base_system_prompt="system",
@@ -892,8 +899,8 @@ def test_session_memory_compaction_does_not_refresh_the_current_prompt() -> None
     )
     messages = [
         Message(role="system", content="system"),
-        Message(role="user", content="u" * 120),
-        Message(role="assistant", content="a" * 120),
+        Message(role="user", content="u " * 1000),
+        Message(role="assistant", content="a " * 1000),
         Message(role="user", content="c" * 120),
     ]
     session_memory.state.entries = [SessionMemoryEntry("decision", contract["fresh_fact"], source_cycle=2)]
@@ -907,38 +914,64 @@ def test_session_memory_compaction_does_not_refresh_the_current_prompt() -> None
     assert contract["fresh_fact"] not in compacted[0].content
 
 
-def _artifact_path(message: Message) -> str:
-    for line in message.content.splitlines():
-        if line.startswith("artifact_path:"):
-            return line.split(":", 1)[1].strip()
-    raise AssertionError(f"artifact path missing from {message.content!r}")
+@pytest.mark.parametrize("case", _CONTRACT["emergency_cases"], ids=lambda case: case["name"])
+def test_emergency_requires_summary_before_removing_more_tail(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    from support.compaction import assert_case, case_manager, messages
+
+    manager, captured = case_manager(case, monkeypatch)
+    original = messages(case["input"]["messages"])
+    result = manager.emergency_compact(original, cycle_index=1000, drop_ratio=case["input"]["drop_ratio"])
+    assert_case(case, result, result != original, captured)
 
 
-def test_structural_tool_compaction_uses_unique_workspace_artifacts(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    backend = LocalWorkspaceBackend(workspace)
-    manager = MemoryManager(
-        workspace=workspace,
-        workspace_backend=backend,
-        recovery_tool_available=True,
-        artifact_scope="run-artifacts",
-        tool_result_compact_threshold=10,
-        tool_result_keep_last=0,
+def test_prune_only_keeps_complete_history_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    from support.compaction import messages, prune_case_manager
+
+    case = _CONTRACT["summary_pipeline"]["prune_only_case"]
+    manager = prune_case_manager(case, monkeypatch)
+    result = manager.compact_with_result(messages(case["input"]["messages"]), cycle_index=case["input"]["cycle_index"])
+    expected = case["expected"]
+    assert [m.to_dict() for m in result.messages] == expected["messages"]
+    for key in ("mode", "changed", "archived_count", "reclaimed_tokens"):
+        assert getattr(result, key) == expected[key]
+
+
+def test_summary_input_window_too_small_has_no_dispatch(tmp_path: Path) -> None:
+    from support.compaction import fixture, messages
+
+    case = next(
+        case
+        for case in fixture("memory_local")["summary_compaction"]["cases"]
+        if case["name"] == "summarizer_failure_preserves_history"
     )
-    messages = [
-        Message(role="tool", content="first artifact payload", tool_call_id="/"),
-        Message(role="tool", content="second artifact payload", tool_call_id="/"),
-    ]
-
-    compacted, changed = manager._compact_tool_messages(messages, cycle_index=4)
-    paths = [_artifact_path(message) for message in compacted]
-
-    assert changed is True
-    assert len(paths) == 2
-    assert len(set(paths)) == len(paths)
-    assert all(path.startswith(".vv-agent/artifacts/run-artifacts/") for path in paths)
-    assert [backend.read_text(path) for path in paths] == [
-        "first artifact payload",
-        "second artifact payload",
-    ]
+    requests = []
+    resolved = ResolvedModelConfig(
+        backend="test",
+        requested_model="small-summary",
+        selected_model="small-summary",
+        model_id="small-summary",
+        endpoint_options=[],
+        context_length=10,
+    )
+    llm = ScriptedLLM(steps=[lambda request: requests.append(request) or LLMResponse(content=_summary_payload())])
+    runtime = AgentRuntime(
+        llm_client=llm,
+        model_provider=FixedModelProvider(llm, resolved),
+        tool_registry=build_default_registry(),
+        default_workspace=tmp_path,
+    )
+    ctx = model_call_context(metadata={"_vv_agent_active_cycle_index": 1})
+    task = _ptl_task()
+    task.metadata.update(
+        memory_summary_model="small-summary",
+        memory_keep_recent_messages=case["input"]["keep_recent_messages"],
+        model_context_window=100000,
+        reserved_output_tokens=0,
+    )
+    manager = runtime._build_memory_manager(task=task, workspace_path=tmp_path, ctx=ctx)
+    original = messages(case["input"]["messages"])
+    manager.recovery_tool_available = True
+    output, changed = manager.compact(original, force=True)
+    assert output == original and not changed
+    assert requests == []
+    assert ctx.model_call_ledger.records() == []

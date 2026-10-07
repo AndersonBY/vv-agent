@@ -1730,5 +1730,520 @@
     "cancellation",
     "budget_exhaustion",
     "business_terminal"
-  ]
+  ],
+  "summary_receipt_replay": {
+    "name": "summary_receipt_before_transcript_commit",
+    "source_case": "memory_local.json#summary_compaction.cases[name=recompression_merges_and_deduplicates_evidence]",
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "系统指令"
+        },
+        {
+          "role": "user",
+          "content": "<Original User Request>\n排查登录失败\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"定位 token 单位错误；已修改，待验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+          "name": "memory_summary",
+          "metadata": {
+            "_vv_agent_compaction": {
+              "artifacts": [
+                {
+                  "tool_call_id": "c1",
+                  "tool_name": "read_file",
+                  "arguments": "{\"path\":\"auth.py\"}",
+                  "artifact_ref": {
+                    "path": ".vv-agent/artifacts/run/c1-H.txt",
+                    "media_type": "text/plain",
+                    "encoding": "utf-8",
+                    "size_bytes": 26,
+                    "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                  }
+                }
+              ],
+              "cursors": [
+                {
+                  "tool_call_id": "c2",
+                  "tool_name": "read_file",
+                  "arguments": "{\"path\":\"logs/output.txt\"}",
+                  "cursor": {
+                    "kind": "read_file",
+                    "path": "logs/output.txt",
+                    "offset_chars": 20,
+                    "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "c1",
+              "type": "function",
+              "function": {
+                "name": "read_file",
+                "arguments": "{\"path\":\"auth.py\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "ordinary artifact result",
+          "tool_call_id": "c1",
+          "artifact_ref": {
+            "path": ".vv-agent/artifacts/run/c1-H.txt",
+            "media_type": "text/plain",
+            "encoding": "utf-8",
+            "size_bytes": 26,
+            "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "c2",
+              "type": "function",
+              "function": {
+                "name": "read_file",
+                "arguments": "{\"path\":\"logs/output.txt\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "bounded source slice\n{\"vv_agent_recovery\":{\"cursor\":{\"kind\":\"read_file\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"sha256\":\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\"},\"original_bytes\":50000,\"truncated\":true,\"truncation_reason\":\"read_limit\",\"visible_bytes\":20}}",
+          "tool_call_id": "c2"
+        },
+        {
+          "role": "user",
+          "content": "继续验证"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "c4",
+              "type": "function",
+              "function": {
+                "name": "run_tests",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "12 passed",
+          "tool_call_id": "c4"
+        }
+      ],
+      "keep_recent_messages": 2,
+      "cycle_index": 5,
+      "operation_id": "op_model_cycle_5_memory_compaction_1",
+      "attempt": 1,
+      "retained_summary_response": "{\"current_work_state\":\"修改完成；继续验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\",\"继续验证\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}",
+      "retained_model_call": {
+        "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+        "operation_id": "op_model_cycle_5_memory_compaction_1",
+        "attempt": 1,
+        "operation": "memory_compaction",
+        "cycle_index": 5,
+        "backend": "test",
+        "model": "test-model",
+        "status": "completed",
+        "usage": {
+          "schema_version": "vv-agent.token-usage.v1",
+          "input_tokens": 1000,
+          "output_tokens": 120,
+          "total_tokens": 1120,
+          "reasoning_tokens": null,
+          "usage_source": "provider_reported",
+          "cache_usage": {
+            "status": "provider_reported",
+            "read_input_tokens": 640,
+            "write_input_tokens": null,
+            "uncached_input_tokens": 360,
+            "source": "provider_usage"
+          },
+          "provider_usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 120,
+            "total_tokens": 1120,
+            "prompt_tokens_details": {
+              "cached_tokens": 640
+            }
+          }
+        },
+        "error_code": null
+      },
+      "retained_receipt": {
+        "kind": "model",
+        "operation_id": "op_model_cycle_5_memory_compaction_1",
+        "cycle_index": 5,
+        "attempt": 1,
+        "request_digest": "c5986827c38f8208e8d3f030e64fbd9f2f01d6b284a34ba464fbc8251dad7c1a",
+        "idempotency_key": null,
+        "state": "succeeded",
+        "response": {
+          "content": "{\"current_work_state\":\"修改完成；继续验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\",\"继续验证\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}",
+          "tool_calls": [],
+          "raw": {
+            "usage": {
+              "prompt_tokens": 1000,
+              "completion_tokens": 120,
+              "total_tokens": 1120,
+              "prompt_tokens_details": {
+                "cached_tokens": 640
+              }
+            }
+          },
+          "token_usage": {
+            "schema_version": "vv-agent.token-usage.v1",
+            "input_tokens": 1000,
+            "output_tokens": 120,
+            "total_tokens": 1120,
+            "reasoning_tokens": null,
+            "usage_source": "provider_reported",
+            "cache_usage": {
+              "status": "provider_reported",
+              "read_input_tokens": 640,
+              "write_input_tokens": null,
+              "uncached_input_tokens": 360,
+              "source": "provider_usage"
+            },
+            "provider_usage": {
+              "prompt_tokens": 1000,
+              "completion_tokens": 120,
+              "total_tokens": 1120,
+              "prompt_tokens_details": {
+                "cached_tokens": 640
+              }
+            }
+          }
+        },
+        "error": null,
+        "model_operation": "memory_compaction",
+        "backend": "test",
+        "model": "test-model",
+        "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1"
+      },
+      "token_estimator": {
+        "input_messages": 1000,
+        "candidate_messages": 600
+      },
+      "language": "en-US",
+      "summary_event_limit": 40
+    },
+    "fault": "after_model_receipt_and_accounting_CAS_before_transcript_replacement",
+    "expected": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "系统指令"
+        },
+        {
+          "role": "user",
+          "content": "<Original User Request>\n排查登录失败\n\n继续验证\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"修改完成；继续验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"},{\"action\":\"read\",\"path\":\"logs/output.txt\",\"summary\":\"Read logs/output.txt\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\",\"继续验证\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+          "name": "memory_summary",
+          "metadata": {
+            "_vv_agent_compaction": {
+              "artifacts": [
+                {
+                  "tool_call_id": "c1",
+                  "tool_name": "read_file",
+                  "arguments": "{\"path\":\"auth.py\"}",
+                  "artifact_ref": {
+                    "path": ".vv-agent/artifacts/run/c1-H.txt",
+                    "media_type": "text/plain",
+                    "encoding": "utf-8",
+                    "size_bytes": 26,
+                    "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                  }
+                }
+              ],
+              "cursors": [
+                {
+                  "tool_call_id": "c2",
+                  "tool_name": "read_file",
+                  "arguments": "{\"path\":\"logs/output.txt\"}",
+                  "cursor": {
+                    "kind": "read_file",
+                    "path": "logs/output.txt",
+                    "offset_chars": 20,
+                    "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "c4",
+              "type": "function",
+              "function": {
+                "name": "run_tests",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "12 passed",
+          "tool_call_id": "c4"
+        }
+      ],
+      "model_calls": [
+        {
+          "call_id": "op_model_cycle_5_memory_compaction_1:attempt:1",
+          "operation_id": "op_model_cycle_5_memory_compaction_1",
+          "attempt": 1,
+          "operation": "memory_compaction",
+          "cycle_index": 5,
+          "backend": "test",
+          "model": "test-model",
+          "status": "completed",
+          "usage": {
+            "schema_version": "vv-agent.token-usage.v1",
+            "input_tokens": 1000,
+            "output_tokens": 120,
+            "total_tokens": 1120,
+            "reasoning_tokens": null,
+            "usage_source": "provider_reported",
+            "cache_usage": {
+              "status": "provider_reported",
+              "read_input_tokens": 640,
+              "write_input_tokens": null,
+              "uncached_input_tokens": 360,
+              "source": "provider_usage"
+            },
+            "provider_usage": {
+              "prompt_tokens": 1000,
+              "completion_tokens": 120,
+              "total_tokens": 1120,
+              "prompt_tokens_details": {
+                "cached_tokens": 640
+              }
+            }
+          },
+          "error_code": null
+        }
+      ],
+      "new_model_dispatches": 0,
+      "new_model_call_records": 0,
+      "new_budget_total_tokens": 0,
+      "repeated_tool_effects": 0,
+      "automatic_file_reads": 0,
+      "operation_id": "op_model_cycle_5_memory_compaction_1",
+      "attempt": 1,
+      "request_digest": "c5986827c38f8208e8d3f030e64fbd9f2f01d6b284a34ba464fbc8251dad7c1a"
+    },
+    "exchange_directions": [
+      "python_to_rust",
+      "rust_to_python"
+    ],
+    "second_replay": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "系统指令"
+        },
+        {
+          "role": "user",
+          "content": "<Original User Request>\n排查登录失败\n\n继续验证\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"修改完成；继续验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"},{\"action\":\"read\",\"path\":\"logs/output.txt\",\"summary\":\"Read logs/output.txt\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\",\"继续验证\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+          "name": "memory_summary",
+          "metadata": {
+            "_vv_agent_compaction": {
+              "artifacts": [
+                {
+                  "tool_call_id": "c1",
+                  "tool_name": "read_file",
+                  "arguments": "{\"path\":\"auth.py\"}",
+                  "artifact_ref": {
+                    "path": ".vv-agent/artifacts/run/c1-H.txt",
+                    "media_type": "text/plain",
+                    "encoding": "utf-8",
+                    "size_bytes": 26,
+                    "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                  }
+                }
+              ],
+              "cursors": [
+                {
+                  "tool_call_id": "c2",
+                  "tool_name": "read_file",
+                  "arguments": "{\"path\":\"logs/output.txt\"}",
+                  "cursor": {
+                    "kind": "read_file",
+                    "path": "logs/output.txt",
+                    "offset_chars": 20,
+                    "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "c4",
+              "type": "function",
+              "function": {
+                "name": "run_tests",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "12 passed",
+          "tool_call_id": "c4"
+        }
+      ],
+      "new_model_dispatches": 0,
+      "new_model_call_records": 0,
+      "new_budget_total_tokens": 0
+    },
+    "after_transcript_commit": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "系统指令"
+        },
+        {
+          "role": "user",
+          "content": "<Original User Request>\n排查登录失败\n\n继续验证\n</Original User Request>\n\n<Compressed Agent Memory>\n{\"current_work_state\":\"修改完成；继续验证。\",\"decisions\":[],\"errors_and_fixes\":[],\"files_examined_or_modified\":[{\"action\":\"modified\",\"path\":\"auth.py\",\"summary\":\"Modified auth.py\"},{\"action\":\"read\",\"path\":\"logs/output.txt\",\"summary\":\"Read logs/output.txt\"}],\"key_facts\":[],\"next_steps\":[],\"open_issues\":[],\"original_user_messages\":[\"排查登录失败\",\"继续验证\"],\"progress\":[],\"summary_version\":\"2.0\",\"user_constraints\":[]}\n</Compressed Agent Memory>\n\n<Persisted Artifacts>\n- {\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"artifact_path\":\".vv-agent/artifacts/run/c1-H.txt\",\"retrieval_hint\":\"use read_file on artifact_path if needed\",\"tool_call_id\":\"c1\",\"tool_name\":\"read_file\"}\n- {\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"offset_chars\":20,\"path\":\"logs/output.txt\",\"retrieval_hint\":\"use read_file on path if needed\",\"tool_call_id\":\"c2\",\"tool_name\":\"read_file\"}\n</Persisted Artifacts>",
+          "name": "memory_summary",
+          "metadata": {
+            "_vv_agent_compaction": {
+              "artifacts": [
+                {
+                  "tool_call_id": "c1",
+                  "tool_name": "read_file",
+                  "arguments": "{\"path\":\"auth.py\"}",
+                  "artifact_ref": {
+                    "path": ".vv-agent/artifacts/run/c1-H.txt",
+                    "media_type": "text/plain",
+                    "encoding": "utf-8",
+                    "size_bytes": 26,
+                    "sha256": "73c3362aef1718f1c2d34f8691f66e6b5b4b73ba4fce4cdcb2bf27c3f00fea76"
+                  }
+                }
+              ],
+              "cursors": [
+                {
+                  "tool_call_id": "c2",
+                  "tool_name": "read_file",
+                  "arguments": "{\"path\":\"logs/output.txt\"}",
+                  "cursor": {
+                    "kind": "read_file",
+                    "path": "logs/output.txt",
+                    "offset_chars": 20,
+                    "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "c4",
+              "type": "function",
+              "function": {
+                "name": "run_tests",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "12 passed",
+          "tool_call_id": "c4"
+        }
+      ],
+      "summary_calls": 0
+    },
+    "changed_request": {
+      "expected_error": "checkpoint_journal_integrity_mismatch",
+      "new_model_dispatches": 0,
+      "new_operation_ids": 0,
+      "golden": {
+        "request": {
+          "schema_version": "vv-agent.operation-request.v1",
+          "kind": "model",
+          "request": {
+            "model": {
+              "backend": "test",
+              "model_id": "test-model"
+            },
+            "messages": [
+              {
+                "role": "user",
+                "content": "You are summarizing a conversation between a user and an AI coding assistant.\nProvide your analysis in <analysis> tags first (this section will be stripped), then output a structured JSON summary.\n\n<analysis>\nThink step by step about what information is critical to preserve, especially the user's exact wording,\nthe current work state, file operations, and any errors that were resolved.\n</analysis>\n\n<Previous Summary>\n[{\"content\":\"<Original User Request>\\n排查登录失败\\n</Original User Request>\\n\\n<Compressed Agent Memory>\\n{\\\"current_work_state\\\":\\\"定位 token 单位错误；已修改，待验证。\\\",\\\"decisions\\\":[],\\\"errors_and_fixes\\\":[],\\\"files_examined_or_modified\\\":[{\\\"action\\\":\\\"modified\\\",\\\"path\\\":\\\"auth.py\\\",\\\"summary\\\":\\\"Modified auth.py\\\"}],\\\"key_facts\\\":[],\\\"next_steps\\\":[],\\\"open_issues\\\":[],\\\"original_user_messages\\\":[\\\"排查登录失败\\\"],\\\"progress\\\":[],\\\"summary_version\\\":\\\"2.0\\\",\\\"user_constraints\\\":[]}\\n</Compressed Agent Memory>\\n\\n<Persisted Artifacts>\\n- {\\\"arguments\\\":\\\"{\\\\\\\"path\\\\\\\":\\\\\\\"auth.py\\\\\\\"}\\\",\\\"artifact_path\\\":\\\".vv-agent/artifacts/run/c1-H.txt\\\",\\\"retrieval_hint\\\":\\\"use read_file on artifact_path if needed\\\",\\\"tool_call_id\\\":\\\"c1\\\",\\\"tool_name\\\":\\\"read_file\\\"}\\n- {\\\"arguments\\\":\\\"{\\\\\\\"path\\\\\\\":\\\\\\\"logs/output.txt\\\\\\\"}\\\",\\\"offset_chars\\\":20,\\\"path\\\":\\\"logs/output.txt\\\",\\\"retrieval_hint\\\":\\\"use read_file on path if needed\\\",\\\"tool_call_id\\\":\\\"c2\\\",\\\"tool_name\\\":\\\"read_file\\\"}\\n</Persisted Artifacts>\",\"name\":\"memory_summary\",\"role\":\"user\"}]\n</Previous Summary>\n\n<Conversation Prefix>\n[{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"name\":\"read_file\"},\"id\":\"c1\",\"type\":\"function\"}]},{\"content\":\"ordinary artifact result\",\"role\":\"tool\",\"tool_call_id\":\"c1\"},{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"name\":\"read_file\"},\"id\":\"c2\",\"type\":\"function\"}]},{\"content\":\"bounded source slice\\n{\\\"vv_agent_recovery\\\":{\\\"cursor\\\":{\\\"kind\\\":\\\"read_file\\\",\\\"offset_chars\\\":20,\\\"path\\\":\\\"logs/output.txt\\\",\\\"sha256\\\":\\\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\\\"},\\\"original_bytes\\\":50000,\\\"truncated\\\":true,\\\"truncation_reason\\\":\\\"read_limit\\\",\\\"visible_bytes\\\":20}}\",\"role\":\"tool\",\"tool_call_id\":\"c2\"},{\"content\":\"重新验证\",\"role\":\"user\"}]\n</Conversation Prefix>\n\nPlease compress the conversation into a structured JSON \"Task Status Summary\".\nThis summary should allow the Agent to quickly resume the task\nwhile preserving user constraints, key decisions, file operations, and critical context.\n\nRequirements:\n- Output JSON only, no Markdown.\n- Keep fields concise and searchable; use short sentences.\n- If a field has no data, use [] or \"\" as appropriate.\n- The \"original_user_messages\" field is critical. Preserve user messages verbatim or near-verbatim.\n\nJSON Schema:\n{\n  \"summary_version\": \"2.0\",\n  \"original_user_messages\": [\"...\"],\n  \"user_constraints\": [\"...\"],\n  \"decisions\": [\"...\"],\n  \"files_examined_or_modified\": [\n    {\"path\": \"...\", \"action\": \"read|created|modified|deleted\", \"summary\": \"...\"}\n  ],\n  \"errors_and_fixes\": [\n    {\"error\": \"...\", \"fix\": \"...\", \"file\": \"...\"}\n  ],\n  \"progress\": [\"Preserve up to 40 critical events\"],\n  \"key_facts\": [\"...\"],\n  \"open_issues\": [\"...\"],\n  \"current_work_state\": \"...\",\n  \"next_steps\": [\"...\"]\n}\n"
+              }
+            ],
+            "settings": {
+              "temperature": 0,
+              "top_p": 1
+            },
+            "tools": [],
+            "output_schema": null,
+            "idempotency_key": null
+          }
+        },
+        "canonical_json_base64": "eyJraW5kIjoibW9kZWwiLCJyZXF1ZXN0Ijp7ImlkZW1wb3RlbmN5X2tleSI6bnVsbCwibWVzc2FnZXMiOlt7ImNvbnRlbnQiOiJZb3UgYXJlIHN1bW1hcml6aW5nIGEgY29udmVyc2F0aW9uIGJldHdlZW4gYSB1c2VyIGFuZCBhbiBBSSBjb2RpbmcgYXNzaXN0YW50LlxuUHJvdmlkZSB5b3VyIGFuYWx5c2lzIGluIDxhbmFseXNpcz4gdGFncyBmaXJzdCAodGhpcyBzZWN0aW9uIHdpbGwgYmUgc3RyaXBwZWQpLCB0aGVuIG91dHB1dCBhIHN0cnVjdHVyZWQgSlNPTiBzdW1tYXJ5LlxuXG48YW5hbHlzaXM+XG5UaGluayBzdGVwIGJ5IHN0ZXAgYWJvdXQgd2hhdCBpbmZvcm1hdGlvbiBpcyBjcml0aWNhbCB0byBwcmVzZXJ2ZSwgZXNwZWNpYWxseSB0aGUgdXNlcidzIGV4YWN0IHdvcmRpbmcsXG50aGUgY3VycmVudCB3b3JrIHN0YXRlLCBmaWxlIG9wZXJhdGlvbnMsIGFuZCBhbnkgZXJyb3JzIHRoYXQgd2VyZSByZXNvbHZlZC5cbjwvYW5hbHlzaXM+XG5cbjxQcmV2aW91cyBTdW1tYXJ5PlxuW3tcImNvbnRlbnRcIjpcIjxPcmlnaW5hbCBVc2VyIFJlcXVlc3Q+XFxu5o6S5p+l55m75b2V5aSx6LSlXFxuPC9PcmlnaW5hbCBVc2VyIFJlcXVlc3Q+XFxuXFxuPENvbXByZXNzZWQgQWdlbnQgTWVtb3J5PlxcbntcXFwiY3VycmVudF93b3JrX3N0YXRlXFxcIjpcXFwi5a6a5L2NIHRva2VuIOWNleS9jemUmeivr++8m+W3suS/ruaUue+8jOW+hemqjOivgeOAglxcXCIsXFxcImRlY2lzaW9uc1xcXCI6W10sXFxcImVycm9yc19hbmRfZml4ZXNcXFwiOltdLFxcXCJmaWxlc19leGFtaW5lZF9vcl9tb2RpZmllZFxcXCI6W3tcXFwiYWN0aW9uXFxcIjpcXFwibW9kaWZpZWRcXFwiLFxcXCJwYXRoXFxcIjpcXFwiYXV0aC5weVxcXCIsXFxcInN1bW1hcnlcXFwiOlxcXCJNb2RpZmllZCBhdXRoLnB5XFxcIn1dLFxcXCJrZXlfZmFjdHNcXFwiOltdLFxcXCJuZXh0X3N0ZXBzXFxcIjpbXSxcXFwib3Blbl9pc3N1ZXNcXFwiOltdLFxcXCJvcmlnaW5hbF91c2VyX21lc3NhZ2VzXFxcIjpbXFxcIuaOkuafpeeZu+W9leWksei0pVxcXCJdLFxcXCJwcm9ncmVzc1xcXCI6W10sXFxcInN1bW1hcnlfdmVyc2lvblxcXCI6XFxcIjIuMFxcXCIsXFxcInVzZXJfY29uc3RyYWludHNcXFwiOltdfVxcbjwvQ29tcHJlc3NlZCBBZ2VudCBNZW1vcnk+XFxuXFxuPFBlcnNpc3RlZCBBcnRpZmFjdHM+XFxuLSB7XFxcImFyZ3VtZW50c1xcXCI6XFxcIntcXFxcXFxcInBhdGhcXFxcXFxcIjpcXFxcXFxcImF1dGgucHlcXFxcXFxcIn1cXFwiLFxcXCJhcnRpZmFjdF9wYXRoXFxcIjpcXFwiLnZ2LWFnZW50L2FydGlmYWN0cy9ydW4vYzEtSC50eHRcXFwiLFxcXCJyZXRyaWV2YWxfaGludFxcXCI6XFxcInVzZSByZWFkX2ZpbGUgb24gYXJ0aWZhY3RfcGF0aCBpZiBuZWVkZWRcXFwiLFxcXCJ0b29sX2NhbGxfaWRcXFwiOlxcXCJjMVxcXCIsXFxcInRvb2xfbmFtZVxcXCI6XFxcInJlYWRfZmlsZVxcXCJ9XFxuLSB7XFxcImFyZ3VtZW50c1xcXCI6XFxcIntcXFxcXFxcInBhdGhcXFxcXFxcIjpcXFxcXFxcImxvZ3Mvb3V0cHV0LnR4dFxcXFxcXFwifVxcXCIsXFxcIm9mZnNldF9jaGFyc1xcXCI6MjAsXFxcInBhdGhcXFwiOlxcXCJsb2dzL291dHB1dC50eHRcXFwiLFxcXCJyZXRyaWV2YWxfaGludFxcXCI6XFxcInVzZSByZWFkX2ZpbGUgb24gcGF0aCBpZiBuZWVkZWRcXFwiLFxcXCJ0b29sX2NhbGxfaWRcXFwiOlxcXCJjMlxcXCIsXFxcInRvb2xfbmFtZVxcXCI6XFxcInJlYWRfZmlsZVxcXCJ9XFxuPC9QZXJzaXN0ZWQgQXJ0aWZhY3RzPlwiLFwibmFtZVwiOlwibWVtb3J5X3N1bW1hcnlcIixcInJvbGVcIjpcInVzZXJcIn1dXG48L1ByZXZpb3VzIFN1bW1hcnk+XG5cbjxDb252ZXJzYXRpb24gUHJlZml4PlxuW3tcImNvbnRlbnRcIjpcIlwiLFwicm9sZVwiOlwiYXNzaXN0YW50XCIsXCJ0b29sX2NhbGxzXCI6W3tcImZ1bmN0aW9uXCI6e1wiYXJndW1lbnRzXCI6XCJ7XFxcInBhdGhcXFwiOlxcXCJhdXRoLnB5XFxcIn1cIixcIm5hbWVcIjpcInJlYWRfZmlsZVwifSxcImlkXCI6XCJjMVwiLFwidHlwZVwiOlwiZnVuY3Rpb25cIn1dfSx7XCJjb250ZW50XCI6XCJvcmRpbmFyeSBhcnRpZmFjdCByZXN1bHRcIixcInJvbGVcIjpcInRvb2xcIixcInRvb2xfY2FsbF9pZFwiOlwiYzFcIn0se1wiY29udGVudFwiOlwiXCIsXCJyb2xlXCI6XCJhc3Npc3RhbnRcIixcInRvb2xfY2FsbHNcIjpbe1wiZnVuY3Rpb25cIjp7XCJhcmd1bWVudHNcIjpcIntcXFwicGF0aFxcXCI6XFxcImxvZ3Mvb3V0cHV0LnR4dFxcXCJ9XCIsXCJuYW1lXCI6XCJyZWFkX2ZpbGVcIn0sXCJpZFwiOlwiYzJcIixcInR5cGVcIjpcImZ1bmN0aW9uXCJ9XX0se1wiY29udGVudFwiOlwiYm91bmRlZCBzb3VyY2Ugc2xpY2VcXG57XFxcInZ2X2FnZW50X3JlY292ZXJ5XFxcIjp7XFxcImN1cnNvclxcXCI6e1xcXCJraW5kXFxcIjpcXFwicmVhZF9maWxlXFxcIixcXFwib2Zmc2V0X2NoYXJzXFxcIjoyMCxcXFwicGF0aFxcXCI6XFxcImxvZ3Mvb3V0cHV0LnR4dFxcXCIsXFxcInNoYTI1NlxcXCI6XFxcImFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlcXFwifSxcXFwib3JpZ2luYWxfYnl0ZXNcXFwiOjUwMDAwLFxcXCJ0cnVuY2F0ZWRcXFwiOnRydWUsXFxcInRydW5jYXRpb25fcmVhc29uXFxcIjpcXFwicmVhZF9saW1pdFxcXCIsXFxcInZpc2libGVfYnl0ZXNcXFwiOjIwfX1cIixcInJvbGVcIjpcInRvb2xcIixcInRvb2xfY2FsbF9pZFwiOlwiYzJcIn0se1wiY29udGVudFwiOlwi6YeN5paw6aqM6K+BXCIsXCJyb2xlXCI6XCJ1c2VyXCJ9XVxuPC9Db252ZXJzYXRpb24gUHJlZml4PlxuXG5QbGVhc2UgY29tcHJlc3MgdGhlIGNvbnZlcnNhdGlvbiBpbnRvIGEgc3RydWN0dXJlZCBKU09OIFwiVGFzayBTdGF0dXMgU3VtbWFyeVwiLlxuVGhpcyBzdW1tYXJ5IHNob3VsZCBhbGxvdyB0aGUgQWdlbnQgdG8gcXVpY2tseSByZXN1bWUgdGhlIHRhc2tcbndoaWxlIHByZXNlcnZpbmcgdXNlciBjb25zdHJhaW50cywga2V5IGRlY2lzaW9ucywgZmlsZSBvcGVyYXRpb25zLCBhbmQgY3JpdGljYWwgY29udGV4dC5cblxuUmVxdWlyZW1lbnRzOlxuLSBPdXRwdXQgSlNPTiBvbmx5LCBubyBNYXJrZG93bi5cbi0gS2VlcCBmaWVsZHMgY29uY2lzZSBhbmQgc2VhcmNoYWJsZTsgdXNlIHNob3J0IHNlbnRlbmNlcy5cbi0gSWYgYSBmaWVsZCBoYXMgbm8gZGF0YSwgdXNlIFtdIG9yIFwiXCIgYXMgYXBwcm9wcmlhdGUuXG4tIFRoZSBcIm9yaWdpbmFsX3VzZXJfbWVzc2FnZXNcIiBmaWVsZCBpcyBjcml0aWNhbC4gUHJlc2VydmUgdXNlciBtZXNzYWdlcyB2ZXJiYXRpbSBvciBuZWFyLXZlcmJhdGltLlxuXG5KU09OIFNjaGVtYTpcbntcbiAgXCJzdW1tYXJ5X3ZlcnNpb25cIjogXCIyLjBcIixcbiAgXCJvcmlnaW5hbF91c2VyX21lc3NhZ2VzXCI6IFtcIi4uLlwiXSxcbiAgXCJ1c2VyX2NvbnN0cmFpbnRzXCI6IFtcIi4uLlwiXSxcbiAgXCJkZWNpc2lvbnNcIjogW1wiLi4uXCJdLFxuICBcImZpbGVzX2V4YW1pbmVkX29yX21vZGlmaWVkXCI6IFtcbiAgICB7XCJwYXRoXCI6IFwiLi4uXCIsIFwiYWN0aW9uXCI6IFwicmVhZHxjcmVhdGVkfG1vZGlmaWVkfGRlbGV0ZWRcIiwgXCJzdW1tYXJ5XCI6IFwiLi4uXCJ9XG4gIF0sXG4gIFwiZXJyb3JzX2FuZF9maXhlc1wiOiBbXG4gICAge1wiZXJyb3JcIjogXCIuLi5cIiwgXCJmaXhcIjogXCIuLi5cIiwgXCJmaWxlXCI6IFwiLi4uXCJ9XG4gIF0sXG4gIFwicHJvZ3Jlc3NcIjogW1wiUHJlc2VydmUgdXAgdG8gNDAgY3JpdGljYWwgZXZlbnRzXCJdLFxuICBcImtleV9mYWN0c1wiOiBbXCIuLi5cIl0sXG4gIFwib3Blbl9pc3N1ZXNcIjogW1wiLi4uXCJdLFxuICBcImN1cnJlbnRfd29ya19zdGF0ZVwiOiBcIi4uLlwiLFxuICBcIm5leHRfc3RlcHNcIjogW1wiLi4uXCJdXG59XG4iLCJyb2xlIjoidXNlciJ9XSwibW9kZWwiOnsiYmFja2VuZCI6InRlc3QiLCJtb2RlbF9pZCI6InRlc3QtbW9kZWwifSwib3V0cHV0X3NjaGVtYSI6bnVsbCwic2V0dGluZ3MiOnsidGVtcGVyYXR1cmUiOjAsInRvcF9wIjoxfSwidG9vbHMiOltdfSwic2NoZW1hX3ZlcnNpb24iOiJ2di1hZ2VudC5vcGVyYXRpb24tcmVxdWVzdC52MSJ9",
+        "canonical_json_utf8_bytes": 4101,
+        "sha256": "9f1ab43a128f014abfe1dc72d414a56f5a518939260c3fbe7141e82fca02e237"
+      }
+    },
+    "summary_request_golden": {
+      "request": {
+        "schema_version": "vv-agent.operation-request.v1",
+        "kind": "model",
+        "request": {
+          "model": {
+            "backend": "test",
+            "model_id": "test-model"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "You are summarizing a conversation between a user and an AI coding assistant.\nProvide your analysis in <analysis> tags first (this section will be stripped), then output a structured JSON summary.\n\n<analysis>\nThink step by step about what information is critical to preserve, especially the user's exact wording,\nthe current work state, file operations, and any errors that were resolved.\n</analysis>\n\n<Previous Summary>\n[{\"content\":\"<Original User Request>\\n排查登录失败\\n</Original User Request>\\n\\n<Compressed Agent Memory>\\n{\\\"current_work_state\\\":\\\"定位 token 单位错误；已修改，待验证。\\\",\\\"decisions\\\":[],\\\"errors_and_fixes\\\":[],\\\"files_examined_or_modified\\\":[{\\\"action\\\":\\\"modified\\\",\\\"path\\\":\\\"auth.py\\\",\\\"summary\\\":\\\"Modified auth.py\\\"}],\\\"key_facts\\\":[],\\\"next_steps\\\":[],\\\"open_issues\\\":[],\\\"original_user_messages\\\":[\\\"排查登录失败\\\"],\\\"progress\\\":[],\\\"summary_version\\\":\\\"2.0\\\",\\\"user_constraints\\\":[]}\\n</Compressed Agent Memory>\\n\\n<Persisted Artifacts>\\n- {\\\"arguments\\\":\\\"{\\\\\\\"path\\\\\\\":\\\\\\\"auth.py\\\\\\\"}\\\",\\\"artifact_path\\\":\\\".vv-agent/artifacts/run/c1-H.txt\\\",\\\"retrieval_hint\\\":\\\"use read_file on artifact_path if needed\\\",\\\"tool_call_id\\\":\\\"c1\\\",\\\"tool_name\\\":\\\"read_file\\\"}\\n- {\\\"arguments\\\":\\\"{\\\\\\\"path\\\\\\\":\\\\\\\"logs/output.txt\\\\\\\"}\\\",\\\"offset_chars\\\":20,\\\"path\\\":\\\"logs/output.txt\\\",\\\"retrieval_hint\\\":\\\"use read_file on path if needed\\\",\\\"tool_call_id\\\":\\\"c2\\\",\\\"tool_name\\\":\\\"read_file\\\"}\\n</Persisted Artifacts>\",\"name\":\"memory_summary\",\"role\":\"user\"}]\n</Previous Summary>\n\n<Conversation Prefix>\n[{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"auth.py\\\"}\",\"name\":\"read_file\"},\"id\":\"c1\",\"type\":\"function\"}]},{\"content\":\"ordinary artifact result\",\"role\":\"tool\",\"tool_call_id\":\"c1\"},{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"logs/output.txt\\\"}\",\"name\":\"read_file\"},\"id\":\"c2\",\"type\":\"function\"}]},{\"content\":\"bounded source slice\\n{\\\"vv_agent_recovery\\\":{\\\"cursor\\\":{\\\"kind\\\":\\\"read_file\\\",\\\"offset_chars\\\":20,\\\"path\\\":\\\"logs/output.txt\\\",\\\"sha256\\\":\\\"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\\\"},\\\"original_bytes\\\":50000,\\\"truncated\\\":true,\\\"truncation_reason\\\":\\\"read_limit\\\",\\\"visible_bytes\\\":20}}\",\"role\":\"tool\",\"tool_call_id\":\"c2\"},{\"content\":\"继续验证\",\"role\":\"user\"}]\n</Conversation Prefix>\n\nPlease compress the conversation into a structured JSON \"Task Status Summary\".\nThis summary should allow the Agent to quickly resume the task\nwhile preserving user constraints, key decisions, file operations, and critical context.\n\nRequirements:\n- Output JSON only, no Markdown.\n- Keep fields concise and searchable; use short sentences.\n- If a field has no data, use [] or \"\" as appropriate.\n- The \"original_user_messages\" field is critical. Preserve user messages verbatim or near-verbatim.\n\nJSON Schema:\n{\n  \"summary_version\": \"2.0\",\n  \"original_user_messages\": [\"...\"],\n  \"user_constraints\": [\"...\"],\n  \"decisions\": [\"...\"],\n  \"files_examined_or_modified\": [\n    {\"path\": \"...\", \"action\": \"read|created|modified|deleted\", \"summary\": \"...\"}\n  ],\n  \"errors_and_fixes\": [\n    {\"error\": \"...\", \"fix\": \"...\", \"file\": \"...\"}\n  ],\n  \"progress\": [\"Preserve up to 40 critical events\"],\n  \"key_facts\": [\"...\"],\n  \"open_issues\": [\"...\"],\n  \"current_work_state\": \"...\",\n  \"next_steps\": [\"...\"]\n}\n"
+            }
+          ],
+          "settings": {
+            "temperature": 0,
+            "top_p": 1
+          },
+          "tools": [],
+          "output_schema": null,
+          "idempotency_key": null
+        }
+      },
+      "canonical_json_base64": "eyJraW5kIjoibW9kZWwiLCJyZXF1ZXN0Ijp7ImlkZW1wb3RlbmN5X2tleSI6bnVsbCwibWVzc2FnZXMiOlt7ImNvbnRlbnQiOiJZb3UgYXJlIHN1bW1hcml6aW5nIGEgY29udmVyc2F0aW9uIGJldHdlZW4gYSB1c2VyIGFuZCBhbiBBSSBjb2RpbmcgYXNzaXN0YW50LlxuUHJvdmlkZSB5b3VyIGFuYWx5c2lzIGluIDxhbmFseXNpcz4gdGFncyBmaXJzdCAodGhpcyBzZWN0aW9uIHdpbGwgYmUgc3RyaXBwZWQpLCB0aGVuIG91dHB1dCBhIHN0cnVjdHVyZWQgSlNPTiBzdW1tYXJ5LlxuXG48YW5hbHlzaXM+XG5UaGluayBzdGVwIGJ5IHN0ZXAgYWJvdXQgd2hhdCBpbmZvcm1hdGlvbiBpcyBjcml0aWNhbCB0byBwcmVzZXJ2ZSwgZXNwZWNpYWxseSB0aGUgdXNlcidzIGV4YWN0IHdvcmRpbmcsXG50aGUgY3VycmVudCB3b3JrIHN0YXRlLCBmaWxlIG9wZXJhdGlvbnMsIGFuZCBhbnkgZXJyb3JzIHRoYXQgd2VyZSByZXNvbHZlZC5cbjwvYW5hbHlzaXM+XG5cbjxQcmV2aW91cyBTdW1tYXJ5PlxuW3tcImNvbnRlbnRcIjpcIjxPcmlnaW5hbCBVc2VyIFJlcXVlc3Q+XFxu5o6S5p+l55m75b2V5aSx6LSlXFxuPC9PcmlnaW5hbCBVc2VyIFJlcXVlc3Q+XFxuXFxuPENvbXByZXNzZWQgQWdlbnQgTWVtb3J5PlxcbntcXFwiY3VycmVudF93b3JrX3N0YXRlXFxcIjpcXFwi5a6a5L2NIHRva2VuIOWNleS9jemUmeivr++8m+W3suS/ruaUue+8jOW+hemqjOivgeOAglxcXCIsXFxcImRlY2lzaW9uc1xcXCI6W10sXFxcImVycm9yc19hbmRfZml4ZXNcXFwiOltdLFxcXCJmaWxlc19leGFtaW5lZF9vcl9tb2RpZmllZFxcXCI6W3tcXFwiYWN0aW9uXFxcIjpcXFwibW9kaWZpZWRcXFwiLFxcXCJwYXRoXFxcIjpcXFwiYXV0aC5weVxcXCIsXFxcInN1bW1hcnlcXFwiOlxcXCJNb2RpZmllZCBhdXRoLnB5XFxcIn1dLFxcXCJrZXlfZmFjdHNcXFwiOltdLFxcXCJuZXh0X3N0ZXBzXFxcIjpbXSxcXFwib3Blbl9pc3N1ZXNcXFwiOltdLFxcXCJvcmlnaW5hbF91c2VyX21lc3NhZ2VzXFxcIjpbXFxcIuaOkuafpeeZu+W9leWksei0pVxcXCJdLFxcXCJwcm9ncmVzc1xcXCI6W10sXFxcInN1bW1hcnlfdmVyc2lvblxcXCI6XFxcIjIuMFxcXCIsXFxcInVzZXJfY29uc3RyYWludHNcXFwiOltdfVxcbjwvQ29tcHJlc3NlZCBBZ2VudCBNZW1vcnk+XFxuXFxuPFBlcnNpc3RlZCBBcnRpZmFjdHM+XFxuLSB7XFxcImFyZ3VtZW50c1xcXCI6XFxcIntcXFxcXFxcInBhdGhcXFxcXFxcIjpcXFxcXFxcImF1dGgucHlcXFxcXFxcIn1cXFwiLFxcXCJhcnRpZmFjdF9wYXRoXFxcIjpcXFwiLnZ2LWFnZW50L2FydGlmYWN0cy9ydW4vYzEtSC50eHRcXFwiLFxcXCJyZXRyaWV2YWxfaGludFxcXCI6XFxcInVzZSByZWFkX2ZpbGUgb24gYXJ0aWZhY3RfcGF0aCBpZiBuZWVkZWRcXFwiLFxcXCJ0b29sX2NhbGxfaWRcXFwiOlxcXCJjMVxcXCIsXFxcInRvb2xfbmFtZVxcXCI6XFxcInJlYWRfZmlsZVxcXCJ9XFxuLSB7XFxcImFyZ3VtZW50c1xcXCI6XFxcIntcXFxcXFxcInBhdGhcXFxcXFxcIjpcXFxcXFxcImxvZ3Mvb3V0cHV0LnR4dFxcXFxcXFwifVxcXCIsXFxcIm9mZnNldF9jaGFyc1xcXCI6MjAsXFxcInBhdGhcXFwiOlxcXCJsb2dzL291dHB1dC50eHRcXFwiLFxcXCJyZXRyaWV2YWxfaGludFxcXCI6XFxcInVzZSByZWFkX2ZpbGUgb24gcGF0aCBpZiBuZWVkZWRcXFwiLFxcXCJ0b29sX2NhbGxfaWRcXFwiOlxcXCJjMlxcXCIsXFxcInRvb2xfbmFtZVxcXCI6XFxcInJlYWRfZmlsZVxcXCJ9XFxuPC9QZXJzaXN0ZWQgQXJ0aWZhY3RzPlwiLFwibmFtZVwiOlwibWVtb3J5X3N1bW1hcnlcIixcInJvbGVcIjpcInVzZXJcIn1dXG48L1ByZXZpb3VzIFN1bW1hcnk+XG5cbjxDb252ZXJzYXRpb24gUHJlZml4PlxuW3tcImNvbnRlbnRcIjpcIlwiLFwicm9sZVwiOlwiYXNzaXN0YW50XCIsXCJ0b29sX2NhbGxzXCI6W3tcImZ1bmN0aW9uXCI6e1wiYXJndW1lbnRzXCI6XCJ7XFxcInBhdGhcXFwiOlxcXCJhdXRoLnB5XFxcIn1cIixcIm5hbWVcIjpcInJlYWRfZmlsZVwifSxcImlkXCI6XCJjMVwiLFwidHlwZVwiOlwiZnVuY3Rpb25cIn1dfSx7XCJjb250ZW50XCI6XCJvcmRpbmFyeSBhcnRpZmFjdCByZXN1bHRcIixcInJvbGVcIjpcInRvb2xcIixcInRvb2xfY2FsbF9pZFwiOlwiYzFcIn0se1wiY29udGVudFwiOlwiXCIsXCJyb2xlXCI6XCJhc3Npc3RhbnRcIixcInRvb2xfY2FsbHNcIjpbe1wiZnVuY3Rpb25cIjp7XCJhcmd1bWVudHNcIjpcIntcXFwicGF0aFxcXCI6XFxcImxvZ3Mvb3V0cHV0LnR4dFxcXCJ9XCIsXCJuYW1lXCI6XCJyZWFkX2ZpbGVcIn0sXCJpZFwiOlwiYzJcIixcInR5cGVcIjpcImZ1bmN0aW9uXCJ9XX0se1wiY29udGVudFwiOlwiYm91bmRlZCBzb3VyY2Ugc2xpY2VcXG57XFxcInZ2X2FnZW50X3JlY292ZXJ5XFxcIjp7XFxcImN1cnNvclxcXCI6e1xcXCJraW5kXFxcIjpcXFwicmVhZF9maWxlXFxcIixcXFwib2Zmc2V0X2NoYXJzXFxcIjoyMCxcXFwicGF0aFxcXCI6XFxcImxvZ3Mvb3V0cHV0LnR4dFxcXCIsXFxcInNoYTI1NlxcXCI6XFxcImFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlcXFwifSxcXFwib3JpZ2luYWxfYnl0ZXNcXFwiOjUwMDAwLFxcXCJ0cnVuY2F0ZWRcXFwiOnRydWUsXFxcInRydW5jYXRpb25fcmVhc29uXFxcIjpcXFwicmVhZF9saW1pdFxcXCIsXFxcInZpc2libGVfYnl0ZXNcXFwiOjIwfX1cIixcInJvbGVcIjpcInRvb2xcIixcInRvb2xfY2FsbF9pZFwiOlwiYzJcIn0se1wiY29udGVudFwiOlwi57un57ut6aqM6K+BXCIsXCJyb2xlXCI6XCJ1c2VyXCJ9XVxuPC9Db252ZXJzYXRpb24gUHJlZml4PlxuXG5QbGVhc2UgY29tcHJlc3MgdGhlIGNvbnZlcnNhdGlvbiBpbnRvIGEgc3RydWN0dXJlZCBKU09OIFwiVGFzayBTdGF0dXMgU3VtbWFyeVwiLlxuVGhpcyBzdW1tYXJ5IHNob3VsZCBhbGxvdyB0aGUgQWdlbnQgdG8gcXVpY2tseSByZXN1bWUgdGhlIHRhc2tcbndoaWxlIHByZXNlcnZpbmcgdXNlciBjb25zdHJhaW50cywga2V5IGRlY2lzaW9ucywgZmlsZSBvcGVyYXRpb25zLCBhbmQgY3JpdGljYWwgY29udGV4dC5cblxuUmVxdWlyZW1lbnRzOlxuLSBPdXRwdXQgSlNPTiBvbmx5LCBubyBNYXJrZG93bi5cbi0gS2VlcCBmaWVsZHMgY29uY2lzZSBhbmQgc2VhcmNoYWJsZTsgdXNlIHNob3J0IHNlbnRlbmNlcy5cbi0gSWYgYSBmaWVsZCBoYXMgbm8gZGF0YSwgdXNlIFtdIG9yIFwiXCIgYXMgYXBwcm9wcmlhdGUuXG4tIFRoZSBcIm9yaWdpbmFsX3VzZXJfbWVzc2FnZXNcIiBmaWVsZCBpcyBjcml0aWNhbC4gUHJlc2VydmUgdXNlciBtZXNzYWdlcyB2ZXJiYXRpbSBvciBuZWFyLXZlcmJhdGltLlxuXG5KU09OIFNjaGVtYTpcbntcbiAgXCJzdW1tYXJ5X3ZlcnNpb25cIjogXCIyLjBcIixcbiAgXCJvcmlnaW5hbF91c2VyX21lc3NhZ2VzXCI6IFtcIi4uLlwiXSxcbiAgXCJ1c2VyX2NvbnN0cmFpbnRzXCI6IFtcIi4uLlwiXSxcbiAgXCJkZWNpc2lvbnNcIjogW1wiLi4uXCJdLFxuICBcImZpbGVzX2V4YW1pbmVkX29yX21vZGlmaWVkXCI6IFtcbiAgICB7XCJwYXRoXCI6IFwiLi4uXCIsIFwiYWN0aW9uXCI6IFwicmVhZHxjcmVhdGVkfG1vZGlmaWVkfGRlbGV0ZWRcIiwgXCJzdW1tYXJ5XCI6IFwiLi4uXCJ9XG4gIF0sXG4gIFwiZXJyb3JzX2FuZF9maXhlc1wiOiBbXG4gICAge1wiZXJyb3JcIjogXCIuLi5cIiwgXCJmaXhcIjogXCIuLi5cIiwgXCJmaWxlXCI6IFwiLi4uXCJ9XG4gIF0sXG4gIFwicHJvZ3Jlc3NcIjogW1wiUHJlc2VydmUgdXAgdG8gNDAgY3JpdGljYWwgZXZlbnRzXCJdLFxuICBcImtleV9mYWN0c1wiOiBbXCIuLi5cIl0sXG4gIFwib3Blbl9pc3N1ZXNcIjogW1wiLi4uXCJdLFxuICBcImN1cnJlbnRfd29ya19zdGF0ZVwiOiBcIi4uLlwiLFxuICBcIm5leHRfc3RlcHNcIjogW1wiLi4uXCJdXG59XG4iLCJyb2xlIjoidXNlciJ9XSwibW9kZWwiOnsiYmFja2VuZCI6InRlc3QiLCJtb2RlbF9pZCI6InRlc3QtbW9kZWwifSwib3V0cHV0X3NjaGVtYSI6bnVsbCwic2V0dGluZ3MiOnsidGVtcGVyYXR1cmUiOjAsInRvcF9wIjoxfSwidG9vbHMiOltdfSwic2NoZW1hX3ZlcnNpb24iOiJ2di1hZ2VudC5vcGVyYXRpb24tcmVxdWVzdC52MSJ9",
+      "canonical_json_utf8_bytes": 4101,
+      "sha256": "c5986827c38f8208e8d3f030e64fbd9f2f01d6b284a34ba464fbc8251dad7c1a"
+    }
+  }
 }

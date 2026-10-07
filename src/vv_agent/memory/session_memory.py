@@ -174,7 +174,13 @@ class SessionMemory:
                 self.config.extraction_model,
             )
         except Exception as exc:
-            if getattr(exc, "vv_agent_control_flow", False):
+            from vv_agent.checkpoint import CheckpointError
+            from vv_agent.runtime.cancellation import CancelledError
+            from vv_agent.runtime.checkpoint_resume import CheckpointReconciliationRequired
+
+            if isinstance(exc, (CancelledError, CheckpointError, CheckpointReconciliationRequired)) or getattr(
+                exc, "vv_agent_control_flow", False
+            ):
                 raise
             logger.debug("Session memory extraction callback failed", exc_info=True)
             return 0

@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+from support.compaction import assert_case, case_manager
+from support.compaction import messages as current_messages
+
 from vv_agent.memory import MemoryManager, SessionMemory, SessionMemoryConfig
 from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
 from vv_agent.memory.token_utils import count_messages_tokens, count_tokens
@@ -68,6 +72,8 @@ def test_memory_local_fixture_identity_and_fields() -> None:
         "unicode_excerpt",
         "session_extraction",
         "summary_parse",
+        "summary_compaction",
+        "evidence_manifest",
     }
     assert _CONTRACT["contract"] == "memory_local"
     assert _CONTRACT["character_unit"] == "unicode_code_point"
@@ -217,13 +223,8 @@ def test_memory_local_summary_and_excerpt_match_fixture() -> None:
         summary_callback=None,
     )
 
-    compacted, changed = manager.compact(
-        _messages_from_fixture(summary_contract["messages"]),
-        force=True,
-    )
-
-    assert changed is True
-    assert _first_json_object(compacted[1].content) == summary_contract["expected"]
+    summary = manager._build_local_summary(_messages_from_fixture(summary_contract["messages"]), [])
+    assert _first_json_object(summary) == summary_contract["expected"]
 
     excerpt_contract = _CONTRACT["unicode_excerpt"]
     unit = str(excerpt_contract["content_unit"])
@@ -297,55 +298,93 @@ def test_session_memory_public_extract_handles_escaped_and_nested_json() -> None
     ]
 
 
-def test_memory_local_recompression_originals_are_stable() -> None:
-    contract = _CONTRACT["recompression_originals"]
-    manager = MemoryManager(summary_callback=None)
+# Contract 23 producers compare complete transcripts and actual callback input.
 
-    compacted, changed = manager.compact(
-        _messages_from_fixture(contract["messages"]),
-        force=True,
+_SUMMARY = _CONTRACT["summary_compaction"]
+_SUMMARY_CASES = [case for case in _SUMMARY["cases"] if "variants" not in case]
+
+
+@pytest.mark.parametrize("case", _SUMMARY_CASES, ids=lambda case: case["name"])
+def test_history_preserving_summary_contract(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, captured = case_manager(case, monkeypatch)
+    result, changed = manager.compact(
+        current_messages(case["input"]["messages"]), force=True, cycle_index=case["input"].get("cycle_index")
     )
-    first_originals = _first_json_object(compacted[1].content)["original_user_messages"]
+    assert_case(case, result, changed, captured)
 
-    recompressed, recompressed_changed = manager.compact(
-        [*compacted, Message(role="assistant", content="continued work")],
-        force=True,
+
+@pytest.mark.parametrize("variant", _SUMMARY["accepted_normalization_cases"]["variants"], ids=lambda case: case["name"])
+def test_summary_normalization_contract(variant: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    case = _SUMMARY["accepted_normalization_cases"]
+    case = {**case, "input": {**case["input"], "summary_response": variant["summary_response"]}, "expected": variant["expected"]}
+    manager, captured = case_manager(case, monkeypatch)
+    result, changed = manager.compact(current_messages(case["input"]["messages"]), force=True)
+    assert_case(case, result, changed, captured)
+
+
+_FAILURE = next(case for case in _SUMMARY["cases"] if "variants" in case)
+
+
+@pytest.mark.parametrize(
+    "variant", [v for v in _FAILURE["variants"] if "summary_input_fits" not in v], ids=lambda case: case["name"]
+)
+def test_failed_or_empty_summary_preserves_prefix(variant: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    case = {
+        **_FAILURE,
+        "input": {**_FAILURE["input"], **variant},
+        "expected": {**_FAILURE["expected"], "summary_calls": variant["expected_summary_calls"]},
+    }
+    manager, captured = case_manager(case, monkeypatch)
+    if variant.get("candidate_fits") is False:
+        manager.model_context_window = 1
+        manager.reserved_output_tokens = 0
+    result, changed = manager.compact(current_messages(case["input"]["messages"]), force=True)
+    assert_case(case, result, changed, captured)
+
+
+@pytest.mark.parametrize("case", _SUMMARY["invalid_block_cases"], ids=lambda case: case["name"])
+def test_invalid_atomic_blocks_preserve_history(case: dict[str, Any]) -> None:
+    captured = []
+    manager = MemoryManager(
+        keep_recent_messages=1, summary_callback=lambda *args: captured.append(args) or '{"progress":["done"]}'
     )
-    second_originals = _first_json_object(recompressed[1].content)["original_user_messages"]
+    original = current_messages(case["messages"])
+    result, changed = manager.compact(original, force=True)
+    assert [m.to_dict() for m in result] == case["expected"]["messages"]
+    assert changed is False
+    assert captured == []
 
-    assert changed is True
-    assert recompressed_changed is True
-    assert first_originals == contract["expected"]
-    assert second_originals == contract["expected"]
+
+@pytest.mark.parametrize("language", ["zh-CN", "en-US"])
+def test_localized_complete_prefix_prompt_bytes(language: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    case = _SUMMARY_CASES[0]
+    prompt_case = _SUMMARY["prompt_cases"][0]
+    manager, captured = case_manager(case, monkeypatch, language=language, summary_event_limit=prompt_case["event_limit"])
+    manager.compact(current_messages(case["input"]["messages"]), force=True)
+    assert captured == [prompt_case["expected_prompts"][language]]
 
 
-def test_memory_summary_parse_and_prefixed_callback_restore_match_contract(tmp_path: Path) -> None:
-    parse_contract = _CONTRACT["summary_parse"]
+@pytest.mark.parametrize("case", _CONTRACT["microcompact"]["transcript_cases"], ids=lambda case: case["name"])
+def test_relative_transcript_microcompact_contract(case: dict[str, Any]) -> None:
+    inputs = case["input"]
+    manager = MemoryManager(
+        compact_threshold=1667,
+        reserved_output_tokens=0,
+        autocompact_buffer_tokens=0,
+        keep_recent_messages=inputs.get("keep_recent_messages", 2),
+        recovery_tool_available=True,
+        microcompaction_policy=MicrocompactionPolicy.from_dict(inputs["policy"]),
+    )
+    original = current_messages(inputs["messages"])
+    plan = manager.plan_microcompaction(original, cycle_index=inputs["cycle_index"], current_tokens=inputs["current_tokens"])
+    assert plan is not None
+    assert [candidate.message_index for candidate in plan.candidates] == case["expected"]["candidate_message_indices"]
+    assert [m.to_dict() for m in original] == case["expected"].get("messages_before_application", inputs["messages"])
+
+
+def test_standalone_summary_helpers_match_current_contract() -> None:
     manager = MemoryManager()
-
-    assert manager._parse_summary_payload(str(parse_contract["raw"])) == parse_contract["expected"]
-
-    restored_file = tmp_path / "restore.py"
-    restored_file.write_text("RESTORED_FROM_PREFIX = True\n", encoding="utf-8")
-
-    def summary_callback(_prompt: str, _backend: str | None, _model: str | None) -> str:
-        return (
-            "prefix text\n"
-            '{"summary_version":"2.0","files_examined_or_modified":'
-            '[{"path":"restore.py","action":"modified","summary":"updated"}]} trailing'
-        )
-
-    restore_manager = MemoryManager(workspace=tmp_path, summary_callback=summary_callback)
-    compacted, changed = restore_manager.compact(
-        [
-            Message(role="system", content="system"),
-            Message(role="user", content="update restore.py"),
-            Message(role="assistant", content="updated"),
-        ],
-        force=True,
-    )
-
-    assert changed is True
-    assert "prefix text" in compacted[1].content
-    assert "<Post-Compaction File Context>" in compacted[1].content
-    assert "RESTORED_FROM_PREFIX = True" in compacted[1].content
+    parse = _CONTRACT["summary_parse"]
+    assert manager._parse_summary_payload(parse["raw"]) == parse["expected"]
+    originals = _CONTRACT["recompression_originals"]
+    assert manager._collect_original_user_messages(current_messages(originals["messages"])) == originals["expected"]
