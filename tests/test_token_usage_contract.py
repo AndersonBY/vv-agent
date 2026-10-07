@@ -147,7 +147,10 @@ def test_compaction_accounting_real_producer(case: dict[str, Any], monkeypatch: 
         transcript = transcript[int(key)] if isinstance(transcript, list) else transcript[key]
     ctx = model_call_context()
     ctx.model_call_ledger.replace([ModelCallRecord.from_dict(record) for record in inputs["existing_model_calls"]])
+    coordinator = ctx.model_call_coordinator
+    assert coordinator is not None
     before = ctx.model_call_ledger.usage().total_tokens
+    assert before is not None
     dispatched = []
     allocations = iter(inputs["allocated_operations"])
     responses = iter(inputs["provider_responses"])
@@ -160,7 +163,7 @@ def test_compaction_accounting_real_producer(case: dict[str, Any], monkeypatch: 
             raw = next(responses)
             return LLMResponse(content=raw["content"], raw={"usage": raw["usage"]})
 
-        result = ctx.model_call_coordinator.dispatch(
+        result = coordinator.dispatch(
             operation=ModelCallOperation.MEMORY_COMPACTION,
             cycle_index=allocation["cycle_index"],
             operation_slot=allocation["operation_id"].removeprefix(f"op_model_cycle_{allocation['cycle_index']}_"),
@@ -186,4 +189,6 @@ def test_compaction_accounting_real_producer(case: dict[str, Any], monkeypatch: 
     assert [record.to_dict() for record in ctx.model_call_ledger.records()] == expected["model_calls"]
     assert len(dispatched) == expected["new_model_dispatches"]
     assert len(ctx.model_call_ledger.records()) - len(inputs["existing_model_calls"]) == expected["new_model_call_records"]
-    assert ctx.model_call_ledger.usage().total_tokens - before == expected["new_budget_total_tokens"]
+    after = ctx.model_call_ledger.usage().total_tokens
+    assert after is not None
+    assert after - before == expected["new_budget_total_tokens"]

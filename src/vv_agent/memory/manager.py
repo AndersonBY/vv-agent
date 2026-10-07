@@ -5,7 +5,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from vv_agent.checkpoint import CheckpointError, canonical_json_bytes
 from vv_agent.memory.message_sanitizer import filter_empty_assistant_messages
@@ -513,16 +513,18 @@ class MemoryManager:
             for item in records if isinstance(records, list) else []:
                 if not isinstance(item, dict):
                     continue
+                record = cast(dict[str, object], item)
                 if key == "files_examined_or_modified":
+                    path = record.get("path")
                     if (
-                        not isinstance(item.get("path"), str)
-                        or not item["path"].strip()
-                        or item.get("action") not in ("read", "created", "modified", "deleted")
+                        not isinstance(path, str)
+                        or not path.strip()
+                        or record.get("action") not in ("read", "created", "modified", "deleted")
                     ):
                         continue
-                elif not isinstance(item.get("error"), str):
+                elif not isinstance(record.get("error"), str):
                     continue
-                normalized[key].append({field: item[field] if isinstance(item.get(field), str) else "" for field in fields})
+                normalized[key].append({field: value if isinstance(value := record.get(field), str) else "" for field in fields})
         return normalized
 
     @staticmethod
@@ -548,6 +550,7 @@ class MemoryManager:
                 calls = {call["id"]: call["function"] for call in message.tool_calls or []}
             if message.role != "tool":
                 continue
+            assert message.tool_call_id is not None  # Validated by _summary_parts.
             function = calls[message.tool_call_id]
             arguments = json.loads(function["arguments"])
             common = {

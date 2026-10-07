@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import EllipsisType
 from typing import Any
 
 import pytest
 
 from vv_agent.memory import MemoryManager
+from vv_agent.memory.manager import SummaryCallback
 from vv_agent.types import Message
 from vv_agent.workspace import MemoryWorkspaceBackend
 
@@ -27,7 +29,14 @@ def section(prompt: str, name: str) -> Any:
     return json.loads(prompt.split(f"<{name}>\n", 1)[1].split(f"\n</{name}>", 1)[0])
 
 
-def case_manager(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> tuple[MemoryManager, list[str]]:
+def case_manager(
+    case: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    language: str = "zh-CN",
+    summary_event_limit: int = 40,
+    summary_callback: SummaryCallback | None | EllipsisType = ...,
+) -> tuple[MemoryManager, list[str]]:
     inputs = case["input"]
     captured: list[str] = []
 
@@ -48,14 +57,16 @@ def case_manager(case: dict[str, Any], monkeypatch: pytest.MonkeyPatch, **overri
         def stat(self, path: str) -> Any:
             raise AssertionError(f"automatic stat: {path}")
 
-    config = dict(
+    manager = MemoryManager(
+        language=language,
+        summary_event_limit=summary_event_limit,
         keep_recent_messages=inputs["keep_recent_messages"],
         recovery_tool_available=inputs.get("recovery_tool_available", True),
         workspace_backend=NoFileReads(),
-        summary_callback=None if inputs.get("callback", {}).get("kind") == "absent" else summarize,
+        summary_callback=summary_callback
+        if summary_callback is not ...
+        else (None if inputs.get("callback", {}).get("kind") == "absent" else summarize),
     )
-    config.update(overrides)
-    manager = MemoryManager(**config)
     estimator = case.get("token_estimator")
     if estimator:
         original = inputs["messages"]
