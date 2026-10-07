@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from threading import Event
 from typing import TypedDict
 
 from support import require_tool_result
@@ -58,7 +59,7 @@ def test_function_tool_schema_strictness_and_exposure_are_model_visible_contract
     assert hidden.to_openai_schema()["function"]["strict"] is False
 
 
-def test_function_tool_timeout_returns_structured_retryable_error(tmp_path) -> None:
+def test_function_tool_timeout_returns_unknown_nonretryable_error(tmp_path) -> None:
     @function_tool(timeout_seconds=0.01)
     def slow() -> str:
         time.sleep(0.05)
@@ -74,7 +75,43 @@ def test_function_tool_timeout_returns_structured_retryable_error(tmp_path) -> N
     result = require_tool_result(result)
 
     assert result.error_code == "tool_timeout"
-    assert json.loads(result.content)["retryable"] is True
+    assert json.loads(result.content) == {
+        "ok": False,
+        "error": "Tool slow did not finish within 0.01 seconds and may still be running. "
+        "Its outcome and side effects are unknown; verify the current state before calling it again.",
+        "error_code": "tool_timeout",
+        "retryable": False,
+    }
+    assert result.metadata == {"output_type": "error", "retryable": False}
+
+
+def test_blocking_function_tool_side_effect_occurs_after_timeout_result(tmp_path) -> None:
+    started, release, side_effect = Event(), Event(), Event()
+
+    @function_tool(timeout_seconds=0.01)
+    def slow() -> str:
+        started.set()
+        if release.wait(0.5):
+            side_effect.set()
+        return "late"
+
+    context = ToolContext(workspace=tmp_path, shared_state={}, cycle_index=0, workspace_backend=MemoryWorkspaceBackend())
+    try:
+        result = require_tool_result(slow.to_executor().execute(ToolCall(id="slow-call", name="slow", arguments={}), context))
+        assert started.is_set()
+        assert not side_effect.is_set()
+    finally:
+        release.set()
+    assert side_effect.wait(0.5)
+    assert result.error_code == "tool_timeout"
+    assert json.loads(result.content) == {
+        "ok": False,
+        "error": "Tool slow did not finish within 0.01 seconds and may still be running. "
+        "Its outcome and side effects are unknown; verify the current state before calling it again.",
+        "error_code": "tool_timeout",
+        "retryable": False,
+    }
+    assert result.metadata == {"output_type": "error", "retryable": False}
 
 
 def test_manual_function_tool_normalizes_formatted_and_default_failures(tmp_path) -> None:

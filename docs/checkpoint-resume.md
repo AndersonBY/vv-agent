@@ -151,6 +151,14 @@ and `ambiguous`.
   model without claiming a definitive external failure.
 - Unknown or unsupported tool idempotency never causes a silent retry.
 
+A tool timeout returns `tool_timeout` with `retryable=false` in both content
+and metadata. Its message warns that work may still be running and requires
+checking the current state before another call. The result does not set
+`definitive_outcome=true`: after `tool_started`, the checkpoint journal remains
+ambiguous without a failed receipt. `tool_outcome_unknown` remains reserved for
+the journal's `surface_to_model` projection. A waiting runtime returning does
+not prove that a timed-out thread or process stopped its side effects.
+
 The typed `tool_call_planned`, `tool_call_started`, and `tool_call_completed`
 events are execution observations, not this durable journal. A policy or
 approval short-circuit can have planned plus completed telemetry without a

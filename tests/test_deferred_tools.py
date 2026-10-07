@@ -5,7 +5,7 @@ import os
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
-from threading import Barrier, Thread
+from threading import Barrier, Event, Thread
 from typing import Any
 from uuid import uuid4
 
@@ -526,6 +526,65 @@ def test_checkpointed_tool_failures_use_definitive_or_ambiguous_lifecycles(
             assert any(event.type == "reconciliation_required" for event in result.events)
     if has_handle:
         assert checkpoint.tool_journal[1].error is not None and not checkpoint.tool_journal[1].error.retryable
+
+
+def test_checkpointed_function_tool_timeout_remains_ambiguous_without_failed_receipt() -> None:
+    store = InMemoryCheckpointStore()
+    release, started, finished = Event(), Event(), Event()
+    observed: list[ToolExecutionResult] = []
+
+    class CaptureResult:
+        def after_tool_call(self, event):
+            observed.append(event.result)
+
+    @function_tool(timeout_seconds=0.01)
+    def slow() -> str:
+        checkpoint = store.load_checkpoint("timeout-after-started")
+        assert checkpoint is not None
+        assert checkpoint.tool_journal[0].state.value == "started"
+        started.set()
+        release.wait(0.5)
+        finished.set()
+        return "late"
+
+    try:
+        result = Runner.run_sync(
+            Agent(name="timeout-agent", instructions="Run slow.", model="test-model", tools=[slow]),
+            "run",
+            run_config=RunConfig(
+                model_provider=_provider(
+                    lambda: ScriptedLLM(
+                        steps=[LLMResponse(content="", tool_calls=[ToolCall(id="slow-call", name="slow", arguments={})])]
+                    )
+                ),
+                hooks=[CaptureResult()],
+                max_cycles=1,
+                no_tool_policy="finish",
+                checkpoint_config=CheckpointConfig(
+                    key="timeout-after-started",
+                    store=store,
+                    capability_refs={"runtime_hook:0": {"id": "capture-timeout", "version": "1"}},
+                ),
+            ),
+        )
+        checkpoint = store.load_checkpoint("timeout-after-started")
+        assert started.is_set()
+        assert result.status is AgentStatus.RECONCILIATION_REQUIRED
+        assert checkpoint is not None
+        assert len(checkpoint.tool_journal) == 1
+        entry = checkpoint.tool_journal[0]
+        assert entry.state.value == "ambiguous"
+        assert entry.result is None and entry.error is None and entry.result_digest is None
+        assert len(observed) == 1
+        assert observed[0].error_code == "tool_timeout"
+        assert json.loads(observed[0].content)["retryable"] is False
+        assert observed[0].metadata == {"output_type": "error", "retryable": False}
+        assert any(event.type == "tool_call_started" for event in result.events)
+        assert not any(event.type == "tool_call_completed" for event in result.events)
+    finally:
+        release.set()
+        if started.is_set():
+            assert finished.wait(0.5)
 
 
 def test_ambiguous_error_marker_is_strict_and_store_admission_is_fail_closed() -> None:
