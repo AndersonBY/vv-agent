@@ -16,7 +16,7 @@ from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.tools import ToolContext, build_default_registry
 from vv_agent.tools.function import FunctionTool
 from vv_agent.tools.orchestrator import ToolOrchestrator
-from vv_agent.types import LLMResponse, SubAgentConfig, ToolCall
+from vv_agent.types import LLMResponse, SubAgentConfig, ToolCall, ToolExecutionResult
 
 ENTRYPOINTS = [
     "invoke",
@@ -238,6 +238,7 @@ def test_agent_tool_without_scope_fails_closed(tmp_path, monkeypatch):
     tool = Agent(name="child", instructions="Do work.", model="child").as_tool()
     result = tool.to_tool_execution_result(tool.invoke(None, {"task_description": "go"}))
     assert calls == []
+    assert isinstance(result, ToolExecutionResult)
     assert result.error_code == "sub_agents_not_enabled"
 
 

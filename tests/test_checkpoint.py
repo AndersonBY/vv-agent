@@ -4982,8 +4982,10 @@ def test_summary_replay_reuses_receipt_and_request_digest(
 
     def run_summary(current, original, *, fail_after_receipt=False):
         ctx = model_call_context()
-        ctx.model_call_coordinator.durable_dispatcher = current
-        current.bind_model_accounting(ctx.model_call_coordinator)
+        coordinator = ctx.model_call_coordinator
+        assert coordinator is not None
+        coordinator.durable_dispatcher = current
+        current.bind_model_accounting(coordinator)
 
         def summarize(prompt, *_args):
             request = LlmRequest(
@@ -4999,7 +5001,7 @@ def test_summary_replay_reuses_receipt_and_request_digest(
                     raw={"usage": inputs["retained_model_call"]["usage"]["provider_usage"]},
                 )
 
-            result = ctx.model_call_coordinator.dispatch(
+            result = coordinator.dispatch(
                 operation=ModelCallOperation.MEMORY_COMPACTION,
                 cycle_index=inputs["cycle_index"],
                 operation_slot="memory_compaction_1",

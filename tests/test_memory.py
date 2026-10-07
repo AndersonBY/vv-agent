@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from support.compaction import fixture, section
@@ -255,7 +255,7 @@ def test_below_threshold_return_preserves_all_tool_pairs_without_summary() -> No
 
 
 @pytest.mark.parametrize("role", ["user", "assistant"])
-def test_structural_return_never_discards_image_without_summary(role: str) -> None:
+def test_structural_return_never_discards_image_without_summary(role: Literal["user", "assistant"]) -> None:
     original = [
         Message(role="system", content="sys"),
         Message(role=role, content="", image_url="data:image/png;base64,AAAA"),
@@ -343,21 +343,21 @@ def test_summary_control_failures_propagate(variant: dict[str, Any]) -> None:
     from vv_agent.runtime.cancellation import CancelledError
 
     inputs = fixture("memory_local")["summary_compaction"]["control_failure_case"]["input"]
-    from vv_agent.budget import BudgetExhaustion
+    from vv_agent.budget import BudgetDimension, BudgetEnforcementBoundary, BudgetExhaustion, BudgetExhaustionReason
     from vv_agent.runtime.model_calls import ModelCallBudgetExhausted
 
     error = CancelledError("cancelled") if variant["name"] == "cancellation" else CheckpointError("control", code=variant["name"])
     if variant["name"] == "budget_exhaustion":
         error = ModelCallBudgetExhausted(
             BudgetExhaustion(
-                dimension="total_tokens",
-                reason="limit_exceeded",
+                dimension=BudgetDimension.TOTAL_TOKENS,
+                reason=BudgetExhaustionReason.LIMIT_EXCEEDED,
                 limit=10,
                 observed=11,
                 attempted_increment=None,
                 overshoot=1,
                 unit="tokens",
-                enforcement_boundary="model_call_complete",
+                enforcement_boundary=BudgetEnforcementBoundary.MODEL_CALL_COMPLETE,
             )
         )
 
