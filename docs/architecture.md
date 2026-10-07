@@ -270,7 +270,13 @@ definitions. `terminal=True` never causes a transition by itself; the result
 directive and completion policy remain authoritative.
 
 `Agent.as_tool()` compiles a child agent into a callable tool. The child result
-is returned as the tool output and the parent agent keeps control. `handoff()`
+is returned as the tool output and the parent agent keeps control. The tool itself
+inherits the active parent scope from `ToolContext`, including when registered
+as an executor or invoked through `ToolOrchestrator`. All agent-as-tool calls
+use the same child-run path; the Runner does not intercept tool metadata to
+start a separate child. Missing runtime/provider scope returns the existing
+`sub_agents_not_enabled` tool error before starting a run. Child cancellation
+is linked to the parent, and child checkpoint/session state remains separate. `handoff()`
 compiles to a transfer tool whose result uses a finish directive; the target
 agent output becomes the run output and a typed `HandoffEvent` is emitted.
 

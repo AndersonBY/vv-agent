@@ -542,6 +542,7 @@ class AgentRuntime:
         runtime_ctx.metadata.setdefault("_vv_agent_agent_name", str(task.metadata.get("agent_name") or task.task_id))
         runtime_ctx.metadata.setdefault("_vv_agent_input", user_message or task.user_prompt)
         runtime_ctx.metadata.setdefault("execution_backend", self.execution_backend)
+        runtime_ctx.metadata.setdefault("_vv_agent_model_provider", self.model_provider)
         effective_budget_limits = budget_limits
         if effective_budget_limits is None:
             metadata_limits = runtime_ctx.metadata.get("_vv_agent_budget_limits")

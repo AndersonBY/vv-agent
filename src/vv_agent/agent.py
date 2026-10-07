@@ -12,9 +12,10 @@ from vv_agent.model_settings import ModelSettings
 from vv_agent.output_validation import OutputRepair, OutputValidator
 from vv_agent.prompt import PromptBundle
 from vv_agent.run_config import _validate_bounded_int
+from vv_agent.tools.base import ToolContext
 from vv_agent.tools.function import FunctionTool
-from vv_agent.tools.outputs import ToolOutputText
-from vv_agent.types import NoToolPolicy, SubAgentConfig, _trim_portable_whitespace, _validate_no_tool_policy
+from vv_agent.tools.outputs import ToolOutputError
+from vv_agent.types import NoToolPolicy, SubAgentConfig, ToolExecutionResult, _trim_portable_whitespace, _validate_no_tool_policy
 
 if TYPE_CHECKING:
     from vv_agent.run_config import ToolPolicy
@@ -111,12 +112,27 @@ class Agent[TContext]:
         tool_name = name or self.name
         tool_description = description or f"Run the {self.name} agent."
 
-        def invoke(_context: Any, arguments: dict[str, Any]) -> ToolOutputText:
+        def invoke(context: ToolContext | None, arguments: dict[str, Any]) -> ToolExecutionResult | ToolOutputError:
             from vv_agent.runner import Runner
 
-            prompt = Runner._child_agent_prompt(arguments=arguments, context=_context)
-            result = Runner.run_sync(self, prompt)
-            return ToolOutputText(text=result.final_output or "")
+            parent_config = Runner._agent_tool_parent_config(context)
+            if parent_config is None:
+                Runner._child_agent_prompt(arguments=arguments, context=context)
+                return ToolOutputError(
+                    message="Sub-agent runtime is not available for this task",
+                    error_code="sub_agents_not_enabled",
+                )
+            result = Runner._run_child_agent(self, arguments=arguments, parent_config=parent_config, context=context)
+            return ToolExecutionResult(
+                tool_call_id="",
+                content=result.final_output or "",
+                metadata={
+                    "agent": self.name,
+                    "mode": "agent_as_tool",
+                    "child_status": result.status.value,
+                    "child_run_id": result.run_id,
+                },
+            )
 
         return FunctionTool(
             name=tool_name,
