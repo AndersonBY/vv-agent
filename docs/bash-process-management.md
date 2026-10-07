@@ -103,3 +103,10 @@ session state lock. A slow storage backend does not prevent the watchdog from
 enforcing the command's original execution deadline. An observation whose
 capture became unavailable during completion is reported as an output error;
 it does not reset the deadline or authorize a duplicate command.
+
+The process-management tests poll completion flags against monotonic deadlines
+without querying the manager. This keeps watchdog checks independent and tolerates
+early unsignaled returns from timed event waits; the existing deadline bounds are
+unchanged. The unread-stdin case also injects an early unsignaled wait to prevent
+regression. Procfs exit probes treat both a missing entry and ESRCH during reading
+as an exited process.

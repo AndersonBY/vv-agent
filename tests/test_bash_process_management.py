@@ -10,7 +10,7 @@ import sys
 import time
 from copy import deepcopy
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Thread, current_thread, main_thread
 from typing import Any
 
 import pytest
@@ -107,8 +107,17 @@ def wait_until(predicate, timeout: float = 3) -> None:
 def process_exited(pid: int) -> bool:
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] in {"Z", "X"}
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return True
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_process_exited_handles_disappearing_procfs_entry(monkeypatch, error):
+    def disappeared(self):
+        raise error("process disappeared during stat read")
+
+    monkeypatch.setattr(Path, "read_text", disappeared)
+    assert process_exited(123)
 
 
 def assert_running(result: ToolExecutionResult) -> str:
@@ -297,7 +306,7 @@ def test_execution_deadline_is_original_start_and_watchdog_needs_no_query(tmp_pa
     assert time.monotonic() - original_start >= 0.8
     call(ctx, "check_background_command", {"session_id": session_id})
     assert session.started_at == original_start
-    assert session.done.wait(max(0, original_start + 1.6 - time.monotonic()))
+    wait_until(session.done.is_set, timeout=max(0, original_start + 1.6 - time.monotonic()))
     terminal = call(ctx, "check_background_command", {"session_id": session_id})
     assert terminal.status_code is ToolResultStatus.ERROR
     assert terminal.metadata["status"] == "timeout"
@@ -337,15 +346,15 @@ def test_slow_live_artifact_does_not_block_execution_deadline(tmp_path, manager,
     def slow_persist(*args, **kwargs):
         if not entered.is_set():
             entered.set()
-            assert release.wait(5), "test did not release its own artifact writer"
+            wait_until(release.is_set, timeout=5)
         return persist(*args, **kwargs)
 
     monkeypatch.setattr(background_runtime, "persist_captured_text_artifact", slow_persist)
     query = Thread(target=lambda: observations.append(call(ctx, "check_background_command", {"session_id": session_id})))
     query.start()
     try:
-        assert entered.wait(2)
-        assert session.done.wait(2), "live artifact I/O blocked the process deadline"
+        wait_until(entered.is_set, timeout=2)
+        wait_until(session.done.is_set, timeout=2)
         assert session.process.poll() is not None
         assert session.status == "timeout"
     finally:
@@ -425,7 +434,8 @@ def test_missing_and_unconfirmed_observations_do_not_invent_exit_codes(tmp_path,
     assert stopped.metadata["status"] == "stopped"
 
 
-def test_unread_large_stdin_does_not_block_yield_or_deadline(tmp_path, manager):
+@pytest.mark.parametrize("early_wait", [False, True], ids=["normal", "early_unsignaled_wait"])
+def test_unread_large_stdin_does_not_block_yield_or_deadline(tmp_path, manager, monkeypatch, early_wait):
     ctx = context(tmp_path)
     command = python_command(tmp_path, "import time\ntime.sleep(10)\n")
     started = time.monotonic()
@@ -433,7 +443,17 @@ def test_unread_large_stdin_does_not_block_yield_or_deadline(tmp_path, manager):
         call(ctx, "bash", {"command": command, "stdin": "x" * 2_000_000, "yield_time_ms": 0, "timeout_seconds": 1})
     )
     assert time.monotonic() - started < 0.75
-    assert manager._sessions[session_id].done.wait(2)
+    session = manager._sessions[session_id]
+    if early_wait:
+        wait = session.done.wait
+
+        def interrupted(timeout=None):
+            return False if current_thread() is main_thread() else wait(timeout)
+
+        monkeypatch.setattr(session.done, "wait", interrupted)
+    # A timed Event.wait can return unsignaled before the monotonic deadline.
+    # Observe completion without querying the manager or resetting that deadline.
+    wait_until(session.done.is_set, timeout=2)
     assert call(ctx, "check_background_command", {"session_id": session_id}).metadata["status"] == "timeout"
 
 
@@ -501,7 +521,7 @@ while not Path('finish').exists(): time.sleep(.01)
     assert ctx.workspace_backend.read_text(first.artifact.path) == full_first
     assert ctx.workspace_backend.read_text(second.artifact.path) == full_first + "追加😀尾部\n"
     (tmp_path / "finish").touch()
-    assert manager._sessions[session_id].done.wait(2)
+    wait_until(manager._sessions[session_id].done.is_set, timeout=2)
     terminal = call(ctx, "check_background_command", {"session_id": session_id})
     repeated = call(ctx, "check_background_command", {"session_id": session_id})
     assert terminal.artifact == repeated.artifact
@@ -533,9 +553,7 @@ os._exit(0)
     assert stopped.metadata["status"] == "stopped"
     assert stopped.metadata["exit_code"] == 0
     pid = int((tmp_path / "child-ready").read_text())
-    proc_stat = Path(f"/proc/{pid}/stat")
-    if proc_stat.exists():
-        assert proc_stat.read_text().rsplit(")", 1)[1].split()[0] in {"Z", "X"}
+    assert process_exited(pid)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux detached-child and procfs evidence")
@@ -590,7 +608,7 @@ os._exit(7)
         else:
             if operation == "complete":
                 (tmp_path / "finish").touch()
-            assert manager._sessions[session_id].done.wait(2)
+            wait_until(manager._sessions[session_id].done.is_set, timeout=2)
             stopped = call(ctx, "check_background_command", {"session_id": session_id})
         assert stopped.metadata["status"] == {"stop": "stopped", "timeout": "timeout", "complete": "failed"}[operation]
         assert stopped.metadata["exit_code"] == (-15 if parent_signal else 7)
