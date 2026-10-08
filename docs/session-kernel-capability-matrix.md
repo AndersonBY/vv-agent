@@ -148,19 +148,19 @@ Each path warms up before at least 200 measured samples. p95 is the nearest-rank
 it is not a paired-difference percentile. Linux current RSS is measured after
 GC before/after each path's measured batch; it is not a peak-RSS measurement.
 All live thread objects are compared before and after the batch, not only their
-count. The process exits nonzero when any scenario exceeds 50 ms added p95 or
-leaves a new kernel thread alive. No daemon-thread timeout is counted as a
+count. The process exits nonzero when a single-turn scenario exceeds 50 ms added p95,
+the ten-turn scenario exceeds 100 ms added p95 (10 ms per turn amortized), or
+any scenario leaves a new kernel thread alive. No daemon-thread timeout is counted as a
 confirmed stop.
 
-Profiling identified Python character-by-character JCS quoting, repeated log
-payload deepcopy/encoding, and duplicate token counting. The shared path now
-uses the stdlib string encoder with strict surrogate rejection, JSON-tree
+F2b profiling identified Python character-by-character JCS quoting, repeated log
+payload deepcopy/encoding, and duplicate token counting. Its shared path used the stdlib string encoder with strict surrogate rejection, JSON-tree
 cloning for detached store reads, validated append bytes for fold/write/digest,
 a semantic record-ID commit identity, and one token count per microcompaction
 pass. It retains validation, lease/CAS checks, commit replay byte comparisons,
 cache invalidation and the same driver. No separate fast executor exists.
 
-## Validation results (2026-10-08)
+## F2b validation results (2026-10-08)
 
 The candidate remains **not ready for F3**: 24 done / 26 partial / 13 missing.
 All code/test gates below passed. The capability and short-run performance gates
@@ -205,3 +205,84 @@ All eight measured path/scenario groups reported no newly surviving threads.
 The benchmark exited 1 for the three timing failures. No-tool added p95 passed
 in this measurement; this is not a claim that arbitrary providers, long-lived
 background processes or uncooperative handlers cannot retain threads.
+
+
+## F2c performance results (2026-10-08)
+
+The short-run timing gate remains **failed**: `two_tools` and `ten_turns` exceed
+their limits. The internal/default boundary and the capability matrix above are
+unchanged. The benchmark still includes admission, all durable writes, final
+state verification, connection cleanup and thread cleanup on the shared driver.
+
+Records retain validated canonical bytes and digests. Store reads reuse only an
+exact session/sequence/byte match after checking the stored digest. Committed
+receipt records update the driver's fold directly; external tails use bounded
+reads. The SQL lease and CAS checks remain in force. The same validated prefix
+can rebind to a new lease epoch after its persisted head digest is checked.
+
+`tests/session/test_record_validation_cache.py` adds 59 cases covering retained
+bytes, mutation isolation, lease rebinding, missing/nonconsecutive tails, compiler
+versus jsonschema equivalence, and independent PG/SQLite writers with tampered
+schema, embedded digest or stored digest. The unchanged record/invalid-JSON tests
+also pass with the original jsonschema validation path (69 cases) and with the
+compiled path (the same 69 plus the 59 new cases). Existing test files are unchanged.
+
+| Gate | Result |
+| --- | --- |
+| Contract snapshot | PASS: 23.0.0, 55 fixture files, unchanged manifest |
+| Ruff format / check and ty | PASS |
+| `uv run pytest tests/session -q`, real local PG | PASS: 545 tests, 250.98 seconds |
+| Full pytest, real local Redis and PG | PASS: 2,962 passed, 20 skipped, 18 warnings; 415.75 seconds |
+| M6, 5k/20k, one sample, `--assert-capacity` | PASS, including 1k/10k catalog scans |
+| Short-run timing, 200 runs per path/scenario | FAIL: two of four scenarios |
+
+The full-suite skips retain the F2b breakdown above. All applicable Redis and PG
+variants ran. The warnings are the existing distributed multithreaded-fork
+warnings; remote-model and cross-runtime probes remain opt-in.
+
+Short runs use 10 warmups and 200 measured samples for each path/scenario.
+Values are milliseconds. F2b is the recorded measurement above; F2c is the new
+measurement in `session-kernel-overhead-f2c.json`.
+
+| Scenario | F2b added p95 | F2c Runner p50 / p95 | F2c kernel p50 / p95 | F2c added p95 | Limit | Result |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| no_tool | 47.34 | 4.08 / 4.81 | 28.31 / 30.08 | 25.27 | 50 | PASS |
+| two_tools | 112.90 | 6.22 / 6.93 | 60.69 / 66.69 | 59.76 | 50 | FAIL |
+| ten_turns | 1183.59 | 42.95 / 46.62 | 299.51 / 316.03 | 269.41 | 100 | FAIL |
+| start_cancel | 57.62 | 5.48 / 6.32 | 29.73 / 33.27 | 26.95 | 50 | PASS |
+
+Ten-turn added p95 is 26.94 ms per turn amortized, above the 10 ms limit. The
+benchmark exits 1. All eight groups finish with one live thread and no newly
+surviving threads. Kernel RSS deltas after GC are 0 / +16 / 0 / +100 KiB in table
+order; Runner deltas are 0 / 0 / -940 / +236 KiB. These are measured batch deltas,
+not peak RSS or a guarantee about uncooperative external handlers.
+
+The M6 script retains the original bounded 1 KiB receipt workload and capacity
+assertions. Both versions below run on real PostgreSQL with one sample at each
+size. The baseline selects the unchanged F2b source at `31e656e`.
+
+| Records | F2b cold drive ms | F2c cold drive ms | F2b steady append ms | F2c steady append ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 5000 | 1912.77 | 762.24 | 21.98 | 17.43 |
+| 20000 | 8344.44 | 3188.77 | 266.36 | 37.93 |
+
+F2b fails the 20k steady-append 50 ms assertion; F2c passes it. Both sizes retain
+zero extra provider calls and zero lease-loss failures. F2c full catalog scans
+at 1k/10k sessions take 22.09 / 250.72 ms, below the 1-second gate.
+
+The requested cProfile summaries are `/tmp/f2c-profile-before.txt` and
+`/tmp/f2c-profile-after.txt` (10 `two_tools` kernel runs after warmup). Total
+profiled time falls from 2.293 to 1.426 seconds. Calls below are per run:
+
+| Call | F2b | F2c |
+| --- | ---: | ---: |
+| `canonical_json_bytes` | 291 | 219 |
+| jsonschema `validate` | 253 | 0 |
+| Driver `refresh` | 23 | 10 |
+| Store `read_state` | 15 | 2 |
+| Store `read` | 38 | 12 |
+
+The compiled closed-shape checks replace the generic validator on valid records;
+invalid values still go through its diagnostics. Remaining profile costs include
+request/definition JCS encoding, tool-schema copies and context preparation.
+These measurements do not establish the required short-run acceptance target.

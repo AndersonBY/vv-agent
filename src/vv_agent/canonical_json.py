@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -12,11 +13,24 @@ from typing import Any
 MAX_WIRE_INTEGER = (1 << 53) - 1
 
 
+_ASTRAL_KEY_RE = re.compile("[\ud800-\udfff\U00010000-\U0010ffff]")
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def canonical_json_bytes(value: Any, field_name: str = "value") -> bytes:
     return _canonical_json(value, field_name).encode("utf-8")
+
+
+def _canonical_json(value: Any, field_name: str) -> str:
+    try:
+        if _stdlib_compatible(value):
+            return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return _jcs_encode(value, fast=True)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError(f"{field_name} must be RFC 8785 I-JSON: {exc}") from exc
 
 
 def canonical_json_sha256(value: Any, field_name: str = "value") -> str:
@@ -29,14 +43,30 @@ def validate_sha256(value: str, field_name: str) -> str:
     return value
 
 
-def _canonical_json(value: Any, field_name: str) -> str:
-    try:
-        return _jcs_encode(value)
-    except (TypeError, ValueError, UnicodeError) as exc:
-        raise ValueError(f"{field_name} must be RFC 8785 I-JSON: {exc}") from exc
+def _stdlib_compatible(value: Any) -> bool:
+    # BMP keys sort identically by code point and UTF-16; C string escapes match JCS.
+    kind = type(value)
+    if kind is str:
+        return value.isascii() or _SURROGATE_RE.search(value) is None
+    if value is None or kind is bool:
+        return True
+    if kind is int:
+        return -MAX_WIRE_INTEGER <= value <= MAX_WIRE_INTEGER
+    if kind is dict:
+        for key, item in value.items():
+            if type(key) is not str or (not key.isascii() and _ASTRAL_KEY_RE.search(key) is not None):
+                return False
+            if not _stdlib_compatible(item):
+                return False
+        return True
+    if kind is list or kind is tuple:
+        return all(_stdlib_compatible(item) for item in value)
+    return False
 
 
-def _jcs_encode(value: Any) -> str:
+def _jcs_encode(value: Any, *, fast: bool = False) -> str:
+    if fast and isinstance(value, dict | list | tuple) and _stdlib_compatible(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     if value is None:
         return "null"
     if value is True:
@@ -59,10 +89,10 @@ def _jcs_encode(value: Any) -> str:
                 raise TypeError("object keys must be strings")
             keys.append(key)
         for key in sorted(keys, key=utf16_sort_key):
-            items.append(f"{_jcs_quote(key)}:{_jcs_encode(value[key])}")
+            items.append(f"{_jcs_quote(key)}:{_jcs_encode(value[key], fast=fast)}")
         return "{" + ",".join(items) + "}"
     if isinstance(value, list | tuple):
-        return "[" + ",".join(_jcs_encode(item) for item in value) + "]"
+        return "[" + ",".join(_jcs_encode(item, fast=fast) for item in value) + "]"
     raise TypeError(f"unsupported JSON value type {type(value).__name__}")
 
 

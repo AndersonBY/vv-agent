@@ -22,19 +22,29 @@ class ToolRegistry:
     _schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
     _executors: dict[str, ToolExecutor] = field(default_factory=dict)
     _planner_extra_tool_names: list[str] = field(default_factory=list)
+    _revision: int = field(default=0, init=False, repr=False)
 
     def register(self, spec: ToolSpec) -> None:
         if spec.name in self._tools:
             raise ValueError(f"Tool already registered: {spec.name}")
         self._tools[spec.name] = spec
+        self._revision += 1
         if spec.name not in self._executors:
             schema = self._schemas.get(spec.name)
             self._executors[spec.name] = RegistryToolExecutor(
                 name=spec.name,
                 handler=spec.handler,
-                schema=deepcopy(schema) if schema else None,
+                schema=schema,
                 tool_metadata=spec.tool_metadata,
             )
+
+    def unregister(self, name: str) -> None:
+        self._tools.pop(name)
+        self._revision += 1
+        self._schemas.pop(name, None)
+        self._executors.pop(name)
+        if name in self._planner_extra_tool_names:
+            self._planner_extra_tool_names.remove(name)
 
     def register_many(self, specs: list[ToolSpec]) -> None:
         for spec in specs:
@@ -47,6 +57,7 @@ class ToolRegistry:
             raise ValueError(f"Tool schema must contain function.parameters: {tool_name}")
         assert_valid_tool_schema(function_schema["parameters"])
         self._schemas[tool_name] = closed_schema
+        self._revision += 1
         executor = self._executors.get(tool_name)
         if isinstance(executor, RegistryToolExecutor):
             executor.schema = deepcopy(closed_schema)
@@ -103,6 +114,7 @@ class ToolRegistry:
         if executor.name in self._executors or executor.name in self._tools:
             raise ValueError(f"Tool already registered: {executor.name}")
         self._executors[executor.name] = executor
+        self._revision += 1
         is_model_visible = executor.exposure == ToolExposure.DIRECT
         if expose_to_model and is_model_visible:
             self.register_schema(executor.name, executor.openai_schema(None))
@@ -112,6 +124,16 @@ class ToolRegistry:
 
     def has_schema(self, name: str) -> bool:
         return name in self._schemas
+
+    def planning_signature(self) -> tuple:
+        """Track schema replacement and mutable executor declarations without exporting schemas."""
+        return (
+            self._revision,
+            tuple(
+                (name, executor.exposure, executor.tool_metadata.to_dict() if executor.tool_metadata else None)
+                for name, executor in self._executors.items()
+            ),
+        )
 
     def get_schema(self, name: str) -> dict[str, Any]:
         schema = self._schemas.get(name)

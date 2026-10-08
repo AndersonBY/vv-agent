@@ -133,15 +133,17 @@ def benchmark(runs: int, warmup: int) -> dict:
                     "rss_delta_bytes": rss_bytes() - before_rss,
                 }
             added = measurements["kernel"]["p95_ms"] - measurements["runner"]["p95_ms"]
-            row = {"scenario": scenario, **measurements, "p95_added_ms": added}
+            target = 100 if scenario == "ten_turns" else 50
+            row = {"scenario": scenario, **measurements, "p95_added_ms": added, "target_ms": target}
             rows.append(row)
             print(json.dumps(row), flush=True)
     return {
         "runs": runs,
         "warmup": warmup,
-        "target_ms": 50,
+        "single_turn_target_ms": 50,
+        "per_turn_target_ms": 10,
         "rows": rows,
-        "passed": all(r["p95_added_ms"] <= 50 and not r["kernel"]["leaked_threads"] for r in rows),
+        "passed": all(r["p95_added_ms"] <= r["target_ms"] and not r["kernel"]["leaked_threads"] for r in rows),
     }
 
 

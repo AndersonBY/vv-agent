@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -22,6 +23,7 @@ from vv_agent.budget import (
     HostCostMeter,
     RunBudgetLimits,
 )
+from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.config import ResolvedModelConfig
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.llm.vv_llm_client import VvLlmClient
@@ -34,7 +36,7 @@ from vv_agent.runtime.compiler import AgentCompiler, _apply_tool_policy_metadata
 from vv_agent.runtime.context import ExecutionContext
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.runtime.token_usage import normalize_token_usage
-from vv_agent.runtime.tool_planner import plan_tool_schemas
+from vv_agent.runtime.tool_planner import plan_tool_names, plan_tool_schemas
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
 from vv_agent.tools.executor import ToolExposure, is_tool_executor
@@ -46,7 +48,7 @@ from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .children import ChildSession
 from .providers import FunctionProvider, Provider
-from .records import Record
+from .records import Record, copy_json, digest
 from .reducer import ExecutionState
 from .store import SessionStore
 
@@ -78,18 +80,29 @@ class Runtime:
 
         self.config = Runner._effective_run_config(self.agent, self.config)
         self.registry = self.config.tool_registry_factory() if self.config.tool_registry_factory else build_default_registry()
+        self._dynamic_tools: dict[str, FunctionTool] = {}
+        self._enabled_dynamic_tools: set[str] = set()
         for candidate in self.agent.tools:
             if is_tool_executor(candidate):
                 executor = candidate
             else:
                 tool = candidate if isinstance(candidate, FunctionTool) else adapt_tool(candidate)
+                if callable(tool.is_enabled):
+                    self._dynamic_tools[tool.name] = tool
                 if not Runner._tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config):
                     continue
                 executor = tool.to_executor()
+                if tool.name in self._dynamic_tools:
+                    self._enabled_dynamic_tools.add(tool.name)
             visible = executor.exposure == ToolExposure.DIRECT
             self.registry.register_executor(executor, expose_to_model=visible, planner_extra=visible)
         self.functions = FunctionProvider(ToolOrchestrator.from_registry(self.registry))
         self.hooks = RuntimeHookManager([*self.agent.hooks, *self.config.hooks])
+        self._definition_key: str | bytes | None = None
+        self._definition_value: dict[str, Any] = {}
+        self._definition_digest = ""
+        self._schema_key: tuple | None = None
+        self._schemas: list[dict[str, Any]] = []
 
     def run_context(self, tid: str) -> RunContext:
         return RunContext(
@@ -117,6 +130,15 @@ class Runtime:
     def compile(self, content: str, tid: str) -> AgentTask:
         from vv_agent.runner import Runner
 
+        for name, tool in self._dynamic_tools.items():
+            enabled = Runner._tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config)
+            if enabled and name not in self._enabled_dynamic_tools:
+                visible = tool.exposure == ToolExposure.DIRECT
+                self.registry.register_executor(tool.to_executor(), expose_to_model=visible, planner_extra=visible)
+                self._enabled_dynamic_tools.add(name)
+            elif not enabled and name in self._enabled_dynamic_tools:
+                self.registry.unregister(name)
+                self._enabled_dynamic_tools.remove(name)
         guardrail = Runner._apply_input_guardrails(agent=self.agent, run_context=self.run_context(tid), user_input=content)
         if guardrail.outcome == "rewrite":
             content = str(guardrail.value)
@@ -183,35 +205,40 @@ class Runtime:
             metadata["_vv_agent_tool_policy_can_use_tool"] = policy.can_use_tool
         ctx = ExecutionContext(cancellation_token=token, metadata=metadata)
         if approved:
-            ctx._approved_tool_approval = SimpleNamespace(call=ToolCall.from_dict(plan.payload["request"]))
+            ctx._approved_tool_approval = SimpleNamespace(call=ToolCall.from_dict(copy_json(plan._payload["request"])))
         workspace = Path(self.config.workspace or ".")
-        source = plan.operation_id if plan.payload["op_kind"] == "model" else plan.payload["dependencies"][0]
+        source = plan.operation_id if plan._payload["op_kind"] == "model" else plan._payload["dependencies"][0]
         assert source is not None
         return ToolContext(
             workspace=workspace,
             shared_state=shared_state if shared_state is not None else dict(task.initial_shared_state),
             run_context=self.run_context(task.task_id),
             cycle_index=(
-                plan.payload["request"]["metadata"]["cycle_index"]
-                if plan.payload["purpose"] == "compaction"
+                plan._payload["request"]["metadata"]["cycle_index"]
+                if plan._payload["purpose"] == "compaction"
                 else int(source.rsplit("/", 1)[1])
             ),
             workspace_backend=self.config.workspace_backend or LocalWorkspaceBackend(workspace),
             task_id=plan.turn_id or task.task_id,
             ctx=ctx,
             task_metadata=metadata,
-            idempotency_key=plan.payload["idempotency_key"],
+            idempotency_key=plan._payload["idempotency_key"],
             metadata={
                 "operation_id": plan.operation_id,
                 "attempt": plan.attempt,
-                "session_tool_names": [s["function"]["name"] for s in self.definition(task)["tools"]],
+                "session_tool_names": [s["function"]["name"] for s in self._definition(task)["tools"]],
             },
         )
 
     def definition(self, task: AgentTask) -> dict[str, Any]:
-        # Freeze schema + capabilities with the task; current bindings are checked on resume.
-        schemas = plan_tool_schemas(registry=self.registry, task=task, include_dynamic_hints=False)
-        names = [s["function"]["name"] for s in schemas]
+        return copy_json(self._definition(task))
+
+    def definition_digest(self, task: AgentTask) -> str:
+        self._definition(task)
+        return self._definition_digest
+
+    def _definition(self, task: AgentTask) -> dict[str, Any]:
+        # One bounded cache; task controls, manager settings and registry changes invalidate it.
         memory_settings = {
             f.name: getattr(self.memory_manager, f.name)
             for f in fields(self.memory_manager)
@@ -225,6 +252,44 @@ class Runtime:
             }
         }
         memory_settings["microcompaction_policy"] = self.memory_manager.microcompaction_policy.to_dict()
+        value: dict[str, Any] = {
+            "memory_settings": memory_settings,
+            "task": task.to_dict(),
+            "child_tools": sorted(self.children),
+            "model_binding": {
+                "backend": self.resolved.backend,
+                "model": self.resolved.model_id,
+                "endpoints": [t.endpoint_id for t in self.llm.endpoint_targets] if isinstance(self.llm, VvLlmClient) else [],
+            },
+        }
+        signature = self.registry.planning_signature()
+        # JSON fingerprints distinguish True from 1 and detach mutable cache inputs.
+        try:
+            key = json.dumps([value, signature], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        except TypeError:
+            key = canonical_json_bytes([value, signature])
+        if key == self._definition_key:
+            return self._definition_value
+        schema_key = (
+            tuple(plan_tool_names(task)),
+            signature,
+            copy_json(
+                [
+                    task.metadata.get(control, [])
+                    for control in (
+                        "_vv_agent_denied_side_effects",
+                        "_vv_agent_denied_capability_tags",
+                        "_vv_agent_denied_cost_dimensions",
+                    )
+                ]
+            ),
+            task.metadata.get("_vv_agent_deny_terminal_tools", False),
+        )
+        if schema_key != self._schema_key:
+            self._schemas = plan_tool_schemas(registry=self.registry, task=task, include_dynamic_hints=False)
+            self._schema_key = schema_key
+        schemas = self._schemas
+        names = [s["function"]["name"] for s in schemas]
         retentions = dict(self.memory_manager.tool_result_retentions)
         for name in names:
             metadata = self.registry.tool_metadata(name)
@@ -235,22 +300,16 @@ class Runtime:
                     else metadata.result_retention
                 )
         memory_settings["tool_result_retentions"] = retentions
-        return {
-            "memory_settings": memory_settings,
-            "task": task.to_dict(),
-            "child_tools": sorted(self.children),
-            "tools": schemas,
-            "model_binding": {
-                "backend": self.resolved.backend,
-                "model": self.resolved.model_id,
-                "endpoints": [t.endpoint_id for t in self.llm.endpoint_targets] if isinstance(self.llm, VvLlmClient) else [],
-            },
-            "capabilities": {
-                n: metadata.to_dict()
-                for n in names
-                if self.registry.has_executor(n) and (metadata := self.registry.tool_metadata(n)) is not None
-            },
+        value["tools"] = schemas
+        value["capabilities"] = {
+            n: metadata.to_dict()
+            for n in names
+            if self.registry.has_executor(n) and (metadata := self.registry.tool_metadata(n)) is not None
         }
+        self._definition_digest = digest(value)
+        self._definition_value = value
+        self._definition_key = key
+        return value
 
 
 def request_from_dict(value: dict[str, Any]) -> LlmRequest:
@@ -272,14 +331,14 @@ def model_usage(value: dict[str, Any] | None):
 
 
 def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
-    limits = state.turns[tid].start.payload["budget"]
+    limits = state.turns[tid].start._payload["budget"]
     parsed = RunBudgetLimits.from_dict(limits)
     if not parsed.has_limits:
         return None
-    observations = [r.payload["usage"] for r in state.usage_values.values() if r.turn_id == tid]
+    observations = [r._payload["usage"] for r in state.usage_values.values() if r.turn_id == tid]
     elapsed = sum(v.get("elapsed_ms", 0) for v in observations)
     missing_interval = any(
-        a.unknown and a.unknown.payload["observation"].get("active_interval_missing")
+        a.unknown and a.unknown._payload["observation"].get("active_interval_missing")
         for op in state.operations.values()
         if op.turn_id == tid
         for a in op.attempts.values()
@@ -291,11 +350,11 @@ def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
     )
     host = observations[-1].get("host_cost") if observations else None
     started = [(op.kind, a) for op in state.operations.values() if op.turn_id == tid for a in op.attempts.values() if a.started]
-    tool_counts = Counter(a.plan.payload["request"]["name"] for kind, a in started if kind != "model")
+    tool_counts = Counter(a.plan._payload["request"]["name"] for kind, a in started if kind != "model")
     evaluator = BudgetEvaluator(
         parsed,
         initial_usage=BudgetUsageSnapshot(
-            cycles=sum(kind == "model" and a.plan.payload["purpose"] == "primary" for kind, a in started),
+            cycles=sum(kind == "model" and a.plan._payload["purpose"] == "primary" for kind, a in started),
             tool_calls=sum(tool_counts.values()),
             tool_calls_by_name=tool_counts,
             elapsed_ms=elapsed,
@@ -307,6 +366,6 @@ def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
     )
     for kind, attempt in started:
         if kind == "model":
-            usage = attempt.result.payload["usage"] if attempt.result else {}
+            usage = attempt.result._payload["usage"] if attempt.result else {}
             evaluator.model_call_complete(model_usage(usage))
     return evaluator
