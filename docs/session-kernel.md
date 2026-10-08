@@ -28,8 +28,16 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
   `compaction.py` adapts MemoryManager to ordinary logged model operations.
 
 Logical bytes use the existing `canonical_json.canonical_json_bytes` (RFC 8785)
-with SHA-256 digests. Storage sequence, receiving time, and writer epoch are
-excluded. Record IDs derive from semantic positions; input and commit IDs must
+with SHA-256 digests. Producer construction validates and freezes each Record's
+canonical bytes and digest once. `payload` and `to_dict()` return detached JSON
+values; edit by constructing a replacement Record, never by mutating a returned
+payload. Direct dataclass construction is checked by `encode()` before admission.
+The closed record schemas compile to checks for their exact keyword vocabulary;
+unsupported keywords fail at import, and invalid values use the original
+jsonschema validator for diagnostics. Equivalence tests exercise all schema and
+handle variants as well as the unchanged invalid-record tests.
+
+Storage sequence, receiving time, and writer epoch are excluded. Record IDs derive from semantic positions; input and commit IDs must
 be stable caller-owned source/transaction identities. No retry generates an ID.
 `input_id` and `commit_id` are scoped by session. `session/create` is reserved
 for creation. Repeated record IDs inside one append are rejected; overlap with
@@ -113,13 +121,18 @@ byte digests, closed schemas, embedded digests and every reducer transition. A
 warm refresh reads and folds only the new tail. Append validates new records
 against a fork of that prefix inside the same transaction and retains head/inbox
 CAS and both lease checks. Commit replay and overlap use indexed identity lookups.
-Rollback/conflict, epoch changes, head rollback or a changed head digest discard
-the cache; an outer host rollback is caught by the next database binding check.
-New cached records are decoded from their already-validated write bytes, so
-native opaque values (for example tuples) match cold JSON reads. Returned state
-and records are detached from the cache. Deleting the cache affects
-only cost, never authoritative state. No snapshot table or second ledger exists. `rebuild_schedule(session_id)`
-locks the session and derives only `phase`, `next_drive_ms`, `active_turn_id`,
+Rollback/conflict, head rollback or a changed head digest discard the cache;
+an outer host rollback is caught by the next database binding check. A new lease
+epoch rebinds the immutable prefix only after its stored head bytes and digest
+still match; it never transfers execution authority. Both database lease checks,
+head CAS and optional inbox CAS remain mandatory for a new append.
+Every fetched row's bytes are checked against its stored digest. Matching session,
+sequence and exact retained bytes reuse a validated Record; other bytes still
+receive full schema, identity and embedded-digest validation. Native opaque values
+(for example tuples) are frozen as the same JSON values a cold reader sees.
+Returned execution state is detached, while immutable Records may be shared.
+Deleting the cache affects only cost, never authoritative state. No snapshot table
+or second ledger exists. `rebuild_schedule(session_id)` locks the session and derives only `phase`, `next_drive_ms`, `active_turn_id`,
 and `terminal_seq` again. Zero is the deterministic immediate-due sentinel;
 absolute deadlines/not-before values come from records. Reads of current time,
 lease deadlines, and receipt times use PostgreSQL `clock_timestamp()` after
@@ -147,7 +160,11 @@ idempotency constrains that request's effects.
 
 `kernel.drive(store, session_id, runtime=...)` acquires a store lease, folds the
 log, applies ready inputs, repairs incomplete operations, and serially dispatches
-work. `Runtime` in `session/runtime.py` supplies the agent, RunConfig, resolved
+work. Append receipts include the newly committed immutable records with their
+store envelopes and the transaction's inbox watermark. After its transaction
+commits, the driver applies that delta through the same Fold, without rereading
+the committed range. Refresh reads only a bounded new tail and checks sequence
+continuity; commit replay or external tails retain the authoritative store path. `Runtime` in `session/runtime.py` supplies the agent, RunConfig, resolved
 model, existing LLM client, tool/provider bindings and a factory returning a
 heartbeat store (a separate connection for files/PG, the same locked instance
 for SQLite memory sessions). It is re-exported by the kernel
@@ -456,6 +473,16 @@ VV_AGENT_TEST_REDIS_URL=redis://127.0.0.1:6395/15 uv run pytest
 The imported capacity regressions exercise cold 2,000-record recovery, 5,000-record
 cancellation/fencing, cache disposal, rollback, mutable caller isolation and
 external tails. Full F2 capability completion and the short-run overhead benchmark
-(p95 additional overhead <=50 ms against the old default) remain prerequisites
+(single-turn added p95 <=50 ms and ten-turn added p95 <=100 ms against Runner) remain prerequisites
 for F3, as do the complete SDK/tool matrix and formal App Server adapter. This
 internal promotion does not claim those later gates or contract-24 adoption.
+
+
+The M6 script uses the same bounded 1 KiB receipt history as the capacity tests,
+real PostgreSQL and disposable databases. Its checks require cold recovery at
+5k/20k to finish within 5/20 seconds, steady append median <=50 ms and full
+catalog pagination <=1 second. The one-sample capacity invocation is:
+
+```bash
+uv run python scripts/session_kernel_benchmark.py --sizes 5000 20000 --samples 1 --assert-capacity
+```

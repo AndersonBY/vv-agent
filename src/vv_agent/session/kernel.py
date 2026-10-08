@@ -25,9 +25,9 @@ from .context import project_context
 from .output import prepare_output
 from .providers import Accepted, Definitive, Outcome, Unknown
 from .records import InboxItem, Record, digest, make_record
-from .reducer import Attempt, ExecutionState
+from .reducer import Attempt, ExecutionState, Fold
 from .runtime import Runtime, budget, request_from_dict
-from .store import Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
+from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
 
 
 def read_state(store: SessionStore, sid: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
@@ -99,17 +99,46 @@ def _invoke(scope: _Scope, callback: Callable[[], Outcome], timeout: float) -> O
 class _Driver:
     def __init__(self, store: SessionStore, sid: str, runtime: Runtime, scope: _Scope):
         self.store, self.sid, self.runtime, self.scope = store, sid, runtime, scope
-        self.state, self.records, self.watermark = read_state(store, sid)
+        self.load_state()
         self.polled: set[tuple[str, int]] = set()
         self.active_since = time.monotonic_ns()
         self.active_tid: str | None = None
 
+    def load_state(self) -> None:
+        self.state, self.records, self.watermark = read_state(self.store, self.sid)
+        self.fold = Fold()
+        self.fold.state = self.state
+        self.fold.history = list(self.records)
+        self.fold.seen = {r.record.record_id: r.record.encode() for r in self.records}
+        self.fold.consumed = {key: InboxItem(**r.payload["input"]) for key, r in self.state.applied_inputs.items()}
+
     def refresh(self) -> None:
-        page = self.store.read(self.sid, limit=1)
-        if page.head_seq != self.records[-1].seq:
-            self.state, self.records, self.watermark = read_state(self.store, self.sid)
+        page = self.store.read(self.sid, after_seq=self.records[-1].seq)
+        head = page.head_seq
+        if head < self.records[-1].seq:
+            self.load_state()
         else:
             self.watermark = page.inbox_seq
+            self.extend(page.records)
+            while self.records[-1].seq < head:
+                if not page.records:
+                    raise Conflict("log sequence gap")
+                page = self.store.read(self.sid, after_seq=self.records[-1].seq, through_seq=head)
+                self.extend(page.records)
+        self.bind_turn()
+
+    def extend(self, records: tuple[StoredRecord, ...]) -> None:
+        if not records:
+            return
+        if any(r.seq != self.records[-1].seq + index for index, r in enumerate(records, 1)):
+            raise Conflict("log sequence gap")
+        self.state = self.fold.extend(
+            (r.record for r in records),
+            consumed_inputs=(InboxItem(**r.record.payload["input"]) for r in records if r.record.kind == "input_applied"),
+        )
+        self.records += records
+
+    def bind_turn(self) -> None:
         tid = self.state.active_turn_id
         if tid != self.active_tid:
             self.active_since = time.monotonic_ns()
@@ -163,7 +192,7 @@ class _Driver:
                 if prepare is not None:
                     records.extend(prepare(tx))
                 self.runtime.hook("before_commit", records[-1] if records else None)
-                tx.append(
+                receipt = tx.append(
                     self.sid,
                     lease=self.scope.lease,
                     expected_seq=self.records[-1].seq,
@@ -173,7 +202,12 @@ class _Driver:
                     expected_inbox_seq=self.watermark if guarded else None,
                 )
         self.runtime.hook("after_commit", records[-1] if records else None)
-        self.refresh()
+        if receipt.replayed:
+            self.refresh()
+        else:
+            self.extend(receipt.records)
+            self.watermark = receipt.inbox_seq
+            self.bind_turn()
 
     def task(self) -> AgentTask:
         assert self.state.active_turn_id is not None
@@ -269,10 +303,16 @@ class _Driver:
                             dependencies=[plan.operation_id],
                             capability=definition["capabilities"].get(patched.name, {}),
                         )
-                        planned.payload["budget_admission"] = {
-                            "hook_result": short.to_dict() if short else None,
-                            "shared_state": shared,
-                        }
+                        planned = replace(
+                            planned,
+                            payload=planned.payload
+                            | {
+                                "budget_admission": {
+                                    "hook_result": short.to_dict() if short else None,
+                                    "shared_state": shared,
+                                }
+                            },
+                        )
                     records.append(planned)
         return records
 

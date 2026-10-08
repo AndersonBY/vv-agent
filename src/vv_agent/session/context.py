@@ -18,7 +18,10 @@ if TYPE_CHECKING:
 def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) -> list[Message]:
     messages: list[Message] = []
     for stored in records:
-        r, p = stored.record, stored.record.payload
+        r = stored.record
+        if r.kind not in {"context_compacted", "turn_started", "input_applied", "op_completed"}:
+            continue
+        p = r.payload
         if r.kind == "context_compacted":
             messages = [Message.from_dict(m) for m in p["replacement"]]
         elif r.kind == "turn_started":

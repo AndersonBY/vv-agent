@@ -118,18 +118,23 @@ class SQLStore:
         ):
             raise LeaseLost("lease expired or fenced")
 
-    @staticmethod
-    def _stored(row: tuple[Any, ...]) -> StoredRecord:
+    def _stored(self, session_id: str, row: tuple[Any, ...]) -> StoredRecord:
         body, seq, commit, epoch, created, checksum = row
         if sha256(body).hexdigest() != checksum:
             raise Conflict("stored record digest mismatch")
+        cached = self._fold_cache
+        if cached is not None and cached.session_id == session_id and 0 < seq <= len(cached.records):
+            prior = cached.records[seq - 1].record
+            if cached.reducer.seen[prior.record_id] == body:
+                # The same session/sequence and exact validated bytes can share the immutable record.
+                return StoredRecord(prior, seq, commit, epoch, created)
         return StoredRecord(Record.parse(body), seq, commit, epoch, created)
 
     def _prefix(self, session_id: str, row: tuple[Any, ...]) -> _Prefix:
         head, epoch = row[0], row[2]
         cached = self._fold_cache
         if cached is not None:
-            valid = cached.session_id == session_id and cached.epoch == epoch and len(cached.records) <= head
+            valid = cached.session_id == session_id and len(cached.records) <= head
             if valid:
                 body, checksum = self._one(
                     "SELECT body,digest FROM sk_record WHERE session_id=%s AND seq=%s",
@@ -138,6 +143,9 @@ class SQLStore:
                 valid = checksum == cached.head_digest and sha256(body).hexdigest() == checksum
             if not valid:
                 self._fold_cache = cached = None
+            elif cached.epoch != epoch:
+                # The immutable prefix survives a lease change; execution authority does not.
+                self._fold_cache = cached = _Prefix(session_id, epoch, cached.head_digest, cached.reducer, cached.records)
         through = len(cached.records) if cached else 0
         if cached is not None and through == head:
             return cached
@@ -146,7 +154,7 @@ class SQLStore:
             "WHERE session_id=%s AND seq>%s AND seq<=%s ORDER BY seq",
             (session_id, through, head),
         )
-        records = tuple(self._stored(r) for r in rows)
+        records = tuple(self._stored(session_id, r) for r in rows)
         if tuple(r.seq for r in records) != tuple(range(through + 1, head + 1)):
             raise Conflict("log sequence gap")
         consumed = []
@@ -173,10 +181,7 @@ class SQLStore:
                 (session_id,),
             )
             prefix = self._prefix(session_id, row)
-            # Validated log payloads are JSON trees. Clone them in C while preserving the
-            # shared Record references between the detached state and detached history.
-            memo = {id(r.record.payload): json.loads(json.dumps(r.record.payload)) for r in prefix.records}
-            state, records = deepcopy((prefix.reducer.state, prefix.records), memo)
+            state, records = deepcopy((prefix.reducer.state, prefix.records))
             return state, records, row[1]
 
     def _schedule(self, session_id: str, state: ExecutionState) -> None:
@@ -207,7 +212,7 @@ class SQLStore:
                 "WHERE session_id=%s AND seq>%s AND seq<=%s ORDER BY seq LIMIT %s",
                 (session_id, after_seq, min(head, through_seq) if through_seq is not None else head, limit),
             )
-            return ReadPage(head, inbox, tuple(self._stored(row) for row in rows))
+            return ReadPage(head, inbox, tuple(self._stored(session_id, row) for row in rows))
 
     def peek_inbox(self, session_id: str, *, through_input_seq: int | None = None, limit: int = 256) -> tuple[StoredInput, ...]:
         _positive(limit, "limit")
@@ -348,7 +353,7 @@ class SQLSessionTx:
                 record.operation_id,
                 record.attempt,
                 body,
-                sha256(body).hexdigest(),
+                record.digest,
                 commit_id,
                 commit_digest,
                 position,
@@ -439,8 +444,7 @@ class SQLSessionTx:
                 raise Conflict("record belongs to another session")
         if len({r.record_id for r in records}) != len(records):
             raise Conflict("duplicate record_id in batch")
-        # Cache the same JSON values that a cold reader sees, detached from caller-owned payloads.
-        records = tuple(Record(**json.loads(body)) for body in encoded)
+        # encode() freezes producer records into the same JSON values as cold reads.
         # CAS/lease are admission facts, not logical commit bytes: replay cannot renew authority.
         body = b'{"consume_input_ids":' + canonical_json_bytes(consume_input_ids) + b',"records":[' + b",".join(encoded) + b"]}"
         manifest = canonical_json_bytes(
@@ -460,7 +464,7 @@ class SQLSessionTx:
                     )[0]
                     for r in records
                 }
-                if old[0][0] != manifest or any(stored.get(r.record_id) != r.encode() for r in records):
+                if old[0][0] != manifest or any(stored.get(r.record_id) != encoded[i] for i, r in enumerate(records)):
                     raise Conflict("commit identity has different bytes")
                 return CommitReceipt(commit_id, tuple((rid, seq) for rid, seq in json.loads(old[0][1])), old[0][2], True)
             s._check_lease(session_id, lease, row, s._now())
@@ -475,7 +479,7 @@ class SQLSessionTx:
                     "SELECT body,seq FROM sk_record WHERE session_id=%s AND record_id=%s", (session_id, record.record_id)
                 )
                 if prior:
-                    if prior[0][0] != record.encode():
+                    if prior[0][0] != encoded[position]:
                         raise Conflict("record identity has different bytes")
                     sequences.append((record.record_id, prior[0][1]))
                 else:
@@ -524,10 +528,10 @@ class SQLSessionTx:
                 s._rows("UPDATE sk_inbox SET consumed_seq=%s WHERE session_id=%s AND input_id=%s", (seq, session_id, input_id))
             s._rows("UPDATE sk_session SET head_seq=%s WHERE session_id=%s", (head, session_id))
             s._schedule(session_id, state)
-            receipt = CommitReceipt(commit_id, tuple(sequences), head)
-            self._commit(session_id, commit_id, body, manifest, receipt.record_sequences, head, now)
             added = tuple(StoredRecord(r, seq, commit_id, lease.epoch, now) for _, r, seq in new)
-            checksum = sha256(encoded[new[-1][0]]).hexdigest() if new else prefix.head_digest
+            receipt = CommitReceipt(commit_id, tuple(sequences), head, records=added, inbox_seq=row[1])
+            self._commit(session_id, commit_id, body, manifest, receipt.record_sequences, head, now)
+            checksum = new[-1][1].digest if new else prefix.head_digest
             s._fold_cache = _Prefix(session_id, lease.epoch, checksum, reducer, prefix.records + added)
             return receipt
 
@@ -556,7 +560,7 @@ class SQLSessionTx:
         if not rows:
             self.batches.pop(key, None)
             return None
-        records = tuple(s._stored(row) for row in rows)
+        records = tuple(s._stored(session_id, row) for row in rows)
         batch = ConsumerBatch(session_id, consumer, last + 1, records[-1].seq, records)
         self.batches[key] = batch
         return batch

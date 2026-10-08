@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
@@ -62,6 +62,8 @@ class CommitReceipt:
     record_sequences: tuple[tuple[str, int], ...]
     head_seq: int
     replayed: bool = False
+    records: tuple[StoredRecord, ...] = field(default=(), compare=False, repr=False)
+    inbox_seq: int = field(default=0, compare=False)
 
 
 @dataclass(frozen=True)

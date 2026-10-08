@@ -481,7 +481,8 @@ class Fold:
         result = Fold()
         result.state = copy(self.state)
         result.state.operations = {
-            oid: replace(op, attempts={n: copy(a) for n, a in op.attempts.items()}) for oid, op in self.state.operations.items()
+            oid: replace(op, attempts={n: Attempt(**vars(a)) for n, a in op.attempts.items()})
+            for oid, op in self.state.operations.items()
         }
         result.state.turns = {tid: copy(turn) for tid, turn in self.state.turns.items()}
         result.state.applied_inputs = self.state.applied_inputs.copy()
