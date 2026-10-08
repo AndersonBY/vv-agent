@@ -376,7 +376,7 @@ def make_record(
 ) -> Record:
     if kind not in PAYLOADS:
         raise RecordError("unknown record kind")
-    validate(payload, PAYLOADS[kind])
+    validate(payload, PAYLOADS[kind], canonical=False)
     record = Record(
         record_identity(kind, session_id, turn_id, operation_id, attempt, payload),
         kind,

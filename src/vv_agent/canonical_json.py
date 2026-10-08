@@ -6,6 +6,7 @@ import hashlib
 import math
 import re
 from collections.abc import Mapping
+from json.encoder import encode_basestring
 from typing import Any
 
 MAX_WIRE_INTEGER = (1 << 53) - 1
@@ -66,30 +67,9 @@ def _jcs_encode(value: Any) -> str:
 
 
 def _jcs_quote(value: str) -> str:
-    parts = ['"']
-    escapes = {
-        0x08: "\\b",
-        0x09: "\\t",
-        0x0A: "\\n",
-        0x0C: "\\f",
-        0x0D: "\\r",
-    }
-    for character in value:
-        codepoint = ord(character)
-        if 0xD800 <= codepoint <= 0xDFFF:
-            raise UnicodeError("unpaired UTF-16 surrogate")
-        if character == '"':
-            parts.append('\\"')
-        elif character == "\\":
-            parts.append("\\\\")
-        elif codepoint in escapes:
-            parts.append(escapes[codepoint])
-        elif codepoint <= 0x1F:
-            parts.append(f"\\u{codepoint:04x}")
-        else:
-            parts.append(character)
-    parts.append('"')
-    return "".join(parts)
+    # The stdlib C encoder uses JCS string escapes; reject lone surrogates first.
+    value.encode("utf-8")
+    return encode_basestring(value)
 
 
 def _jcs_float(value: float) -> str:

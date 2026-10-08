@@ -21,6 +21,19 @@ def history():
     return [Message("system", "Frozen system"), Message("user", "original request"), Message("assistant", "old facts " * 4000)]
 
 
+def compiled_system():
+    return Message(
+        "system",
+        "Be precise.",
+        metadata={
+            "session_memory_enabled": False,
+            "trace_id": "s/turn/initial",
+            "_vv_agent_tool_use_behavior": "run_llm_again",
+            "_vv_agent_tool_policy_approval": "default",
+        },
+    )
+
+
 def configured(database, steps, **kwargs):
     rt = runtime(database, steps, **kwargs)
     rt.config = replace(rt.config, initial_messages=history())
@@ -42,7 +55,8 @@ def test_threshold_summary_is_logged_and_applied(store, database):
         seen.append(request)
         assert [m.name for m in request.messages].count("memory_summary") == 1
         assert request.messages[-1].content == "go"
-        assert request.messages[0] == history()[0]
+        assert request.messages[0].role == "system"
+        assert request.messages[0].content == "Be precise."
         return LLMResponse("done")
 
     start(store)
@@ -103,7 +117,7 @@ def test_rejected_summary_preserves_history_and_continues(store, database):
 
     start(store)
     drive(store, "s", runtime=configured(database, [LLMResponse('{"user_constraints":["alone"]}'), answer]))
-    assert seen == [*history(), Message("user", "go")]
+    assert seen == [compiled_system(), *history()[1:], Message("user", "go")]
     assert not records_of(store, "context_compacted")
     assert len(records_of(store, "op_planned")) == 2
 
@@ -335,7 +349,7 @@ def test_rejected_summary_receipt_after_restart_is_not_called_again(store, datab
         return LLMResponse("done")
 
     drive(store, "s", runtime=configured(database, [primary]))
-    assert seen == [*history(), Message("user", "go")]
+    assert seen == [compiled_system(), *history()[1:], Message("user", "go")]
     assert not records_of(store, "context_compacted")
     assert len([r for r in records_of(store, "op_planned") if r.payload["purpose"] == "compaction"]) == 1
 
@@ -362,7 +376,7 @@ def test_summary_input_window_rejects_without_truncating_or_calling(store, datab
     rt = configured(database, [primary])
     rt.memory_manager.model_context_window = 1000
     drive(store, "s", runtime=rt)
-    assert seen == [*history(), Message("user", "go")]
+    assert seen == [compiled_system(), *history()[1:], Message("user", "go")]
     assert [r.payload["purpose"] for r in records_of(store, "op_planned")] == ["primary"]
 
 
@@ -464,7 +478,7 @@ def test_invalid_blocks_below_summary_threshold_do_not_prune_or_abort_turn(store
     messages = tool_history()
     messages.insert(4, Message("tool", messages[3].content, tool_call_id="old"))
     rt.config = replace(rt.config, initial_messages=messages)
-    source = [*messages, Message("user", "go")]
+    source = [compiled_system(), *messages[1:], Message("user", "go")]
     rt.memory_manager.compact_threshold = count_messages_tokens([m.to_openai_message() for m in source]) + 1
     drive(store, "s", runtime=rt)
     assert seen == source

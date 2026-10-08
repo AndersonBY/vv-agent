@@ -1,0 +1,207 @@
+# Internal session kernel capability gate
+
+Date: 2026-10-08. Scope: `feat/session-kernel-internal`, internal assembly only.
+Runner, interactive, CLI and App Server still use their existing entry points.
+No top-level exports, default selection, public contract change, or Rust work.
+
+**F3 is blocked.** Inventory: **63 rows — 24 done, 26 partial, 13 missing**. `done` means the bounded behavior named in that row has a
+same-scenario Runner / SQLite `:memory:` comparison. `partial` means some
+implementation exists but the whole row is not proved. `missing` means no
+kernel adapter implements the capability. Existing Runner tests and F2a fault
+suites alone are not evidence of Runner/kernel parity.
+
+Paths in the owner column are relative to `src/vv_agent/`. `P` below means
+`tests/session/test_runner_parity.py`. Other test paths are under `tests/`.
+A dash is an explicit missing paired producer, not a waiver.
+
+| Capability | Current owner module | Kernel status | Evidence / remaining requirement |
+| --- | --- | --- | --- |
+| Basic synchronous no-tool completion | `runner.py`, `runtime/engine.py` | done | P `test_basic_runner_parity` |
+| FunctionTool and serial multi-tool execution | `tools/function.py`, `tools/orchestrator.py` | done | P `test_basic_runner_parity` |
+| ToolRegistry factory / dynamically registered direct executors | `runner.py`, `tools/registry.py`, `runtime/tool_planner.py` | done | P `test_dynamic_enabled_and_registry_factory_parity` |
+| FunctionTool `is_enabled` boolean/callback | `runner.py:_tool_is_enabled` | done | P `test_dynamic_enabled_and_registry_factory_parity`, `test_disabled_tool_never_executes` |
+| Hidden tools, dynamic schema changes and exposure boundaries | `tools/executor.py`, `tools/registry.py` | partial | Registry exposure reused; no paired hidden/dynamic-schema producer |
+| Built-in `read_file` | `tools/handlers/workspace_io.py` | done | P `test_workspace_tool_parity[read_file-arguments0]` |
+| Built-in `write_file` | `tools/handlers/workspace_io.py` | done | P `test_workspace_tool_parity[write_file-arguments1]` |
+| Built-in `edit_file` including prior-read baseline | `tools/handlers/workspace_io.py` | done | P `test_workspace_tool_parity[edit_file-arguments2]` |
+| Built-in `find_files` | `tools/handlers/search.py` | done | P `test_workspace_tool_parity[find_files-arguments3]` |
+| Built-in `search_files` | `tools/handlers/search.py` | done | P `test_workspace_tool_parity[search_files-arguments4]` |
+| Built-in `file_info` | `tools/handlers/workspace_io.py` | done | P `test_additional_builtin_parity[file_info-arguments0]` |
+| Built-in `todo_write` | `tools/handlers/todo.py` | done | P `test_todo_and_skill_state_parity` with fixed clock and caller-owned TODO id |
+| Built-in `ask_user` / host interaction response | `tools/handlers/control.py`, `interaction.py` | partial | `session/test_recovery_matrix.py` covers parked replies; no paired SDK interaction lifecycle |
+| Built-in `bash` | `tools/handlers/bash.py` | done | P `test_additional_builtin_parity[bash-arguments1]` covers foreground output; background lifecycle has separate rows |
+| Built-in `check_background_command` | `tools/handlers/background.py` | partial | Handler reusable; no paired running/completed/forbidden receipt producer |
+| Built-in `stop_background_command` | `tools/handlers/background.py` | partial | Handler reusable; no paired confirmed-stop and restart producer |
+| Built-in `read_image` | `tools/handlers/image.py` | done | P `test_additional_builtin_parity`, `test_multimodal_model_context_parity` cover URL and local PNG output |
+| Built-in `activate_skill` | `tools/handlers/skills.py`, `skills/` | done | P `test_todo_and_skill_state_parity` checks activation and retained active skill state |
+| Built-in `create_sub_task` | `tools/handlers/sub_agents.py`, `runtime/sub_task_manager.py` | partial | Host `Runtime.children` admission works; configured-agent adapter absent |
+| Built-in `sub_task_status` | `tools/handlers/sub_task_status.py` | missing | No kernel-backed SubTaskManager projection |
+| Tool allow/deny predicates and metadata denials | `run_config.py`, `tools/orchestrator.py` | partial | Existing orchestrator and frozen/current policy checks reused; F2a denial/revocation tests, full paired policy matrix missing |
+| Approval modes default / always / never / on_request | `tools/orchestrator.py`, `approval.py` | partial | Durable approval inbox and exact arguments work; ApprovalProvider/Broker, allow_session and timeout bridge missing |
+| Input guardrails allow/rewrite/block/require_approval | `runner.py`, `guardrails.py` | done | P `test_guardrail_parity`, `test_blocked_input_does_not_compile_providers` |
+| Output guardrails allow/rewrite/block/require_approval | `runner.py`, `guardrails.py` | done | P `test_guardrail_parity` |
+| Opt-in output validator accept/reject and one tools-free repair | `runner.py`, `output_validation.py` | done | P `test_output_validation_parity`; repair dispatch retained as an operation |
+| Typed output coercion / repair exceptions / repair budget ledger | `runner.py`, `output_validation.py` | partial | Existing coercion/validator helpers reused; arbitrary typed JSON persistence and repair usage remain open |
+| Runtime before_llm / after_llm hooks | `runtime/hooks.py` | done | P `test_llm_hook_parity` |
+| Runtime before_tool_call / after_tool_call hooks | `runtime/hooks.py` | partial | P `test_tool_hooks_parity`; short-circuit, per-tool state mutation and approval/restart permutations remain open |
+| Runtime before_memory_compact hook | `runtime/hooks.py`, `runtime/cycle_runner.py` | missing | No persisted hook context replacement before compaction |
+| AfterCycleHook continue / steer / deny / stop | `runtime/lifecycle.py`, `runtime/engine.py` | missing | Needs durable decisions and reconstructed snapshots before the next dispatch |
+| Context providers and prompt sections | `context_providers.py`, `runtime/compiler.py` | done | P `test_context_provider_parity`; immutable compiled prompt retained by F2a |
+| MemoryProvider compact callbacks | `memory/provider.py`, `runtime/cycle_runner.py` | missing | No kernel before_compact/after_compact lifecycle binding |
+| Session memory extraction/save/reload | `memory/session_memory.py`, `runtime/engine.py` | partial | Compiler can load existing session memory; extraction/save operations not yet driven |
+| Microcompaction, summary and prompt-too-long recovery | `memory/manager.py`, `runtime/cycle_runner.py` | partial | `session/test_compaction.py` runs real stores; paired Runner producer still missing |
+| Budget usage: cycles, tool counts, tokens/cache | `budget.py`, `runtime/token_usage.py` | done | P `test_budget_usage_parity` with measured provider usage |
+| Budget limits: total and uncached input tokens | `budget.py`, `runtime/model_calls.py` | partial | Logged model usage and terminal check exist; full boundary/missing-usage paired cases absent |
+| Budget limits: total and per-name tool calls | `budget.py`, `runtime/engine.py` | partial | Per-dispatch preflight exists; whole-batch admission differs and must be reconciled |
+| Budget limits: wall time, host cost, unavailable metrics | `budget.py` | partial | F2a active-lease accounting and unknown markers exist; paired boundary cases absent |
+| Tracing processors and run/agent/tool spans | `tracing.py`, `runner.py:_RunTrace` | missing | No kernel span delivery adapter |
+| Live assistant/reasoning/tool stream deltas | `events.py`, `runtime/cycle_runner.py` | missing | Model currently uses complete; stream adapter and durable replay not connected |
+| Typed lifecycle RunEvents | `events.py`, `runtime/engine.py` | partial | P compares shared lifecycle and per-tool sequences; agent/cycle/diagnostic/budget/memory/delegation events incomplete |
+| Multimodal initial messages and tool image output | `types.py`, `llm/vv_llm_client.py`, `tools/function.py` | done | P `test_multimodal_model_context_parity` compares complete model-visible requests, image notifications and provider tool-call extensions |
+| Multiple model endpoints, no stacked retries | `llm/vv_llm_client.py` | partial | P `test_endpoint_attempts_do_not_stack` proves one endpoint per attempt and unchanged client; paired routing/preference cases absent |
+| Agent/run/provider model settings precedence | `model_settings.py`, `runner.py`, `runtime/compiler.py` | done | P `test_shared_state_and_settings_parity`, `test_provider_default_settings_parity`; transport retry override is intentional |
+| Agent.as_tool | `agent.py`, `runner.py` | missing | FunctionTool metadata still needs child-session runtime assembly, never recursive Runner |
+| Configured sub-agents: policy/budget/workspace inheritance | `runtime/sub_task_manager.py`, `runtime/engine.py` | missing | Host child admission alone does not implement SubAgentConfig |
+| BackgroundAgentTask start/poll/wait/cancel | `background_task.py` | missing | No kernel-backed public handle/snapshot assembly |
+| Handoff and maximum-handoff enforcement | `handoffs.py`, `runner.py` | missing | No kernel agent transfer adapter |
+| Child session atomic admission/delivery/cancellation | `runtime/sub_task_manager.py`, `runtime/backends/` | partial | `session/test_children.py` covers PG/SQLite failure cuts; SDK parity adapter absent |
+| shared_state between tools, persistence and reconstruction | `runtime/engine.py`, `tools/base.py` | partial | P `test_shared_state_and_settings_parity`, `test_shared_state_survives_runtime_reconstruction` prove JSON state; arbitrary Python objects still need host reconstruction bindings |
+| Workspace local/memory/S3/streaming backend selection | `workspace/`, `runtime/engine.py` | partial | Injected backend and local handlers reused; local and memory backends have paired producers (P `test_memory_workspace_backend_parity`); S3/streaming remain unpaired |
+| Bash background session restart and owner checks | `runtime/background_sessions.py`, `runtime/processes.py` | partial | Existing process manager reusable; no kernel reattachment/paired managed-process lifecycle |
+| no_tool_policy finish | `runtime/engine.py` | done | P `test_basic_runner_parity` |
+| no_tool_policy continue and max_cycles stop | `runtime/engine.py` | done | P `test_continue_max_cycles_parity` compares one- and two-cycle stops |
+| no_tool_policy wait_user | `runtime/engine.py` | missing | Needs a durable no-tool user wait, not a manufactured tool call |
+| tool_use_behavior stop_on_first_tool / stop_at_tool_names | `runtime/tool_call_runner.py` | partial | P `test_tool_stop_parity`; pending-batch and native FINISH result edge cases remain |
+| Cancellation: cooperative / unknown / descendants | `runtime/cancellation.py`, `run_handle.py` | partial | F2a cancellation fault suite and benchmark handshake; paired control/result/event matrix absent |
+| Completed RunResult fields and cycle/tool history | `result.py`, `runner.py` | partial | P `test_result_projection_parity` covers normal completion; errors, waits, budgets, typed output and repair ledger incomplete |
+| Event store replay and durable consumer acknowledgement | `event_store.py`, `run_handle.py` | partial | Pure `session/projection.py` plus SQL consumers exist; RunEventStore bridge and paired replay absent |
+| Interactive steer/follow-up/resume/archive/close | `interactive.py`, `sessions/` | partial | Inbox controls exist; interactive session facade not wired (F3) and parity absent |
+| CLI single-run, stream and persistent sessions | `cli.py` | missing | No internal CLI scenario adapter; defaults intentionally unchanged |
+| App Server thread/turn/approval/replay/non-text input | `app_server/server.py`, `app_server/run_adapter.py` | missing | No full internal App Server scenario adapter; public wire unchanged |
+| App Server model/list, schema and TypeScript export | `app_server/protocol/`, `app_server/schema.py` | partial | Existing independent public paths retained; cut-over compatibility needs F3 producer |
+
+## Comparison projection
+
+Every paired P scenario independently creates the scripted provider, Agent and
+RunConfig and runs the current public `Runner.run_sync` or `kernel.drive` on a
+fresh in-memory SQLite database. It compares final output, ordered tool-call
+IDs/content, shared lifecycle event types, and budget usage when enabled. JSON
+shared state is compared too. Shared-state restart additionally discards the
+SQL prefix cache and constructs a new Runtime after a committed tool result.
+Image context tests also compare full model-visible requests, including the canonical system message, initial images, tool image notifications and provider tool-call extension fields. The result projection test compares the existing result fields, raw cycles,
+new items, shared state and resolved model on a normal completed tool run.
+
+The comparison deliberately does **not** establish full RunEvent parity:
+
+- Event/run/trace/operation IDs and timestamps are identities from different
+  producers and are not compared as literal strings.
+- Kernel atomically plans a whole tool batch with its model receipt. Runner
+  plans each tool just before executing it. Per-tool planned/started/completed
+  ordering and the remaining shared execution sequence are separate checks.
+- Agent/cycle/diagnostic and other unimplemented events are open matrix gaps;
+  filtering to common lifecycle events is not evidence that those events exist.
+- Wall-clock `elapsed_ms` is excluded from numerical usage equality. All other
+  usage fields in the tested scenario must match; this is not a wall-budget
+  boundary test.
+- Input blocking precedes public Runner compilation. Kernel retains a blocked
+  turn definition without invoking instruction/context providers, and projects
+  only the failed event, with no model dispatch.
+- Runner's host repair callback has no v23 model-call ledger discriminator.
+  Kernel logs one `output_repair` dispatch for recovery. The repair test asserts
+  those two additional model lifecycle events before comparing the remainder.
+  Repair accounting and the final public discriminator remain open.
+
+## Internal persistence and execution changes
+
+All standard registered tools use the existing planner and ToolOrchestrator;
+there is no hand-maintained three-tool allowlist. Registered enabled tools keep
+their normal exposure rules. Before-LLM patches are frozen in the planned request;
+after-LLM and after-tool results are retained in the ordinary operation result.
+JSON shared state is stored in the operation receipt's opaque usage object as
+`session_shared_state`, outside model-visible ToolExecutionResult metadata.
+Unknown effects do not invent a successful state snapshot.
+
+Output repair is a tools-free model-purpose operation in the same driver. It
+never calls Runner execution and never retries an unknown host repair callback.
+Model endpoints are selected by logged attempt index in configured order; each
+VvLlmClient call sees one endpoint and one transport attempt. Credentials are
+never included in the frozen binding. Current selection does not reproduce the
+old randomized/preferred-endpoint policy; that row is consequently partial.
+
+The public Runner is reused only for existing configuration and pure output
+helpers. No Runner execution method is called by the internal kernel. Removing
+that helper ownership dependency belongs to the cut-over extraction work.
+
+## Short-run benchmark
+
+Run `uv run python scripts/session_kernel_overhead.py --runs 200 --output report.json`.
+The benchmark includes SQLite schema creation, session admission, drive, final
+state read and connection/thread cleanup. The ten-turn case means ten successive
+user turns in one session, compared with ten Runner runs using MemorySession.
+The two-tool case includes the model's final response after both tool results.
+Start/cancel uses an explicit provider-entry barrier on both paths, submits
+cancellation, releases the same cooperative scripted provider and waits for
+completion. A timeout or wrong terminal state fails the benchmark.
+
+Each path warms up before at least 200 measured samples. p95 is the nearest-rank
+95th percentile. Added p95 is `kernel p95 - Runner p95` for the same scenario;
+it is not a paired-difference percentile. Linux current RSS is measured after
+GC before/after each path's measured batch; it is not a peak-RSS measurement.
+All live thread objects are compared before and after the batch, not only their
+count. The process exits nonzero when any scenario exceeds 50 ms added p95 or
+leaves a new kernel thread alive. No daemon-thread timeout is counted as a
+confirmed stop.
+
+Profiling identified Python character-by-character JCS quoting, repeated log
+payload deepcopy/encoding, and duplicate token counting. The shared path now
+uses the stdlib string encoder with strict surrogate rejection, JSON-tree
+cloning for detached store reads, validated append bytes for fold/write/digest,
+a semantic record-ID commit identity, and one token count per microcompaction
+pass. It retains validation, lease/CAS checks, commit replay byte comparisons,
+cache invalidation and the same driver. No separate fast executor exists.
+
+## Validation results (2026-10-08)
+
+The candidate remains **not ready for F3**: 24 done / 26 partial / 13 missing.
+All code/test gates below passed. The capability and short-run performance gates
+did not pass. There were no commits or changes to public/default entry points.
+
+| Gate | Result |
+| --- | --- |
+| `uv run python scripts/contract_snapshot.py check` | PASS: contract 23.0.0, 55 fixture files, unchanged manifest |
+| `uv run ruff format --check .` | PASS: 375 files |
+| `uv run ruff check .` | PASS |
+| `uv run ty check` | PASS |
+| `uv run pytest tests/session -q` with local PostgreSQL | PASS: 486 tests, 340.86 seconds |
+| `uv run pytest` with dedicated real Redis and local PostgreSQL | PASS: 2,903 passed, 20 skipped, 18 warnings; 494.33 seconds |
+| Capability matrix | FAIL: 39 partial/missing rows |
+| Short-run added p95 <= 50 ms | FAIL: 3 of 4 scenarios exceed the target |
+
+The 20 full-suite skips are nine inapplicable non-Redis fixture variants of
+Redis-only tests, six opt-in remote-model tests, four opt-in cross-runtime probes,
+and one unavailable directory-symlink test. The applicable real-Redis variants
+ran; PostgreSQL cases were not skipped. Warnings are the existing distributed
+tests' multithreaded-fork deprecation warnings. The dedicated Redis instance was
+stopped after the suite. No Rust/cargo or production operations ran.
+
+Forty new parametrized cases compare Runner and SQLite, two test kernel endpoint
+attempt isolation and state reconstruction, and five check JCS encoding. The
+compaction suite retains its full history-preservation checks and now expects
+the compiled system prompt, consistent with Runner.
+
+Final benchmark: 200 measured runs per path/scenario after 10 warmups. Values are
+milliseconds; ten turns is the aggregate of ten successive user turns. Exact
+numbers are in `docs/session-kernel-overhead.json`. RSS values are KiB changes
+after GC for the whole measured batch, shown as Runner / kernel.
+
+| Scenario | Runner p50 / p95 | Kernel p50 / p95 | Added p95 | RSS delta (R / K), KiB | Threads after (R / K) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| no_tool | 4.38 / 6.69 | 45.39 / 54.03 | 47.34 | +0 / +0 | 1 / 1 |
+| two_tools | 6.23 / 8.85 | 94.33 / 121.74 | 112.90 | +0 / +0 | 1 / 1 |
+| ten_turns | 39.97 / 47.21 | 998.91 / 1230.80 | 1183.59 | -940 / +16 | 1 / 1 |
+| start_cancel | 6.38 / 8.33 | 53.36 / 65.95 | 57.62 | +248 / +72 | 1 / 1 |
+
+All eight measured path/scenario groups reported no newly surviving threads.
+The benchmark exited 1 for the three timing failures. No-tool added p95 passed
+in this measurement; this is not a claim that arbitrary providers, long-lived
+background processes or uncooperative handlers cannot retain threads.

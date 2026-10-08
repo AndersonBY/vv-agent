@@ -7,17 +7,22 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
 from vv_agent.budget import BudgetEvaluator, RunBudgetLimits
 from vv_agent.llm.errors import is_prompt_too_long_error
+from vv_agent.output_validation import OutputRepairRequest
 from vv_agent.runtime.cancellation import CancellationToken
-from vv_agent.types import AgentTask, Message, ToolExecutionResult, ToolResultStatus
+from vv_agent.runtime.tool_call_runner import ToolCallRunner
+from vv_agent.types import AgentTask, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
 from .children import child_outcome, create_child, verify_completion
 from .compaction import compact_context, finish_summary
 from .context import project_context
+from .output import prepare_output
 from .providers import Accepted, Definitive, Outcome, Unknown
 from .records import InboxItem, Record, digest, make_record
 from .reducer import Attempt, ExecutionState
@@ -77,7 +82,8 @@ def _invoke(scope: _Scope, callback: Callable[[], Outcome], timeout: float) -> O
         finally:
             done.set()
 
-    threading.Thread(target=run, daemon=True, name="session-external-call").start()
+    worker = threading.Thread(target=run, daemon=True, name="session-external-call")
+    worker.start()
     deadline = time.monotonic() + timeout
     while not done.wait(0.02):
         if scope.token.cancelled:
@@ -86,6 +92,7 @@ def _invoke(scope: _Scope, callback: Callable[[], Outcome], timeout: float) -> O
             return Unknown("cancellation without confirmed external stop")
         if time.monotonic() >= deadline:
             return Unknown("external call timeout")
+    worker.join()
     return result[0] if result else Unknown("external worker exited without a receipt")
 
 
@@ -98,7 +105,11 @@ class _Driver:
         self.active_tid: str | None = None
 
     def refresh(self) -> None:
-        self.state, self.records, self.watermark = read_state(self.store, self.sid)
+        page = self.store.read(self.sid, limit=1)
+        if page.head_seq != self.records[-1].seq:
+            self.state, self.records, self.watermark = read_state(self.store, self.sid)
+        else:
+            self.watermark = page.inbox_seq
         tid = self.state.active_turn_id
         if tid != self.active_tid:
             self.active_since = time.monotonic_ns()
@@ -156,7 +167,7 @@ class _Driver:
                     self.sid,
                     lease=self.scope.lease,
                     expected_seq=self.records[-1].seq,
-                    commit_id=digest({"records": [r.to_dict() for r in records], "consumed": list(consumed)}),
+                    commit_id=digest({"record_ids": [r.record_id for r in records], "consumed": list(consumed)}),
                     records=tuple(records),
                     consume_input_ids=consumed,
                     expected_inbox_seq=self.watermark if guarded else None,
@@ -234,22 +245,46 @@ class _Driver:
             for i, call in enumerate(outcome.result.get("tool_calls", [])):
                 oid = f"{plan.operation_id}/attempt/{plan.attempt}/tool/{i}"
                 if oid not in self.state.operations:
-                    records.append(
-                        self.plan(
-                            oid,
-                            call,
-                            "interaction" if call["name"] == "ask_user" else "tool",
-                            dependencies=[plan.operation_id],
-                            capability=definition["capabilities"].get(call["name"], {}),
-                        )
+                    planned = self.plan(
+                        oid,
+                        call,
+                        "interaction" if call["name"] == "ask_user" else "tool",
+                        dependencies=[plan.operation_id],
+                        capability=definition["capabilities"].get(call["name"], {}),
                     )
+                    if self.runtime.hooks.has_hooks():
+                        task = self.task()
+                        shared = deepcopy(outcome.usage.get("session_shared_state", self.shared_state()))
+                        ctx = self.runtime.context(task, planned, self.scope.token, shared_state=shared)
+                        patched, short = self.runtime.hooks.apply_before_tool_call(
+                            task=task,
+                            cycle_index=ctx.cycle_index,
+                            call=ToolCall.from_dict(call),
+                            context=ctx,
+                        )
+                        planned = self.plan(
+                            oid,
+                            patched.to_dict(),
+                            "interaction" if patched.name == "ask_user" else "tool",
+                            dependencies=[plan.operation_id],
+                            capability=definition["capabilities"].get(patched.name, {}),
+                        )
+                        planned.payload["budget_admission"] = {
+                            "hook_result": short.to_dict() if short else None,
+                            "shared_state": shared,
+                        }
+                    records.append(planned)
         return records
 
     def unknown(self, plan: Record, reason: str) -> Record:
         assert plan.operation_id is not None and plan.attempt is not None
         attempt = self.state.operations[plan.operation_id].attempts[plan.attempt]
         is_model = plan.payload["op_kind"] == "model"
-        retry = plan.attempt < 2 and (is_model or (plan.payload["tool"] or {}).get("idempotency") == "supported")
+        retry = (
+            plan.payload["purpose"] != "output_repair"
+            and plan.attempt < 2
+            and (is_model or (plan.payload["tool"] or {}).get("idempotency") == "supported")
+        )
         retry = (
             retry
             and self.scope.token.reason not in {"cancel", "abort", "close", "lease_lost"}
@@ -515,17 +550,38 @@ class _Driver:
     def transcript(self) -> list[Message]:
         return project_context(self.records, self.state)
 
+    def shared_state(self) -> dict[str, Any]:
+        for stored in reversed(self.records):
+            r = stored.record
+            if r.turn_id != self.state.active_turn_id:
+                continue
+            if r.kind == "op_completed" and r.payload["context"] == "normal":
+                snapshot = r.payload["usage"].get("session_shared_state")
+                if snapshot is not None:
+                    return deepcopy(snapshot)
+        return deepcopy(self.task().initial_shared_state)
+
     def model_plan(self) -> Record:
         task = self.task()
         messages = self.transcript()
         tid = self.state.active_turn_id
         assert tid is not None
         definition = self.state.turns[tid].start.payload["definition"]
+        cycle = 1 + sum(
+            op.turn_id == tid and op.kind == "model" and op.attempts[1].plan.payload["purpose"] == "primary"
+            for op in self.state.operations.values()
+        )
+        shared = self.shared_state()
+        if self.runtime.config.before_cycle_messages:
+            messages.extend(self.runtime.config.before_cycle_messages(cycle, list(messages), shared))
+        messages, schemas = self.runtime.hooks.apply_before_llm(
+            task=task, cycle_index=cycle, messages=messages, tool_schemas=definition["tools"], shared_state=shared
+        )
         request = {
             "model": task.model,
             "messages": [m.to_dict() for m in messages],
-            "tools": definition["tools"],
-            "metadata": dict(task.metadata),
+            "tools": schemas,
+            "metadata": dict(task.metadata) | {"session_shared_state": shared},
             "prompt_bundle": task.prompt_bundle.to_dict(),
             "model_settings": task.model_settings.to_dict() if task.model_settings else None,
         }
@@ -541,6 +597,16 @@ class _Driver:
     def close(self, status: str, reason: str | None, result: Any = None) -> None:
         tid = self.state.active_turn_id
         assert tid is not None
+        if status == "completed":
+            evaluator = budget(self.state, tid)
+            if evaluator and evaluator.terminal():
+                status, reason = "failed", "budget_exhausted"
+        if status == "completed":
+            prepared = prepare_output(self, result)
+            if prepared is None:
+                return
+            status, output_reason, result = prepared
+            reason = output_reason or reason
         records: list[Record] = []
         for op in self.state.operations.values():
             if op.turn_id != tid:
@@ -630,8 +696,18 @@ class _Driver:
         plan = attempt.plan
         task = self.task()
         kind = plan.payload["op_kind"]
-        context = self.runtime.context(task, plan, self.scope.token, approved=attempt.approval == "approve")
+        context = self.runtime.context(
+            task, plan, self.scope.token, approved=attempt.approval == "approve", shared_state=self.shared_state()
+        )
         context.metadata["fence_epoch"] = self.scope.lease.epoch
+        if kind != "model":
+            parent = self.state.operations[plan.payload["dependencies"][0]]
+            source = parent.attempts[parent.selected_attempt or max(parent.attempts)].plan
+            context.metadata["session_tool_names"] = [s["function"]["name"] for s in source.payload["request"]["tools"]]
+        hook_result = plan.payload["budget_admission"].get("hook_result")
+        if hook_result is not None:
+            self.commit(self.completed(plan, Definitive(hook_result)), guarded=True)
+            return
         if attempt.approval == "deny":
             self.commit(
                 self.completed(
@@ -748,12 +824,38 @@ class _Driver:
                 {"operation_id": plan.operation_id, "attempt": plan.attempt, "call_id": f"{plan.operation_id}/{plan.attempt}"}
             )
             request.metadata["purpose"] = plan.payload["purpose"]
+            if plan.payload["purpose"] == "output_repair":
+                repair = self.runtime.agent.output_repair
+                assert repair is not None
+                repaired = repair(
+                    OutputRepairRequest(
+                        invalid_output=request.metadata["invalid_output"],
+                        validation_code=request.metadata["validation_code"],
+                        validation_message=request.metadata["validation_message"],
+                        model=self.runtime.agent.output_repair_model,
+                        model_settings=self.runtime.agent.output_repair_model_settings,
+                    )
+                )
+                return Definitive({"content": repaired, "tool_calls": []})
+            if "session_shared_state" in request.metadata:
+                context.shared_state.clear()
+                context.shared_state.update(request.metadata.pop("session_shared_state"))
             try:
-                response = self.runtime.llm.complete(request)
+                response = self.runtime.complete(request, plan.attempt or 1)
             except Exception as exc:
                 if is_prompt_too_long_error(exc):
                     return Definitive({"error_code": "prompt_too_long", "content": "", "tool_calls": []})
                 raise
+            observed_usage = response.raw.get("usage") or {}
+            if plan.payload["purpose"] == "primary":
+                response = self.runtime.hooks.apply_after_llm(
+                    task=task,
+                    cycle_index=context.cycle_index,
+                    messages=request.messages,
+                    tool_schemas=request.tools,
+                    response=response,
+                    shared_state=context.shared_state,
+                )
             return Definitive(
                 {
                     "content": response.content,
@@ -761,7 +863,7 @@ class _Driver:
                     "raw": response.raw,
                     "reasoning_content": response.raw.get("reasoning_content"),
                 },
-                usage=response.raw.get("usage") or {},
+                usage=observed_usage,
             )
 
         outcome = _invoke(
@@ -771,6 +873,22 @@ class _Driver:
         )
         self.runtime.hook("after_external_call", plan)
         if isinstance(outcome, Definitive):
+            if kind != "model":
+                result = ToolExecutionResult.from_dict(outcome.result)
+                result = self.runtime.hooks.apply_after_tool_call(
+                    task=task,
+                    cycle_index=context.cycle_index,
+                    call=ToolCall.from_dict(plan.payload["request"]),
+                    context=context,
+                    result=result,
+                )
+                stop = ToolCallRunner._apply_tool_use_behavior(
+                    task=task, call=ToolCall.from_dict(plan.payload["request"]), result=result
+                )
+                if stop is not None:
+                    outcome.usage["session_completion_reason"] = stop.value
+                outcome = replace(outcome, result=result.to_dict())
+            outcome.usage["session_shared_state"] = context.shared_state
             self.commit(self.completed(plan, outcome))
         elif isinstance(outcome, Accepted):
             self.commit([self.parked(plan, outcome.handle, after=True)])
@@ -783,6 +901,10 @@ class _Driver:
             self.state.active_turn_id
             and not self.state.cancel_requested
             and not self.scope.token.cancelled
+            and any(
+                op.turn_id == self.state.active_turn_id and op.attempts[1].plan.payload["purpose"] == "compaction"
+                for op in self.state.operations.values()
+            )
             and self.state.turns[self.state.active_turn_id].start.payload["handler_version"] == self.runtime.handler_version
             and digest(self.runtime.definition(self.task()))
             == self.state.turns[self.state.active_turn_id].start.payload["definition_digest"]
@@ -812,10 +934,27 @@ class _Driver:
             self.close("failed", "handler_version_mismatch")
             return True
         task = self.task()
+        if task.metadata.get("session_input_blocked"):
+            self.close("failed", "agent_failed", task.metadata["session_input_blocked"])
+            return True
         if digest(self.runtime.definition(task)) != turn.start.payload["definition_digest"]:
             self.close("failed", "handler_schema_or_capability_mismatch")
             return True
         operations = [(oid, op) for oid, op in self.state.operations.items() if op.turn_id == tid]
+        for _, op in operations:
+            if op.kind == "model" or op.selected_attempt is None:
+                continue
+            result = op.attempts[op.selected_attempt].result
+            if result and result.payload["result"].get("directive") == ToolDirective.FINISH.value:
+                repair = self.state.operations.get(f"{tid}/model/output_repair/1")
+                if repair and repair.state in {"planned", "started", "parked"}:
+                    continue
+                self.close(
+                    "completed",
+                    result.payload["usage"].get("session_completion_reason", "tool_finish"),
+                    result.payload["result"]["content"],
+                )
+                return True
         for oid, op in operations:
             if op.kind == "model" and op.attempts[1].plan.payload["purpose"] == "primary" and op.selected_attempt is not None:
                 known = op.attempts[op.selected_attempt]
@@ -897,6 +1036,7 @@ class _Driver:
                     not a.result.payload["result"].get("tool_calls")
                     and not a.result.payload["result"].get("error_code")
                     and not changed
+                    and task.no_tool_policy == "finish"
                 ):
                     self.close("completed", None, a.result.payload["result"]["content"])
                     return True
@@ -906,7 +1046,7 @@ class _Driver:
             for a in [op.attempts[op.selected_attempt or max(op.attempts)]]
         )
         if cycles >= task.max_cycles:
-            self.close("failed", "max_cycles")
+            self.close("failed", "max_cycles", "Reached max cycles without finish signal.")
             return True
         if compact_context(self):
             return True
