@@ -197,6 +197,7 @@ def test_controls_require_consumed_input_and_matching_generation():
                 "result": {},
                 "terminal_seq": 1,
                 "terminal_digest": digest({}),
+                "status": "completed",
             },
         ),
         (

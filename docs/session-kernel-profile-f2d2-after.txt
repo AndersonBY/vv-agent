@@ -1,0 +1,33 @@
+         7915021 function calls (6760381 primitive calls) in 6.924 seconds
+
+   Ordered by: cumulative time
+   List reduced from 570 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       30    0.014    0.000    7.036    0.235 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/scripts/session_kernel_overhead.py:31(run_case)
+      300    0.007    0.000    6.593    0.022 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/kernel.py:1459(drive)
+      600    0.003    0.000    6.520    0.011 /home/makerbi/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/threading.py:1117(join)
+      600    0.003    0.000    6.481    0.011 /home/makerbi/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/threading.py:1155(_wait_for_tstate_lock)
+ 6000/900    0.111    0.000    6.475    0.007 {method 'acquire' of '_thread.lock' objects}
+  600/300    0.016    0.000    6.440    0.021 /home/makerbi/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/threading.py:1018(_bootstrap)
+  600/300    0.004    0.000    6.425    0.021 /home/makerbi/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/threading.py:1058(_bootstrap_inner)
+  600/300    0.005    0.000    6.422    0.021 /home/makerbi/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/threading.py:1001(run)
+      300    0.008    0.000    6.402    0.021 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/kernel.py:66(_heartbeat)
+     1800    0.047    0.000    6.143    0.003 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/kernel.py:1236(step)
+    42180    0.035    0.000    1.705    0.000 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/canonical_json.py:23(canonical_json_bytes)
+    42180    0.049    0.000    1.654    0.000 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/canonical_json.py:27(_canonical_json)
+     1800    0.051    0.000    1.652    0.001 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/kernel.py:162(commit)
+      300    0.013    0.000    1.529    0.005 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/kernel.py:926(dispatch)
+     3330    0.018    0.000    1.494    0.000 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/records.py:612(make_record)
+    28020    0.043    0.000    1.383    0.000 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/records.py:578(encode)
+      600    0.010    0.000    1.360    0.002 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/kernel.py:718(start_turn)
+     3000    0.006    0.000    1.157    0.000 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/kernel.py:152(record)
+     1800    0.107    0.000    1.069    0.001 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/sql.py:420(append)
+78390/50760    0.080    0.000    0.823    0.000 {built-in method builtins.all}
+     3390    0.033    0.000    0.792    0.000 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/records.py:545(_validate)
+625110/52980    0.574    0.000    0.788    0.000 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/canonical_json.py:46(_stdlib_compatible)
+    35490    0.075    0.000    0.740    0.000 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/session/sqlite.py:98(_rows)
+33600/600    0.107    0.000    0.719    0.001 /home/makerbi/vectorvein/tmp/wt-f2-vv-agent/src/vv_agent/canonical_json.py:67(_jcs_encode)
+    51900    0.683    0.000    0.695    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+
+

@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "python": "3.12.12",
+  "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "started_unix_s": 1791473680.301677,
+  "samples": 1,
+  "cold_samples": 1,
+  "method": "Single active turn with retained final model receipt before terminal commit, completed tool triples with bounded 1KiB receipts; append is committed; steady append uses consecutive heads; fresh connection/runtime for cold drive through terminal commit; OS/PG buffers remain warm.",
+  "history": [
+    {
+      "records": 5000,
+      "logical_bytes": 4241706,
+      "append": {
+        "samples_ms": [
+          6.405649000953417
+        ],
+        "median_ms": 6.405649000953417,
+        "max_ms": 6.405649000953417
+      },
+      "steady_append": {
+        "samples_ms": [
+          9.29820100282086
+        ],
+        "median_ms": 9.29820100282086,
+        "max_ms": 9.29820100282086,
+        "lease_ttl_ms": 15000,
+        "heartbeat_seconds": 0.25
+      },
+      "full_fold": {
+        "samples_ms": [
+          36.035502002050634
+        ],
+        "median_ms": 36.035502002050634,
+        "max_ms": 36.035502002050634
+      },
+      "read_and_fold": {
+        "samples_ms": [
+          474.1067849972751
+        ],
+        "median_ms": 474.1067849972751,
+        "max_ms": 474.1067849972751
+      },
+      "cold_drive": {
+        "samples_ms": [
+          582.8231640043668
+        ],
+        "median_ms": 582.8231640043668,
+        "max_ms": 582.8231640043668,
+        "failures": []
+      },
+      "reset_samples_ms": [
+        1.9486439996398985
+      ],
+      "provider_call_increment": 0
+    },
+    {
+      "records": 20000,
+      "logical_bytes": 16958334,
+      "append": {
+        "samples_ms": [
+          12.853977998020127
+        ],
+        "median_ms": 12.853977998020127,
+        "max_ms": 12.853977998020127
+      },
+      "steady_append": {
+        "samples_ms": [
+          16.76992600550875
+        ],
+        "median_ms": 16.76992600550875,
+        "max_ms": 16.76992600550875,
+        "lease_ttl_ms": 15000,
+        "heartbeat_seconds": 0.25
+      },
+      "full_fold": {
+        "samples_ms": [
+          301.3430220016744
+        ],
+        "median_ms": 301.3430220016744,
+        "max_ms": 301.3430220016744
+      },
+      "read_and_fold": {
+        "samples_ms": [
+          2071.6788830031874
+        ],
+        "median_ms": 2071.6788830031874,
+        "max_ms": 2071.6788830031874
+      },
+      "cold_drive": {
+        "samples_ms": [
+          2289.3409059979604
+        ],
+        "median_ms": 2289.3409059979604,
+        "max_ms": 2289.3409059979604,
+        "failures": []
+      },
+      "reset_samples_ms": [
+        2.737686001637485
+      ],
+      "provider_call_increment": 0
+    }
+  ],
+  "runnable": [
+    {
+      "sessions": 1000,
+      "runnable_items": 1500,
+      "page_size": 100,
+      "first_page": {
+        "samples_ms": [
+          2.7268099947832525
+        ],
+        "median_ms": 2.7268099947832525,
+        "max_ms": 2.7268099947832525
+      },
+      "late_page": {
+        "samples_ms": [
+          1.6830469976412132
+        ],
+        "median_ms": 1.6830469976412132,
+        "max_ms": 1.6830469976412132
+      },
+      "full_scan": {
+        "samples_ms": [
+          16.42013099626638
+        ],
+        "median_ms": 16.42013099626638,
+        "max_ms": 16.42013099626638
+      }
+    },
+    {
+      "sessions": 10000,
+      "runnable_items": 15000,
+      "page_size": 100,
+      "first_page": {
+        "samples_ms": [
+          2.0176860052742995
+        ],
+        "median_ms": 2.0176860052742995,
+        "max_ms": 2.0176860052742995
+      },
+      "late_page": {
+        "samples_ms": [
+          1.3880530023016036
+        ],
+        "median_ms": 1.3880530023016036,
+        "max_ms": 1.3880530023016036
+      },
+      "full_scan": {
+        "samples_ms": [
+          208.1369680017815
+        ],
+        "median_ms": 208.1369680017815,
+        "max_ms": 208.1369680017815
+      }
+    }
+  ],
+  "postgres": "PostgreSQL 18.6 (Ubuntu 18.6-1.pgdg22.04+2) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0, 64-bit"
+}

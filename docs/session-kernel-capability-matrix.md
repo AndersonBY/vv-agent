@@ -4,7 +4,7 @@ Date: 2026-10-08. Scope: `feat/session-kernel-internal`, internal assembly only.
 Runner, interactive, CLI and App Server still use their existing entry points.
 No top-level exports, default selection, public contract change, or Rust work.
 
-**F3 is blocked.** Inventory: **63 rows — 35 done, 16 partial, 12 missing**. `done` means the bounded behavior named in that row has a
+**F3 is blocked.** Inventory: **63 rows — 50 done, 6 partial, 7 missing**. `done` means the bounded behavior named in that row has a
 same-scenario Runner / SQLite `:memory:` comparison. `partial` means some
 implementation exists but the whole row is not proved. `missing` means no
 kernel adapter implements the capability. Existing Runner tests and F2a fault
@@ -12,7 +12,7 @@ suites alone are not evidence of Runner/kernel parity.
 
 Paths in the owner column are relative to `src/vv_agent/`. `P` below means
 `tests/session/test_runner_parity.py`. Other test paths are under `tests/`.
-A dash is an explicit missing paired producer, not a waiver.
+`C` means `tests/session/test_capability_parity.py`; `R` means `tests/session/test_recovery_matrix.py`. C persistence cases run real PostgreSQL, SQLite files and SQLite `:memory:`. A dash is an explicit missing paired producer, not a waiver.
 
 | Capability | Current owner module | Kernel status | Evidence / remaining requirement |
 | --- | --- | --- | --- |
@@ -41,24 +41,24 @@ A dash is an explicit missing paired producer, not a waiver.
 | Input guardrails allow/rewrite/block/require_approval | `runner.py`, `guardrails.py` | done | P `test_guardrail_parity`, `test_blocked_input_does_not_compile_providers` |
 | Output guardrails allow/rewrite/block/require_approval | `runner.py`, `guardrails.py` | done | P `test_guardrail_parity` |
 | Opt-in output validator accept/reject and one tools-free repair | `runner.py`, `output_validation.py` | done | P `test_output_validation_parity`; repair dispatch retained as an operation |
-| Typed output coercion / repair exceptions / repair budget ledger | `runner.py`, `output_validation.py` | partial | Existing coercion/validator helpers reused; arbitrary typed JSON persistence and repair usage remain open |
+| Typed output coercion / repair exceptions / repair budget ledger | `runner.py`, `output_validation.py` | done (intentional difference) | C `test_typed_output_repair_ledger_restart_parity`, `test_output_repair_exceptions_parity`, `test_output_coercion_exception_becomes_durable_result`, `test_repair_usage_budget_is_logged_intentional_difference`, `test_uncertain_repair_does_not_retry_on_recovery`, `test_repair_missing_usage_policy_is_durable`; tools-free logged output_repair, typed JSON reconstruction and strict usage ledger |
 | Runtime before_llm / after_llm hooks | `runtime/hooks.py` | done | P `test_llm_hook_parity` |
 | Runtime before_tool_call / after_tool_call hooks | `runtime/hooks.py` | done | T `test_tool_hooks_state_approval_restart_parity`, `test_hook_patch_preserves_hidden_tool_boundary`; short circuit, serial state, approval and restart after prepared/result commits; recorded hooks are not replayed |
-| Runtime before_memory_compact hook | `runtime/hooks.py`, `runtime/cycle_runner.py` | missing | No persisted hook context replacement before compaction |
-| AfterCycleHook continue / steer / deny / stop | `runtime/lifecycle.py`, `runtime/engine.py` | missing | Needs durable decisions and reconstructed snapshots before the next dispatch |
+| Runtime before_memory_compact hook | `runtime/hooks.py`, `runtime/cycle_runner.py` | done | C `test_before_memory_hook_replacement_restart_parity`, `test_boundary_validation_rolls_back`; replacement and JSON state committed before compaction, retained decisions not rerun |
+| AfterCycleHook continue / steer / deny / stop | `runtime/lifecycle.py`, `runtime/engine.py` | done | C `test_after_cycle_decision_snapshot_restart_parity`, `test_after_cycle_steering_boundary_parity`, `test_after_cycle_wait_and_native_finish_snapshot_restart`; snapshots rebuilt from adopted receipts, decisions replayed before dispatch |
 | Context providers and prompt sections | `context_providers.py`, `runtime/compiler.py` | done | P `test_context_provider_parity`; immutable compiled prompt retained by F2a |
-| MemoryProvider compact callbacks | `memory/provider.py`, `runtime/cycle_runner.py` | missing | No kernel before_compact/after_compact lifecycle binding |
-| Session memory extraction/save/reload | `memory/session_memory.py`, `runtime/engine.py` | partial | Compiler can load existing session memory; extraction/save operations not yet driven |
-| Microcompaction, summary and prompt-too-long recovery | `memory/manager.py`, `runtime/cycle_runner.py` | partial | `session/test_compaction.py` runs real stores; paired Runner producer still missing |
+| MemoryProvider compact callbacks | `memory/provider.py`, `runtime/cycle_runner.py` | done | C `test_memory_provider_logged_callbacks_restart_parity`; accepted/rejected summary, before/after committed lifecycle and recovery at both boundaries |
+| Session memory extraction/save/reload | `memory/session_memory.py`, `runtime/engine.py` | done | C `test_session_memory_logged_extract_save_reload_parity`; session_memory model receipt, structured state and disposable file projection; deleted file rebuilt before next-turn reload |
+| Microcompaction, summary and prompt-too-long recovery | `memory/manager.py`, `runtime/cycle_runner.py` | done (intentional difference) | C `test_memory_compaction_runner_producer_parity`, `test_prompt_too_long_logical_cycle_and_tail_parity`; same MemoryManager producer, logical cycle and forced tail; duplicate rejected summary request reuses its logged receipt |
 | Budget usage: cycles, tool counts, tokens/cache | `budget.py`, `runtime/token_usage.py` | done | P `test_budget_usage_parity` with measured provider usage |
-| Budget limits: total and uncached input tokens | `budget.py`, `runtime/model_calls.py` | partial | Logged model usage and terminal check exist; full boundary/missing-usage paired cases absent |
-| Budget limits: total and per-name tool calls | `budget.py`, `runtime/engine.py` | partial | Per-dispatch preflight exists; whole-batch admission differs and must be reconciled |
-| Budget limits: wall time, host cost, unavailable metrics | `budget.py` | partial | F2a active-lease accounting and unknown markers exist; paired boundary cases absent |
-| Tracing processors and run/agent/tool spans | `tracing.py`, `runner.py:_RunTrace` | missing | No kernel span delivery adapter |
-| Live assistant/reasoning/tool stream deltas | `events.py`, `runtime/cycle_runner.py` | missing | Model currently uses complete; stream adapter and durable replay not connected |
-| Typed lifecycle RunEvents | `events.py`, `runtime/engine.py` | partial | P compares shared lifecycle and per-tool sequences; agent/cycle/diagnostic/budget/memory/delegation events incomplete |
+| Budget limits: total and uncached input tokens | `budget.py`, `runtime/model_calls.py` | done | C `test_token_budget_boundaries_parity`, `test_missing_usage_budget_parity`; zero/equality/overshoot boundaries and STOP/CONTINUE missing accounting |
+| Budget limits: total and per-name tool calls | `budget.py`, `runtime/engine.py` | done | C `test_tool_batch_admission_restart_parity`; whole batch atomically reserves names with the model receipt; dispatch checks wall/host and never counts reservations again |
+| Budget limits: wall time, host cost, unavailable metrics | `budget.py` | done (intentional difference) | C `test_wall_time_budget_parity`, `test_host_cost_and_unavailable_metrics_parity`, `test_host_meter_failure_latch_restart_parity`, `test_lost_active_interval_is_unavailable_after_restart`; errors, units/currency, decreasing readings and retained unavailable state; strict missing active-interval recovery |
+| Tracing processors and run/agent/tool spans | `tracing.py`, `runner.py:_RunTrace` | done (intentional difference) | C `test_trace_delivery_span_parity_and_no_recovery_duplicates`, `test_trace_ack_boundary_and_processor_failure`, `test_trace_processors_cannot_mutate_durable_output`; stable projected spans, separate committed traces cursor; at-most-once telemetry can be lost after acknowledgement |
+| Live assistant/reasoning/tool stream deltas | `events.py`, `runtime/cycle_runner.py` | done | C `test_live_stream_deltas_and_durable_final_restart_parity`; volatile sink is optional, definitive content/reasoning/tool calls replay from records |
+| Typed lifecycle RunEvents | `events.py`, `runtime/engine.py` | done (intentional difference) | C `test_lifecycle_events_replay_ack_and_rollback_parity`, `test_delegation_events_and_child_replay_paired_producer`, memory/budget/hook suites; stable typed identities and record sequence; child lifecycle belongs to parent admission records |
 | Multimodal initial messages and tool image output | `types.py`, `llm/vv_llm_client.py`, `tools/function.py` | done | P `test_multimodal_model_context_parity` compares complete model-visible requests, image notifications and provider tool-call extensions |
-| Multiple model endpoints, no stacked retries | `llm/vv_llm_client.py` | partial | P `test_endpoint_attempts_do_not_stack` proves one endpoint per attempt and unchanged client; paired routing/preference cases absent |
+| Multiple model endpoints, no stacked retries | `llm/vv_llm_client.py` | done (intentional difference) | C `test_endpoint_routing_preference_logged_attempts_parity`, `test_logged_endpoint_dispatch_rejects_routing_tamper`; actual Runner/VvLlmClient transport producer, preference/randomization, three endpoint attempts, frozen route and one request per attempt |
 | Agent/run/provider model settings precedence | `model_settings.py`, `runner.py`, `runtime/compiler.py` | done | P `test_shared_state_and_settings_parity`, `test_provider_default_settings_parity`; transport retry override is intentional |
 | Agent.as_tool | `agent.py`, `runner.py` | missing | FunctionTool metadata still needs child-session runtime assembly, never recursive Runner |
 | Configured sub-agents: policy/budget/workspace inheritance | `runtime/sub_task_manager.py`, `runtime/engine.py` | missing | Host child admission alone does not implement SubAgentConfig |
@@ -73,8 +73,8 @@ A dash is an explicit missing paired producer, not a waiver.
 | no_tool_policy wait_user | `runtime/engine.py` | done (intentional difference) | T `test_user_wait_sdk_lifecycle_parity` (no_tool); durable turn-level wait with zero fabricated tool operations; reply resumes the same turn |
 | tool_use_behavior stop_on_first_tool / stop_at_tool_names | `runtime/tool_call_runner.py` | done | P `test_tool_stop_parity`; T `test_tool_stop_pending_batch_native_finish_parity`, `test_tool_stop_error_result_parity`; pending calls close with the same skipped result and native FINISH is respected |
 | Cancellation: cooperative / unknown / descendants | `runtime/cancellation.py`, `run_handle.py` | done (intentional difference) | T `test_cancellation_control_result_event_parity`, `test_cancellation_descendant_control_result_events_parity`; SDK cancellation/exception versus durable confirmed/unknown receipts, targeted descendant controls and terminal events |
-| Completed RunResult fields and cycle/tool history | `result.py`, `runner.py` | partial | P `test_result_projection_parity` covers normal completion; errors, waits, budgets, typed output and repair ledger incomplete |
-| Event store replay and durable consumer acknowledgement | `event_store.py`, `run_handle.py` | partial | Pure `session/projection.py` plus SQL consumers exist; RunEventStore bridge and paired replay absent |
+| Completed RunResult fields and cycle/tool history | `result.py`, `runner.py` | done (intentional difference) | C typed output/repair/budget/hook suites, `test_wait_result_fields_parity`, `test_completed_result_compaction_flags_are_per_cycle`, `test_endpoint_routing_preference_logged_attempts_parity`; errors, partial output, waits, logical cycles, repair calls and fixed terminal prefix |
+| Event store replay and durable consumer acknowledgement | `event_store.py`, `run_handle.py` | done | C `test_lifecycle_events_replay_ack_and_rollback_parity`, `test_delegation_events_and_child_replay_paired_producer`; RunEventStore bridge, SQL cursor rollback/replay, child query and identical append assertion |
 | Interactive steer/follow-up/resume/archive/close | `interactive.py`, `sessions/` | partial | Inbox controls exist; interactive session facade not wired (F3) and parity absent |
 | CLI single-run, stream and persistent sessions | `cli.py` | missing | No internal CLI scenario adapter; defaults intentionally unchanged |
 | App Server thread/turn/approval/replay/non-text input | `app_server/server.py`, `app_server/run_adapter.py` | missing | No full internal App Server scenario adapter; public wire unchanged |
@@ -103,8 +103,7 @@ The comparison deliberately does **not** establish full RunEvent parity:
 - Kernel atomically plans a whole tool batch with its model receipt. Runner
   plans each tool just before executing it. Per-tool planned/started/completed
   ordering and the remaining shared execution sequence are separate checks.
-- Agent/cycle/diagnostic and other unimplemented events are open matrix gaps;
-  filtering to common lifecycle events is not evidence that those events exist.
+- F2d-2 adds paired agent/cycle/diagnostic/budget/memory/delegation producers and typed replay. The earlier P common-event filter alone does not prove them; C supplies their separate evidence.
 - Wall-clock `elapsed_ms` is excluded from numerical usage equality. All other
   usage fields in the tested scenario must match; this is not a wall-budget
   boundary test.
@@ -114,7 +113,9 @@ The comparison deliberately does **not** establish full RunEvent parity:
 - Runner's host repair callback has no v23 model-call ledger discriminator.
   Kernel logs one `output_repair` dispatch for recovery. The repair test asserts
   those two additional model lifecycle events before comparing the remainder.
-  Repair accounting and the final public discriminator remain open.
+  F2d-2 closes repair accounting. The existing v23 public enum remains
+  agent_cycle; event metadata and the session result ledger preserve output_repair
+  explicitly. A new public discriminator belongs to C1.
 
 ## Internal persistence and execution changes
 
@@ -128,10 +129,10 @@ Unknown effects do not invent a successful state snapshot.
 
 Output repair is a tools-free model-purpose operation in the same driver. It
 never calls Runner execution and never retries an unknown host repair callback.
-Model endpoints are selected by logged attempt index in configured order; each
-VvLlmClient call sees one endpoint and one transport attempt. Credentials are
-never included in the frozen binding. Current selection does not reproduce the
-old randomized/preferred-endpoint policy; that row is consequently partial.
+Model requests freeze the existing preferred/randomized endpoint order. Each
+logged attempt selects one endpoint; each VvLlmClient call performs one transport
+attempt. Durable success restores preference on a later turn. Routing parity and
+attempt isolation are proved in C; credentials never enter the frozen binding.
 
 The public Runner is reused only for existing configuration and pure output
 helpers. No Runner execution method is called by the internal kernel. Removing
@@ -154,7 +155,7 @@ it is not a paired-difference percentile. Linux current RSS is measured after
 GC before/after each path's measured batch; it is not a peak-RSS measurement.
 All live thread objects are compared before and after the batch, not only their
 count. The process exits nonzero when a single-turn scenario exceeds 50 ms added p95,
-the ten-turn scenario exceeds 100 ms added p95 (10 ms per turn amortized), or
+the ten-turn scenario exceeds 80 ms added p95 (8 ms per turn amortized), or
 any scenario leaves a new kernel thread alive. No daemon-thread timeout is counted as a
 confirmed stop.
 
@@ -400,3 +401,52 @@ now uses Runtime's already-computed digest. Record validation still verifies tha
 digest. Existing cache invalidation/tamper suites passed (108 tests), and the
 same candidate then passed the complete gates above. No benchmark workload,
 sampling, cleanup, lease/CAS or record-validation boundary was removed.
+
+## F2d-2 validation results (2026-10-08)
+
+The fifteen memory/budget/event/model rows requested for F2d-2 are closed, including
+seven intentional differences. Inventory is 50 done / 6 partial / 7 missing;
+F3 remains blocked. Paired C producers and reconstruction run on real PostgreSQL,
+SQLite files and SQLite `:memory:`. C contains 34 test functions / 358 cases.
+The full Chinese evidence, reviewer decisions, remaining inventory, cProfile
+before/after entries and capacity tables are in
+[session-kernel-f2d-memory-budget-events-report.md](session-kernel-f2d-memory-budget-events-report.md).
+
+Whole tool batches reserve admission names with their model receipt and plans;
+dispatch checks dynamic metrics without repeating the reservation. Recorded hook
+and compaction decisions are reused. Session memory and output repair are logged
+model operations. Stream deltas remain volatile; durable receipts rebuild finals.
+Typed event replay uses existing consumer cursors. Tracing acknowledges before
+processor delivery to prevent recovery duplicates; this at-most-once telemetry
+can be lost after acknowledgement and remains an explicit reviewer decision.
+
+| Gate | Result |
+| --- | --- |
+| Contract snapshot | PASS: 23.0.0, 55 fixture files, unchanged manifest |
+| Ruff format / check and ty | PASS: 386 Python files |
+| `uv run pytest tests/session -q`, real local PG | PASS: 1187 passed, no skips, 281.48 seconds |
+| Full pytest, real Redis 6400 DB 15 and local PG | PASS: 3662 passed, 20 skipped, 18 warnings, 427.71 seconds |
+| Overhead, 10 warmups / 200 samples per path/scenario | PASS: single-turn <=50 ms, ten turns <=80 ms; no leaked threads |
+| M6 5k/20k, one sample, `--assert-capacity` | PASS: cold drive, steady append and 1k/10k catalog scans |
+| Scope / diff / cleanup | PASS: no default wiring, public exports, lock/fixture or Rust changes; HEAD e9194f4, no commits; gate-owned Redis stopped |
+
+The full-suite skip/warning breakdown matches F2d-1. All applicable Redis and PG
+variants ran. Shared MemoryProvider callback helpers moved to the retained memory
+module without changing Runner behavior; session no longer depends on CycleRunner.
+
+Values below are milliseconds; added p95 is kernel p95 minus Runner p95.
+
+| Scenario | Runner p50 / p95 | Kernel p50 / p95 | Added p95 | Limit | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| no_tool | 3.51 / 4.12 | 13.34 / 14.52 | 10.40 | 50 | PASS |
+| two_tools | 5.58 / 6.42 | 26.48 / 35.10 | 28.69 | 50 | PASS |
+| ten_turns | 37.94 / 46.51 | 106.48 / 113.14 | 66.63 | 80 | PASS |
+| start_cancel | 4.81 / 5.68 | 15.99 / 17.21 | 11.54 | 50 | PASS |
+
+The A-complete pre-optimization candidate measured 99.061 ms ten-turn added p95;
+the final candidate measures 66.626 ms (13.374 ms headroom). The shared driver
+reuses nested JCS bytes already produced by digest validation, avoids redundant
+read-only task/definition preparation, and defers unused compaction digests.
+Schema validation, JCS equivalence, nested-invalid rejection, lease/CAS/fencing
+and the original benchmark workload remain in force. Raw before/after timings
+include their Runner measurements; host timing differences are not hidden.

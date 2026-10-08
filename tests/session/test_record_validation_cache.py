@@ -179,3 +179,54 @@ def test_driver_tail_rejects_sequence_gap(store, database, gap):
     else:
         with pytest.raises(Conflict, match="sequence gap"):
             driver.extend((StoredRecord(record("turn_started"), 3, "gap", lease.epoch, 0),))
+
+
+@pytest.mark.parametrize(
+    "kind,field",
+    [("turn_started", "definition"), ("op_planned", "request"), ("op_completed", "result"), ("op_prepared", "request")],
+)
+def test_record_encoding_reuses_validated_fields_with_identical_jcs(kind, field):
+    import random
+
+    rng = random.Random(23)
+    values = [
+        None,
+        True,
+        False,
+        0,
+        9007199254740991,
+        -9007199254740991,
+        -0.0,
+        1e-27,
+        1e27,
+        4.333333333333332,
+        'quotation " and slash \\ and newline\n',
+        "汉字",
+        "\U0001f600",
+        {"\U0001f600": 2, "\uffff": 1},
+    ]
+    for _ in range(100):
+        value = {"nested": [rng.choice(values) for _ in range(6)], "payload": None}
+        payload = example(records.PAYLOADS[kind])
+        payload[field], payload[f"{field}_digest"] = value, records.digest(value)
+        if kind == "op_planned":
+            payload["op_kind"], payload["purpose"] = "model", "primary"
+        rec = records.make_record(
+            kind,
+            session_id="s",
+            turn_id="t",
+            operation_id="o" if kind.startswith("op_") else None,
+            attempt=1 if kind.startswith("op_") else None,
+            payload=payload,
+        )
+        expected = canonical_json_bytes(rec.to_dict())
+        assert rec.encode() == expected
+        parsed = records.Record.parse(expected)
+        assert parsed.encode() == expected and parsed.digest == rec.digest
+
+
+def test_record_composition_preserves_nested_invalid_json_rejection():
+    for value in (float("inf"), float("nan"), 9007199254740992, "\ud800", {1: "invalid key"}):
+        with pytest.raises((ValueError, RecordError)):
+            payload = record("op_completed").payload | {"usage": {"invalid": value}}
+            records.make_record("op_completed", session_id="s", turn_id="t", operation_id="o", attempt=1, payload=payload)

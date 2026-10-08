@@ -30,7 +30,7 @@ CREATE TABLE sk_record (
     session_id TEXT NOT NULL REFERENCES sk_session(session_id), seq INTEGER NOT NULL CHECK (seq > 0),
     record_id TEXT NOT NULL, schema_version INTEGER NOT NULL CHECK (schema_version = 1),
     kind TEXT NOT NULL CHECK (kind IN ('session_created','turn_started','input_applied','op_planned','op_started',
-        'op_prepared','turn_parked','op_parked','op_completed','op_unknown','context_compacted','usage_observed','turn_ended')),
+        'op_prepared','turn_parked','op_parked','op_completed','op_unknown','context_compacted','boundary_recorded','usage_observed','turn_ended')),
     turn_id TEXT, operation_id TEXT, attempt INTEGER CHECK (attempt > 0), body BLOB NOT NULL,
     digest TEXT NOT NULL CHECK (length(digest)=64), commit_id TEXT NOT NULL,
     commit_digest TEXT NOT NULL CHECK (length(commit_digest)=64),

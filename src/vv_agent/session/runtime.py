@@ -119,7 +119,7 @@ class Runtime:
             metadata={**self.agent.metadata, **self.config.metadata},
         )
 
-    def complete(self, request: LlmRequest, attempt: int) -> LLMResponse:
+    def complete(self, request: LlmRequest, attempt: int, stream_callback=None) -> LLMResponse:
         client = self.llm
         if isinstance(client, VvLlmClient):
             # One endpoint per logged attempt; never stack client fallback and kernel retries.
@@ -127,9 +127,16 @@ class Runtime:
             if not targets:
                 raise ValueError("No endpoint targets configured")
             client = copy(client)
-            client.endpoint_targets = [targets[(attempt - 1) % len(targets)]]
+            endpoint_id = request.metadata.get("session_endpoint_id")
+            client.endpoint_targets = (
+                [next(t for t in targets if t.endpoint_id == endpoint_id)]
+                if endpoint_id
+                else [targets[(attempt - 1) % len(targets)]]
+            )
             client.max_retries_per_endpoint = 1
             client.randomize_endpoints = False
+        if stream_callback is not None:
+            return client.complete_with_stream(request, stream_callback)
         return client.complete(request)
 
     def compile(self, content: str, tid: str) -> AgentTask:
@@ -171,6 +178,12 @@ class Runtime:
         task.model_settings = replace(
             defaults.resolve(task.model_settings), retry=RetrySettings(max_attempts=1, backoff_seconds=0)
         )
+        if task.metadata.get("session_memory_enabled"):
+            from .memory import session_memory
+
+            memory = session_memory(task, Path(self.config.workspace or ".") if task.use_workspace else None)
+            memory.load()
+            task.metadata["_vv_agent_session_memory_initial_state"] = memory.state.to_dict()
         task.initial_shared_state.setdefault("todo_list", [])
         for key in ("available_skills", "active_skills"):
             if key in task.metadata:
@@ -204,6 +217,11 @@ class Runtime:
             policy.allowed_tools = [n for n in frozen.allowed_tools if n in policy.allowed_tools]
         if frozen.approval == "always":
             policy.approval = "always"
+        from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
+
+        policy.disallowed_tools = list(
+            dict.fromkeys([*policy.disallowed_tools, *read_after_cycle_disallowed_tools(shared_state or {})])
+        )
         _apply_tool_policy_metadata(metadata, policy)
         if policy is not None:
             metadata["_vv_agent_tool_policy_approval"] = policy.approval
@@ -220,7 +238,7 @@ class Runtime:
             run_context=self.run_context(task.task_id),
             cycle_index=(
                 plan._payload["request"]["metadata"]["cycle_index"]
-                if plan._payload["purpose"] == "compaction"
+                if plan._payload["op_kind"] == "model" and "cycle_index" in plan._payload["request"].get("metadata", {})
                 else int(source.rsplit("/", 1)[1])
             ),
             workspace_backend=self.config.workspace_backend or LocalWorkspaceBackend(workspace),
@@ -231,7 +249,7 @@ class Runtime:
             metadata={
                 "operation_id": plan.operation_id,
                 "attempt": plan.attempt,
-                "session_tool_names": [s["function"]["name"] for s in self._definition(task)["tools"]],
+                "session_tool_names": [s["function"]["name"] for s in plan._payload["request"].get("tools", [])],
             },
         )
 
@@ -258,6 +276,7 @@ class Runtime:
         }
         memory_settings["microcompaction_policy"] = self.memory_manager.microcompaction_policy.to_dict()
         value: dict[str, Any] = {
+            "agent_name": self.agent.name,
             "memory_settings": memory_settings,
             "task": task.to_dict(),
             "child_tools": sorted(self.children),
@@ -330,32 +349,30 @@ def request_from_dict(value: dict[str, Any]) -> LlmRequest:
 
 def model_usage(value: dict[str, Any] | None):
     # Framework receipt annotations are not provider token-usage fields.
-    return normalize_token_usage(
-        {k: v for k, v in (value or {}).items() if k not in {"session_shared_state", "session_completion_reason"}}
-    )
+    return normalize_token_usage({k: v for k, v in (value or {}).items() if not k.startswith("session_")})
 
 
 def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
-    limits = state.turns[tid].start._payload["budget"]
-    parsed = RunBudgetLimits.from_dict(limits)
+    parsed = RunBudgetLimits.from_dict(state.turns[tid].start._payload["budget"])
     if not parsed.has_limits:
         return None
     observations = [r._payload["usage"] for r in state.usage_values.values() if r.turn_id == tid]
     elapsed = sum(v.get("elapsed_ms", 0) for v in observations)
+    boundaries = [r._payload["data"] for (turn, stage, _), r in state.boundaries.items() if turn == tid and stage == "budget"]
+    previous = BudgetUsageSnapshot.from_dict(boundaries[-1]["usage"]) if boundaries else BudgetUsageSnapshot()
     missing_interval = any(
         a.unknown and a.unknown._payload["observation"].get("active_interval_missing")
         for op in state.operations.values()
         if op.turn_id == tid
         for a in op.attempts.values()
     )
-    unavailable = (
-        (BudgetUnavailableDimension(BudgetDimension.WALL_TIME, BudgetUnavailableReason.ACCOUNTING_MISSING),)
-        if missing_interval
-        else ()
-    )
-    host = observations[-1].get("host_cost") if observations else None
+    unavailable = list(previous.unavailable_dimensions)
+    if missing_interval and not any(v.dimension == BudgetDimension.WALL_TIME for v in unavailable):
+        unavailable.append(BudgetUnavailableDimension(BudgetDimension.WALL_TIME, BudgetUnavailableReason.ACCOUNTING_MISSING))
     started = [(op.kind, a) for op in state.operations.values() if op.turn_id == tid for a in op.attempts.values() if a.started]
-    tool_counts = Counter(a.execution_plan._payload["request"]["name"] for kind, a in started if kind != "model")
+    tool_counts = Counter(name for b in boundaries for name in b["tool_names"])
+    # Host readings and unavailable classifications are retained at every active-scope commit.
+    host = observations[-1].get("host_cost") if observations else None
     evaluator = BudgetEvaluator(
         parsed,
         initial_usage=BudgetUsageSnapshot(
@@ -363,14 +380,13 @@ def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
             tool_calls=sum(tool_counts.values()),
             tool_calls_by_name=tool_counts,
             elapsed_ms=elapsed,
-            host_cost=HostCost.from_dict(host) if host else None,
-            unavailable_dimensions=unavailable,
+            host_cost=previous.host_cost,
+            unavailable_dimensions=tuple(unavailable),
         ),
         host_cost_meter=cast(HostCostMeter, SimpleNamespace(read=lambda: HostCost.from_dict(host) if host else None)),
         clock_ns=lambda: 0,
     )
     for kind, attempt in started:
-        if kind == "model":
-            usage = attempt.result._payload["usage"] if attempt.result else {}
-            evaluator.model_call_complete(model_usage(usage))
+        if kind == "model" and (attempt.result is not None or attempt.unknown is not None):
+            evaluator._observe_token_usage(model_usage(attempt.result._payload["usage"] if attempt.result else {}))
     return evaluator

@@ -328,7 +328,8 @@ def test_endpoint_attempts_do_not_stack(tmp_path, monkeypatch):
             tx.create(SessionSpec("s", "test", str(tmp_path)), consumers=())
             tx.push("s", InboxItem("i", "user", {"content": "go"}))
         llm = VvLlmClient(
-            [EndpointTarget("a", "unused", "https://example.invalid"), EndpointTarget("b", "unused", "https://example.invalid")]
+            [EndpointTarget("a", "unused", "https://example.invalid"), EndpointTarget("b", "unused", "https://example.invalid")],
+            randomize_endpoints=False,
         )
         runtime = Runtime(
             Agent("parity", "Be concise."), RunConfig(workspace=tmp_path), RESOLVED, llm, lambda: nullcontext(store)

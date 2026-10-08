@@ -9,7 +9,7 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
 
 ## Modules and logical bytes
 
-- `records.py` defines thirteen record variants and eight inbox variants. The
+- `records.py` defines 14 record variants and eight inbox variants. The
   version, envelope, payload, handles, and control discriminators are closed.
   Missing fields, unknown fields, non-integer/stale versions, duplicate JSON
   object keys, invalid identities, and incorrect embedded digests are rejected.
@@ -26,6 +26,10 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
 - `sqlite.py` provides the single-host implementation for local persistent and in-memory sessions.
 - `context.py` projects model messages, including accepted compaction replacements;
   `compaction.py` adapts MemoryManager to ordinary logged model operations.
+- `lifecycle.py` logs after-cycle decisions; `memory.py` binds callbacks and
+  session-memory file projections to committed boundaries.
+- `projection.py`, `result.py`, `events.py` and `tracing.py` provide typed host
+  projections; events and spans acknowledge through existing consumer cursors.
 
 Logical bytes use the existing `canonical_json.canonical_json_bytes` (RFC 8785)
 with SHA-256 digests. Producer construction validates and freezes each Record's
@@ -219,7 +223,7 @@ its deferred lifecycle.
 `CycleRunner._complete_llm` couples request construction to the old coordinator.
 The kernel builds the same LlmRequest and uses the same client, replacing only
 operation admission/persistence. It freezes `RetrySettings(max_attempts=1)` and binds one VvLlmClient endpoint per
-logged attempt, in configured order. Custom clients must also perform exactly one
+logged attempt, following the frozen preferred/randomized order. Custom clients must also perform exactly one
 provider attempt per `complete` call. No network/provider
 credentials are needed by the scripted recovery tests.
 
@@ -257,7 +261,8 @@ with missing plans can also reconstruct those plans without another model call.
 Known results are reused; planned work is admitted again; durable provider waits
 keep their exact handle. A started operation without authentic result/acceptance
 evidence becomes unknown only after the inbox watermark is rechecked. Models
-have at most two attempts; tools retry at most once only when their frozen
+have at most max(2, frozen endpoint count) logged attempts; an uncertain output
+repair is never retried. Tools retry at most once only when their frozen
 metadata declares `supported` idempotency. Their key includes the session and
 logical operation, never the attempt. Unknown model records explicitly carry
 `duplicate_model_request_and_cost` and missing measurement information.
@@ -539,3 +544,90 @@ catalog pagination <=1 second. The one-sample capacity invocation is:
 ```bash
 uv run python scripts/session_kernel_benchmark.py --sizes 5000 20000 --samples 1 --assert-capacity
 ```
+
+
+## F2d-2 memory, decisions and budgets
+
+`boundary_recorded` retains closed, stage-specific callback, decision, output and
+budget data. Before-memory replacements include the exact source context digest
+and JSON shared state. After-cycle snapshots use adopted model/tool receipts,
+including the parked ask_user WAIT_RESPONSE receipt. Decisions are committed
+before another dispatch and reused after recovery. Steer, persisted tool denials,
+invalid decisions and non-success stops use the existing lifecycle helpers.
+A callback interrupted before its boundary commit can run again; a recorded
+callback or decision is never executed again.
+
+MemoryProvider callbacks surround a logged started/completed compaction lifecycle.
+Micro and summary work share that lifecycle, with retained archive statistics.
+Summary requests, their acceptance and replacements still use MemoryManager and
+the ordinary model driver. First prompt-too-long recovery forces compaction with
+the configured tail; later retries shrink it. Primary requests retain the logical
+cycle number across those retries. Identical rejected summary operations reuse
+retained receipts rather than issuing another identical model request.
+
+Session-memory extraction is a tools-free logged model operation with purpose
+`session_memory`. Structured state is logged before file projection. Atomic file
+replacement and reconstruction from records make the file disposable; projection
+runs before compilation/reload of the next turn. Extraction parsing, entry merging
+and pruning reuse SessionMemory.
+
+Tool budgets reserve the whole ordered model batch in the same transaction as the
+adopted model receipt and tool plans. Rejected admission has no tool effects.
+Counts refer to admission names, including reserved calls later skipped by a
+finish/wait; per-dispatch wall/host checks do not increment them again. Retry and
+recovery reuse those reservations. Total/uncached tokens include logged internal
+model calls. Host metrics retain unavailable classifications across reconstruction;
+lost active intervals are explicitly unavailable, and strict policy stops instead
+of inventing wall time. No wall time is inferred from process downtime.
+
+## F2d-2 model and result adapters
+
+Endpoint order freezes the existing preference/randomization policy in the model
+request; each logged attempt selects exactly one endpoint from that order. Client
+and transport retries are set to one, and fallback is represented by another logged
+attempt. The last durable model success supplies later-turn preference. Request
+and endpoint drift are rejected before dispatch.
+
+Typed output checks and one tools-free repair reuse Runner coercion/validation.
+Repair is a logged `output_repair` operation; reported usage participates in budget
+and result ledgers, and an uncertain repair is never retried automatically.
+Candidate/partial output and final decisions survive recovery. Completed results
+use their terminal prefix, so later turns cannot change an older result. Per-cycle
+compaction flags, waits, errors, budget exhaustion and typed JSON output are
+reconstructed from records. The v23 public model-operation enum has no repair
+variant: adapters expose its existing agent_cycle enum and retain the precise
+purpose in event metadata and `RunResult.metadata.session_model_calls`.
+
+## F2d-2 events, streams and tracing
+
+Typed RunEvents project agent/cycle/diagnostic/budget/memory/child lifecycle from
+records with stable event IDs and `metadata.session_seq`. Child admission/completion
+events use parent records and carry child session/turn identities. Existing wait,
+approval, skipped-tool and cancellation differences remain explicit. This is an
+internal producer adapter, not App Server/default-entry adoption.
+
+`SessionRunEventStore` implements replay and validates append against the existing
+projection without another event ledger. `batch(tx)` bridges consumer cursors to
+projected events; a host can write its projection and acknowledge in the same SQL
+transaction. `consume` with an external sink is at least once if a crash occurs
+between sink delivery and acknowledgement; stable IDs support deduplication.
+
+Live assistant/reasoning/tool deltas use the existing stream-payload adapter and
+remain volatile. Sink loss cannot affect correctness. Definitive content,
+reasoning and tool calls rebuild from durable receipts; delta delivery is never a
+recovery prerequisite.
+
+Tracing projects stable run/agent/tool spans and uses a separate registered traces
+consumer. `deliver_spans` requires a top-level transaction and commits its cursor
+before invoking processors, preventing recovery duplicates. Telemetry is therefore
+at most once and may be lost after acknowledgement; processor failures remain
+isolated. Span output is detached before delivery so processors cannot mutate
+retained result data. Host assembly supplies processors explicitly; no default
+wiring changed.
+
+Record encoding reuses the exact nested JCS bytes already checked for an embedded
+digest when composing the closed ASCII-key record envelope. Parsing and production
+retain the same schema, identity, digest and nested I-JSON rejection checks. The
+byte-equivalence suite compares composed bytes against the shared full JCS encoder,
+including floats, Unicode key ordering and invalid nested values. Task copies remain
+at callback boundaries; internal read-only definition checks use the retained task.
