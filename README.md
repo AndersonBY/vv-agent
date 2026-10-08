@@ -6,9 +6,12 @@ A lightweight agent framework extracted from VectorVein's production runtime. Cy
 
 ## Install
 
-The current package version is `0.16.1`. This repository's `HEAD` locks
-language-neutral Contract `14.0.0`. The central support matrix records paired Python/Rust
-adoption and verification. This repository keeps a Python-idiomatic API.
+`contract.lock.json` pins this repository's language-neutral contract. The
+schema-2 central support matrix records adoption and verification: Python is the
+required implementation; `vv-agent-rs` is frozen at contract `23.0.0` / package
+series `0.21.x` for maintenance only. Python adoption does not require a Rust
+update. See [the contract workflow](docs/parity-contract.md). This repository
+keeps a Python-idiomatic API.
 
 ```bash
 python -m pip install "vv-agent==0.16.1"

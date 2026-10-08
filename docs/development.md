@@ -2,15 +2,18 @@
 
 Run commands from the repository root.
 
-The repository vendors an immutable snapshot of the shared Python/Rust
-contract. Verify it before changing or releasing shared behavior:
+The repository vendors an immutable snapshot of the language-neutral contract.
+Python is the required implementation; `vv-agent-rs` is frozen at contract
+23.0.0 / package series 0.21.x for maintenance only. Verify the snapshot before
+changing or releasing contract behavior:
 
 ```bash
 python3 scripts/contract_snapshot.py check
 ```
 
 Canonical fixtures live in `../vv-agent-contract/`; never edit
-`tests/fixtures/parity/` directly.
+`tests/fixtures/parity/` directly. Follow `docs/parity-contract.md` for schema-2
+adoption and central CI gates; Python adoption does not require a Rust update.
 
 After adopting a contract revision that changes `builtin_tools.json`, regenerate
 the readable Python schema source and verify that generation is reproducible:
@@ -102,6 +105,7 @@ Useful live-test environment variables:
 
 | Change area | Primary tests |
 | --- | --- |
+| Snapshot client and schema-2 adoption | `tests/test_contract_snapshot.py` |
 | Shared contract and canonical producers | `tests/test_tool_metadata_contract.py`, `tests/test_parity_evidence_manifests.py`, `tests/test_tool_schema_contract.py`, `tests/test_app_server_contract_parity.py`, `tests/test_runner_events_producer_parity.py` |
 | Tool metadata construction and model-schema isolation | `tests/test_tool_metadata_contract.py`, `tests/test_run_definition_producer.py`, `tests/test_function_tool.py`, `tests/test_tool_schema_contract.py`, `tests/test_parity_evidence_manifests.py` |
 | Metadata denial, delegation, and distributed projection | `tests/test_tool_orchestrator.py`, `tests/test_configured_sub_agent_parity.py`, `tests/test_handoffs.py`, `tests/test_distributed_checkpoint.py` |
