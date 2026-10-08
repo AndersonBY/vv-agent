@@ -44,6 +44,24 @@ class Attempt:
     unknown_consumed: bool = False
     approval: str | None = None
     superseded: bool = False
+    prepared: Record | None = None
+    approval_answer: Record | None = None
+
+    @property
+    def execution_plan(self) -> Record:
+        if self.prepared is None:
+            return self.plan
+        p = self.prepared._payload
+        return replace(
+            self.plan,
+            payload=self.plan._payload
+            | {
+                **{
+                    key: p[key] for key in ("request", "request_digest", "tool", "op_kind", "provider_binding", "idempotency_key")
+                },
+                "budget_admission": {"hook_result": p["hook_result"], "shared_state": p["shared_state"]},
+            },
+        )
 
     @property
     def started(self) -> bool:
@@ -68,6 +86,7 @@ class Turn:
     ended: bool = False
     cancelled: bool = False
     suspended: bool = False
+    wait: Record | None = None
 
 
 @dataclass
@@ -138,7 +157,7 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
         else:
             number = item.payload["attempt"]
             require(number in op.attempts, "evidence attempt mismatch")
-            plan = op.attempts[number].plan._payload
+            plan = op.attempts[number].execution_plan._payload
             require(item.payload["request_digest"] == plan["request_digest"], "evidence request mismatch")
             if item.kind == "deferred_result":
                 require(item.payload["provider_binding"] == plan["provider_binding"], "evidence provider mismatch")
@@ -166,6 +185,18 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
             else:
                 require(not turn.cancelled, "cannot resume or suspend a cancelled turn")
                 turn.suspended = action == "suspend"
+    if item.kind == "user" and tid in state.turns and state.turns[tid].wait is not None:
+        waiting = state.turns[tid].wait
+        assert waiting is not None
+        content = item.payload["content"]
+        require(
+            isinstance(content, dict)
+            and content.get("interaction_id") == waiting._payload["interaction_id"]
+            and p["target_wait_id"] == waiting._payload["interaction_id"]
+            and p["target_operation_id"] is None,
+            "no-tool reply identity mismatch",
+        )
+        state.turns[tid].wait = None
     if item.kind == "approval_answer":
         answer = item.payload
         op = state.operations.get(answer["operation_id"])
@@ -186,7 +217,9 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
             p["target_operation_id"] == answer["operation_id"] and p["target_wait_id"] == answer["request_id"],
             "approval application target mismatch",
         )
+        require(attempt.approval is None, "approval already answered")
         attempt.approval = answer["decision"]
+        attempt.approval_answer = record
 
 
 def _plan(state: ExecutionState, record: Record) -> None:
@@ -194,7 +227,10 @@ def _plan(state: ExecutionState, record: Record) -> None:
     assert oid is not None and tid is not None and number is not None
     require(tid == state.active_turn_id, "plan outside active turn")
     turn = state.turns[tid]
-    require(not turn.cancelled and not turn.suspended and not state.closed, "plan after cancel/suspend/close")
+    require(
+        not turn.cancelled and not turn.suspended and not state.closed and turn.wait is None,
+        "plan after cancel/suspend/close/wait",
+    )
     op = state.operations.get(oid)
     if op is None:
         require(number == 1, "first attempt must be 1")
@@ -207,8 +243,8 @@ def _plan(state: ExecutionState, record: Record) -> None:
         require(previous.unknown is not None and previous.unknown._payload["retry"] == "retry", "retry not authorized")
         require(op.selected_attempt is None, "retry after adopted result")
         require(
-            p["request_digest"] == previous.plan._payload["request_digest"]
-            and p["provider_binding"] == previous.plan._payload["provider_binding"]
+            p["request_digest"] == previous.execution_plan._payload["request_digest"]
+            and p["provider_binding"] == previous.execution_plan._payload["provider_binding"]
             and p["context_version"] == previous.plan._payload["context_version"]
             and p["purpose"] == previous.plan._payload["purpose"],
             "retry changed request, context, purpose or provider",
@@ -227,7 +263,7 @@ def _plan(state: ExecutionState, record: Record) -> None:
         source_attempt = source.attempts[ref["attempt"]]
         require(source.turn_id == tid and source_attempt.state == "unknown", "request did not consume an unknown")
         source_attempt.unknown_consumed = True
-    op.attempts[number] = Attempt(record)
+    op.attempts[number] = Attempt(record, prepared=previous.prepared if number > 1 else None)
 
 
 def _operation(state: ExecutionState, record: Record) -> None:
@@ -237,13 +273,29 @@ def _operation(state: ExecutionState, record: Record) -> None:
     require(op is not None and op.turn_id == record.turn_id and number in op.attempts, "operation/attempt/turn mismatch")
     assert op is not None
     attempt, turn = op.attempts[number], state.turns[op.turn_id]
-    if record.kind == "op_started":
+    if record.kind == "op_prepared":
+        require(op.kind != "model" and attempt.state == "planned" and attempt.prepared is None, "invalid hook preparation")
         require(
-            op.turn_id == state.active_turn_id and not turn.cancelled and not turn.suspended and not state.closed,
+            op.turn_id == state.active_turn_id and not turn.cancelled and not turn.suspended, "prepare outside executable turn"
+        )
+        require(p["request"]["id"] == attempt.plan._payload["request"]["id"], "hook changed tool call identity")
+        require(
+            p["tool"] == turn.start._payload["definition"]["capabilities"].get(p["request"]["name"], {}),
+            "hook changed frozen capability",
+        )
+        require(p["op_kind"] == ("interaction" if p["request"]["name"] == "ask_user" else "tool"), "hook kind mismatch")
+        attempt.prepared = record
+    elif record.kind == "op_started":
+        require(
+            op.turn_id == state.active_turn_id
+            and not turn.cancelled
+            and not turn.suspended
+            and not state.closed
+            and turn.wait is None,
             "dispatch outside executable turn",
         )
         require(number == max(op.attempts) and op.selected_attempt is None, "superseded dispatch")
-        ready = attempt.state == "planned" or (attempt.state == "parked" and attempt.approval == "approve")
+        ready = attempt.state == "planned" or (attempt.state == "parked" and attempt.approval in {"approve", "allow_session"})
         require(ready, "start requires plan or approved before-dispatch wait")
         require(
             all(state.operations[dep].state == "completed" for dep in attempt.plan._payload["dependencies"]),
@@ -257,15 +309,21 @@ def _operation(state: ExecutionState, record: Record) -> None:
         handle = p["handle"]
         require(not before or handle["kind"] in {"approval", "user", "child"}, "provider park needs dispatch")
         if handle["kind"] == "user":
-            require(op.kind == "interaction" and before, "user wait requires undispatched interaction")
+            require(
+                attempt.execution_plan._payload["op_kind"] == "interaction" and before,
+                "user wait requires undispatched interaction",
+            )
         if handle["kind"] == "approval":
-            require(before and handle["request_digest"] == attempt.plan._payload["request_digest"], "approval request mismatch")
+            require(
+                before and handle["request_digest"] == attempt.execution_plan._payload["request_digest"],
+                "approval request mismatch",
+            )
         if handle["kind"] == "provider":
             require(
                 handle["operation_id"] == oid
                 and handle["attempt"] == number
-                and handle["request_digest"] == attempt.plan._payload["request_digest"]
-                and handle["provider"] == attempt.plan._payload["provider_binding"],
+                and handle["request_digest"] == attempt.execution_plan._payload["request_digest"]
+                and handle["provider"] == attempt.execution_plan._payload["provider_binding"],
                 "provider handle mismatch",
             )
         if handle["kind"] == "child":
@@ -294,8 +352,8 @@ def _operation(state: ExecutionState, record: Record) -> None:
     elif record.kind == "op_completed":
         require(attempt.state in {"planned", "started", "parked", "unknown"}, "result after completion")
         require(
-            p["request_digest"] == attempt.plan._payload["request_digest"]
-            and p["provider_binding"] == attempt.plan._payload["provider_binding"],
+            p["request_digest"] == attempt.execution_plan._payload["request_digest"]
+            and p["provider_binding"] == attempt.execution_plan._payload["provider_binding"],
             "result request/provider mismatch",
         )
         require(p["execution_started"] == attempt.started, "execution_started disagrees with dispatch")
@@ -349,6 +407,9 @@ def _schedule(state: ExecutionState) -> None:
         return
     if turn.suspended:
         state.phase = "suspended"
+        return
+    if turn.wait is not None:
+        state.phase = "parked"
         return
     due: list[int] = []
     waiting = False
@@ -576,6 +637,36 @@ class Fold:
             elif kind.startswith("op_"):
                 self._own_operation(record.operation_id)
                 _operation(state, record)
+            elif kind == "turn_parked":
+                require(tid == state.active_turn_id and tid in state.turns, "wait outside active turn")
+                assert tid is not None
+                turn = state.turns[tid]
+                require(turn.wait is None and not turn.cancelled and not turn.suspended, "invalid turn wait")
+                source = state.operations.get(p["source_operation_id"])
+                require(
+                    source is not None
+                    and source.turn_id == tid
+                    and source.kind == "model"
+                    and source.selected_attempt == p["source_attempt"],
+                    "wait source mismatch",
+                )
+                assert source is not None
+                result = source.attempts[p["source_attempt"]].result
+                require(
+                    result is not None
+                    and not result._payload["result"].get("tool_calls")
+                    and not result._payload["result"].get("error_code")
+                    and source.attempts[p["source_attempt"]].plan._payload["purpose"] == "primary"
+                    and p["question"] == result._payload["result"]["content"]
+                    and turn.start._payload["definition"]["task"]["no_tool_policy"] == "wait_user",
+                    "invalid no-tool wait source",
+                )
+                require(
+                    all(op.state == "completed" for op in state.operations.values() if op.turn_id == tid),
+                    "wait has unfinished operations",
+                )
+                self._own_turn(tid)
+                state.turns[tid].wait = record
             elif kind == "turn_ended":
                 require(tid == state.active_turn_id and tid in state.turns, "end outside active turn")
                 assert tid is not None

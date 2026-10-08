@@ -58,6 +58,8 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                 event = RunCancelledEvent(**common, reason=p["reason"] or p["status"])
             else:
                 event = RunFailedEvent(**common, error=p["reason"] or "failed", status="failed")
+        elif r.kind == "turn_parked":
+            event = RunStateChangedEvent(**common, state="wait_user")
         elif r.kind == "input_applied" and p["disposition"] == "applied":
             item = p["input"]
             if item["kind"] == "control":
@@ -70,13 +72,19 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
             elif item["kind"] == "approval_answer":
                 answer = item["payload"]
                 plan = plans[(answer["operation_id"], answer["attempt"])]
+                approval_common: dict[str, Any] = common | {
+                    "metadata": common["metadata"]
+                    | {"reason": answer.get("reason", ""), "decision_metadata": answer.get("metadata", {})}
+                }
                 event = ApprovalResolvedEvent(
-                    **common,
+                    **approval_common,
                     request_id=answer["request_id"],
                     tool_name=plan["request"]["name"],
                     tool_call_id=plan["request"]["id"],
-                    action="allow" if answer["decision"] == "approve" else "deny",
+                    action="allow" if answer["decision"] == "approve" else answer["decision"],
                 )
+            elif item["kind"] == "user" and p["target_wait_id"] and p["target_operation_id"] is None:
+                event = RunStateChangedEvent(**common, state="running")
             elif item["kind"] == "user" and p["target_operation_id"]:
                 plan = plans[(p["target_operation_id"], 1)]
                 cycle = int(plan["dependencies"][0].rsplit("/", 1)[1])
@@ -99,6 +107,8 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
             key = (r.operation_id, r.attempt)
             if r.kind == "op_planned":
                 plans[key] = p
+            elif r.kind == "op_prepared":
+                plans[key] = plans[key] | {"request": p["request"], "tool": p["tool"], "request_digest": p["request_digest"]}
             plan = plans[key]
             kind, request = plan["op_kind"], plan["request"]
             source = r.operation_id if kind == "model" else plan["dependencies"][0]

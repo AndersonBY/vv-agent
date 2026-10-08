@@ -9,7 +9,7 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
 
 ## Modules and logical bytes
 
-- `records.py` defines eleven record variants and eight inbox variants. The
+- `records.py` defines thirteen record variants and eight inbox variants. The
   version, envelope, payload, handles, and control discriminators are closed.
   Missing fields, unknown fields, non-integer/stale versions, duplicate JSON
   object keys, invalid identities, and incorrect embedded digests are rejected.
@@ -157,8 +157,9 @@ and consumer lag. It does not claim work. Each ordered branch starts at the curs
 ready-inbox indexes and stops at the page limit before the union is sorted.
 The final merge sorts at most twice the page size. Call with `after=page[-1].cursor`
 until exhausted, then restart from the beginning on the next scan. Projection
-work is independent of the execution lease. User/approval-only waits have no
-due time; an approval response, including denial, makes resolution runnable.
+work is independent of the execution lease. User waits and approval waits without
+a deadline have no due time. An approval deadline or response, including denial,
+makes resolution runnable.
 A planned operation blocked on an unresolved dependency does not spin.
 Queued user/follow-up inputs remain due after the active turn ends, even after
 their inbox rows are consumed. A turn input cannot be admitted a second time.
@@ -231,6 +232,24 @@ outcomes do not count as trusted session acceptance. Executors marked
 `policy_managed_by_handler` are rejected before preflight because they bypass
 the orchestrator dispatch callback; they cannot execute through this wrapper.
 
+Before-tool hooks run serially immediately before each tool's preflight.
+`op_prepared` retains the patched call/digest, capability, provider/idempotency
+binding, short-circuit result and JSON state. It is replayed after approval or
+Runtime reconstruction without calling the hook again. Definitive result records
+retain after-tool hooks and stop behavior, including pre-dispatch denials and
+short circuits. Native FINISH closes already planned pending tools with the
+shared skipped-result producer.
+
+Approval parks bind the exact prepared arguments. The internal approval bridge
+uses ApprovalProvider and ApprovalBroker only as transports and pushes their
+decisions through the same inbox. Answers allow approve, deny, allow_session and
+timeout with optional typed reason/metadata fields. Session grants are folded
+from applied answers; a new Broker cannot lose them. Deadlines are absolute
+store times retained in the parked record, including provider decision time.
+Expired allow/allow_session answers are rejected; Broker session flags alone cannot
+authorize effects. Duplicate answers are noop only when all decision bytes agree;
+conflicting decisions are rejected.
+
 ## Repair, inputs and provider evidence
 
 Model results and all dependent tool plans commit together. A retained response
@@ -261,7 +280,21 @@ input arriving in that window forces recomputation. Replies to `ask_user` use a
 `operation_id`, `interaction_id`, and `text`; they produce one tool result in the
 same turn, not an additional user message. Approval answers bind the operation,
 attempt, request ID, request digest and scope; authentication of the host user
-belongs to the inbox-writing adapter.
+belongs to the inbox-writing adapter. Identical reply replays are noop; different
+response bytes for the same interaction are rejected even after completion.
+
+A no-tool `wait_user` result creates `turn_parked` with its source model receipt,
+interaction identity and prompt, leaving no due time. It has no tool operation or
+invented tool message. A targeted `user` reply contains `interaction_id` and
+`text`, clears that wait and appends the user message within the same turn.
+Cancel/suspend controls remain effective while parked.
+
+Bash/check/stop reuse the existing BackgroundSessionManager. A retained bash
+receipt carries the process-manager session ID; rebuilding a drive/Runtime keeps
+the original turn owner, so subsequent management tools reattach through the
+same owner-scoped manager. Manager/OS-worker restart is outside this guarantee;
+missing handles are never adopted by PID alone. Unknown/stopping receipts are
+not confirmed stop receipts.
 
 Late results follow the reducer's original normal/correction/audit rules.
 An unknown already frozen into a successor request keeps its single original
