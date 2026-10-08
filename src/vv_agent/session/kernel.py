@@ -17,8 +17,10 @@ from vv_agent.llm.errors import is_prompt_too_long_error
 from vv_agent.output_validation import OutputRepairRequest
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.tool_call_runner import ToolCallRunner
+from vv_agent.tools.orchestrator import ToolOrchestrator
 from vv_agent.types import AgentTask, Message, ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 
+from .approval import resolve_approval
 from .children import child_outcome, create_child, verify_completion
 from .compaction import compact_context, finish_summary
 from .context import project_context
@@ -286,33 +288,6 @@ class _Driver:
                         dependencies=[plan.operation_id],
                         capability=definition["capabilities"].get(call["name"], {}),
                     )
-                    if self.runtime.hooks.has_hooks():
-                        task = self.task()
-                        shared = deepcopy(outcome.usage.get("session_shared_state", self.shared_state()))
-                        ctx = self.runtime.context(task, planned, self.scope.token, shared_state=shared)
-                        patched, short = self.runtime.hooks.apply_before_tool_call(
-                            task=task,
-                            cycle_index=ctx.cycle_index,
-                            call=ToolCall.from_dict(copy_json(call)),
-                            context=ctx,
-                        )
-                        planned = self.plan(
-                            oid,
-                            patched.to_dict(),
-                            "interaction" if patched.name == "ask_user" else "tool",
-                            dependencies=[plan.operation_id],
-                            capability=definition["capabilities"].get(patched.name, {}),
-                        )
-                        planned = replace(
-                            planned,
-                            payload=planned._payload
-                            | {
-                                "budget_admission": {
-                                    "hook_result": short.to_dict() if short else None,
-                                    "shared_state": shared,
-                                }
-                            },
-                        )
                     records.append(planned)
         return records
 
@@ -354,14 +329,15 @@ class _Driver:
         return self.runtime.providers.get(plan._payload["provider_binding"], self.runtime.functions)
 
     def parked(self, plan: Record, handle: dict[str, Any], *, after: bool) -> Record:
-        now = self.scope.poll(self.store).db_now_ms if handle["kind"] == "provider" else 0
+        timeout = self.runtime.config.approval_timeout_seconds if handle["kind"] == "approval" else None
+        now = self.scope.poll(self.store).db_now_ms if handle["kind"] == "provider" or timeout is not None else 0
         return self.record(
             "op_parked",
             {
                 "phase": "after_dispatch" if after else "before_dispatch",
                 "handle": handle,
                 "poll_at_ms": now + self.runtime.poll_ms if handle["kind"] == "provider" else None,
-                "deadline_ms": None,
+                "deadline_ms": now + max(0, int(timeout * 1000)) if timeout is not None else None,
             },
             plan,
         )
@@ -383,6 +359,20 @@ class _Driver:
             tid = self.state.active_turn_id
             target_tid = item.target_turn_id
             evidence = item.kind in {"deferred_result", "provider_evidence", "child_result"}
+            retained_reply = item.kind in {"user", "approval_answer"} and any(
+                r._payload["disposition"] == "applied"
+                and r._payload["input"]["kind"] == item.kind
+                and r._payload["input"]["target_turn_id"] == target_tid
+                and r._payload["input"]["generation"] == item.generation
+                and r._payload["target_wait_id"] is not None
+                and (
+                    r._payload["input"]["payload"].get("request_id") == item.payload.get("request_id")
+                    if item.kind == "approval_answer"
+                    else isinstance(item.payload["content"], dict)
+                    and r._payload["target_wait_id"] == item.payload["content"].get("interaction_id")
+                )
+                for r in self.state.applied_inputs.values()
+            )
             # Cancellation may arrive before the child's initial user input opens its turn.
             if (
                 item.kind == "control"
@@ -402,7 +392,7 @@ class _Driver:
                 target, extra, disposition, reason = self.apply_child(item)
                 if disposition == "pending":
                     continue
-            elif (target_tid is not None and target_tid != tid and not evidence) or (
+            elif (target_tid is not None and target_tid != tid and not evidence and not retained_reply) or (
                 target_tid in self.state.turns
                 and item.generation is not None
                 and item.generation != self.state.turns[target_tid].start._payload["generation"]
@@ -417,20 +407,22 @@ class _Driver:
                     attempt is None
                     or op is None
                     or op.turn_id != target_tid
-                    or item.payload["request_digest"] != attempt.plan._payload["request_digest"]
-                    or not self.provider(attempt.plan).authenticate(item, attempt.plan)
+                    or item.payload["request_digest"] != attempt.execution_plan._payload["request_digest"]
+                    or not self.provider(attempt.execution_plan).authenticate(item, attempt.execution_plan)
                 ):
                     disposition, reason = "rejected", "untrusted or mismatched provider evidence"
                 elif item.kind == "deferred_result":
-                    if item.payload["provider_binding"] != attempt.plan._payload["provider_binding"]:
+                    if item.payload["provider_binding"] != attempt.execution_plan._payload["provider_binding"]:
                         disposition, reason = "rejected", "provider binding mismatch"
                     elif attempt.result is not None:
                         disposition = "noop" if attempt.result._payload["result"] == item.payload["result"] else "rejected"
                         reason = "retained result" if disposition == "noop" else "result conflict"
                     else:
-                        extra = self.completed(attempt.plan, Definitive(item.payload["result"], tuple(item.payload["evidence"])))
+                        extra = self.completed(
+                            attempt.execution_plan, Definitive(item.payload["result"], tuple(item.payload["evidence"]))
+                        )
                 elif attempt.state == "started":
-                    extra = [self.parked(attempt.plan, item.payload["handle"], after=True)]
+                    extra = [self.parked(attempt.execution_plan, item.payload["handle"], after=True)]
                 elif attempt.wait and attempt.wait["handle"] == item.payload["handle"]:
                     disposition = "noop"
                 else:
@@ -441,18 +433,70 @@ class _Driver:
                 attempt = op.attempts.get(item.payload["attempt"]) if op else None
                 handle = attempt.wait["handle"] if attempt and attempt.wait else {}
                 wait = item.payload["request_id"]
+                previous = attempt.approval_answer if attempt else None
                 if (
+                    previous is not None
+                    and op is not None
+                    and target_tid == op.turn_id
+                    and item.payload == previous._payload["input"]["payload"]
+                ):
+                    disposition, reason = "noop", "approval already resolved"
+                elif (
                     target_tid != tid
                     or not handle
                     or handle.get("kind") != "approval"
                     or any(handle[k] != item.payload[k] for k in ("request_id", "request_digest", "scope"))
                 ):
                     disposition, reason = "rejected", "approval identity or scope mismatch"
+                elif (
+                    attempt
+                    and attempt.wait
+                    and attempt.wait["deadline_ms"] is not None
+                    and item.payload["decision"] != "timeout"
+                    and self.scope.poll(self.store).db_now_ms >= attempt.wait["deadline_ms"]
+                ):
+                    disposition, reason = "rejected", "approval deadline expired"
                 elif attempt and attempt.approval:
-                    disposition, reason = "noop", "approval already resolved"
+                    original = attempt.approval_answer
+                    assert original is not None
+                    equal = original._payload["input"]["payload"] == item.payload
+                    disposition, reason = (
+                        ("noop", "approval already resolved") if equal else ("rejected", "approval reply conflict")
+                    )
             elif item.kind in {"user", "follow_up"}:
+                content = item.payload["content"]
+                previous = next(
+                    (
+                        r
+                        for r in self.state.applied_inputs.values()
+                        if item.kind == "user"
+                        and isinstance(content, dict)
+                        and r._payload["disposition"] == "applied"
+                        and r._payload["input"]["kind"] == "user"
+                        and r._payload["input"]["target_turn_id"] == target_tid
+                        and r._payload["target_wait_id"] == content.get("interaction_id")
+                    ),
+                    None,
+                )
+                turn_wait = self.state.turns[tid].wait if tid else None
+                if previous is not None:
+                    equal = previous._payload["input"]["payload"] == item.payload
+                    disposition, reason = ("noop", "retained user reply") if equal else ("rejected", "user reply conflict")
+                elif turn_wait is not None and item.kind == "user":
+                    wait = turn_wait._payload["interaction_id"]
+                    if (
+                        target_tid != tid
+                        or not isinstance(content, dict)
+                        or content.get("interaction_id") != wait
+                        or "text" not in content
+                    ):
+                        disposition, reason = "rejected", "reply must identify the parked turn"
+                else:
+                    wait = None
                 waits = [(oid, n, h) for (oid, n), h in self.state.waits.items() if h["handle"]["kind"] == "user"]
-                if item.kind == "user" and tid and waits:
+                if previous is not None or (turn_wait is not None and item.kind == "user"):
+                    pass
+                elif item.kind == "user" and tid and waits:
                     content = item.payload["content"]
                     match = next(
                         (
@@ -461,6 +505,7 @@ class _Driver:
                             if isinstance(content, dict)
                             and content.get("interaction_id") == h["handle"]["interaction_id"]
                             and content.get("operation_id") == oid
+                            and "text" in content
                             and target_tid == tid
                         ),
                         None,
@@ -470,16 +515,19 @@ class _Driver:
                     else:
                         target, number, h = match
                         wait = h["handle"]["interaction_id"]
-                        plan = self.state.operations[target].attempts[number].plan
-                        extra = self.completed(
+                        plan = self.state.operations[target].attempts[number].execution_plan
+                        context = self.runtime.context(self.task(), plan, self.scope.token, shared_state=self.shared_state())
+                        outcome = self.finalize_tool(
                             plan,
+                            context,
                             Definitive(
                                 ToolExecutionResult(
-                                    tool_call_id=plan._payload["request"]["id"], content=str(content.get("text", ""))
+                                    tool_call_id=plan._payload["request"]["id"], content=str(content["text"])
                                 ).to_dict(),
                                 (),
                             ),
                         )
+                        extra = self.completed(plan, outcome)
                 elif tid and item.kind == "user":
                     disposition, reason = "rejected", "turn already active"
                 else:
@@ -550,7 +598,7 @@ class _Driver:
             )
         return (
             target,
-            self.completed(a.plan, Definitive(result, (f"child/{terminal.seq}/{terminal.record.digest}",))),
+            self.completed(a.execution_plan, Definitive(result, (f"child/{terminal.seq}/{terminal.record.digest}",))),
             "applied",
             None,
         )
@@ -572,7 +620,7 @@ class _Driver:
                         {
                             "input_ids": [input_id],
                             "definition": definition,
-                            "definition_digest": digest(definition),
+                            "definition_digest": self.runtime._definition_digest,
                             "handler_version": self.runtime.handler_version,
                             "budget": limits.to_dict(),
                             "binding": None,
@@ -595,6 +643,8 @@ class _Driver:
             r = stored.record
             if r.turn_id != self.state.active_turn_id:
                 continue
+            if r.kind == "op_prepared":
+                return copy_json(r._payload["shared_state"])
             if r.kind == "op_completed" and r._payload["context"] == "normal":
                 snapshot = r._payload["usage"].get("session_shared_state")
                 if snapshot is not None:
@@ -659,13 +709,21 @@ class _Driver:
                 if a.state != "completed" and not a.started:
                     records.extend(
                         self.completed(
-                            a.plan,
+                            a.execution_plan,
                             Definitive(
-                                ToolExecutionResult(
-                                    tool_call_id=a.plan._payload["request"].get("id", "model"),
-                                    content=reason or "not executed",
-                                    status_code=ToolResultStatus.ERROR,
-                                    error_code="not_executed",
+                                (
+                                    ToolCallRunner._build_skipped_result(
+                                        ToolCall.from_dict(a.execution_plan.payload["request"]),
+                                        error_code="skipped_due_to_finish",
+                                        message="Tool skipped because a previous tool finished the task.",
+                                    )
+                                    if status == "completed" and op.kind != "model"
+                                    else ToolExecutionResult(
+                                        tool_call_id=a.plan._payload["request"].get("id", "model"),
+                                        content=reason or "not executed",
+                                        status_code=ToolResultStatus.ERROR,
+                                        error_code="not_executed",
+                                    )
                                 ).to_dict(),
                                 (),
                             ),
@@ -677,11 +735,13 @@ class _Driver:
                         continue
                     if a.wait and a.wait["handle"]["kind"] == "provider":
                         handle = copy_json(a.wait["handle"])
-                        outcome = _invoke(self.scope, lambda a=a, handle=handle: self.provider(a.plan).cancel(handle), 1)
+                        outcome = _invoke(
+                            self.scope, lambda a=a, handle=handle: self.provider(a.execution_plan).cancel(handle), 1
+                        )
                         if isinstance(outcome, Definitive):
-                            records.extend(self.completed(a.plan, outcome))
+                            records.extend(self.completed(a.execution_plan, outcome))
                             continue
-                    records.append(self.unknown(a.plan, reason or "turn stopped"))
+                    records.append(self.unknown(a.execution_plan, reason or "turn stopped"))
 
         def cancel_children(tx: SessionTx) -> list[Record]:
             for op in self.state.operations.values():
@@ -737,38 +797,93 @@ class _Driver:
         self.commit([terminal], guarded=True)
 
     def dispatch(self, attempt: Attempt) -> None:
-        plan = attempt.plan
+        plan = attempt.execution_plan
         task = self.task()
         kind = plan._payload["op_kind"]
         context = self.runtime.context(
-            task, plan, self.scope.token, approved=attempt.approval == "approve", shared_state=self.shared_state()
+            task,
+            plan,
+            self.scope.token,
+            approved=attempt.approval in {"approve", "allow_session"},
+            shared_state=self.shared_state(),
         )
         context.metadata["fence_epoch"] = self.scope.lease.epoch
         if kind != "model":
             parent = self.state.operations[plan._payload["dependencies"][0]]
             source = parent.attempts[parent.selected_attempt or max(parent.attempts)].plan
             context.metadata["session_tool_names"] = [s["function"]["name"] for s in source._payload["request"]["tools"]]
-        hook_result = plan._payload["budget_admission"].get("hook_result")
-        if hook_result is not None:
-            self.commit(self.completed(plan, Definitive(hook_result)), guarded=True)
-            return
-        if attempt.approval == "deny":
+        if kind != "model" and self.runtime.hooks.has_hooks() and attempt.prepared is None:
+            patched, short = self.runtime.hooks.apply_before_tool_call(
+                task=task, cycle_index=context.cycle_index, call=ToolCall.from_dict(plan.payload["request"]), context=context
+            )
+            capabilities = self.state.turns[plan.turn_id or ""].start._payload["definition"]["capabilities"]
+            prepared = self.plan(
+                plan.operation_id or "",
+                patched.to_dict(),
+                "interaction" if patched.name == "ask_user" else "tool",
+                dependencies=plan._payload["dependencies"],
+                capability=capabilities.get(patched.name, {}),
+            )
             self.commit(
-                self.completed(
-                    plan,
-                    Definitive(
-                        ToolExecutionResult(
-                            tool_call_id=plan._payload["request"]["id"],
-                            content="Approval denied",
-                            status_code=ToolResultStatus.ERROR,
-                            error_code="tool_approval_denied",
-                        ).to_dict(),
-                        (),
-                    ),
-                )
+                [
+                    self.record(
+                        "op_prepared",
+                        {
+                            "request": patched.to_dict(),
+                            "request_digest": digest(patched.to_dict()),
+                            "tool": prepared._payload["tool"],
+                            "op_kind": prepared._payload["op_kind"],
+                            "provider_binding": prepared._payload["provider_binding"],
+                            "idempotency_key": prepared._payload["idempotency_key"],
+                            "hook_result": short.to_dict() if short else None,
+                            "shared_state": context.shared_state,
+                        },
+                        plan,
+                    )
+                ],
+                guarded=True,
             )
             return
+        if attempt.prepared is not None:
+            context.shared_state.clear()
+            context.shared_state.update(copy_json(plan._payload["budget_admission"]["shared_state"]))
+        hook_result = plan._payload["budget_admission"].get("hook_result")
+        if hook_result is not None:
+            self.commit(self.completed(plan, self.finalize_tool(plan, context, Definitive(hook_result))), guarded=True)
+            return
+        if attempt.approval in {"deny", "timeout"}:
+            assert attempt.approval_answer is not None
+            answer = attempt.approval_answer._payload["input"]["payload"]
+            executor = self.runtime.functions.orchestrator._resolve_executor(plan._payload["request"]["name"])
+            assert executor is not None
+            result = ToolOrchestrator._approval_error_result(
+                executor=executor,
+                call=ToolCall.from_dict(plan.payload["request"]),
+                request_id=answer["request_id"],
+                error_code="tool_approval_timeout" if attempt.approval == "timeout" else "tool_approval_denied",
+                action=attempt.approval,
+                message=answer.get("reason")
+                or (
+                    "Approval request timed out."
+                    if attempt.approval == "timeout"
+                    else f"Approval denied for tool {executor.name}."
+                ),
+            )
+            self.commit(self.completed(plan, self.finalize_tool(plan, context, Definitive(result.to_dict(), ()))))
+            return
         if kind != "model":
+            name = plan._payload["request"]["name"]
+            if any(
+                r._payload["disposition"] == "applied"
+                and r._payload["input"]["kind"] == "approval_answer"
+                and r._payload["input"]["payload"]["decision"] == "allow_session"
+                and name in r._payload["input"]["payload"]["scope"]
+                for r in self.state.applied_inputs.values()
+            ):
+                assert context.ctx is not None
+                from types import SimpleNamespace
+
+                context.ctx._approved_tool_approval = SimpleNamespace(call=ToolCall.from_dict(plan.payload["request"]))
             preflight = self.runtime.functions.preflight(plan, context)
             if preflight is not None:
                 if preflight.error_code == "tool_approval_required":
@@ -780,7 +895,9 @@ class _Driver:
                     }
                     self.commit([self.parked(plan, handle, after=False)], guarded=True)
                 else:
-                    self.commit(self.completed(plan, Definitive(preflight.to_dict(), ())), guarded=True)
+                    self.commit(
+                        self.completed(plan, self.finalize_tool(plan, context, Definitive(preflight.to_dict(), ()))), guarded=True
+                    )
                 return
         evaluator = budget(self.state, plan.turn_id or "")
         if evaluator:
@@ -798,21 +915,31 @@ class _Driver:
         poll = self.scope.poll(self.store)
         if poll.inbox_seq != self.watermark or self.scope.token.cancelled:
             raise SequenceConflict("input arrived before dispatch")
-        if kind == "interaction":
+        if kind == "interaction" or plan._payload["request"].get("name") == "ask_user":
             outcome = self.runtime.functions.submit(plan, context=context)
             if not isinstance(outcome, Definitive):
                 raise ValueError("ask_user must be a synchronous interaction")
             question = outcome.result.get("metadata", {}).get("question", outcome.result["content"])
-            self.commit(
-                [
-                    self.parked(
-                        plan,
-                        {"kind": "user", "interaction_id": f"interaction/{plan.operation_id}", "question": question},
-                        after=False,
-                    )
-                ],
-                guarded=True,
+            parked = self.parked(
+                plan, {"kind": "user", "interaction_id": f"interaction/{plan.operation_id}", "question": question}, after=False
             )
+            skipped = []
+            for oid, op in self.state.operations.items():
+                pending = op.attempts[max(op.attempts)]
+                if (
+                    oid != plan.operation_id
+                    and op.turn_id == plan.turn_id
+                    and op.kind != "model"
+                    and pending.state == "planned"
+                    and pending.plan._payload["dependencies"] == plan._payload["dependencies"]
+                ):
+                    result = ToolCallRunner._build_skipped_result(
+                        ToolCall.from_dict(pending.execution_plan.payload["request"]),
+                        error_code="skipped_due_to_wait_user",
+                        message="Tool skipped because a previous tool requested user input.",
+                    )
+                    skipped.extend(self.completed(pending.execution_plan, Definitive(result.to_dict(), ())))
+            self.commit([parked, *skipped], guarded=True)
             return
         started = self.record(
             "op_started",
@@ -918,26 +1045,30 @@ class _Driver:
         self.runtime.hook("after_external_call", plan)
         if isinstance(outcome, Definitive):
             if kind != "model":
-                result = ToolExecutionResult.from_dict(outcome.result)
-                result = self.runtime.hooks.apply_after_tool_call(
-                    task=task,
-                    cycle_index=context.cycle_index,
-                    call=ToolCall.from_dict(copy_json(plan._payload["request"])),
-                    context=context,
-                    result=result,
-                )
-                stop = ToolCallRunner._apply_tool_use_behavior(
-                    task=task, call=ToolCall.from_dict(copy_json(plan._payload["request"])), result=result
-                )
-                if stop is not None:
-                    outcome.usage["session_completion_reason"] = stop.value
-                outcome = replace(outcome, result=result.to_dict())
+                outcome = self.finalize_tool(plan, context, outcome)
             outcome.usage["session_shared_state"] = context.shared_state
             self.commit(self.completed(plan, outcome))
         elif isinstance(outcome, Accepted):
             self.commit([self.parked(plan, outcome.handle, after=True)])
         else:
             self.commit([self.unknown(plan, outcome.reason)])
+
+    def finalize_tool(self, plan: Record, context, outcome: Definitive) -> Definitive:
+        call = ToolCall.from_dict(plan.payload["request"])
+        result = self.runtime.hooks.apply_after_tool_call(
+            task=self.task(),
+            cycle_index=context.cycle_index,
+            call=call,
+            context=replace(context, tool_call_id=call.id, tool_name=call.name, arguments=dict(call.arguments)),
+            result=ToolExecutionResult.from_dict(outcome.result),
+        )
+        if not result.tool_call_id:
+            result.tool_call_id = call.id
+        stop = ToolCallRunner._apply_tool_use_behavior(task=self.task(), call=call, result=result)
+        usage = outcome.usage | {"session_shared_state": context.shared_state}
+        if stop is not None:
+            usage["session_completion_reason"] = stop.value
+        return replace(outcome, result=result.to_dict(), usage=usage)
 
     def step(self) -> bool:
         self.refresh()
@@ -969,7 +1100,7 @@ class _Driver:
             ]
             self.close("aborted" if "abort" in actions else "cancelled", "cancel_requested")
             return True
-        if turn.suspended:
+        if turn.suspended or turn.wait is not None:
             return False
         if self.scope.token.cancelled:
             # A suspend/resume pair may already have been folded in this drive.
@@ -1016,7 +1147,7 @@ class _Driver:
                         return True
             a = op.attempts[max(op.attempts)]
             if a.state == "started":
-                self.commit([self.unknown(a.plan, "worker lost before durable result")], guarded=True)
+                self.commit([self.unknown(a.execution_plan, "worker lost before durable result")], guarded=True)
                 return True
             if a.state == "unknown" and a.unknown:
                 if a.unknown._payload["retry"] == "retry":
@@ -1030,7 +1161,7 @@ class _Driver:
                         turn_id=tid,
                         operation_id=oid,
                         attempt=(a.plan.attempt or 1) + 1,
-                        payload=a.plan._payload | {"not_before_ms": due},
+                        payload=a.execution_plan._payload | {"not_before_ms": due},
                     )
                     self.commit([next_plan], guarded=True)
                     return True
@@ -1042,14 +1173,18 @@ class _Driver:
                     return False
                 self.dispatch(a)
                 return True
+            if a.state == "parked" and a.wait and a.wait["handle"]["kind"] == "approval":
+                return resolve_approval(self, a)
+            if a.state == "parked" and a.wait and a.wait["handle"]["kind"] == "user":
+                return False
             if a.state == "parked" and a.wait and a.wait["handle"]["kind"] == "provider":
                 key = (oid, a.plan.attempt or 1)
                 if key not in self.polled:
                     self.polled.add(key)
                     handle = copy_json(a.wait["handle"])
-                    outcome = _invoke(self.scope, lambda a=a, handle=handle: self.provider(a.plan).query(handle), 1)
+                    outcome = _invoke(self.scope, lambda a=a, handle=handle: self.provider(a.execution_plan).query(handle), 1)
                     if isinstance(outcome, Definitive):
-                        self.commit(self.completed(a.plan, outcome), guarded=True)
+                        self.commit(self.completed(a.execution_plan, outcome), guarded=True)
                         return True
                 return False
         if self.pending_batch():
@@ -1071,6 +1206,7 @@ class _Driver:
                             and r.record.turn_id == tid
                             and (
                                 r.record._payload["input"]["kind"] == "steer"
+                                or (r.record._payload["input"]["kind"] == "user" and r.record._payload["target_wait_id"])
                                 or r.record._payload["reason"] == "background child notification"
                             )
                         )
@@ -1082,10 +1218,26 @@ class _Driver:
                     not a.result._payload["result"].get("tool_calls")
                     and not a.result._payload["result"].get("error_code")
                     and not changed
-                    and task.no_tool_policy == "finish"
                 ):
-                    self.close("completed", None, a.result._payload["result"]["content"])
-                    return True
+                    if task.no_tool_policy == "finish":
+                        self.close("completed", None, a.result._payload["result"]["content"])
+                        return True
+                    if task.no_tool_policy == "wait_user":
+                        self.commit(
+                            [
+                                self.record(
+                                    "turn_parked",
+                                    {
+                                        "interaction_id": f"interaction/{a.plan.operation_id}/{a.plan.attempt}",
+                                        "question": a.result._payload["result"]["content"],
+                                        "source_operation_id": a.plan.operation_id,
+                                        "source_attempt": a.plan.attempt,
+                                    },
+                                )
+                            ],
+                            guarded=True,
+                        )
+                        return True
         cycles = sum(
             not (a.result and a.result._payload["result"].get("error_code") == "prompt_too_long")
             for _, op in models

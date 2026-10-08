@@ -98,6 +98,11 @@ class Runtime:
             self.registry.register_executor(executor, expose_to_model=visible, planner_extra=visible)
         self.functions = FunctionProvider(ToolOrchestrator.from_registry(self.registry))
         self.hooks = RuntimeHookManager([*self.agent.hooks, *self.config.hooks])
+        self.approval_broker = self.config.approval_broker
+        if self.config.approval_provider is not None and self.approval_broker is None:
+            from vv_agent.approval import ApprovalBroker
+
+            self.approval_broker = ApprovalBroker()
         self._definition_key: str | bytes | None = None
         self._definition_value: dict[str, Any] = {}
         self._definition_digest = ""
@@ -350,7 +355,7 @@ def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
     )
     host = observations[-1].get("host_cost") if observations else None
     started = [(op.kind, a) for op in state.operations.values() if op.turn_id == tid for a in op.attempts.values() if a.started]
-    tool_counts = Counter(a.plan._payload["request"]["name"] for kind, a in started if kind != "model")
+    tool_counts = Counter(a.execution_plan._payload["request"]["name"] for kind, a in started if kind != "model")
     evaluator = BudgetEvaluator(
         parsed,
         initial_usage=BudgetUsageSnapshot(

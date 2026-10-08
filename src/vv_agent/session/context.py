@@ -42,6 +42,14 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
             and p["reason"] == "background child notification"
         ):
             messages.append(Message("user", f"Child completed: {json.dumps(p['input']['payload'], ensure_ascii=False)}"))
+        elif (
+            r.kind == "input_applied"
+            and p["disposition"] == "applied"
+            and p["input"]["kind"] == "user"
+            and p["target_wait_id"]
+            and p["target_operation_id"] is None
+        ):
+            messages.append(Message("user", str(p["input"]["payload"]["content"]["text"])))
         elif r.kind == "op_completed" and r.operation_id:
             assert r.attempt is not None
             op = state.operations[r.operation_id]

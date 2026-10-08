@@ -97,7 +97,12 @@ INPUT_PAYLOADS = {
         operation_id=TEXT, attempt=POS, request_digest=HASH, provider_binding=nullable(TEXT), result=JSON_VALUE, evidence=STRINGS
     ),
     "approval_answer": closed(
-        operation_id=TEXT, attempt=POS, request_id=TEXT, request_digest=HASH, decision=enum("approve", "deny"), scope=STRINGS
+        operation_id=TEXT,
+        attempt=POS,
+        request_id=TEXT,
+        request_digest=HASH,
+        decision=enum("approve", "deny", "allow_session", "timeout"),
+        scope=STRINGS,
     ),
     "child_result": closed(
         session_id=TEXT,
@@ -111,6 +116,9 @@ INPUT_PAYLOADS = {
     "control": closed(action=CONTROL),
     "provider_evidence": closed(operation_id=TEXT, attempt=POS, request_digest=HASH, handle=HANDLE),
 }
+# Optional typed decision details remain inside the closed approval answer.
+INPUT_PAYLOADS["approval_answer"]["properties"].update(reason={"type": "string"}, metadata=JSON_OBJECT)
+
 INPUT_SCHEMA = closed(
     schema_version={"type": "integer", "const": 1},
     input_id=TEXT,
@@ -160,6 +168,17 @@ PAYLOADS = {
         provider_binding=nullable(TEXT),
         consumed_unknowns=array(RESULT_ID),
     ),
+    "op_prepared": closed(
+        request=JSON_OBJECT,
+        request_digest=HASH,
+        op_kind=enum("tool", "interaction"),
+        tool=JSON_OBJECT,
+        provider_binding=nullable(TEXT),
+        idempotency_key=nullable(TEXT),
+        hook_result=JSON_VALUE,
+        shared_state=JSON_OBJECT,
+    ),
+    "turn_parked": closed(interaction_id=TEXT, question={"type": "string"}, source_operation_id=TEXT, source_attempt=POS),
     "op_started": closed(dispatch_id=TEXT, authorization_version=TEXT, epoch=POS, mode=enum("sync", "provider", "managed")),
     "op_parked": closed(
         phase=enum("before_dispatch", "after_dispatch"), handle=HANDLE, poll_at_ms=nullable(NAT), deadline_ms=nullable(NAT)
@@ -238,9 +257,16 @@ def _compile_check(schema: dict[str, Any]) -> Callable[[Any], bool]:
             return lambda v: isinstance(v, dict)
         if set(schema) == {"type", "properties", "required", "additionalProperties"}:
             props = schema["properties"]
-            assert set(schema["required"]) == set(props) and schema["additionalProperties"] is False
+            assert set(schema["required"]) <= set(props) and schema["additionalProperties"] is False
+            required = frozenset(schema["required"])
             fields = tuple((k, _compile_check(s)) for k, s in props.items())
-            return lambda v: isinstance(v, dict) and v.keys() == props.keys() and all(check(v[k]) for k, check in fields)
+            if required == props.keys():
+                return lambda v: isinstance(v, dict) and v.keys() == props.keys() and all(check(v[k]) for k, check in fields)
+            return lambda v: (
+                isinstance(v, dict)
+                and required <= v.keys() <= props.keys()
+                and all(k not in v or check(v[k]) for k, check in fields)
+            )
     if kind == "array" and set(schema) == {"type", "items"}:
         check = _compile_check(schema["items"])
         return lambda v: isinstance(v, list) and all(check(item) for item in v)
@@ -250,6 +276,8 @@ def _compile_check(schema: dict[str, Any]) -> Callable[[Any], bool]:
         if set(schema) == {"type", "const"}:
             return lambda v: type(v) is int and v == schema["const"]
     if kind == "string":
+        if set(schema) == {"type"}:
+            return lambda v: isinstance(v, str)
         if set(schema) == {"type", "minLength"}:
             return lambda v: isinstance(v, str) and len(v) >= schema["minLength"]
         if set(schema) == {"type", "enum"}:
@@ -349,6 +377,8 @@ def record_identity(
 ) -> str:
     if kind == "session_created":
         return f"session/{session_id}/created"
+    if kind == "turn_parked":
+        return f"turn/{turn_id}/wait/{payload['interaction_id']}"
     if kind in {"turn_started", "turn_ended"}:
         return f"turn/{turn_id}/{kind.removeprefix('turn_')}"
     if kind == "input_applied":
@@ -458,6 +488,7 @@ class Record:
         for kind, digest_field in (
             ("turn_started", "definition"),
             ("op_planned", "request"),
+            ("op_prepared", "request"),
             ("op_completed", "result"),
             ("input_applied", "input"),
         ):

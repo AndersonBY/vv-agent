@@ -4,7 +4,7 @@ Date: 2026-10-08. Scope: `feat/session-kernel-internal`, internal assembly only.
 Runner, interactive, CLI and App Server still use their existing entry points.
 No top-level exports, default selection, public contract change, or Rust work.
 
-**F3 is blocked.** Inventory: **63 rows — 24 done, 26 partial, 13 missing**. `done` means the bounded behavior named in that row has a
+**F3 is blocked.** Inventory: **63 rows — 35 done, 16 partial, 12 missing**. `done` means the bounded behavior named in that row has a
 same-scenario Runner / SQLite `:memory:` comparison. `partial` means some
 implementation exists but the whole row is not proved. `missing` means no
 kernel adapter implements the capability. Existing Runner tests and F2a fault
@@ -20,7 +20,7 @@ A dash is an explicit missing paired producer, not a waiver.
 | FunctionTool and serial multi-tool execution | `tools/function.py`, `tools/orchestrator.py` | done | P `test_basic_runner_parity` |
 | ToolRegistry factory / dynamically registered direct executors | `runner.py`, `tools/registry.py`, `runtime/tool_planner.py` | done | P `test_dynamic_enabled_and_registry_factory_parity` |
 | FunctionTool `is_enabled` boolean/callback | `runner.py:_tool_is_enabled` | done | P `test_dynamic_enabled_and_registry_factory_parity`, `test_disabled_tool_never_executes` |
-| Hidden tools, dynamic schema changes and exposure boundaries | `tools/executor.py`, `tools/registry.py` | partial | Registry exposure reused; no paired hidden/dynamic-schema producer |
+| Hidden tools, dynamic schema changes and exposure boundaries | `tools/executor.py`, `tools/registry.py` | done | T `test_hidden_tool_exposure_parity`, `test_dynamic_schema_new_turn_parity`, `test_dynamic_schema_active_turn_rejected`, `test_hook_patch_preserves_hidden_tool_boundary`; hidden invocation is denied, new turns adopt schema changes, active turns reject drift |
 | Built-in `read_file` | `tools/handlers/workspace_io.py` | done | P `test_workspace_tool_parity[read_file-arguments0]` |
 | Built-in `write_file` | `tools/handlers/workspace_io.py` | done | P `test_workspace_tool_parity[write_file-arguments1]` |
 | Built-in `edit_file` including prior-read baseline | `tools/handlers/workspace_io.py` | done | P `test_workspace_tool_parity[edit_file-arguments2]` |
@@ -28,22 +28,22 @@ A dash is an explicit missing paired producer, not a waiver.
 | Built-in `search_files` | `tools/handlers/search.py` | done | P `test_workspace_tool_parity[search_files-arguments4]` |
 | Built-in `file_info` | `tools/handlers/workspace_io.py` | done | P `test_additional_builtin_parity[file_info-arguments0]` |
 | Built-in `todo_write` | `tools/handlers/todo.py` | done | P `test_todo_and_skill_state_parity` with fixed clock and caller-owned TODO id |
-| Built-in `ask_user` / host interaction response | `tools/handlers/control.py`, `interaction.py` | partial | `session/test_recovery_matrix.py` covers parked replies; no paired SDK interaction lifecycle |
+| Built-in `ask_user` / host interaction response | `tools/handlers/control.py`, `interaction.py` | done (intentional difference) | T `test_user_wait_sdk_lifecycle_parity` (ask_user); SDK ask/resume versus durable park/inbox/rebuild; same kernel turn/operation, identical duplicate is noop, conflict rejected |
 | Built-in `bash` | `tools/handlers/bash.py` | done | P `test_additional_builtin_parity[bash-arguments1]` covers foreground output; background lifecycle has separate rows |
-| Built-in `check_background_command` | `tools/handlers/background.py` | partial | Handler reusable; no paired running/completed/forbidden receipt producer |
-| Built-in `stop_background_command` | `tools/handlers/background.py` | partial | Handler reusable; no paired confirmed-stop and restart producer |
+| Built-in `check_background_command` | `tools/handlers/background.py` | done | T `test_background_process_restart_owner_parity`, `test_background_forbidden_owner_parity`; running/completed receipts and cross-owner denial |
+| Built-in `stop_background_command` | `tools/handlers/background.py` | done | T `test_background_process_restart_owner_parity`, `test_background_unknown_stop_is_not_confirmed_parity`; confirmed stopped versus unconfirmed stopping/unknown |
 | Built-in `read_image` | `tools/handlers/image.py` | done | P `test_additional_builtin_parity`, `test_multimodal_model_context_parity` cover URL and local PNG output |
 | Built-in `activate_skill` | `tools/handlers/skills.py`, `skills/` | done | P `test_todo_and_skill_state_parity` checks activation and retained active skill state |
 | Built-in `create_sub_task` | `tools/handlers/sub_agents.py`, `runtime/sub_task_manager.py` | partial | Host `Runtime.children` admission works; configured-agent adapter absent |
 | Built-in `sub_task_status` | `tools/handlers/sub_task_status.py` | missing | No kernel-backed SubTaskManager projection |
-| Tool allow/deny predicates and metadata denials | `run_config.py`, `tools/orchestrator.py` | partial | Existing orchestrator and frozen/current policy checks reused; F2a denial/revocation tests, full paired policy matrix missing |
-| Approval modes default / always / never / on_request | `tools/orchestrator.py`, `approval.py` | partial | Durable approval inbox and exact arguments work; ApprovalProvider/Broker, allow_session and timeout bridge missing |
+| Tool allow/deny predicates and metadata denials | `run_config.py`, `tools/orchestrator.py` | done | T `test_tool_policy_matrix_parity`, `test_frozen_current_policy_dispatch_boundary`, `test_current_policy_predicate_rechecked_after_restart`; allow/deny lists, predicate, side effect/tag/cost/terminal denial and frozen/current dispatch restrictions |
+| Approval modes default / always / never / on_request | `tools/orchestrator.py`, `approval.py` | done (intentional difference) | T `test_approval_mode_provider_parity`, `test_approval_broker_restart_session_and_conflicting_answer`, `test_approval_timeout_restart_parity`, `test_provider_decision_receipt_events_restart`; durable answers/session grants and absolute deadlines |
 | Input guardrails allow/rewrite/block/require_approval | `runner.py`, `guardrails.py` | done | P `test_guardrail_parity`, `test_blocked_input_does_not_compile_providers` |
 | Output guardrails allow/rewrite/block/require_approval | `runner.py`, `guardrails.py` | done | P `test_guardrail_parity` |
 | Opt-in output validator accept/reject and one tools-free repair | `runner.py`, `output_validation.py` | done | P `test_output_validation_parity`; repair dispatch retained as an operation |
 | Typed output coercion / repair exceptions / repair budget ledger | `runner.py`, `output_validation.py` | partial | Existing coercion/validator helpers reused; arbitrary typed JSON persistence and repair usage remain open |
 | Runtime before_llm / after_llm hooks | `runtime/hooks.py` | done | P `test_llm_hook_parity` |
-| Runtime before_tool_call / after_tool_call hooks | `runtime/hooks.py` | partial | P `test_tool_hooks_parity`; short-circuit, per-tool state mutation and approval/restart permutations remain open |
+| Runtime before_tool_call / after_tool_call hooks | `runtime/hooks.py` | done | T `test_tool_hooks_state_approval_restart_parity`, `test_hook_patch_preserves_hidden_tool_boundary`; short circuit, serial state, approval and restart after prepared/result commits; recorded hooks are not replayed |
 | Runtime before_memory_compact hook | `runtime/hooks.py`, `runtime/cycle_runner.py` | missing | No persisted hook context replacement before compaction |
 | AfterCycleHook continue / steer / deny / stop | `runtime/lifecycle.py`, `runtime/engine.py` | missing | Needs durable decisions and reconstructed snapshots before the next dispatch |
 | Context providers and prompt sections | `context_providers.py`, `runtime/compiler.py` | done | P `test_context_provider_parity`; immutable compiled prompt retained by F2a |
@@ -67,12 +67,12 @@ A dash is an explicit missing paired producer, not a waiver.
 | Child session atomic admission/delivery/cancellation | `runtime/sub_task_manager.py`, `runtime/backends/` | partial | `session/test_children.py` covers PG/SQLite failure cuts; SDK parity adapter absent |
 | shared_state between tools, persistence and reconstruction | `runtime/engine.py`, `tools/base.py` | partial | P `test_shared_state_and_settings_parity`, `test_shared_state_survives_runtime_reconstruction` prove JSON state; arbitrary Python objects still need host reconstruction bindings |
 | Workspace local/memory/S3/streaming backend selection | `workspace/`, `runtime/engine.py` | partial | Injected backend and local handlers reused; local and memory backends have paired producers (P `test_memory_workspace_backend_parity`); S3/streaming remain unpaired |
-| Bash background session restart and owner checks | `runtime/background_sessions.py`, `runtime/processes.py` | partial | Existing process manager reusable; no kernel reattachment/paired managed-process lifecycle |
+| Bash background session restart and owner checks | `runtime/background_sessions.py`, `runtime/processes.py` | done | T `test_background_process_restart_owner_parity`; retained handle and unchanged turn owner reattach after rebuilding Runtime and SQL fold; process manager remains alive |
 | no_tool_policy finish | `runtime/engine.py` | done | P `test_basic_runner_parity` |
 | no_tool_policy continue and max_cycles stop | `runtime/engine.py` | done | P `test_continue_max_cycles_parity` compares one- and two-cycle stops |
-| no_tool_policy wait_user | `runtime/engine.py` | missing | Needs a durable no-tool user wait, not a manufactured tool call |
-| tool_use_behavior stop_on_first_tool / stop_at_tool_names | `runtime/tool_call_runner.py` | partial | P `test_tool_stop_parity`; pending-batch and native FINISH result edge cases remain |
-| Cancellation: cooperative / unknown / descendants | `runtime/cancellation.py`, `run_handle.py` | partial | F2a cancellation fault suite and benchmark handshake; paired control/result/event matrix absent |
+| no_tool_policy wait_user | `runtime/engine.py` | done (intentional difference) | T `test_user_wait_sdk_lifecycle_parity` (no_tool); durable turn-level wait with zero fabricated tool operations; reply resumes the same turn |
+| tool_use_behavior stop_on_first_tool / stop_at_tool_names | `runtime/tool_call_runner.py` | done | P `test_tool_stop_parity`; T `test_tool_stop_pending_batch_native_finish_parity`, `test_tool_stop_error_result_parity`; pending calls close with the same skipped result and native FINISH is respected |
+| Cancellation: cooperative / unknown / descendants | `runtime/cancellation.py`, `run_handle.py` | done (intentional difference) | T `test_cancellation_control_result_event_parity`, `test_cancellation_descendant_control_result_events_parity`; SDK cancellation/exception versus durable confirmed/unknown receipts, targeted descendant controls and terminal events |
 | Completed RunResult fields and cycle/tool history | `result.py`, `runner.py` | partial | P `test_result_projection_parity` covers normal completion; errors, waits, budgets, typed output and repair ledger incomplete |
 | Event store replay and durable consumer acknowledgement | `event_store.py`, `run_handle.py` | partial | Pure `session/projection.py` plus SQL consumers exist; RunEventStore bridge and paired replay absent |
 | Interactive steer/follow-up/resume/archive/close | `interactive.py`, `sessions/` | partial | Inbox controls exist; interactive session facade not wired (F3) and parity absent |
@@ -81,6 +81,11 @@ A dash is an explicit missing paired producer, not a waiver.
 | App Server model/list, schema and TypeScript export | `app_server/protocol/`, `app_server/schema.py` | partial | Existing independent public paths retained; cut-over compatibility needs F3 producer |
 
 ## Comparison projection
+
+T denotes `tests/session/test_tools_control_parity.py`. Persistent T scenarios run
+on PostgreSQL, SQLite files and SQLite `:memory:` using the existing store fixtures;
+ordinary policy/exposure/stop scenarios use the paired in-memory P harness.
+
 
 Every paired P scenario independently creates the scripted provider, Agent and
 RunConfig and runs the current public `Runner.run_sync` or `kernel.drive` on a
@@ -286,3 +291,112 @@ The compiled closed-shape checks replace the generic validator on valid records;
 invalid values still go through its diagnostics. Remaining profile costs include
 request/definition JCS encoding, tool-schema copies and context preparation.
 These measurements do not establish the required short-run acceptance target.
+
+## F2d tools/control comparison boundaries (2026-10-08)
+
+The eleven requested tools/control rows are closed. The other capability rows
+remain open as listed above; these tests do not authorize an F3 cut-over.
+
+Intentional differences for review:
+
+- User waits keep the existing kernel turn and interaction operation. SDK
+  `Runner.resume` admits another run and carries the earlier WAIT_RESPONSE tool
+  message plus a user message. Kernel consumes an identified inbox reply into
+  exactly one tool result. Compare the waiting stage, delivered response and
+  final output, then separately assert the kernel identity and replay fences.
+  An undispatched ask has no external-effect started event.
+- `no_tool_policy=wait_user` is a logged `turn_parked` record, not a tool. It
+  projects wait/running state events. Its reply appends a user message to the
+  existing turn; SDK resumes another run. There is no manufactured call ID.
+- Kernel parks approval before calling its provider. Even immediate decisions
+  are retained as inbox answers before effects. `allow_session` is recovered
+  from the log across Runtime/Broker replacement. Runner retains that grant in
+  its process-local broker. Timeout uses the original absolute store deadline
+  and the shared orchestrator's exact error result. The deadline includes provider
+  decision time: with zero timeout Runner can accept an immediate provider allow,
+  while kernel times out before invoking it. This strict expiry difference is
+  paired in `test_approval_absolute_deadline_includes_provider_time`. Provider decision reason
+  and metadata are retained and projected. If `should_request` returns false,
+  kernel still retains its pre-dispatch park/allow decision; Runner omits those
+  approval events. Tool effect, result and provider invocation counts agree.
+  Broker session flags alone do not authorize kernel effects; only applied log
+  answers grant a session allowance. This prevents a late/rejected broker answer
+  from leaving an authorization behind.
+- Runner's function-tool cancellation currently raises `CancelledError` and
+  produces no terminal cancelled event on that path. Kernel commits the targeted
+  control, a confirmed cooperative-stop receipt or explicit unknown attempt,
+  and a cancelled terminal event. A thread that has not stopped is never called
+  stopped. The test compares cancelled control/handle state and dispatched-tool
+  count, and asserts the different result/event projections explicitly.
+  Descendant cancellation uses the SDK child producer as the reference and
+  kernel host child admission as the candidate; public child SDK assembly remains
+  the separate open matrix row.
+
+Other normalized comparisons:
+
+- A complete model receipt atomically admits all kernel tool plans. When a tool
+  finishes, those unused plans require durable skipped results. Runner emits
+  no lifecycle events for its unadmitted skipped calls. Compare all ordered tool
+  results/output; compare effects and the skipped lifecycle difference separately.
+- Background process receipts normalize generated session IDs, elapsed time and
+  the terminal text/ongoing JSON envelope. Status, output and exit code must
+  agree. Both paths use the existing process manager and actual shell processes.
+  Drive/Runtime reconstruction reuses the retained session handle and stable
+  task/workspace owner. Restarting the operating-system worker/process manager
+  remains unsupported by its process-local handles; no PID-only adoption is
+  claimed. Cross-owner access is rejected before observing/stopping a process.
+- Active-turn schema/capability drift is rejected rather than applying a new
+  declaration to an old authorization. A new turn sees the changed schema.
+  Callable policy predicates are host bindings reevaluated at dispatch; frozen
+  serializable denials remain restrictive when current policy loosens.
+
+Before-tool hooks are prepared individually after the preceding tool result,
+using its retained JSON state. `op_prepared` freezes the patched call, capability,
+provider binding, idempotency key, short-circuit result and hook state before
+approval or effects. Recovery reuses it. After-tool hooks and stop behavior are
+retained in the definitive result; known results never rerun hooks. An unrecorded
+callback interrupted before its commit remains outside exactly-once claims. Hook
+renaming retains the target capability from the frozen exposed definition; it
+cannot make a hidden tool executable or bypass its normal policy denial.
+
+Approval deadline boundaries use a controlled SQL clock to avoid relying on
+PostgreSQL operations finishing inside a millisecond test sleep. Storage, leases,
+parked deadlines, inbox consumption and Runtime reconstruction still use the
+actual PostgreSQL and SQLite stores.
+
+## F2d-1 validation results (2026-10-08)
+
+The eleven requested rows are closed: 35 done (including four intentional
+differences), 16 partial, 12 missing overall. F3 remains blocked.
+The detailed Chinese report is `session-kernel-f2d-tools-control-report.md`;
+the raw 200-run result is `session-kernel-overhead-f2d-tools-control.json`.
+
+| Gate | Result |
+| --- | --- |
+| Contract snapshot | PASS: 23.0.0, 55 fixture files, unchanged manifest |
+| Ruff format / check and ty | PASS: 381 Python files formatted |
+| `uv run pytest tests/session -q`, local PostgreSQL | PASS: 816 tests, no skips, 261.93 seconds |
+| Full pytest, real Redis 6399 DB 15 and PostgreSQL | PASS: 3291 passed, 20 skipped, 18 warnings, 415.92 seconds |
+| Short-run overhead, 10 warmups / 200 runs per path/scenario | PASS: all targets; no leaked threads |
+| Internal/default boundary and diff whitespace | PASS: no public/default/fixture changes; no commits |
+| Redis cleanup | PASS: gate-owned server stopped |
+
+The new T suite contains 25 test functions / 222 parameterized cases. The skip
+and warning breakdown matches the F2b/F2c breakdown: all applicable Redis and PG
+variants ran; live providers and cross-runtime probes remain opt-in.
+
+Values below are milliseconds; added p95 is kernel p95 minus Runner p95.
+
+| Scenario | Runner p50 / p95 | Kernel p50 / p95 | Added p95 | Limit | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| no_tool | 3.40 / 4.07 | 14.07 / 16.11 | 12.04 | 50 | PASS |
+| two_tools | 5.25 / 5.84 | 25.06 / 25.94 | 20.10 | 50 | PASS |
+| ten_turns | 33.89 / 36.81 | 108.34 / 125.47 | 88.67 | 100 | PASS |
+| start_cancel | 4.62 / 5.20 | 14.76 / 16.32 | 11.12 | 50 | PASS |
+
+The first F2d measurement exceeded the ten-turn limit at 104.70 ms added p95.
+Profiling identified duplicate definition hashing at each admission; the driver
+now uses Runtime's already-computed digest. Record validation still verifies that
+digest. Existing cache invalidation/tamper suites passed (108 tests), and the
+same candidate then passed the complete gates above. No benchmark workload,
+sampling, cleanup, lease/CAS or record-validation boundary was removed.
