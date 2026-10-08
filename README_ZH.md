@@ -6,9 +6,10 @@
 
 ## 安装
 
-当前包版本为 `0.16.1`。本仓库 `HEAD` 锁定语言无关的 Contract `14.0.0`；Python/Rust
-配对采用及验证状态以中央 support matrix 为准。本实现保留
-符合 Python 语言习惯的 API 写法。
+`contract.lock.json` 锁定本仓库使用的语言无关合约。采用及验证状态以 schema 2
+中央 support matrix 为准：Python 是必需实现；`vv-agent-rs` 冻结在合约 `23.0.0` /
+包版本系列 `0.21.x`，仅作维护。Python 采用新合约不要求同步更新 Rust。
+详见[合约工作流](docs/parity-contract.md)。本实现保留符合 Python 语言习惯的 API 写法。
 
 ```bash
 python -m pip install "vv-agent==0.16.1"
