@@ -16,8 +16,8 @@ from vv_agent.memory.provider import (
     MemoryCompactCompleted,
     MemoryCompactStarted,
     MemoryProvider,
-    _call_after_memory_providers,
-    _call_before_memory_providers,
+    call_after_memory_providers,
+    call_before_memory_providers,
 )
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.model_settings import ModelSettings
@@ -478,7 +478,7 @@ class CycleRunner:
             created_at=event.created_at,
             metadata={"messages": list(messages)},
         )
-        metadata = _call_before_memory_providers(providers, provider_event)
+        metadata = call_before_memory_providers(providers, provider_event)
         if metadata:
             event = MemoryCompactStarted(
                 **self._memory_event_context(ctx),
@@ -540,7 +540,7 @@ class CycleRunner:
             reclaimed_tokens=reclaimed_tokens,
             artifact_failure_count=artifact_failure_count,
         )
-        metadata = _call_after_memory_providers(providers, event)
+        metadata = call_after_memory_providers(providers, event)
         if metadata:
             event = MemoryCompactCompleted(
                 **self._memory_event_context(ctx),

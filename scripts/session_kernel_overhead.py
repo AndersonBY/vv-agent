@@ -16,11 +16,12 @@ from tempfile import TemporaryDirectory
 from vv_agent import Agent, MemorySession, RunConfig, Runner
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.model import ScriptedModelProvider
+from vv_agent.session.children import child_delivery
 from vv_agent.session.kernel import Runtime, drive, read_state
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
 from vv_agent.tools.function import function_tool
-from vv_agent.types import LLMResponse, ToolCall
+from vv_agent.types import LLMResponse, SubAgentConfig, ToolCall
 
 
 @function_tool
@@ -41,10 +42,18 @@ def run_case(path: str, scenario: str, workspace: Path) -> None:
     steps = [LLMResponse("done") for _ in range(turns)]
     if scenario == "two_tools":
         steps.insert(0, LLMResponse("", [ToolCall("a", "echo", {"text": "a"}), ToolCall("b", "echo", {"text": "b"})]))
+    if scenario == "children":
+        steps = [
+            LLMResponse("", [ToolCall("child", "create_sub_task", {"agent_id": "worker", "task_description": "work"})]),
+            LLMResponse("child done"),
+            LLMResponse("done"),
+        ]
     llm = ScriptedLLM([blocking] if scenario == "start_cancel" else steps)
     provider = ScriptedModelProvider("scripted", "m", llm, context_length=None, max_output_tokens=None)
     config = RunConfig(model_provider=provider, workspace=workspace)
     agent = Agent("bench", "Be concise.", tools=[echo])
+    if scenario == "children":
+        agent.sub_agents = {"worker": SubAgentConfig(model="m", description="Be concise.")}
     if path == "runner":
         if scenario == "start_cancel":
             handle = Runner.start(agent, "go", run_config=config)
@@ -88,6 +97,16 @@ def run_case(path: str, scenario: str, workspace: Path) -> None:
                     assert not thread.is_alive() and not errors, errors
                 else:
                     drive(store, "bench", runtime=runtime)
+                    if scenario == "children":
+                        state, records, _ = read_state(store, "bench")
+                        assert state.phase == "parked"
+                        child_id = next(
+                            r.record._payload["handle"]["session_id"] for r in records if r.record.kind == "op_parked"
+                        )
+                        drive(store, child_id, runtime=runtime.child_runtime(store, child_id))
+                        with store.atomic() as tx:
+                            child_delivery(store, tx, child_id)
+                        drive(store, "bench", runtime=runtime)
             state, records, _ = read_state(store, "bench")
             assert state.active_turn_id is None
             terminal = [r.record.payload for r in records if r.record.kind == "turn_ended"]
@@ -110,7 +129,7 @@ def benchmark(runs: int, warmup: int) -> dict:
     rows = []
     with TemporaryDirectory(prefix="vv-kernel-bench-") as temporary:
         workspace = Path(temporary)
-        for scenario in ("no_tool", "two_tools", "ten_turns", "start_cancel"):
+        for scenario in ("no_tool", "two_tools", "ten_turns", "start_cancel", "children"):
             measurements = {}
             for path in ("runner", "kernel"):
                 for _ in range(warmup):

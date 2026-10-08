@@ -158,7 +158,7 @@ class VvLlmClient(LLMClient):
         )
         tool_payload = self._build_tool_payload(tools)
 
-        ordered_targets = self._ordered_targets()
+        ordered_targets = self.ordered_targets()
         errors: list[str] = []
         last_error: Exception | None = None
 
@@ -417,13 +417,14 @@ class VvLlmClient(LLMClient):
             return self.selected_model.strip()
         return fallback
 
-    def _ordered_targets(self) -> list[EndpointTarget]:
+    def ordered_targets(self, preferred_endpoint_id: str | None = None) -> list[EndpointTarget]:
         targets = list(self.endpoint_targets)
 
-        if self._preferred_endpoint_id:
+        preferred_endpoint_id = preferred_endpoint_id or self._preferred_endpoint_id
+        if preferred_endpoint_id:
             preferred_index = None
             for index, target in enumerate(targets):
-                if target.endpoint_id == self._preferred_endpoint_id:
+                if target.endpoint_id == preferred_endpoint_id:
                     preferred_index = index
                     break
             if preferred_index is not None:

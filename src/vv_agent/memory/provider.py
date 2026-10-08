@@ -48,7 +48,7 @@ class MemoryProvider(Protocol):
     def after_compact(self, event: MemoryCompactCompleted) -> None: ...
 
 
-def _call_before_memory_providers(
+def call_before_memory_providers(
     providers: list[MemoryProvider],
     event: MemoryCompactStarted,
 ) -> dict[str, Any]:
@@ -71,7 +71,7 @@ def _call_before_memory_providers(
     return _memory_provider_metadata(results=results, errors=errors)
 
 
-def _call_after_memory_providers(
+def call_after_memory_providers(
     providers: list[MemoryProvider],
     event: MemoryCompactCompleted,
 ) -> dict[str, Any]:

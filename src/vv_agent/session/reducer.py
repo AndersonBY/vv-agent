@@ -17,6 +17,7 @@ from vv_agent.memory.microcompact import (
 from vv_agent.memory.token_utils import count_messages_tokens
 from vv_agent.types import Message
 
+from .children import child_handles
 from .context import message_ids, project_context
 from .records import InboxItem, Record, copy_json, digest
 from .store import StoredRecord
@@ -104,6 +105,7 @@ class ExecutionState:
     terminal_seq: int = 0
     applied_inputs: dict[str, Record] = field(default_factory=dict)
     admitted_inputs: set[str] = field(default_factory=set)
+    child_completions: dict[tuple[str, int, str], Record] | None = None
     usage_observations: dict[str, int] = field(default_factory=dict)
     usage_values: dict[str, Record] = field(default_factory=dict)
     compactions: list[Record] = field(default_factory=list)
@@ -147,8 +149,10 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
             assert handle is not None
             target = handle["delivery_target"]
             require(
-                handle["session_id"] == item.payload["session_id"]
-                and handle["turn_id"] == item.payload["turn_id"]
+                any(
+                    h["session_id"] == item.payload["session_id"] and h["turn_id"] == item.payload["turn_id"]
+                    for h in child_handles(handle)
+                )
                 and target["session_id"] == state.session_id
                 and target["turn_id"] == tid
                 and target["generation"] == item.generation
@@ -163,6 +167,12 @@ def _input(state: ExecutionState, record: Record, consumed: dict[str, InboxItem]
             require(item.payload["request_digest"] == plan["request_digest"], "evidence request mismatch")
             if item.kind == "deferred_result":
                 require(item.payload["provider_binding"] == plan["provider_binding"], "evidence provider mismatch")
+    if item.kind == "child_result":
+        key = (item.payload["operation_id"], item.payload["attempt"], item.payload["session_id"])
+        if state.child_completions is None:
+            state.child_completions = {}
+        require(key not in state.child_completions, "child completion applied twice")
+        state.child_completions[key] = record
     if session_control and tid is not None:
         require(tid == state.active_turn_id, "session control targets an inactive turn")
     if item.kind not in {"user", "follow_up"} and not session_control and not evidence_input:
@@ -372,6 +382,8 @@ def _operation(state: ExecutionState, record: Record) -> None:
                 },
                 "child delivery target mismatch",
             )
+            members = child_handles(handle)
+            require(len({h["session_id"] for h in members}) == len(members), "duplicate child membership")
             attempt.child_handle = copy_json(handle)
         attempt.state, attempt.wait = "parked", copy_json(p)
     elif record.kind == "op_unknown":
@@ -392,16 +404,17 @@ def _operation(state: ExecutionState, record: Record) -> None:
         if attempt.started:
             require(bool(p["evidence"]), "dispatched result requires authenticated evidence reference")
         if attempt.child_handle and not attempt.child_handle["background"]:
-            completions = [
-                r._payload["input"]["payload"]
-                for r in state.applied_inputs.values()
-                if r._payload["disposition"] == "applied"
-                and r._payload["input"]["kind"] == "child_result"
-                and r._payload["input"]["payload"]["operation_id"] == oid
-                and r._payload["input"]["payload"]["attempt"] == number
-            ]
             require(
-                any(f"child/{c['terminal_seq']}/{c['terminal_digest']}" in p["evidence"] for c in completions),
+                all(
+                    state.child_completions is not None
+                    and (receipt := state.child_completions.get((oid, number, h["session_id"]))) is not None
+                    and (
+                        f"child/{receipt._payload['input']['payload']['terminal_seq']}/"
+                        f"{receipt._payload['input']['payload']['terminal_digest']}"
+                    )
+                    in p["evidence"]
+                    for h in child_handles(attempt.child_handle)
+                ),
                 "child completion needs terminal input",
             )
         if attempt.wait and attempt.wait["handle"]["kind"] == "provider":
@@ -581,6 +594,7 @@ class Fold:
         result._shared_turns = set(self.state.turns)
         result.state.applied_inputs = self.state.applied_inputs.copy()
         result.state.admitted_inputs = self.state.admitted_inputs.copy()
+        result.state.child_completions = self.state.child_completions.copy() if self.state.child_completions else None
         result.state.usage_observations = self.state.usage_observations.copy()
         result.state.usage_values = self.state.usage_values.copy()
         result.state.compactions = self.state.compactions.copy()
@@ -619,6 +633,7 @@ class Fold:
             turns={tid: copy(turn) for tid, turn in self.state.turns.items()},
             applied_inputs=self.state.applied_inputs.copy(),
             admitted_inputs=self.state.admitted_inputs.copy(),
+            child_completions=self.state.child_completions.copy() if self.state.child_completions else None,
             usage_observations=self.state.usage_observations.copy(),
             usage_values=self.state.usage_values.copy(),
             compactions=self.state.compactions.copy(),
@@ -703,22 +718,30 @@ class Fold:
                 require(turn.wait is None and not turn.cancelled and not turn.suspended, "invalid turn wait")
                 source = state.operations.get(p["source_operation_id"])
                 require(
-                    source is not None
-                    and source.turn_id == tid
-                    and source.kind == "model"
-                    and source.selected_attempt == p["source_attempt"],
+                    source is not None and source.turn_id == tid and source.selected_attempt == p["source_attempt"],
                     "wait source mismatch",
                 )
                 assert source is not None
                 result = source.attempts[p["source_attempt"]].result
                 require(
                     result is not None
-                    and not result._payload["result"].get("tool_calls")
-                    and not result._payload["result"].get("error_code")
-                    and source.attempts[p["source_attempt"]].plan._payload["purpose"] == "primary"
-                    and p["question"] == result._payload["result"]["content"]
-                    and turn.start._payload["definition"]["task"]["no_tool_policy"] == "wait_user",
-                    "invalid no-tool wait source",
+                    and (
+                        (
+                            source.kind == "model"
+                            and not result._payload["result"].get("tool_calls")
+                            and not result._payload["result"].get("error_code")
+                            and source.attempts[p["source_attempt"]].plan._payload["purpose"] == "primary"
+                            and p["question"] == result._payload["result"]["content"]
+                            and turn.start._payload["definition"]["task"]["no_tool_policy"] == "wait_user"
+                        )
+                        or (
+                            source.kind == "tool"
+                            and result._payload["result"].get("directive") == "wait_user"
+                            and p["question"]
+                            == result._payload["result"].get("metadata", {}).get("question", result._payload["result"]["content"])
+                        )
+                    ),
+                    "invalid user wait source",
                 )
                 require(
                     all(op.state == "completed" for op in state.operations.values() if op.turn_id == tid),

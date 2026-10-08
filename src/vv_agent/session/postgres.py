@@ -99,6 +99,7 @@ class PostgresStore(SQLStore):
                 yield
         except BaseException:
             self._fold_cache = None
+            self._previous_prefix = None
             raise
 
     def _transaction_id(self) -> object:

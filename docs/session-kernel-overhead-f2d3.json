@@ -1,0 +1,104 @@
+{
+  "runs": 200,
+  "warmup": 10,
+  "single_turn_target_ms": 50,
+  "per_turn_target_ms": 8,
+  "rows": [
+    {
+      "scenario": "no_tool",
+      "runner": {
+        "p50_ms": 3.3551175,
+        "p95_ms": 3.972533,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 8192
+      },
+      "kernel": {
+        "p50_ms": 12.965418,
+        "p95_ms": 13.831565,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 806912
+      },
+      "p95_added_ms": 9.859032,
+      "target_ms": 50
+    },
+    {
+      "scenario": "two_tools",
+      "runner": {
+        "p50_ms": 5.516040500000001,
+        "p95_ms": 6.123209,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 8192
+      },
+      "kernel": {
+        "p50_ms": 23.287356000000003,
+        "p95_ms": 24.652542,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 102400
+      },
+      "p95_added_ms": 18.529333,
+      "target_ms": 50
+    },
+    {
+      "scenario": "ten_turns",
+      "runner": {
+        "p50_ms": 35.105612,
+        "p95_ms": 37.714658,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": -962560
+      },
+      "kernel": {
+        "p50_ms": 89.2229875,
+        "p95_ms": 92.346236,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 16384
+      },
+      "p95_added_ms": 54.631578000000005,
+      "target_ms": 80
+    },
+    {
+      "scenario": "start_cancel",
+      "runner": {
+        "p50_ms": 4.3183385,
+        "p95_ms": 4.848674,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 237568
+      },
+      "kernel": {
+        "p50_ms": 14.665351999999999,
+        "p95_ms": 16.046956,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 61440
+      },
+      "p95_added_ms": 11.198282000000003,
+      "target_ms": 50
+    },
+    {
+      "scenario": "children",
+      "runner": {
+        "p50_ms": 7.295344,
+        "p95_ms": 7.916425,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 0
+      },
+      "kernel": {
+        "p50_ms": 49.422400499999995,
+        "p95_ms": 52.34012,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 0
+      },
+      "p95_added_ms": 44.423694999999995,
+      "target_ms": 50
+    }
+  ],
+  "passed": true
+}

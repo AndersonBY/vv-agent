@@ -480,12 +480,12 @@ class BudgetEvaluator:
         return self._check_admission_limits(boundary, dimensions=(BudgetDimension.WALL_TIME, BudgetDimension.HOST_COST))
 
     def cycle_start(self) -> BudgetExhaustion | None:
-        exhaustion = self._model_call_start()
+        exhaustion = self.model_call_start()
         if exhaustion is None:
             self._cycles += 1
         return exhaustion
 
-    def _model_call_start(self) -> BudgetExhaustion | None:
+    def model_call_start(self) -> BudgetExhaustion | None:
         boundary = BudgetEnforcementBoundary.CYCLE_START
         self._observe_boundary(boundary)
         unavailable = self._strict_unavailable(boundary)

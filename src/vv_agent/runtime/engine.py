@@ -220,7 +220,7 @@ class _RunBudgetController:
             self.ctx.check_cancelled()
         exhaustion = self._observe(
             BudgetEnforcementBoundary.CYCLE_START,
-            self.evaluator._model_call_start,
+            self.evaluator.model_call_start,
             cycle_index=cycle_index,
         )
         if exhaustion is not None:
