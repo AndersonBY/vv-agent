@@ -89,6 +89,46 @@ HANDLE = {
         ),
     ]
 }
+HANDLE["oneOf"][-1]["properties"]["siblings"] = array(closed(session_id=TEXT, turn_id=TEXT, generation=NAT))
+
+DELEGATION = closed(
+    mode=enum("configured", "agent_as_tool", "background_task", "handoff"),
+    agent_name=TEXT,
+    handoff_count=NAT,
+    max_handoffs=NAT,
+    metadata=JSON_OBJECT,
+)
+
+CHILD_ADMISSION = closed(
+    mode=enum("configured", "agent_as_tool", "background_task", "handoff"),
+    selector=TEXT,
+    definition=JSON_OBJECT,
+    definition_digest=HASH,
+    budget=JSON_OBJECT,
+    handler_version=TEXT,
+    sub_config=nullable(
+        closed(
+            model=TEXT,
+            description={"type": "string"},
+            backend=nullable({"type": "string"}),
+            system_prompt=nullable({"type": "string"}),
+            max_cycles=NAT,
+            session_memory_enabled=BOOL,
+            exclude_tools=array({"type": "string"}),
+            metadata=JSON_OBJECT,
+            denied_side_effects=STRINGS,
+            denied_capability_tags=STRINGS,
+            deny_terminal_tools=BOOL,
+            denied_cost_dimensions=STRINGS,
+        )
+    ),
+    exclude_files_pattern=nullable(TEXT),
+    handoff_count=NAT,
+    max_handoffs=NAT,
+    handoff_metadata=JSON_OBJECT,
+)
+
+
 BOUNDARY_DATA = {
     "before_memory": closed(messages=array(JSON_OBJECT), shared_state=JSON_OBJECT),
     "after_cycle": closed(
@@ -279,12 +319,14 @@ RECORD_SCHEMA = closed(
     attempt=nullable(POS),
     payload=JSON_OBJECT,
 )
+PAYLOADS["op_parked"]["properties"]["delegation"] = DELEGATION
+
 _StrictValidator = extend(
     Draft202012Validator, type_checker=Draft202012Validator.TYPE_CHECKER.redefine("integer", lambda _, value: type(value) is int)
 )
 _VALIDATORS = {
     id(s): _StrictValidator(s)
-    for s in [RECORD_SCHEMA, INPUT_SCHEMA, *PAYLOADS.values(), *INPUT_PAYLOADS.values(), *BOUNDARY_DATA.values()]
+    for s in [RECORD_SCHEMA, INPUT_SCHEMA, CHILD_ADMISSION, *PAYLOADS.values(), *INPUT_PAYLOADS.values(), *BOUNDARY_DATA.values()]
 }
 
 
@@ -592,6 +634,15 @@ class Record:
         op = self.kind.startswith("op_")
         if op != (self.operation_id is not None) or op != (self.attempt is not None):
             raise RecordError("operation and attempt required only for operation records")
+        encoded_fields = {}
+        if self.kind == "session_created" and "child_admission" in self.payload["attributes"]:
+            attributes = self.payload["attributes"]
+            admission = attributes["child_admission"]
+            validate(admission, CHILD_ADMISSION, canonical=False)
+            definition = _check_digest(admission, "definition")
+            encoded_fields["attributes"] = _object_bytes(
+                attributes, {"child_admission": _object_bytes(admission, {"definition": definition})}
+            )
         if self.kind == "session_created" and self.turn_id is not None:
             raise RecordError("session_created has no turn")
         if self.kind not in {"session_created", "input_applied", "usage_observed"} and self.turn_id is None:
@@ -600,7 +651,6 @@ class Record:
             self.kind, self.session_id, self.turn_id, self.operation_id, self.attempt, self.payload
         ):
             raise RecordError("record_id does not match semantic position")
-        encoded_fields = {}
         for kind, digest_field in (
             ("turn_started", "definition"),
             ("op_planned", "request"),

@@ -1,10 +1,10 @@
 # Internal session kernel capability gate
 
-Date: 2026-10-08. Scope: `feat/session-kernel-internal`, internal assembly only.
+Date: 2026-10-09. Scope: `feat/session-kernel-internal`, internal assembly only.
 Runner, interactive, CLI and App Server still use their existing entry points.
 No top-level exports, default selection, public contract change, or Rust work.
 
-**F3 is blocked.** Inventory: **63 rows — 50 done, 6 partial, 7 missing**. `done` means the bounded behavior named in that row has a
+**F3 is blocked.** Inventory: **63 rows — 59 done, 2 partial, 2 missing**. `done` means the bounded behavior named in that row has a
 same-scenario Runner / SQLite `:memory:` comparison. `partial` means some
 implementation exists but the whole row is not proved. `missing` means no
 kernel adapter implements the capability. Existing Runner tests and F2a fault
@@ -12,7 +12,7 @@ suites alone are not evidence of Runner/kernel parity.
 
 Paths in the owner column are relative to `src/vv_agent/`. `P` below means
 `tests/session/test_runner_parity.py`. Other test paths are under `tests/`.
-`C` means `tests/session/test_capability_parity.py`; `R` means `tests/session/test_recovery_matrix.py`. C persistence cases run real PostgreSQL, SQLite files and SQLite `:memory:`. A dash is an explicit missing paired producer, not a waiver.
+`C` means `tests/session/test_capability_parity.py`; `R` means `tests/session/test_recovery_matrix.py`. D means `tests/session/test_delegation_parity.py`. D and C persistence cases run real PostgreSQL, SQLite files and SQLite `:memory:`. A dash is an explicit missing paired producer, not a waiver.
 
 | Capability | Current owner module | Kernel status | Evidence / remaining requirement |
 | --- | --- | --- | --- |
@@ -34,8 +34,8 @@ Paths in the owner column are relative to `src/vv_agent/`. `P` below means
 | Built-in `stop_background_command` | `tools/handlers/background.py` | done | T `test_background_process_restart_owner_parity`, `test_background_unknown_stop_is_not_confirmed_parity`; confirmed stopped versus unconfirmed stopping/unknown |
 | Built-in `read_image` | `tools/handlers/image.py` | done | P `test_additional_builtin_parity`, `test_multimodal_model_context_parity` cover URL and local PNG output |
 | Built-in `activate_skill` | `tools/handlers/skills.py`, `skills/` | done | P `test_todo_and_skill_state_parity` checks activation and retained active skill state |
-| Built-in `create_sub_task` | `tools/handlers/sub_agents.py`, `runtime/sub_task_manager.py` | partial | Host `Runtime.children` admission works; configured-agent adapter absent |
-| Built-in `sub_task_status` | `tools/handlers/sub_task_status.py` | missing | No kernel-backed SubTaskManager projection |
+| Built-in `create_sub_task` | `tools/handlers/sub_agents.py`, `runtime/sub_task_manager.py` | done (intentional difference) | D `test_configured_child_atomic_sdk_restart_parity`, `test_configured_async_admission_status_and_late_delivery_parity`, `test_configured_child_argument_failure_parity`, `test_blocking_child_user_wait_is_durable_intentional_difference`; configured single/batch, synchronous/async, terminal delivery; a waiting child keeps its parent operation parked |
+| Built-in `sub_task_status` | `tools/handlers/sub_task_status.py` | done | D `test_sub_task_status_records_projection_parity`, `test_sub_task_status_message_continuation_and_wait_projection_parity`; owner-scoped record projection, continuation/wait, stable inbox message replay; no second ledger |
 | Tool allow/deny predicates and metadata denials | `run_config.py`, `tools/orchestrator.py` | done | T `test_tool_policy_matrix_parity`, `test_frozen_current_policy_dispatch_boundary`, `test_current_policy_predicate_rechecked_after_restart`; allow/deny lists, predicate, side effect/tag/cost/terminal denial and frozen/current dispatch restrictions |
 | Approval modes default / always / never / on_request | `tools/orchestrator.py`, `approval.py` | done (intentional difference) | T `test_approval_mode_provider_parity`, `test_approval_broker_restart_session_and_conflicting_answer`, `test_approval_timeout_restart_parity`, `test_provider_decision_receipt_events_restart`; durable answers/session grants and absolute deadlines |
 | Input guardrails allow/rewrite/block/require_approval | `runner.py`, `guardrails.py` | done | P `test_guardrail_parity`, `test_blocked_input_does_not_compile_providers` |
@@ -60,13 +60,13 @@ Paths in the owner column are relative to `src/vv_agent/`. `P` below means
 | Multimodal initial messages and tool image output | `types.py`, `llm/vv_llm_client.py`, `tools/function.py` | done | P `test_multimodal_model_context_parity` compares complete model-visible requests, image notifications and provider tool-call extensions |
 | Multiple model endpoints, no stacked retries | `llm/vv_llm_client.py` | done (intentional difference) | C `test_endpoint_routing_preference_logged_attempts_parity`, `test_logged_endpoint_dispatch_rejects_routing_tamper`; actual Runner/VvLlmClient transport producer, preference/randomization, three endpoint attempts, frozen route and one request per attempt |
 | Agent/run/provider model settings precedence | `model_settings.py`, `runner.py`, `runtime/compiler.py` | done | P `test_shared_state_and_settings_parity`, `test_provider_default_settings_parity`; transport retry override is intentional |
-| Agent.as_tool | `agent.py`, `runner.py` | missing | FunctionTool metadata still needs child-session runtime assembly, never recursive Runner |
-| Configured sub-agents: policy/budget/workspace inheritance | `runtime/sub_task_manager.py`, `runtime/engine.py` | missing | Host child admission alone does not implement SubAgentConfig |
-| BackgroundAgentTask start/poll/wait/cancel | `background_task.py` | missing | No kernel-backed public handle/snapshot assembly |
-| Handoff and maximum-handoff enforcement | `handoffs.py`, `runner.py` | missing | No kernel agent transfer adapter |
-| Child session atomic admission/delivery/cancellation | `runtime/sub_task_manager.py`, `runtime/backends/` | partial | `session/test_children.py` covers PG/SQLite failure cuts; SDK parity adapter absent |
-| shared_state between tools, persistence and reconstruction | `runtime/engine.py`, `tools/base.py` | partial | P `test_shared_state_and_settings_parity`, `test_shared_state_survives_runtime_reconstruction` prove JSON state; arbitrary Python objects still need host reconstruction bindings |
-| Workspace local/memory/S3/streaming backend selection | `workspace/`, `runtime/engine.py` | partial | Injected backend and local handlers reused; local and memory backends have paired producers (P `test_memory_workspace_backend_parity`); S3/streaming remain unpaired |
+| Agent.as_tool | `agent.py`, `runner.py` | done (intentional difference) | D `test_sdk_children_never_recursive_runner_or_parent_lease`, `test_child_hooks_policy_budget_workspace_inheritance_frozen`, `test_child_inherited_denial_and_budget_execute_real_producers`, `test_blocking_child_user_wait_is_durable_intentional_difference`; frozen child assembly, terminal-turn result, durable cancellation/wait |
+| Configured sub-agents: policy/budget/workspace inheritance | `runtime/sub_task_manager.py`, `runtime/engine.py` | done | D `test_child_hooks_policy_budget_workspace_inheritance_frozen`, `test_child_inherited_denial_and_budget_execute_real_producers`; SubAgentConfig, model binding, prompt/summary, policy/budget/workspace frozen at admission |
+| BackgroundAgentTask start/poll/wait/cancel | `background_task.py` | done (intentional difference) | D `test_background_handle_start_poll_wait_cancel_reconstruction`, `test_sdk_parent_cancellation_cascades_after_reconstruction`; tool admission starts a child; reconstructed internal handles project the existing public snapshot type and submit inbox controls |
+| Handoff and maximum-handoff enforcement | `handoffs.py`, `runner.py` | done (intentional difference) | D `test_handoff_durable_transfer_and_maximum_parity`, `test_handoff_target_validation_state_and_events_parity`; durable terminal child transfer, inherited state, target guardrails, record-derived count/frozen maximum, stable events |
+| Child session atomic admission/delivery/cancellation | `runtime/sub_task_manager.py`, `runtime/backends/` | done (intentional difference) | D `test_configured_child_atomic_sdk_restart_parity`, `test_sdk_completion_delivery_failure_cut_and_replay_parity`, `test_sdk_parent_cancellation_cascades_after_reconstruction`, `test_completion_projection_uses_authenticated_turn_not_later_continuation`; SDK producers plus existing `session/test_children.py` fault cuts |
+| shared_state between tools, persistence and reconstruction | `runtime/engine.py`, `tools/base.py` | done (intentional difference) | D `test_shared_state_host_binding_restart_intentional_difference`, `test_host_binding_json_boundary_rejects_invalid_state`; JSON-only durability, explicit process-local object bindings, deterministic missing binding, no pickle |
+| Workspace local/memory/S3/streaming backend selection | `workspace/`, `runtime/engine.py` | done | D `test_s3_streaming_workspace_paired_producers`; existing S3 double, real read/write handlers, bounded large-object streaming and Runtime reconstruction with re-supplied backend; existing local/memory P producers |
 | Bash background session restart and owner checks | `runtime/background_sessions.py`, `runtime/processes.py` | done | T `test_background_process_restart_owner_parity`; retained handle and unchanged turn owner reattach after rebuilding Runtime and SQL fold; process manager remains alive |
 | no_tool_policy finish | `runtime/engine.py` | done | P `test_basic_runner_parity` |
 | no_tool_policy continue and max_cycles stop | `runtime/engine.py` | done | P `test_continue_max_cycles_parity` compares one- and two-cycle stops |
@@ -145,6 +145,9 @@ The benchmark includes SQLite schema creation, session admission, drive, final
 state read and connection/thread cleanup. The ten-turn case means ten successive
 user turns in one session, compared with ten Runner runs using MemorySession.
 The two-tool case includes the model's final response after both tool results.
+The children case runs configured create_sub_task, separately drives its child after
+releasing the parent lease, commits terminal inbox delivery and resumes the parent;
+the Runner reference uses its real configured-child producer.
 Start/cancel uses an explicit provider-entry barrier on both paths, submits
 cancellation, releases the same cooperative scripted provider and waits for
 completion. A timeout or wrong terminal state fails the benchmark.
@@ -458,3 +461,6 @@ copies only state in host snapshots, and folds endpoint preference instead of
 scanning the log. Schema validation, embedded and
 storage digests, output isolation, lease/CAS/fencing and the original benchmark
 workload remain in force. GC is unchanged; the p95 gate is not a max/p99 guarantee.
+
+F2d-3 row mapping, C1 candidates and three independent overhead runs are recorded in
+[`session-kernel-f2d-children-report.md`](session-kernel-f2d-children-report.md).

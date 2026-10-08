@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from hashlib import sha256
 
 import pytest
 
@@ -10,13 +11,76 @@ from vv_agent.session.context import project_context
 from vv_agent.session.kernel import drive
 from vv_agent.session.records import InboxItem, SessionSpec, digest, make_record
 from vv_agent.session.reducer import Fold
-from vv_agent.session.store import StoredRecord
+from vv_agent.session.store import Conflict, StoredRecord
 from vv_agent.tools.function import function_tool
 from vv_agent.tools.metadata import ToolMetadata
 from vv_agent.types import LLMResponse, ToolCall
 
 from .helpers import record
 from .test_recovery_matrix import runtime, start
+
+
+def test_two_session_prefixes_reuse_validated_bytes_with_bounded_eviction(store, monkeypatch):
+    with store.atomic() as tx:
+        for sid in ("parent", "child", "third"):
+            tx.create(SessionSpec(sid, "p", "w"), consumers=())
+    for sid in ("parent", "child"):
+        store.read_state(sid)
+    calls = []
+    parse = records.Record.parse
+
+    def counted(body):
+        calls.append(True)
+        return parse(body)
+
+    monkeypatch.setattr(records.Record, "parse", counted)
+    for _ in range(3):
+        for sid in ("parent", "child"):
+            store.read_state(sid)
+    assert not calls
+    store.read_state("third")
+    assert {store._fold_cache.session_id, store._previous_prefix.session_id} == {"child", "third"}
+    calls.clear()
+    store.read_state("parent")
+    assert calls, "the third session must evict the older prefix"
+    store._fold_cache = None
+    calls.clear()
+    store.read_state("third")
+    assert calls and store._previous_prefix is None, "explicit disposal clears both slots"
+
+
+@pytest.mark.parametrize("change", ["rollback", "same_head", "storage_digest", "schema"])
+def test_displaced_parent_prefix_still_checks_rollback_and_database_bytes(store, change):
+    with store.atomic() as tx:
+        for sid in ("s", "child"):
+            tx.create(SessionSpec(sid, "p", "w"), consumers=())
+    lease = store.acquire("s", owner="parent", ttl_ms=15000)
+    assert lease is not None
+    with store.atomic() as tx:
+        tx.append("s", lease=lease, expected_seq=1, commit_id="start", records=(record("turn_started"),))
+    store.read_state("child")
+    assert store._previous_prefix.session_id == "s"
+    if change == "rollback":
+        with pytest.raises(RuntimeError, match="rollback"), store._transaction():
+            with store.atomic() as tx:
+                tx.append("s", lease=lease, expected_seq=2, commit_id="provisional", records=(record("op_planned"),))
+            store.read_state("child")
+            raise RuntimeError("rollback")
+        state, rows, _ = store.read_state("s")
+        assert len(rows) == 2 and not state.operations
+        return
+    value = record("turn_started", tid="replacement").to_dict()
+    if change == "schema":
+        value["payload"]["extra"] = True
+    body = records.canonical_json_bytes(value)
+    checksum = "0" * 64 if change == "storage_digest" else sha256(body).hexdigest()
+    with store.atomic():
+        store._rows("UPDATE sk_record SET body=%s,digest=%s WHERE session_id=%s AND seq=2", (body, checksum, "s"))
+    if change == "same_head":
+        assert store.read_state("s")[0].active_turn_id == "replacement"
+    else:
+        with pytest.raises(Conflict if change == "storage_digest" else records.RecordError):
+            store.read_state("s")
 
 
 @pytest.mark.parametrize("source", ["producer", "cold"])
@@ -52,6 +116,8 @@ def test_state_snapshot_detaches_waits_and_mutable_state_containers():
     rows = [record(kind) for kind in ("session_created", "turn_started", "op_planned", "op_started", "op_parked")]
     fold.extend(rows)
     snapshot = fold.snapshot()
+    assert snapshot.child_completions is None
+    assert fold.fork().state.child_completions is None
     wait = snapshot.operations["o"].attempts[1].wait
     assert wait is not None
     wait["handle"]["query_ref"] = "changed"

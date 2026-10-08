@@ -13,6 +13,7 @@ history.
 | `development.md` | Local setup, test commands, linting, live-test workflow, and change hygiene. |
 | `model-settings.md` | `LLM_SETTINGS`, local key files, model defaults, and exact model resolution rules. |
 | `session-kernel-capability-matrix.md` | F3 capability gate, Runner/SQLite parity evidence, explicit gaps and short-run benchmark methodology. |
+| `session-kernel-f2d-children-report.md` | F2d-3 child SDK adapters, host bindings, intentional differences and measured gates. |
 | `session-kernel.md` | Internal non-default session kernel, SQL stores, recovery, compaction, and test isolation. |
 | `runtime-control.md` | Background tasks, interrupted-result resume, approvals, sessions, cancellation, and typed event producers. |
 | `bash-process-management.md` | Bash initial wait, execution deadline, owner-scoped query/stop, live output, and checkpoint receipts. |

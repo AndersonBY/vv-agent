@@ -6,8 +6,9 @@ import json
 from collections import Counter
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from copy import copy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field, fields, replace
+from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,9 +45,11 @@ from vv_agent.tools.executor import ToolExposure, is_tool_executor
 from vv_agent.tools.function import FunctionTool, adapt_tool
 from vv_agent.tools.metadata import ToolResultRetention
 from vv_agent.tools.orchestrator import ToolOrchestrator
+from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
+from .bindings import bind_shared_state, durable_shared_state
 from .children import ChildSession
 from .providers import FunctionProvider, Provider
 from .records import Record, copy_json
@@ -63,6 +66,8 @@ class Runtime:
     heartbeat_store: Callable[[], AbstractContextManager[SessionStore]]
     providers: dict[str, Provider] = field(default_factory=dict)  # tool name -> trusted adapter
     children: dict[str, Callable[[Record], ChildSession]] = field(default_factory=dict)
+    host_bindings: dict[str, Any] = field(default_factory=dict)
+    frozen_task: AgentTask | None = None
     handler_version: str = "1"
     ttl_ms: int = 15000
     heartbeat_seconds: float = 0.25
@@ -80,24 +85,8 @@ class Runtime:
         from vv_agent.runner import Runner
 
         self.config = Runner._effective_run_config(self.agent, self.config)
-        self.registry = self.config.tool_registry_factory() if self.config.tool_registry_factory else build_default_registry()
         self._dynamic_tools: dict[str, FunctionTool] = {}
         self._enabled_dynamic_tools: set[str] = set()
-        for candidate in self.agent.tools:
-            if is_tool_executor(candidate):
-                executor = candidate
-            else:
-                tool = candidate if isinstance(candidate, FunctionTool) else adapt_tool(candidate)
-                if callable(tool.is_enabled):
-                    self._dynamic_tools[tool.name] = tool
-                if not Runner._tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config):
-                    continue
-                executor = tool.to_executor()
-                if tool.name in self._dynamic_tools:
-                    self._enabled_dynamic_tools.add(tool.name)
-            visible = executor.exposure == ToolExposure.DIRECT
-            self.registry.register_executor(executor, expose_to_model=visible, planner_extra=visible)
-        self.functions = FunctionProvider(ToolOrchestrator.from_registry(self.registry))
         self.hooks = RuntimeHookManager([*self.agent.hooks, *self.config.hooks])
         self.approval_broker = self.config.approval_broker
         if self.config.approval_provider is not None and self.approval_broker is None:
@@ -114,6 +103,89 @@ class Runtime:
         self._definition_suffix = b""
         self._schema_key: tuple | None = None
         self._schemas: list[dict[str, Any]] = []
+
+    @cached_property
+    def registry(self) -> ToolRegistry:
+        # A read-only child result projection does not dispatch or plan tools.
+        from vv_agent.runner import Runner
+
+        registry = self.config.tool_registry_factory() if self.config.tool_registry_factory else build_default_registry()
+        for candidate in self.agent.tools:
+            if is_tool_executor(candidate):
+                executor = candidate
+            else:
+                tool = candidate if isinstance(candidate, FunctionTool) else adapt_tool(candidate)
+                if callable(tool.is_enabled):
+                    self._dynamic_tools[tool.name] = tool
+                if not Runner._tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config):
+                    continue
+                executor = tool.to_executor()
+                if tool.name in self._dynamic_tools:
+                    self._enabled_dynamic_tools.add(tool.name)
+            visible = executor.exposure == ToolExposure.DIRECT
+            registry.register_executor(executor, expose_to_model=visible, planner_extra=visible)
+        from .delegation import register_adapters
+
+        register_adapters(self, registry)
+        return registry
+
+    @cached_property
+    def delegated_tools(self) -> set[str]:
+        names = {
+            t.name
+            for t in self.agent.tools
+            if isinstance(t, FunctionTool) and t.metadata.get("mode") in {"agent_as_tool", "background_task"}
+        }
+        names.update(t.tool_name for t in self.agent.handoffs if t.tool_name)
+        if self.agent.sub_agents:
+            names.add("create_sub_task")
+        return names
+
+    @cached_property
+    def functions(self) -> FunctionProvider:
+        return FunctionProvider(ToolOrchestrator.from_registry(self.registry))
+
+    def durable_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        return durable_shared_state(state, self.host_bindings) if self.host_bindings else state
+
+    def bind_state(self, state: dict[str, Any], task: AgentTask) -> dict[str, Any]:
+        required = task.metadata.get("session_host_binding_names", [])
+        return bind_shared_state(state, self.host_bindings, required) if required or self.host_bindings else state
+
+    def for_agent(self, agent: Agent, config: RunConfig) -> Runtime:
+        from vv_agent.runner import Runner
+
+        client, resolved = (
+            Runner._resolve_model(agent=agent, run_config=config) if config.model_provider else (self.llm, self.resolved)
+        )
+        return Runtime(
+            agent,
+            config,
+            resolved,
+            client,
+            self.heartbeat_store,
+            providers=self.providers,
+            children=self.children,
+            host_bindings=self.host_bindings,
+            handler_version=self.handler_version,
+            ttl_ms=self.ttl_ms,
+            heartbeat_seconds=self.heartbeat_seconds,
+            poll_ms=self.poll_ms,
+            cancellation_grace=self.cancellation_grace,
+            model_timeout=self.model_timeout,
+            tool_timeout=self.tool_timeout,
+            memory_manager=replace(self.memory_manager),
+        )
+
+    def child_runtime(self, store: SessionStore, session_id: str) -> Runtime:
+        from .delegation import reconstruct
+
+        return reconstruct(self, store, session_id)
+
+    def child_tasks(self, store: SessionStore, session_id: str):
+        from .delegation import ChildTasks
+
+        return ChildTasks(store, session_id, self)
 
     def run_context(self, tid: str) -> RunContext:
         return RunContext(
@@ -148,6 +220,13 @@ class Runtime:
     def compile(self, content: str, tid: str) -> AgentTask:
         from vv_agent.runner import Runner
 
+        if self.frozen_task is not None:
+            task = deepcopy(self.frozen_task)
+            task.task_id = tid
+            if tid != self.frozen_task.task_id:
+                task.user_prompt = content
+            return task
+        _ = self.registry
         for name, tool in self._dynamic_tools.items():
             enabled = Runner._tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config)
             if enabled and name not in self._enabled_dynamic_tools:
@@ -190,6 +269,14 @@ class Runtime:
             memory = session_memory(task, Path(self.config.workspace or ".") if task.use_workspace else None)
             memory.load()
             task.metadata["_vv_agent_session_memory_initial_state"] = memory.state.to_dict()
+        if self.agent.handoffs:
+            task.metadata["session_max_handoffs"] = self.config.max_handoffs
+            task.metadata["session_handoff_targets"] = {t.tool_name: t.agent.name for t in self.agent.handoffs}
+        if self.host_bindings:
+            if any(not isinstance(name, str) or not name for name in self.host_bindings):
+                raise ValueError("host binding names must be non-empty strings")
+            task.metadata["session_host_binding_names"] = sorted(self.host_bindings)
+            self.bind_state(task.initial_shared_state, task)
         task.initial_shared_state.setdefault("todo_list", [])
         for key in ("available_skills", "active_skills"):
             if key in task.metadata:
@@ -205,6 +292,8 @@ class Runtime:
         *,
         approved: bool = False,
         shared_state: dict[str, Any] | None = None,
+        store: SessionStore | None = None,
+        session_id: str | None = None,
     ) -> ToolContext:
         metadata = dict(task.metadata)
         frozen = ToolPolicy(
@@ -251,6 +340,9 @@ class Runtime:
             task_id=plan.turn_id or task.task_id,
             ctx=ctx,
             task_metadata=metadata,
+            sub_task_manager=self.child_tasks(store, session_id).tool_manager()
+            if store and session_id and plan._payload["request"].get("name") == "sub_task_status"
+            else None,
             idempotency_key=plan._payload["idempotency_key"],
             metadata={
                 "operation_id": plan.operation_id,

@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 from vv_agent.event_store import RunEventReplayQuery, _resolve_replay_query
 from vv_agent.events import RunEvent
 
+from .children import child_handles
 from .projection import project_records
 from .store import ConsumerBatch, SessionStore, SessionTx
 
@@ -32,13 +33,14 @@ class SessionRunEventStore:
                 r = stored.record
                 if r.turn_id != resolved.run_id or r.kind != "op_parked" or r._payload["handle"]["kind"] != "child":
                     continue
-                h = r._payload["handle"]
-                child = SessionRunEventStore(self.store, h["session_id"])
-                for event in child.replay(run_id=h["turn_id"]):
-                    payload = event.to_dict() | {"parent_run_id": resolved.run_id}
-                    from vv_agent.events import event_from_dict
+                group = r._payload["handle"]
+                for h in child_handles(group):
+                    child = SessionRunEventStore(self.store, h["session_id"])
+                    for event in child.replay(RunEventReplayQuery(run_id=h["turn_id"], include_children=True)):
+                        payload = event.to_dict() | {"parent_run_id": resolved.run_id}
+                        from vv_agent.events import event_from_dict
 
-                    yield event_from_dict(payload)
+                        yield event_from_dict(payload)
 
     def batch(self, tx: SessionTx, *, limit: int = 256) -> tuple[ConsumerBatch, list[RunEvent]] | None:
         batch = tx.consumer_batch(self.session_id, self.consumer, limit=limit)

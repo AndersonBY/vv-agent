@@ -115,6 +115,7 @@ class SQLiteStore(SQLStore):
                 self.connection.execute("COMMIT" if outer else f"RELEASE {savepoint}")
             except BaseException:
                 self._fold_cache = None
+                self._previous_prefix = None
                 self.connection.execute("ROLLBACK" if outer else f"ROLLBACK TO {savepoint}")
                 if not outer:
                     self.connection.execute(f"RELEASE {savepoint}")

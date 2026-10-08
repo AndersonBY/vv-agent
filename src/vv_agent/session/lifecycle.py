@@ -149,7 +149,7 @@ def after_cycle(driver: _Driver) -> bool:
                     **asdict(decision),
                     "steering_messages": list(decision.steering_messages),
                     "disallow_tools": list(decision.disallow_tools),
-                    "shared_state": shared,
+                    "shared_state": driver.runtime.durable_state(shared),
                     "error": error,
                 },
                 source_operation_id=oid,

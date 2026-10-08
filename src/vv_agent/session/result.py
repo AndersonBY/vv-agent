@@ -24,12 +24,20 @@ from vv_agent.types import (
 
 from .context import project_context
 from .projection import project_records
+from .reducer import ExecutionState
 from .runtime import Runtime, model_usage
-from .store import SessionStore
+from .store import SessionStore, StoredRecord
 
 
-def project_result(store: SessionStore, session_id: str, turn_id: str, *, runtime: Runtime) -> RunResult:
-    state, records, _ = store.read_state(session_id)
+def project_result(
+    store: SessionStore,
+    session_id: str,
+    turn_id: str,
+    *,
+    runtime: Runtime,
+    snapshot: tuple[ExecutionState, tuple[StoredRecord, ...], int] | None = None,
+) -> RunResult:
+    state, records, _ = snapshot if snapshot is not None else store.read_state(session_id)
     turn = state.turns[turn_id]
     task = AgentTask.from_dict(turn.start.payload["definition"]["task"])
     terminal = next((r.record for r in reversed(records) if r.record.kind == "turn_ended" and r.record.turn_id == turn_id), None)
@@ -175,7 +183,24 @@ def project_result(store: SessionStore, session_id: str, turn_id: str, *, runtim
 
             evaluator = budget(state, turn_id)
             budget_usage = evaluator.snapshot() if evaluator else None
-    if status == AgentStatus.COMPLETED:
+    transferred = None
+    if terminal is not None:
+        for op in state.operations.values():
+            if op.turn_id != turn_id or op.kind == "model" or op.selected_attempt is None:
+                continue
+            attempt = op.attempts[op.selected_attempt]
+            if attempt.result and attempt.result._payload["result"].get("metadata", {}).get("mode") == "handoff":
+                if attempt.child_handle is None:
+                    continue
+                child_id = attempt.child_handle["session_id"]
+                transferred = project_result(
+                    store, child_id, attempt.child_handle["turn_id"], runtime=runtime.child_runtime(store, child_id)
+                )
+                output, shared = transferred.final_output, transferred.raw_result.shared_state
+                reason, completion_tool_name = transferred.completion_reason, transferred.completion_tool_name
+                error = transferred.raw_result.error
+                break
+    if status == AgentStatus.COMPLETED and transferred is None:
         output = Runner._coerce_output_type(agent=runtime.agent, final_output=output)
     partial = cycles[-1].assistant_message or None if cycles and status != AgentStatus.COMPLETED else None
     checked = state.boundaries.get((turn_id, "output_checked", "final"))
@@ -219,6 +244,6 @@ def project_result(store: SessionStore, session_id: str, turn_id: str, *, runtim
         run_id=turn_id,
         trace_id=turn_id,
         metadata={"session_model_calls": ledger},
-        agent_name=runtime.agent.name,
-        resolved_model=runtime.resolved,
+        agent_name=transferred.agent_name if transferred else runtime.agent.name,
+        resolved_model=transferred.resolved_model if transferred else runtime.resolved,
     )

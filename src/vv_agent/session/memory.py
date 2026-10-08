@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from vv_agent.events import MemoryCompactCompleted, MemoryCompactMode, MemoryCompactStarted, MemoryCompactTrigger
-from vv_agent.memory.provider import _call_after_memory_providers, _call_before_memory_providers
+from vv_agent.memory.provider import call_after_memory_providers, call_before_memory_providers
 from vv_agent.memory.session_memory import SessionMemory, SessionMemoryConfig, SessionMemoryState
 from vv_agent.types import Message
 
@@ -162,7 +162,7 @@ def start_compact(driver: _Driver, manager, source, *, cycle: int, trigger: str,
     from vv_agent.events import event_from_dict
 
     provider_event = event_from_dict(event.to_dict() | {"metadata": {"messages": source}})
-    metadata = _call_before_memory_providers(driver.runtime.config.memory_providers, cast(MemoryCompactStarted, provider_event))
+    metadata = call_before_memory_providers(driver.runtime.config.memory_providers, cast(MemoryCompactStarted, provider_event))
     payload = event.to_dict() | {"metadata": metadata}
     driver.commit([driver.boundary_record("memory_started", key, {"event": payload})], guarded=True)
     return True
@@ -208,7 +208,7 @@ def finish_compact(
         reclaimed_tokens=reclaimed_tokens,
         artifact_failure_count=artifact_failure_count,
     )
-    metadata = _call_after_memory_providers(driver.runtime.config.memory_providers, event)
+    metadata = call_after_memory_providers(driver.runtime.config.memory_providers, event)
     records = [driver.boundary_record("memory_completed", key, {"event": event.to_dict() | {"metadata": metadata}})]
     if changed and mode in {"summary", "emergency"} and driver.task().metadata.get("session_memory_enabled"):
         memory = restore_memory(driver)

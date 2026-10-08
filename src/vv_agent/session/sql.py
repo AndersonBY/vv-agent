@@ -62,6 +62,25 @@ class SQLStore:
     read_lock_clause = ""
     clock_sql = ""
     _fold_cache: _Prefix | None = None
+    _previous_prefix: _Prefix | None = None
+
+    def _cached_prefix(self, session_id: str) -> _Prefix | None:
+        cached = self._fold_cache
+        if cached is None:
+            self._previous_prefix = None
+            return None
+        if cached.session_id == session_id:
+            return cached
+        previous = self._previous_prefix
+        return previous if previous is not None and previous.session_id == session_id else None
+
+    def _retain_prefix(self, prefix: _Prefix) -> None:
+        # Two slots keep parent/child projection from evicting each other's validated log.
+        if self._fold_cache is None:
+            self._previous_prefix = None
+        elif self._fold_cache.session_id != prefix.session_id:
+            self._previous_prefix = self._fold_cache
+        self._fold_cache = prefix
 
     def _rows(self, query: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         raise NotImplementedError
@@ -121,8 +140,8 @@ class SQLStore:
         body, seq, commit, epoch, created, checksum = row
         if sha256(body).hexdigest() != checksum:
             raise Conflict("stored record digest mismatch")
-        cached = self._fold_cache
-        if cached is not None and cached.session_id == session_id and 0 < seq <= len(cached.records):
+        cached = self._cached_prefix(session_id)
+        if cached is not None and 0 < seq <= len(cached.records):
             prior = cached.records[seq - 1].record
             if cached.reducer.seen[prior.record_id] == body:
                 # The same session/sequence and exact validated bytes can share the immutable record.
@@ -131,7 +150,7 @@ class SQLStore:
 
     def _prefix(self, session_id: str, row: tuple[Any, ...]) -> _Prefix:
         head, epoch = row[0], row[2]
-        cached = self._fold_cache
+        cached = self._cached_prefix(session_id)
         if cached is not None:
             valid = cached.session_id == session_id and len(cached.records) <= head
             if valid:
@@ -142,11 +161,13 @@ class SQLStore:
                 valid = checksum == cached.head_digest and sha256(body).hexdigest() == checksum
             if not valid:
                 self._fold_cache = cached = None
+                self._previous_prefix = None
             elif cached.epoch != epoch:
                 # The immutable prefix survives a lease change; execution authority does not.
-                self._fold_cache = cached = _Prefix(session_id, epoch, cached.head_digest, cached.reducer, cached.records)
+                cached = _Prefix(session_id, epoch, cached.head_digest, cached.reducer, cached.records)
         through = len(cached.records) if cached else 0
         if cached is not None and through == head:
+            self._retain_prefix(cached)
             return cached
         rows = self._rows(
             "SELECT body,seq,commit_id,writer_epoch,created_ms,digest FROM sk_record "
@@ -167,7 +188,7 @@ class SQLStore:
         reducer = cached.reducer.fork() if cached else Fold()
         reducer.extend((r.record for r in records), consumed_inputs=consumed, bodies=(r[0] for r in rows))
         prefix = _Prefix(session_id, epoch, rows[-1][5], reducer, (cached.records if cached else ()) + records)
-        self._fold_cache = prefix
+        self._retain_prefix(prefix)
         return prefix
 
     def read_state(self, session_id: str) -> tuple[ExecutionState, tuple[StoredRecord, ...], int]:
@@ -530,7 +551,7 @@ class SQLSessionTx:
             receipt = CommitReceipt(commit_id, tuple(sequences), head, records=added, inbox_seq=row[1])
             self._commit(session_id, commit_id, body, manifest, receipt.record_sequences, head, now)
             checksum = new[-1][1].digest if new else prefix.head_digest
-            s._fold_cache = _Prefix(session_id, lease.epoch, checksum, reducer, prefix.records + added)
+            s._retain_prefix(_Prefix(session_id, lease.epoch, checksum, reducer, prefix.records + added))
             return receipt
 
     def consumer_batch(self, session_id: str, consumer: str, *, limit: int = 256) -> ConsumerBatch | None:

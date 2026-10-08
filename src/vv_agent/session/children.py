@@ -19,6 +19,11 @@ class ChildSession:
     background: bool = False
 
 
+def child_handles(handle: dict[str, Any]) -> list[dict[str, Any]]:
+    base = {key: value for key, value in handle.items() if key != "siblings"}
+    return [base, *(base | sibling for sibling in handle.get("siblings", []))]
+
+
 def create_child(tx: SessionTx, child: ChildSession, plan: Record, generation: int) -> dict[str, Any]:
     handle = {
         "kind": "child",
@@ -88,6 +93,9 @@ def child_delivery(
 
 
 def verify_completion(store: SessionStore, parent_id: str, handle: dict[str, Any], item: InboxItem) -> StoredRecord | None:
+    handle = next((h for h in child_handles(handle) if h["session_id"] == item.payload["session_id"]), {})
+    if not handle:
+        return None
     p, target = item.payload, handle["delivery_target"]
     if (
         target["session_id"] != parent_id

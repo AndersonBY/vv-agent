@@ -12,6 +12,8 @@ from vv_agent.events import (
     BudgetSnapshotEvent,
     CycleStartedEvent,
     DiagnosticEvent,
+    HandoffCompletedEvent,
+    HandoffStartedEvent,
     HostInteractionRequestedEvent,
     HostInteractionResponseConsumedEvent,
     ModelCallCompletedEvent,
@@ -35,6 +37,7 @@ from vv_agent.events import (
 from vv_agent.interaction import HostInteractionRequest
 from vv_agent.types import ModelCallOperation, ToolExecutionResult
 
+from .children import child_handles
 from .records import copy_json, digest
 from .runtime import model_usage
 from .store import StoredRecord
@@ -43,6 +46,7 @@ from .store import StoredRecord
 def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
     """Pass a prefix including plans; callers filter emitted metadata.session_seq by cursor."""
     plans, events, turns = {}, [], {}
+    delegations: dict[tuple[str, int], dict] = {}
     interactions: dict[tuple[str, int], HostInteractionRequest] = {}
     for stored in records:
         r, p = stored.record, stored.record.payload
@@ -154,14 +158,28 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
             elif item["kind"] == "child_result":
                 answer = item["payload"]
                 parent_plan = plans[(answer["operation_id"], answer["attempt"])]
-                event = SubRunCompletedEvent(
-                    **common,
-                    parent_tool_call_id=parent_plan["request"]["id"],
-                    child_session_id=answer["session_id"],
-                    task_id=answer["turn_id"],
-                    status=answer["status"],
-                    final_output=str(answer["result"]),
-                )
+                marker = delegations.get((answer["operation_id"], answer["attempt"]), {})
+                if marker.get("mode") == "handoff":
+                    handoff_common = {k: v for k, v in common.items() if k != "agent_name"}
+                    handoff_common["metadata"] = common["metadata"] | marker["metadata"]
+                    event = HandoffCompletedEvent(
+                        **handoff_common,
+                        source_agent=common.get("agent_name") or "agent",
+                        target_agent=marker["agent_name"],
+                        tool_call_id=parent_plan["request"]["id"],
+                        child_session_id=answer["session_id"],
+                        child_run_id=answer["turn_id"],
+                        status=answer["status"],
+                    )
+                else:
+                    event = SubRunCompletedEvent(
+                        **common,
+                        parent_tool_call_id=parent_plan["request"]["id"],
+                        child_session_id=answer["session_id"],
+                        task_id=answer["turn_id"],
+                        status=answer["status"],
+                        final_output=str(answer["result"]),
+                    )
             elif item["kind"] == "user" and p["target_wait_id"] and p["target_operation_id"] is None:
                 event = RunStateChangedEvent(**common, state="running")
             elif item["kind"] == "user" and p["target_operation_id"]:
@@ -348,9 +366,29 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                             cycle_index=cycle,
                         )
                     elif h["kind"] == "child":
-                        event = SubRunStartedEvent(
-                            **common, parent_tool_call_id=request["id"], child_session_id=h["session_id"], task_id=h["turn_id"]
-                        )
+                        marker = p.get("delegation", {})
+                        delegations[key] = marker
+                        if marker.get("mode") == "handoff":
+                            handoff_common = {k: v for k, v in common.items() if k != "agent_name"}
+                            handoff_common["metadata"] = common["metadata"] | marker["metadata"]
+                            event = HandoffStartedEvent(
+                                **handoff_common,
+                                source_agent=common.get("agent_name") or "agent",
+                                target_agent=marker["agent_name"],
+                                tool_call_id=request["id"],
+                                child_session_id=h["session_id"],
+                            )
+                        else:
+                            for index, member in enumerate(child_handles(h)):
+                                child_common: dict[str, Any] = common | {"event_id": f"sk/{identity_digest}/child/{index}"}
+                                events.append(
+                                    SubRunStartedEvent(
+                                        **child_common,
+                                        parent_tool_call_id=request["id"],
+                                        child_session_id=member["session_id"],
+                                        task_id=member["turn_id"],
+                                    )
+                                )
                     else:
                         event = RunStateChangedEvent(**common, state="parked")
         if event is not None:

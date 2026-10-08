@@ -26,6 +26,8 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
 - `sqlite.py` provides the single-host implementation for local persistent and in-memory sessions.
 - `context.py` projects model messages, including accepted compaction replacements;
   `compaction.py` adapts MemoryManager to ordinary logged model operations.
+- `delegation.py` assembles configured children, agent tools, background handles and handoffs;
+  `bindings.py` separates JSON state from process-local shared-state objects.
 - `lifecycle.py` logs after-cycle decisions; `memory.py` binds callbacks and
   session-memory file projections to committed boundaries.
 - `projection.py`, `result.py`, `events.py` and `tracing.py` provide typed host
@@ -130,7 +132,7 @@ those same checks and retained for replay.
 
 ## Scheduling and recovery
 
-Each SQL store keeps one disposable in-memory validated prefix, bound to session,
+Each SQL store keeps at most two disposable in-memory validated prefixes, bound to session,
 head sequence, lease epoch and the stored head digest. Cold recovery checks stored
 byte digests, closed schemas, embedded digests and every reducer transition. A
 warm refresh reads and folds only the new tail. Append validates new records
@@ -158,6 +160,13 @@ and `terminal_seq` again. Zero is the deterministic immediate-due sentinel;
 absolute deadlines/not-before values come from records. Reads of current time,
 lease deadlines, and receipt times use PostgreSQL `clock_timestamp()` after
 acquiring the session row lock.
+
+The second slot prevents child result projection from evicting the executing
+parent's prefix. A third session evicts the older slot; rollback or explicit
+disposal clears both. Neither slot skips database head/digest binding checks.
+Child projection reuses one validated state snapshot and creation record, and
+Runtime initializes its tool registry only when planning or dispatching requires
+it. Read-only projection still resolves host bindings and the child model/config.
 
 `list_runnable` uses the design's union of due/unconsumed-input execution work
 and consumer lag. It does not claim work. Each ordered branch starts at the cursor session using existing primary and
@@ -351,6 +360,64 @@ Wake callbacks are best-effort hints; the scan recovers empty-inbox work and
 unprojected terminal records independently.
 
 ## Child sessions and completion delivery
+
+The internal Runtime binds configured `create_sub_task`, `Agent.as_tool`,
+`BackgroundAgentTask` and handoff tools to the same child admission path.
+Adapters only assemble definitions and project results; they never execute a
+recursive Runner or a child driver under the parent lease. The host independently
+schedules each child and its completion consumer. No public SDK entry point is
+switched to these adapters.
+
+`session_created.attributes.child_admission` is closed: mode, selector, frozen
+definition/digest, budget, handler version, SubAgentConfig, discovery filter,
+handoff count/maximum and handoff metadata. The definition freezes child policy,
+model binding, prompt, workspace path and initial JSON state at admission.
+Recovery re-supplies the agent/tool/provider/workspace handlers, validates their
+version and definition binding, and uses the admitted task. Workspace backends
+remain host configuration; S3 clients and credentials never enter the records.
+Configured children start with their own JSON state; agent tools and handoff
+children inherit a copy of the parent's JSON state.
+
+A batch uses optional closed `handle.siblings` member identities. Every member
+has the same parent delivery target and its own initial turn and cursor.
+Blocking completion requires an authenticated terminal input for every member.
+A disposable fold index supplies completion lookups; it is reconstructed from
+`input_applied`, with no second ledger. Result assembly always projects the
+terminal turn named in the authenticated handle, even after the child continues.
+
+`Runtime.child_tasks(store, parent_id)` supplies owner-scoped status and handles.
+The built-in status adapter uses record projections plus the existing status
+formatter, with its own SQL connection on the provider thread. Messages,
+continuations, user replies and cancellation use stable inbox IDs; retries
+replay identical bytes and conflicting content fails. `handle.poll`, `snapshot`,
+`wait` and `cancel` survive Runtime reconstruction. The start operation is the
+background tool's atomic child admission; its initial snapshot is durably
+running, independent of the child's scheduling race. The public BackgroundAgentTask
+and its in-process handle registry continue to use Runner.
+
+A blocking child waiting for a user keeps the parent operation parked until a
+terminal result, rather than returning Runner's intermediate waiting outcome.
+Ordinary tools returning WAIT_USER retain their result and park the turn using
+`turn_parked`; a reply resumes it without repeating the handler.
+Handoff is a terminal child continuation: count and maximum come from admitted
+records, and the source never resumes model execution after transfer. The source
+log remains the durable owner, while result agent/model/state/output project the
+terminal target. Target validation runs once on execution; the source's transient
+Runner transfer marker is not a user-facing final output and is not validated.
+See the F2d-3 report for the pending C1 decisions on these internal semantics.
+
+### Shared-state host bindings
+
+Durable shared_state remains JSON-only. A host supplies arbitrary Python objects
+explicitly through `Runtime.host_bindings`; only their sorted required names in
+`task.metadata.session_host_binding_names` are frozen. Tools and runtime hooks
+receive the original references; records, model-visible metadata and result
+projections retain only JSON state. Bound references cannot shadow durable keys,
+be replaced or be deleted. Reconstructing without a required binding raises
+`MissingHostBinding` before execution; the host must re-supply the object.
+Nothing pickles or serializes its object representation. These bindings are
+process-local and do not promise rollback of mutations to the host object.
+
 
 `Runtime.children` maps a registered tool name to a synchronous admission
 callback returning `children.ChildSession`. The existing tool policy, argument
