@@ -19,11 +19,13 @@ dependencies = [
 [project.optional-dependencies]
 celery = ["celery[redis]>=5.4"]
 redis = ["redis>=5.0"]
+postgres = ["psycopg[binary]>=3.2"]
 s3 = ["boto3>=1.35"]
 
 [dependency-groups]
 dev = [
     "celery[redis]>=5.4",
+    "psycopg[binary]>=3.2",
     "pytest>=8.4.0",
     "pytest-cov>=6.2.1",
     "ruff>=0.12.10",
@@ -45,6 +47,9 @@ addopts = "-ra"
 testpaths = ["tests"]
 markers = [
     "live: tests that call real remote LLM endpoints",
+    "postgres: PostgreSQL host transaction integration",
+    "persistent_store: process death or independent-connection persistence requires a file or PostgreSQL",
+    "sqlite_file: SQLite file header validation",
 ]
 
 [tool.ruff]

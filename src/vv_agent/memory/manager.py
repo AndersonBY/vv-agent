@@ -181,6 +181,19 @@ class MicrocompactionApplyResult:
     artifact_failure_count: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class SummaryPlan:
+    """Exact history and prompt for a separately persisted summary model operation."""
+
+    messages: list[Message]
+    systems: list[Message]
+    previous: list[Message]
+    prefix: list[Message]
+    tail: list[Message]
+    prompt: str
+    keep_recent: int
+
+
 @dataclass(slots=True)
 class MemoryManager:
     compact_threshold: int = 250_000
@@ -385,8 +398,7 @@ class MemoryManager:
         cycle_index: int | None = None,
         drop_ratio: float = 0.2,
     ) -> list[Message]:
-        keep = max(1, int(self.keep_recent_messages * (1 - min(max(drop_ratio, 0.0), 0.95))))
-        return self._summarize_prefix(messages, keep_recent=keep)[0]
+        return self._summarize_prefix(messages, keep_recent=self.keep_recent_messages, drop_ratio=drop_ratio)[0]
 
     def compress_memory(
         self,
@@ -441,15 +453,34 @@ class MemoryManager:
         tail = [messages[i] for i in raw_indices if i >= cut]
         return systems, previous, prefix, tail
 
-    def _summarize_prefix(self, messages: list[Message], *, keep_recent: int) -> tuple[list[Message], bool]:
-        parts = self._summary_parts(messages, keep_recent)
-        if parts is None or not parts[2] or self.summary_callback is None:
-            return list(messages), False
+    def plan_summary(
+        self, messages: list[Message], *, keep_recent: int | None = None, drop_ratio: float = 0
+    ) -> SummaryPlan | None:
+        """Plan without inference, pruning, or callbacks; preserve complete block boundaries."""
+        keep = self.keep_recent_messages if keep_recent is None else keep_recent
+        keep = max(1, int(keep * (1 - min(max(drop_ratio, 0.0), 0.95))))
+        parts = self._summary_parts(messages, keep)
+        if parts is None or not parts[2]:
+            return None
         systems, previous, prefix, tail = parts
-        prompt = self._build_compress_memory_prompt(prefix, previous=previous)
-        summary = self._normalize_summary_payload(
-            self._parse_summary_payload(self._normalize_summary_output(self._generate_summary(prompt)))
+        return SummaryPlan(
+            list(messages), systems, previous, prefix, tail, self._build_compress_memory_prompt(prefix, previous=previous), keep
         )
+
+    def _summarize_prefix(
+        self, messages: list[Message], *, keep_recent: int, drop_ratio: float = 0
+    ) -> tuple[list[Message], bool]:
+        if self.summary_callback is None:
+            return list(messages), False
+        plan = self.plan_summary(messages, keep_recent=keep_recent, drop_ratio=drop_ratio)
+        if plan is None:
+            return list(messages), False
+        return self.accept_summary(plan, self._generate_summary(plan.prompt))
+
+    def accept_summary(self, plan: SummaryPlan, text: str, *, notify: bool = True) -> tuple[list[Message], bool]:
+        """Validate a retained model result. Log owners defer notification until commit."""
+        messages, systems, previous, prefix, tail = plan.messages, plan.systems, plan.previous, plan.prefix, plan.tail
+        summary = self._normalize_summary_payload(self._parse_summary_payload(self._normalize_summary_output(text)))
         if not any(value for key, value in summary.items() if key not in {"summary_version", "user_constraints"}):
             return list(messages), False
         try:
@@ -485,7 +516,7 @@ class MemoryManager:
         tokens = self._calculate_message_length(candidate)
         if tokens >= self._calculate_message_length(messages) or tokens > self.effective_context_window:
             return list(messages), False
-        if self.session_memory is not None:
+        if notify and self.session_memory is not None:
             self.session_memory.on_compaction(current_tokens=tokens)
         return candidate, True
 
@@ -527,6 +558,13 @@ class MemoryManager:
                     continue
                 normalized[key].append({field: value if isinstance(value := record.get(field), str) else "" for field in fields})
         return normalized
+
+    def compaction_evidence(self, messages: list[Message]) -> dict[str, list[dict[str, Any]]]:
+        """Collect validated recovery references without reading files or dropping evidence."""
+        parts = self._summary_parts(messages, 1)
+        if parts is None:
+            raise ValueError("invalid compaction blocks")
+        return self._collect_evidence(parts[1], [*parts[2], *parts[3]])
 
     @staticmethod
     def _collect_evidence(previous: list[Message], prefix: list[Message]) -> dict[str, list[dict[str, Any]]]:
