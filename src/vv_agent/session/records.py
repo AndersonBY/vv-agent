@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from jsonschema import Draft202012Validator, ValidationError
 from jsonschema.validators import extend
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.canonical_json import canonical_json_bytes, utf16_sort_key
 
 if TYPE_CHECKING:
     from vv_agent.types import AgentTask
@@ -35,7 +35,7 @@ def copy_json(value: Any) -> Any:
 
 
 def digest(value: Any) -> str:
-    return sha256(canonical_json_bytes(value)).hexdigest()
+    return sha256(_json_bytes(value)).hexdigest()
 
 
 def closed(**fields: Any) -> dict[str, Any]:
@@ -89,6 +89,36 @@ HANDLE = {
         ),
     ]
 }
+BOUNDARY_DATA = {
+    "before_memory": closed(messages=array(JSON_OBJECT), shared_state=JSON_OBJECT),
+    "after_cycle": closed(
+        action=enum("continue", "steer", "stop_non_success"),
+        steering_messages=STRINGS,
+        disallow_tools=STRINGS,
+        stop=nullable(closed(code=TEXT, message=TEXT)),
+        shared_state=JSON_OBJECT,
+        error=nullable(TEXT),
+    ),
+    "memory_started": closed(event=JSON_OBJECT),
+    "memory_completed": closed(event=JSON_OBJECT),
+    "session_memory_saved": closed(
+        state=closed(
+            entries=array(
+                closed(
+                    category=enum("user_intent", "decision", "file_change", "error_fix", "key_fact"),
+                    content=TEXT,
+                    source_cycle=NAT,
+                    importance={"type": "integer", "minimum": 1, "maximum": 10},
+                )
+            ),
+            last_extracted_message_index={"type": "integer", "minimum": -1},
+            tokens_at_last_extraction=NAT,
+            initialized=BOOL,
+        )
+    ),
+    "output_checked": closed(status=enum("completed", "failed", "repair"), reason=nullable(TEXT), value=JSON_VALUE),
+    "budget": closed(usage=JSON_OBJECT, exhaustion=nullable(JSON_OBJECT), tool_names=STRINGS),
+}
 INPUT_PAYLOADS = {
     "user": closed(content=JSON_VALUE),
     "steer": closed(content=JSON_VALUE),
@@ -110,6 +140,7 @@ INPUT_PAYLOADS = {
         operation_id=TEXT,
         attempt=POS,
         result=JSON_VALUE,
+        status=enum("completed", "failed", "cancelled", "aborted"),
         terminal_seq=POS,
         terminal_digest=HASH,
     ),
@@ -211,6 +242,13 @@ PAYLOADS = {
         replacement=array(JSON_VALUE),
         evidence_manifest=JSON_OBJECT,
     ),
+    "boundary_recorded": closed(
+        boundary_id=TEXT,
+        stage=enum(*BOUNDARY_DATA),
+        source_operation_id=nullable(TEXT),
+        source_digest=nullable(HASH),
+        data=JSON_OBJECT,
+    ),
     "usage_observed": closed(
         meter_id=TEXT, observation=POS, mode=enum("cumulative", "correction"), usage=JSON_OBJECT, source=TEXT
     ),
@@ -223,6 +261,14 @@ PAYLOADS = {
         unconfirmed_operations=STRINGS,
     ),
 }
+BOUNDARY_DATA["output_checked"]["properties"]["partial_output"] = JSON_VALUE
+PAYLOADS["op_started"]["properties"]["endpoint_id"] = TEXT
+PAYLOADS["op_parked"]["properties"]["interaction_result"] = JSON_OBJECT
+PAYLOADS["context_compacted"]["properties"]["micro_usage"] = closed(
+    archived_count=NAT,
+    reclaimed_tokens=NAT,
+    artifact_failure_count=NAT,
+)
 RECORD_SCHEMA = closed(
     schema_version={"type": "integer", "const": 1},
     record_id=TEXT,
@@ -236,7 +282,10 @@ RECORD_SCHEMA = closed(
 _StrictValidator = extend(
     Draft202012Validator, type_checker=Draft202012Validator.TYPE_CHECKER.redefine("integer", lambda _, value: type(value) is int)
 )
-_VALIDATORS = {id(s): _StrictValidator(s) for s in [RECORD_SCHEMA, INPUT_SCHEMA, *PAYLOADS.values(), *INPUT_PAYLOADS.values()]}
+_VALIDATORS = {
+    id(s): _StrictValidator(s)
+    for s in [RECORD_SCHEMA, INPUT_SCHEMA, *PAYLOADS.values(), *INPUT_PAYLOADS.values(), *BOUNDARY_DATA.values()]
+}
 
 
 def _compile_check(schema: dict[str, Any]) -> Callable[[Any], bool]:
@@ -271,6 +320,8 @@ def _compile_check(schema: dict[str, Any]) -> Callable[[Any], bool]:
         check = _compile_check(schema["items"])
         return lambda v: isinstance(v, list) and all(check(item) for item in v)
     if kind == "integer":
+        if set(schema) == {"type", "minimum", "maximum"}:
+            return lambda v: type(v) is int and schema["minimum"] <= v <= schema["maximum"]
         if set(schema) == {"type", "minimum"}:
             return lambda v: type(v) is int and v >= schema["minimum"]
         if set(schema) == {"type", "const"}:
@@ -325,9 +376,62 @@ def _load(body: bytes) -> dict[str, Any]:
     return value
 
 
-def _check_digest(payload: dict[str, Any], field: str) -> None:
-    if payload[f"{field}_digest"] != digest(payload[field]):
+def _check_digest(payload: dict[str, Any], field: str) -> bytes:
+    encoded = _json_bytes(payload[field])
+    if payload[f"{field}_digest"] != sha256(encoded).hexdigest():
         raise RecordError(f"{field} digest mismatch")
+    return encoded
+
+
+@dataclass(frozen=True)
+class _RetainedTools:
+    """Producer-only reference to a validated, read-only schema subtree."""
+
+    source: Record
+
+    def encode(self) -> bytes:
+        self.source.encode()
+        if self.source._tools_body is None:
+            object.__setattr__(self.source, "_tools_body", canonical_json_bytes(self.value))
+        assert self.source._tools_body is not None
+        return self.source._tools_body
+
+    @property
+    def value(self) -> list[dict[str, Any]]:
+        return self.source._payload["definition"]["tools"]
+
+
+def _json_bytes(value: Any) -> bytes:
+    if isinstance(value, dict):
+        retained = {key: item.encode() for key, item in value.items() if isinstance(item, _RetainedTools)}
+        if retained:
+            return _object_bytes(value, retained)
+    return canonical_json_bytes(value)
+
+
+def _object_bytes(value: dict[str, Any], encoded_fields: dict[str, bytes]) -> bytes:
+    parts = []
+    pending = {}
+    keys = sorted(value) if all(type(key) is str and key.isascii() for key in value) else sorted(value, key=utf16_sort_key)
+    for key in keys:
+        if key in encoded_fields:
+            if pending:
+                parts.append(canonical_json_bytes(pending)[1:-1])
+                pending.clear()
+            parts.append(canonical_json_bytes(key) + b":" + encoded_fields[key])
+        else:
+            pending[key] = value[key]
+    if pending:
+        parts.append(canonical_json_bytes(pending)[1:-1])
+    return b"{" + b",".join(parts) + b"}"
+
+
+def _record_bytes(value: dict[str, Any], encoded_fields: dict[str, bytes]) -> bytes:
+    if not encoded_fields:
+        return canonical_json_bytes(value)
+    payload = _object_bytes(value["payload"], encoded_fields)
+    envelope = canonical_json_bytes(value | {"payload": None})
+    return envelope.replace(b'"payload":null', b'"payload":' + payload, 1)
 
 
 @dataclass(frozen=True)
@@ -388,6 +492,8 @@ def record_identity(
         if kind == "op_parked":
             suffix += f"/{payload['phase']}"
         return f"op/{operation_id}/{attempt}/{suffix}"
+    if kind == "boundary_recorded":
+        return f"turn/{turn_id}/boundary/{payload['stage']}/{payload['boundary_id']}"
     if kind == "context_compacted":
         return f"compact/{payload['source_digest']}/{payload['mode']}/{payload['summary_operation_id']}"
     return f"usage/{payload['meter_id']}/{payload['observation']}"
@@ -410,6 +516,7 @@ class Record:
     _digest: str | None = field(default=None, init=False, repr=False, compare=False)
     _value: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
     _task_value: AgentTask | None = field(default=None, init=False, repr=False, compare=False)
+    _tools_body: bytes | None = field(default=None, init=False, repr=False, compare=False)
 
     def _task(self) -> AgentTask:
         from vv_agent.types import AgentTask
@@ -466,12 +573,20 @@ class Record:
         return self._value["payload"] if self._value is not None else self.payload
 
     def _retain(self, body: bytes, value: dict[str, Any] | None = None) -> None:
-        object.__setattr__(self, "_value", value if value is not None else json.loads(body))
+        value = value if value is not None else json.loads(body)
+        for container_field in ("definition", "request"):
+            container = self._payload.get(container_field)
+            if isinstance(container, dict) and isinstance(container.get("tools"), _RetainedTools):
+                retained = container["tools"]
+                value["payload"][container_field]["tools"] = retained.value
+                if container_field == "definition":
+                    object.__setattr__(self, "_tools_body", retained.encode())
+        object.__setattr__(self, "_value", value)
         object.__setattr__(self, "payload", {})
         object.__setattr__(self, "_digest", sha256(body).hexdigest())
         object.__setattr__(self, "_body", body)
 
-    def _validate(self, value: dict[str, Any]) -> None:
+    def _validate(self, value: dict[str, Any]) -> dict[str, bytes]:
         validate(value, RECORD_SCHEMA, canonical=False)
         validate(self.payload, PAYLOADS[self.kind], canonical=False)
         op = self.kind.startswith("op_")
@@ -485,6 +600,7 @@ class Record:
             self.kind, self.session_id, self.turn_id, self.operation_id, self.attempt, self.payload
         ):
             raise RecordError("record_id does not match semantic position")
+        encoded_fields = {}
         for kind, digest_field in (
             ("turn_started", "definition"),
             ("op_planned", "request"),
@@ -493,19 +609,22 @@ class Record:
             ("input_applied", "input"),
         ):
             if self.kind == kind:
-                _check_digest(self.payload, digest_field)
+                encoded_fields[digest_field] = _check_digest(self.payload, digest_field)
         if self.kind == "input_applied":
             incoming = self.payload["input"]
             validate(incoming["payload"], INPUT_PAYLOADS[incoming["kind"]], canonical=False)
+        if self.kind == "boundary_recorded":
+            validate(self.payload["data"], BOUNDARY_DATA[self.payload["stage"]], canonical=False)
         if self.kind == "op_planned" and (self.payload["op_kind"] == "model") != (self.payload["purpose"] is not None):
             raise RecordError("purpose required only for model operations")
+        return encoded_fields
 
     def encode(self) -> bytes:
         if self._body is None:
             value = {f.name: getattr(self, f.name) for f in fields(self) if f.init}
-            self._validate(value)
+            encoded_fields = self._validate(value)
             try:
-                body = canonical_json_bytes(value)
+                body = _record_bytes(value, encoded_fields)
             except (ValueError, TypeError) as exc:
                 raise RecordError(str(exc)) from exc
             self._retain(body)
@@ -525,9 +644,9 @@ class Record:
             record = cls(**value)
         except TypeError as exc:
             raise RecordError(str(exc)) from exc
-        record._validate(value)
+        encoded_fields = record._validate(value)
         try:
-            canonical = canonical_json_bytes(value)
+            canonical = _record_bytes(value, encoded_fields)
             record._retain(canonical, value if canonical == body else None)
         except (ValueError, TypeError) as exc:
             raise RecordError(str(exc)) from exc

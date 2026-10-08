@@ -59,6 +59,7 @@ def completion_input(handle: dict[str, Any], terminal: StoredRecord) -> InboxIte
             "operation_id": target["operation_id"],
             "attempt": target["attempt"],
             "result": record.payload["result"],
+            "status": record._payload["status"],
             "terminal_seq": terminal.seq,
             "terminal_digest": record.digest,
         },

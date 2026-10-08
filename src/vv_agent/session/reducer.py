@@ -107,6 +107,8 @@ class ExecutionState:
     usage_observations: dict[str, int] = field(default_factory=dict)
     usage_values: dict[str, Record] = field(default_factory=dict)
     compactions: list[Record] = field(default_factory=list)
+    boundaries: dict[tuple[str, str, str], Record] = field(default_factory=dict)
+    preferred_endpoint_id: str | None = None
 
     @property
     def waits(self) -> dict[tuple[str, int], dict[str, Any]]:
@@ -250,7 +252,8 @@ def _plan(state: ExecutionState, record: Record) -> None:
             "retry changed request, context, purpose or provider",
         )
         if op.kind == "model":
-            require(number <= 2, "model retry limit exceeded")
+            order = p["request"].get("metadata", {}).get("session_endpoint_order", [])
+            require(number <= max(2, len(order)), "model retry limit exceeded")
         due = previous.unknown._payload["retry_at_ms"] if previous.unknown else None
         require(due is None or (p["not_before_ms"] or 0) >= due, "retry before not-before")
     for dependency in p["dependencies"]:
@@ -263,6 +266,17 @@ def _plan(state: ExecutionState, record: Record) -> None:
         source_attempt = source.attempts[ref["attempt"]]
         require(source.turn_id == tid and source_attempt.state == "unknown", "request did not consume an unknown")
         source_attempt.unknown_consumed = True
+    order = p["request"].get("metadata", {}).get("session_endpoint_order")
+    if order is not None:
+        require(
+            op.kind == "model"
+            and isinstance(order, list)
+            and bool(order)
+            and all(isinstance(e, str) and bool(e) for e in order)
+            and len(set(order)) == len(order)
+            and set(order) == set(turn.start._payload["definition"].get("model_binding", {}).get("endpoints", [])),
+            "invalid frozen endpoint order",
+        )
     op.attempts[number] = Attempt(record, prepared=previous.prepared if number > 1 else None)
 
 
@@ -301,6 +315,13 @@ def _operation(state: ExecutionState, record: Record) -> None:
             all(state.operations[dep].state == "completed" for dep in attempt.plan._payload["dependencies"]),
             "unfinished dependency",
         )
+        order = attempt.plan._payload["request"].get("metadata", {}).get("session_endpoint_order", [])
+        endpoint = p.get("endpoint_id")
+        require(
+            (op.kind == "model" and bool(order) and endpoint == order[(number - 1) % len(order)])
+            or (not order and endpoint is None),
+            "dispatch endpoint differs from frozen routing",
+        )
         attempt.state, attempt.dispatch, attempt.wait = "started", record, None
     elif record.kind == "op_parked":
         require(op.turn_id == state.active_turn_id and not turn.cancelled, "park outside active turn")
@@ -312,6 +333,17 @@ def _operation(state: ExecutionState, record: Record) -> None:
             require(
                 attempt.execution_plan._payload["op_kind"] == "interaction" and before,
                 "user wait requires undispatched interaction",
+            )
+        if "interaction_result" in p:
+            from vv_agent.types import ToolDirective, ToolExecutionResult, ToolResultStatus
+
+            result = ToolExecutionResult.from_dict(p["interaction_result"])
+            require(
+                handle["kind"] == "user"
+                and result.tool_call_id == attempt.execution_plan._payload["request"]["id"]
+                and result.directive == ToolDirective.WAIT_USER
+                and result.status_code == ToolResultStatus.WAIT_RESPONSE,
+                "invalid interaction result",
             )
         if handle["kind"] == "approval":
             require(
@@ -464,6 +496,8 @@ def _compacted(state: ExecutionState, record: Record, history: list[StoredRecord
         require(p["summary_operation_id"] is None and len(source) == len(replacement), "invalid micro replacement")
         removed = {i for i, (a, b) in enumerate(zip(source, replacement, strict=True)) if a != b}
         require(bool(removed), "empty micro replacement")
+        if "micro_usage" in p:
+            require(p["micro_usage"]["archived_count"] == len(removed), "micro archive count mismatch")
         prune = manager.plan_microcompaction(
             source,
             cycle_index=1,
@@ -550,6 +584,7 @@ class Fold:
         result.state.usage_observations = self.state.usage_observations.copy()
         result.state.usage_values = self.state.usage_values.copy()
         result.state.compactions = self.state.compactions.copy()
+        result.state.boundaries = self.state.boundaries.copy()
         result.seen, result.consumed = self.seen.copy(), self.consumed.copy()
         result.history = self.history.copy()
         return result
@@ -568,15 +603,27 @@ class Fold:
             self._shared_turns.remove(tid)
 
     def snapshot(self) -> ExecutionState:
-        result = self.fork()
-        for oid in result.state.operations:
-            result._own_operation(oid)
-            for attempt in result.state.operations[oid].attempts.values():
-                attempt.wait = copy_json(attempt.wait)
-                attempt.child_handle = copy_json(attempt.child_handle)
-        for tid in result.state.turns:
-            result._own_turn(tid)
-        return result.state
+        # Detach state only; a snapshot does not need the fold's history or identity indexes.
+        return replace(
+            self.state,
+            operations={
+                oid: replace(
+                    op,
+                    attempts={
+                        n: Attempt(**(vars(a) | {"wait": copy_json(a.wait), "child_handle": copy_json(a.child_handle)}))
+                        for n, a in op.attempts.items()
+                    },
+                )
+                for oid, op in self.state.operations.items()
+            },
+            turns={tid: copy(turn) for tid, turn in self.state.turns.items()},
+            applied_inputs=self.state.applied_inputs.copy(),
+            admitted_inputs=self.state.admitted_inputs.copy(),
+            usage_observations=self.state.usage_observations.copy(),
+            usage_values=self.state.usage_values.copy(),
+            compactions=self.state.compactions.copy(),
+            boundaries=self.state.boundaries.copy(),
+        )
 
     def extend(
         self, records: Iterable[Record], *, consumed_inputs: Iterable[InboxItem] = (), bodies: Iterable[bytes] | None = None
@@ -637,6 +684,18 @@ class Fold:
             elif kind.startswith("op_"):
                 self._own_operation(record.operation_id)
                 _operation(state, record)
+                if (
+                    kind == "op_completed"
+                    and p["execution_started"]
+                    and isinstance(p["result"], dict)
+                    and not p["result"].get("error_code")
+                ):
+                    assert record.operation_id is not None and record.attempt is not None
+                    op = state.operations[record.operation_id]
+                    if op.kind == "model":
+                        dispatch = op.attempts[record.attempt].dispatch
+                        if dispatch and dispatch._payload.get("endpoint_id"):
+                            state.preferred_endpoint_id = dispatch._payload["endpoint_id"]
             elif kind == "turn_parked":
                 require(tid == state.active_turn_id and tid in state.turns, "wait outside active turn")
                 assert tid is not None
@@ -704,6 +763,80 @@ class Fold:
                 require(p["observation"] > previous, "usage observation must increase")
                 state.usage_observations[p["meter_id"]] = p["observation"]
                 state.usage_values[p["meter_id"]] = record
+            elif kind == "boundary_recorded":
+                require(tid == state.active_turn_id and tid in state.turns, "boundary outside active turn")
+                assert tid is not None
+                require(not state.turns[tid].cancelled and not state.turns[tid].suspended, "boundary after cancel/suspend")
+                key = (tid, p["stage"], p["boundary_id"])
+                require(key not in state.boundaries, "boundary recorded twice")
+                if p["source_digest"] is not None:
+                    source = project_context(tuple(history[:-1]), state)
+                    require(digest([m.to_dict() for m in source]) == p["source_digest"], "boundary source mismatch")
+                oid = p["source_operation_id"]
+                if oid is not None:
+                    require(oid in state.operations and state.operations[oid].turn_id == tid, "boundary operation mismatch")
+                if p["stage"] == "before_memory":
+                    require(p["source_digest"] is not None and oid is None, "memory hook needs a context source")
+                    for message in p["data"]["messages"]:
+                        Message.from_dict(message)
+                elif p["stage"] == "session_memory_saved" and oid is not None:
+                    require(
+                        state.operations[oid].kind == "model"
+                        and state.operations[oid].attempts[1].plan._payload["purpose"] == "session_memory"
+                        and state.operations[oid].selected_attempt is not None,
+                        "session memory needs a logged extraction result",
+                    )
+                elif p["stage"] == "after_cycle":
+                    from vv_agent.runtime.lifecycle import AfterCycleDecision, AfterCycleStop
+
+                    data = p["data"]
+                    AfterCycleDecision(
+                        data["action"],
+                        tuple(data["steering_messages"]),
+                        tuple(data["disallow_tools"]),
+                        AfterCycleStop(**data["stop"]) if data["stop"] else None,
+                    )
+                    require(
+                        oid is not None and state.operations[oid].selected_attempt is not None,
+                        "cycle decision needs an adopted model result",
+                    )
+                    require(
+                        all(
+                            op.state == "completed"
+                            or any(
+                                a.wait and a.wait["handle"]["kind"] == "user" and "interaction_result" in a.wait
+                                for a in op.attempts.values()
+                            )
+                            for op in state.operations.values()
+                            if op.turn_id == tid and op.kind != "model" and op.attempts[1].plan._payload["dependencies"] == [oid]
+                        ),
+                        "cycle decision before tool batch completion",
+                    )
+                elif p["stage"] == "budget":
+                    from vv_agent.budget import BudgetExhaustion, BudgetUsageSnapshot
+
+                    require(
+                        BudgetUsageSnapshot.from_dict(p["data"]["usage"]).to_dict() == p["data"]["usage"],
+                        "budget snapshot contains unknown or incomplete fields",
+                    )
+                    if p["data"]["exhaustion"]:
+                        require(
+                            BudgetExhaustion.from_dict(p["data"]["exhaustion"]).to_dict() == p["data"]["exhaustion"],
+                            "budget exhaustion contains unknown or incomplete fields",
+                        )
+                elif p["stage"] in {"memory_started", "memory_completed"}:
+                    from vv_agent.events import event_from_dict
+
+                    event = event_from_dict(p["data"]["event"])
+                    require(
+                        event.type
+                        == ("memory_compact_started" if p["stage"] == "memory_started" else "memory_compact_completed"),
+                        "memory lifecycle type mismatch",
+                    )
+                    require(event.run_id == tid and event.session_id == state.session_id, "memory lifecycle identity mismatch")
+                    if p["stage"] == "memory_completed":
+                        require((tid, "memory_started", p["boundary_id"]) in state.boundaries, "memory completion without start")
+                state.boundaries[key] = record
             elif kind == "context_compacted":
                 _compacted(state, record, history[:-1])
         require(set(consumed) == set(state.applied_inputs), "consumed input without input_applied")

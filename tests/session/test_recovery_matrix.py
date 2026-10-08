@@ -681,7 +681,16 @@ def test_run_events_are_stable_typed_projections_and_do_not_execute(store, datab
     first = [event.to_dict() for event in project_records(rows)]
     second = [event.to_dict() for event in project_records(rows)]
     assert first == second
-    assert [e["type"] for e in first] == ["run_started", "model_call_started", "model_call_completed", "run_completed"]
+    assert [e["type"] for e in first] == [
+        "run_started",
+        "agent_started",
+        "cycle_started",
+        "model_call_started",
+        "diagnostic",
+        "model_call_completed",
+        "diagnostic",
+        "run_completed",
+    ]
     assert len({e["event_id"] for e in first}) == len(first)
     assert all(event_from_dict(e).to_dict() == e for e in first)
 
@@ -823,7 +832,7 @@ def test_budget_counts_and_elapsed_survive_recovery(store, database):
 
     rt = runtime(
         database,
-        [LLMResponse("", [ToolCall("a", "effect", {}), ToolCall("b", "effect", {})])],
+        [LLMResponse("", [ToolCall("a", "effect", {})])],
         [effect_tool()],
         providers={"effect": provider},
         hook=hook,
@@ -832,7 +841,13 @@ def test_budget_counts_and_elapsed_survive_recovery(store, database):
     with pytest.raises(Restart):
         drive(store, "s", runtime=rt)
     observed_before = sum(r.payload["usage"]["elapsed_ms"] for r in read_state(store, "s")[0].usage_values.values())
-    drive(store, "s", runtime=runtime(database, [], [effect_tool()], providers={"effect": provider}))
+    drive(
+        store,
+        "s",
+        runtime=runtime(
+            database, [LLMResponse("", [ToolCall("b", "effect", {})])], [effect_tool()], providers={"effect": provider}
+        ),
+    )
     end = records_of(store, "turn_ended")[0]
     assert end.payload["budget"]["tool_calls"] == 1
     assert end.payload["budget"]["elapsed_ms"] >= observed_before > 0

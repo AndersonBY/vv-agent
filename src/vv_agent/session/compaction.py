@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ from vv_agent.types import Message
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .context import message_ids, project_context
+from .memory import extract_memory, finish_compact, start_compact
 from .records import InboxItem, Record, digest
 from .reducer import fold
 
@@ -116,6 +118,29 @@ def compact_context(driver: _Driver) -> bool:
         if result is None or result._payload["result"].get("error_code") != "prompt_too_long":
             break
         failures += 1
+    cycle = 1 + sum(
+        not (
+            op.selected_attempt
+            and (receipt := op.attempts[op.selected_attempt].result)
+            and receipt._payload["result"].get("error_code") == "prompt_too_long"
+        )
+        for op in primary
+    )
+    last_compaction = next(
+        (
+            r.record
+            for r in reversed(driver.records)
+            if r.record.kind == "context_compacted" and r.record.turn_id == driver.state.active_turn_id
+        ),
+        None,
+    )
+    if (
+        last_compaction
+        and last_compaction._payload["replacement"] == [m.to_dict() for m in source]
+        and last_compaction._payload["mode"] != "micro"
+        and finish_compact(driver, manager, source, mode=last_compaction._payload["mode"], changed=True)
+    ):
+        return True
     if failures:
         selected = primary[-1].selected_attempt
         assert selected is not None
@@ -126,16 +151,7 @@ def compact_context(driver: _Driver) -> bool:
     if failures > MAX_PTL_RETRIES:
         driver.close("failed", "CompactionExhaustedError")
         return True
-    mode = "emergency" if failures else "summary"
-    source_digest = digest([m.to_dict() for m in source])
-    if not failures and any(
-        op.turn_id == driver.state.active_turn_id
-        and op.attempts[1].plan._payload["purpose"] == "compaction"
-        and op.attempts[1].plan._payload["request"]["metadata"]["source_digest"] == source_digest
-        and op.attempts[1].plan._payload["request"]["metadata"]["mode"] == mode
-        for op in driver.state.operations.values()
-    ):
-        return False
+    mode = "emergency" if failures > 1 else "summary"
     last_change = next(
         (
             r.record
@@ -158,23 +174,56 @@ def compact_context(driver: _Driver) -> bool:
         return False
     if not failures:
         current_tokens = tokens(manager, source)
-        prune = manager.plan_microcompaction(source, cycle_index=len(primary) + 1, current_tokens=current_tokens)
+        if extract_memory(driver, source, current_tokens, cycle):
+            return True
+        prune = manager.plan_microcompaction(source, cycle_index=cycle, current_tokens=current_tokens)
+        if ((prune and prune.candidates) or current_tokens > manager.autocompact_threshold) and start_compact(
+            driver,
+            manager,
+            source,
+            cycle=cycle,
+            trigger="full_threshold" if current_tokens > manager.autocompact_threshold else "micro_threshold",
+            prune=prune,
+        ):
+            return True
         if prune and prune.candidates and not (last_change and last_change.kind == "context_compacted"):
             result = manager.apply_microcompaction(source, plan=prune)
             if result.archived_count:
                 record = replacement_record(driver, manager, source, result.messages, mode="micro")
+                record = replace(
+                    record,
+                    payload=record._payload
+                    | {
+                        "micro_usage": {
+                            "archived_count": result.archived_count,
+                            "reclaimed_tokens": result.reclaimed_tokens,
+                            "artifact_failure_count": result.artifact_failure_count,
+                        }
+                    },
+                )
                 driver.runtime.hook("after_microcompact_artifacts", record)
                 driver.commit([record], guarded=True)
                 return True
         if current_tokens <= manager.autocompact_threshold:
-            return False
-    plan = manager.plan_summary(source, drop_ratio=0.2 * failures)
+            return finish_compact(driver, manager, source, mode="none", changed=False)
+    elif start_compact(driver, manager, source, cycle=cycle, trigger="prompt_too_long"):
+        return True
+    source_digest = digest([m.to_dict() for m in source])
+    if not failures and any(
+        op.turn_id == driver.state.active_turn_id
+        and op.attempts[1].plan._payload["purpose"] == "compaction"
+        and op.attempts[1].plan._payload["request"]["metadata"]["source_digest"] == source_digest
+        and op.attempts[1].plan._payload["request"]["metadata"]["mode"] == mode
+        for op in driver.state.operations.values()
+    ):
+        return finish_compact(driver, manager, source, mode="none", changed=False)
+    plan = manager.plan_summary(source, drop_ratio=min(0.2 * failures, 0.95) if failures > 1 else 0)
     if plan is None:
-        return False
+        return finish_compact(driver, manager, source, mode="none", changed=False)
     # Equal source and tail targets reuse even rejected receipts across PTL retries.
     oid = f"{driver.state.active_turn_id}/model/compaction/{source_digest}/{mode}/{plan.keep_recent}"
     if oid in driver.state.operations:
-        return False
+        return finish_compact(driver, manager, source, mode="none", changed=False)
     task = driver.task()
     request = {
         "model": task.model,
@@ -185,7 +234,7 @@ def compact_context(driver: _Driver) -> bool:
             "source_digest": source_digest,
             "keep_recent": plan.keep_recent,
             "mode": mode,
-            "cycle_index": len(primary) + 1,
+            "cycle_index": cycle,
         },
         "prompt_bundle": None,
         "model_settings": task.model_settings.to_dict() if task.model_settings else None,

@@ -20,10 +20,15 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
     messages: list[Message] = []
     for stored in records:
         r = stored.record
-        if r.kind not in {"context_compacted", "turn_started", "input_applied", "op_completed"}:
+        if r.kind not in {"context_compacted", "boundary_recorded", "turn_started", "input_applied", "op_completed"}:
             continue
         p = r._payload
-        if r.kind == "context_compacted":
+        if r.kind == "boundary_recorded":
+            if p["stage"] == "before_memory":
+                messages = [Message.from_dict(copy_json(m)) for m in p["data"]["messages"]]
+            elif p["stage"] == "after_cycle" and not p["data"]["error"]:
+                messages.extend(Message("user", text) for text in p["data"]["steering_messages"])
+        elif r.kind == "context_compacted":
             messages = [Message.from_dict(copy_json(m)) for m in p["replacement"]]
         elif r.kind == "turn_started":
             task = r._task()
@@ -97,6 +102,8 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                     image = ToolCallRunner._build_image_notification(result=result, include_image=task.native_multimodal)
                     if image is not None:
                         messages.append(image)
+                elif a.wait and "interaction_result" in a.wait:
+                    messages.append(ToolExecutionResult.from_dict(copy_json(a.wait["interaction_result"])).to_tool_message())
                 else:
                     content = json.dumps({"error": "tool_outcome_unknown", "retryable": False})
                     messages.append(Message("tool", content, tool_call_id=call["id"], name=call["name"]))

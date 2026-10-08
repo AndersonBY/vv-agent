@@ -8,6 +8,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from copy import copy
 from dataclasses import dataclass, field, fields, replace
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -48,7 +49,7 @@ from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .children import ChildSession
 from .providers import FunctionProvider, Provider
-from .records import Record, copy_json, digest
+from .records import Record, copy_json
 from .reducer import ExecutionState
 from .store import SessionStore
 
@@ -103,9 +104,14 @@ class Runtime:
             from vv_agent.approval import ApprovalBroker
 
             self.approval_broker = ApprovalBroker()
-        self._definition_key: str | bytes | None = None
+        self._definition_key: tuple[str | bytes, str | bytes] | None = None
         self._definition_value: dict[str, Any] = {}
         self._definition_digest = ""
+        self._retained_task_key: tuple[Record, str | bytes] | None = None
+        self._definition_binding_key: tuple | None = None
+        self._definition_binding: dict[str, Any] = {}
+        self._definition_prefix = b""
+        self._definition_suffix = b""
         self._schema_key: tuple | None = None
         self._schemas: list[dict[str, Any]] = []
 
@@ -119,7 +125,7 @@ class Runtime:
             metadata={**self.agent.metadata, **self.config.metadata},
         )
 
-    def complete(self, request: LlmRequest, attempt: int) -> LLMResponse:
+    def complete(self, request: LlmRequest, attempt: int, stream_callback=None) -> LLMResponse:
         client = self.llm
         if isinstance(client, VvLlmClient):
             # One endpoint per logged attempt; never stack client fallback and kernel retries.
@@ -127,9 +133,16 @@ class Runtime:
             if not targets:
                 raise ValueError("No endpoint targets configured")
             client = copy(client)
-            client.endpoint_targets = [targets[(attempt - 1) % len(targets)]]
+            endpoint_id = request.metadata.get("session_endpoint_id")
+            client.endpoint_targets = (
+                [next(t for t in targets if t.endpoint_id == endpoint_id)]
+                if endpoint_id
+                else [targets[(attempt - 1) % len(targets)]]
+            )
             client.max_retries_per_endpoint = 1
             client.randomize_endpoints = False
+        if stream_callback is not None:
+            return client.complete_with_stream(request, stream_callback)
         return client.complete(request)
 
     def compile(self, content: str, tid: str) -> AgentTask:
@@ -171,6 +184,12 @@ class Runtime:
         task.model_settings = replace(
             defaults.resolve(task.model_settings), retry=RetrySettings(max_attempts=1, backoff_seconds=0)
         )
+        if task.metadata.get("session_memory_enabled"):
+            from .memory import session_memory
+
+            memory = session_memory(task, Path(self.config.workspace or ".") if task.use_workspace else None)
+            memory.load()
+            task.metadata["_vv_agent_session_memory_initial_state"] = memory.state.to_dict()
         task.initial_shared_state.setdefault("todo_list", [])
         for key in ("available_skills", "active_skills"):
             if key in task.metadata:
@@ -204,6 +223,11 @@ class Runtime:
             policy.allowed_tools = [n for n in frozen.allowed_tools if n in policy.allowed_tools]
         if frozen.approval == "always":
             policy.approval = "always"
+        from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
+
+        policy.disallowed_tools = list(
+            dict.fromkeys([*policy.disallowed_tools, *read_after_cycle_disallowed_tools(shared_state or {})])
+        )
         _apply_tool_policy_metadata(metadata, policy)
         if policy is not None:
             metadata["_vv_agent_tool_policy_approval"] = policy.approval
@@ -220,7 +244,7 @@ class Runtime:
             run_context=self.run_context(task.task_id),
             cycle_index=(
                 plan._payload["request"]["metadata"]["cycle_index"]
-                if plan._payload["purpose"] == "compaction"
+                if plan._payload["op_kind"] == "model" and "cycle_index" in plan._payload["request"].get("metadata", {})
                 else int(source.rsplit("/", 1)[1])
             ),
             workspace_backend=self.config.workspace_backend or LocalWorkspaceBackend(workspace),
@@ -231,19 +255,35 @@ class Runtime:
             metadata={
                 "operation_id": plan.operation_id,
                 "attempt": plan.attempt,
-                "session_tool_names": [s["function"]["name"] for s in self._definition(task)["tools"]],
+                "session_tool_names": [s["function"]["name"] for s in plan._payload["request"].get("tools", [])],
             },
         )
 
     def definition(self, task: AgentTask) -> dict[str, Any]:
         return copy_json(self._definition(task))
 
-    def definition_digest(self, task: AgentTask) -> str:
+    def definition_digest(self, task: AgentTask | Record) -> str:
         self._definition(task)
         return self._definition_digest
 
-    def _definition(self, task: AgentTask) -> dict[str, Any]:
-        # One bounded cache; task controls, manager settings and registry changes invalidate it.
+    def _definition(self, task: AgentTask | Record) -> dict[str, Any]:
+        # Retained tasks are immutable; mutable runtime bindings are checked on every step.
+        retained = task if isinstance(task, Record) else None
+        if retained is not None:
+            task_value = retained._payload["definition"]["task"]
+            task = retained._task()
+        else:
+            assert isinstance(task, AgentTask)
+            task_value = task.to_dict()
+        if retained is not None and self._retained_task_key is not None and self._retained_task_key[0] is retained:
+            task_key = self._retained_task_key[1]
+        else:
+            try:
+                task_key = json.dumps(task_value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            except TypeError:
+                task_key = canonical_json_bytes(task_value)
+            if retained is not None:
+                self._retained_task_key = (retained, task_key)
         memory_settings = {
             f.name: getattr(self.memory_manager, f.name)
             for f in fields(self.memory_manager)
@@ -258,8 +298,8 @@ class Runtime:
         }
         memory_settings["microcompaction_policy"] = self.memory_manager.microcompaction_policy.to_dict()
         value: dict[str, Any] = {
+            "agent_name": self.agent.name,
             "memory_settings": memory_settings,
-            "task": task.to_dict(),
             "child_tools": sorted(self.children),
             "model_binding": {
                 "backend": self.resolved.backend,
@@ -270,9 +310,10 @@ class Runtime:
         signature = self.registry.planning_signature()
         # JSON fingerprints distinguish True from 1 and detach mutable cache inputs.
         try:
-            key = json.dumps([value, signature], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            binding_key = json.dumps([value, signature], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         except TypeError:
-            key = canonical_json_bytes([value, signature])
+            binding_key = canonical_json_bytes([value, signature])
+        key = (task_key, binding_key)
         if key == self._definition_key:
             return self._definition_value
         schema_key = (
@@ -293,25 +334,33 @@ class Runtime:
         if schema_key != self._schema_key:
             self._schemas = plan_tool_schemas(registry=self.registry, task=task, include_dynamic_hints=False)
             self._schema_key = schema_key
-        schemas = self._schemas
-        names = [s["function"]["name"] for s in schemas]
-        retentions = dict(self.memory_manager.tool_result_retentions)
-        for name in names:
-            metadata = self.registry.tool_metadata(name)
-            if metadata is not None:
-                retentions[name] = (
-                    ToolResultRetention.PRESERVE
-                    if ToolResultRetention.PRESERVE in (retentions.get(name), metadata.result_retention)
-                    else metadata.result_retention
-                )
-        memory_settings["tool_result_retentions"] = retentions
-        value["tools"] = schemas
-        value["capabilities"] = {
-            n: metadata.to_dict()
-            for n in names
-            if self.registry.has_executor(n) and (metadata := self.registry.tool_metadata(n)) is not None
-        }
-        self._definition_digest = digest(value)
+        if (binding_key, schema_key) != self._definition_binding_key:
+            schemas = self._schemas
+            names = [s["function"]["name"] for s in schemas]
+            retentions = dict(self.memory_manager.tool_result_retentions)
+            for name in names:
+                metadata = self.registry.tool_metadata(name)
+                if metadata is not None:
+                    retentions[name] = (
+                        ToolResultRetention.PRESERVE
+                        if ToolResultRetention.PRESERVE in (retentions.get(name), metadata.result_retention)
+                        else metadata.result_retention
+                    )
+            memory_settings["tool_result_retentions"] = retentions
+            value["capabilities"] = {
+                n: metadata.to_dict()
+                for n in names
+                if self.registry.has_executor(n) and (metadata := self.registry.tool_metadata(n)) is not None
+            }
+            # These closed keys precede task, and tools follows it in JCS order.
+            prefix = canonical_json_bytes(value)[:-1] + b',"task":'
+            suffix = b',"tools":' + canonical_json_bytes(schemas) + b"}"
+            self._definition_binding = value | {"tools": schemas}
+            self._definition_prefix, self._definition_suffix = prefix, suffix
+            self._definition_binding_key = (binding_key, schema_key)
+        task_bytes = canonical_json_bytes(task_value)
+        value = self._definition_binding | {"task": task_value}
+        self._definition_digest = sha256(self._definition_prefix + task_bytes + self._definition_suffix).hexdigest()
         self._definition_value = value
         self._definition_key = key
         return value
@@ -330,32 +379,30 @@ def request_from_dict(value: dict[str, Any]) -> LlmRequest:
 
 def model_usage(value: dict[str, Any] | None):
     # Framework receipt annotations are not provider token-usage fields.
-    return normalize_token_usage(
-        {k: v for k, v in (value or {}).items() if k not in {"session_shared_state", "session_completion_reason"}}
-    )
+    return normalize_token_usage({k: v for k, v in (value or {}).items() if not k.startswith("session_")})
 
 
 def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
-    limits = state.turns[tid].start._payload["budget"]
-    parsed = RunBudgetLimits.from_dict(limits)
+    parsed = RunBudgetLimits.from_dict(state.turns[tid].start._payload["budget"])
     if not parsed.has_limits:
         return None
     observations = [r._payload["usage"] for r in state.usage_values.values() if r.turn_id == tid]
     elapsed = sum(v.get("elapsed_ms", 0) for v in observations)
+    boundaries = [r._payload["data"] for (turn, stage, _), r in state.boundaries.items() if turn == tid and stage == "budget"]
+    previous = BudgetUsageSnapshot.from_dict(boundaries[-1]["usage"]) if boundaries else BudgetUsageSnapshot()
     missing_interval = any(
         a.unknown and a.unknown._payload["observation"].get("active_interval_missing")
         for op in state.operations.values()
         if op.turn_id == tid
         for a in op.attempts.values()
     )
-    unavailable = (
-        (BudgetUnavailableDimension(BudgetDimension.WALL_TIME, BudgetUnavailableReason.ACCOUNTING_MISSING),)
-        if missing_interval
-        else ()
-    )
-    host = observations[-1].get("host_cost") if observations else None
+    unavailable = list(previous.unavailable_dimensions)
+    if missing_interval and not any(v.dimension == BudgetDimension.WALL_TIME for v in unavailable):
+        unavailable.append(BudgetUnavailableDimension(BudgetDimension.WALL_TIME, BudgetUnavailableReason.ACCOUNTING_MISSING))
     started = [(op.kind, a) for op in state.operations.values() if op.turn_id == tid for a in op.attempts.values() if a.started]
-    tool_counts = Counter(a.execution_plan._payload["request"]["name"] for kind, a in started if kind != "model")
+    tool_counts = Counter(name for b in boundaries for name in b["tool_names"])
+    # Host readings and unavailable classifications are retained at every active-scope commit.
+    host = observations[-1].get("host_cost") if observations else None
     evaluator = BudgetEvaluator(
         parsed,
         initial_usage=BudgetUsageSnapshot(
@@ -363,14 +410,13 @@ def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
             tool_calls=sum(tool_counts.values()),
             tool_calls_by_name=tool_counts,
             elapsed_ms=elapsed,
-            host_cost=HostCost.from_dict(host) if host else None,
-            unavailable_dimensions=unavailable,
+            host_cost=previous.host_cost,
+            unavailable_dimensions=tuple(unavailable),
         ),
         host_cost_meter=cast(HostCostMeter, SimpleNamespace(read=lambda: HostCost.from_dict(host) if host else None)),
         clock_ns=lambda: 0,
     )
     for kind, attempt in started:
-        if kind == "model":
-            usage = attempt.result._payload["usage"] if attempt.result else {}
-            evaluator.model_call_complete(model_usage(usage))
+        if kind == "model" and (attempt.result is not None or attempt.unknown is not None):
+            evaluator._observe_token_usage(model_usage(attempt.result._payload["usage"] if attempt.result else {}))
     return evaluator

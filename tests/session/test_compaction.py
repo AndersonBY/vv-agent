@@ -135,6 +135,7 @@ def test_prompt_too_long_emergency_and_exhaustion(store, database, accepted):
             too_long,
             LLMResponse("invalid"),
             too_long,
+            LLMResponse("invalid"),
             too_long,
             too_long,
         ]
@@ -146,13 +147,14 @@ def test_prompt_too_long_emergency_and_exhaustion(store, database, accepted):
     terminal = records_of(store, "turn_ended")[-1].payload
     assert terminal["status"] == ("completed" if accepted else "failed")
     if accepted:
-        assert records_of(store, "context_compacted")[-1].payload["mode"] == "emergency"
+        # First PTL retry keeps the configured tail, as Runner force compaction does.
+        assert not records_of(store, "context_compacted")
     else:
         assert terminal["reason"] == "CompactionExhaustedError"
         assert not records_of(store, "context_compacted")
         plans = records_of(store, "op_planned")
         assert sum(p.payload["purpose"] == "primary" for p in plans) == 4
-        assert sum(p.payload["purpose"] == "compaction" for p in plans) == 1
+        assert sum(p.payload["purpose"] == "compaction" for p in plans) == 2
 
 
 def test_retry_after_compaction_keeps_frozen_context_with_late_steer(store, database):
@@ -418,7 +420,7 @@ def test_emergency_resummarizes_previous_summary_with_smaller_raw_tail(store, da
         return LLMResponse(SUMMARY)
 
     start(store)
-    rt = configured(database, [summary, too_long, summary, LLMResponse("done")])
+    rt = configured(database, [summary, too_long, too_long, summary, LLMResponse("done")])
     rt.config = replace(
         rt.config,
         initial_messages=[*history(), Message("assistant", "tail one " * 2000), Message("assistant", "tail two " * 2000)],
