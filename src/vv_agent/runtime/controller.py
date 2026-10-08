@@ -8,14 +8,22 @@ derivation.
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vv_agent import interaction
-from vv_agent.canonical_json import canonical_json_bytes, canonical_json_sha256
+from vv_agent.canonical_json import canonical_json_sha256
 from vv_agent.checkpoint import CheckpointError
+from vv_agent.interaction import (
+    CONTROLLER_COMMAND_ID_DOMAIN as CONTROLLER_COMMAND_ID_DOMAIN,
+)
+from vv_agent.interaction import (
+    CONTROLLER_COMMAND_ID_SCHEMA as CONTROLLER_COMMAND_ID_SCHEMA,
+)
+from vv_agent.interaction import (
+    derive_controller_command_id as derive_controller_command_id,
+)
 
 if TYPE_CHECKING:
     from vv_agent.runtime.backends.distributed import DistributedRunHandle
@@ -30,31 +38,8 @@ HOST_RECOVERY_SCHEMA = "vv-agent.host-interaction-recovery.v1"
 HOST_RECOVERY_RESULT_SCHEMA = "vv-agent.host-interaction-recovery-result.v1"
 HOST_RECORD_SCHEMA = "vv-agent.host-interaction-record.v1"
 HOST_NOTIFICATION_SCHEMA = "vv-agent.host-interaction-notification.v1"
-CONTROLLER_COMMAND_ID_SCHEMA = "vv-agent.controller-command-id.v1"
-CONTROLLER_COMMAND_ID_DOMAIN = "vv-agent.controller-command-id.v1"
 
 _SHA256_FIELDS = frozenset({"request_digest", "response_digest", "command_digest", "notification_payload_digest"})
-
-
-def derive_controller_command_id(thread_id: str, turn_id: str, action_id: str) -> str:
-    """Derive the App Server command identity without accepting a client id.
-
-    The length prefix is part of the central contract so concatenation cannot
-    make two different public scopes collide.  The payload uses snake_case
-    keys because it is an internal identity envelope, not App Server wire.
-    """
-    thread = interaction._text(thread_id, "thread_id")
-    turn = interaction._text(turn_id, "turn_id")
-    action = interaction._text(action_id, "action_id")
-    payload = {
-        "action_id": action,
-        "schema_version": CONTROLLER_COMMAND_ID_SCHEMA,
-        "thread_id": thread,
-        "turn_id": turn,
-    }
-    canonical = canonical_json_bytes(payload, "controller_command_id")
-    framed = CONTROLLER_COMMAND_ID_DOMAIN.encode("utf-8") + b"\x00" + len(canonical).to_bytes(8, "big") + canonical
-    return hashlib.sha256(framed).hexdigest()
 
 
 def derive_host_interaction_record_id(

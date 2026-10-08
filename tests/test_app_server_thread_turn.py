@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import threading
-from typing import cast
+from typing import Any, cast
 
+import pytest
 from support import FixedModelProvider
 
 from vv_agent import Agent, RunConfig
@@ -12,6 +13,8 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
 from vv_agent.types import LLMResponse, ToolCall
+
+pytestmark = pytest.mark.usefixtures("surface")
 
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
@@ -160,7 +163,7 @@ def test_turn_steer_injects_context_into_active_turn_next_cycle() -> None:
             "method": "turn/steer",
             "params": {
                 "threadId": "thread_1",
-                "expectedTurnId": "turn_1",
+                "expectedTurnId": _active_turn_id(server),
                 "input": [{"type": "text", "text": "queued from app server"}],
             },
         },
@@ -261,7 +264,7 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
             "method": "turn/followUp",
             "params": {
                 "threadId": "thread_1",
-                "expectedTurnId": "turn_1",
+                "expectedTurnId": _active_turn_id(server),
                 "input": [{"type": "text", "text": "continue"}],
             },
         },
@@ -273,7 +276,7 @@ def test_turn_follow_up_starts_next_turn_after_active_turn_completes() -> None:
 
     assert methods.count("turn/started") == 2
     assert methods.count("turn/completed") == 2
-    assert seen_user_messages == [["continue"]]
+    assert seen_user_messages == ([["hello", "continue"]] if hasattr(server.store, "kernel") else [["continue"]])
 
 
 def test_turn_interrupt_cancels_active_turn() -> None:
@@ -308,7 +311,7 @@ def test_turn_interrupt_cancels_active_turn() -> None:
             "jsonrpc": "2.0",
             "id": 3,
             "method": "turn/interrupt",
-            "params": {"threadId": "thread_1", "expectedTurnId": "turn_1", "reason": "stop"},
+            "params": {"threadId": "thread_1", "expectedTurnId": _active_turn_id(server), "reason": "stop"},
         },
     )
     response = _receive_response(transport, 3)
@@ -320,7 +323,11 @@ def test_turn_interrupt_cancels_active_turn() -> None:
     assert response == {
         "jsonrpc": "2.0",
         "id": 3,
-        "result": {"threadId": "thread_1", "turnId": "turn_1", "cancelled": True},
+        "result": {
+            "threadId": "thread_1",
+            "turnId": ("thread_1/turn/turn_1" if hasattr(server.store, "kernel") else "turn_1"),
+            "cancelled": True,
+        },
     }
     assert isinstance(completed_params, dict)
     assert cast(dict[str, object], completed_params)["status"] == "failed"
@@ -361,3 +368,119 @@ def _drain_until_turn_completed(transport: ChannelTransport, *, count: int = 1) 
         if message.get("method") == "turn/completed":
             completed += 1
     return outbound
+
+
+def test_child_wait_user_is_exposed_and_reply_targets_child(surface):
+    from vv_agent import function_tool
+    from vv_agent.types import SubAgentConfig, ToolDirective, ToolExecutionResult
+
+    @function_tool
+    def wait_child() -> ToolExecutionResult:
+        return ToolExecutionResult(
+            "", "child needs answer", directive=ToolDirective.WAIT_USER, metadata={"question": "child needs answer"}
+        )
+
+    llm = ScriptedLLM(
+        [
+            LLMResponse("", [ToolCall("child", "create_sub_task", {"agent_id": "worker", "task_description": "work"})]),
+            LLMResponse("", [ToolCall("ask", "wait_child", {})]),
+            LLMResponse("child done"),
+            LLMResponse("parent done"),
+        ]
+    )
+    transport = ChannelTransport(connection_id="conn_1")
+    server = AppServer(
+        transport=transport,
+        host=DefaultAppServerHost(
+            agent=Agent(
+                "assistant",
+                "Delegate.",
+                model="test-model",
+                tools=[wait_child],
+                sub_agents={"worker": SubAgentConfig(model="test-model", description="Work.")},
+            ),
+            run_config=RunConfig(model_provider=FixedModelProvider(llm, _resolved_model()), max_cycles=3),
+        ),
+    )
+    _send(transport, server, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "test"}}})
+    _send(transport, server, {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+    _send(
+        transport,
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "turn/start",
+            "params": {
+                "threadId": "thread_1",
+                "input": [{"type": "text", "text": "delegate"}],
+            },
+        },
+    )
+    first = _drain_until_turn_completed(transport)
+    if surface is None:
+        assert cast(dict[str, Any], first[-1]["params"])["status"] == "completed"
+        assert cast(dict[str, Any], first[-1]["params"])["finalOutput"] == "child done"
+        return
+    cast(Any, server.run_adapter).join()
+    interrupted = transport.receive_outbound(timeout=5)
+    assert interrupted["method"] == "thread/status/changed"
+    wait = interrupted["params"]["interactions"][0]
+    assert wait["prompt"] == "child needs answer" and wait["sessionId"] != "thread_1"
+    assert set(wait) == {"sessionId", "turnId", "prompt", "interactionId"}
+    parent = surface.store.read_state("thread_1")[0]
+    child = surface.store.read_state(wait["sessionId"])[0]
+    assert parent.phase == child.phase == "parked"
+    parent_tid = parent.active_turn_id
+    _send(
+        transport,
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "turn/action",
+            "params": {
+                "threadId": "thread_1",
+                "turnId": parent_tid,
+                "actionId": "reply-child",
+                "action": {"kind": "respond", "message": {"role": "user", "content": "approved child answer"}},
+            },
+        },
+    )
+    final = _drain_until_turn_completed(transport)[-1]
+    assert cast(dict[str, Any], final["params"])["finalOutput"] == "parent done"
+    cast(Any, server.run_adapter).join()
+    from vv_agent.runtime.controller import derive_controller_command_id
+
+    input_id = derive_controller_command_id("thread_1", parent_tid, "reply-child")
+    child_state = surface.store.read_state(wait["sessionId"])[0]
+    assert child_state.applied_inputs[input_id]._payload["input"]["payload"]["content"]["text"] == "approved child answer"
+    assert input_id not in surface.store.read_state("thread_1")[0].applied_inputs
+    receipt = surface.answer("thread_1", cast(Any, server.store).runtimes["thread_1"], "approved child answer", input_id)
+    assert receipt.replayed
+    from vv_agent.session.store import Conflict
+
+    with pytest.raises(Conflict):
+        surface.answer("thread_1", cast(Any, server.store).runtimes["thread_1"], "different answer", input_id)
+    retained_head = surface.store.read_state("thread_1")[1][-1].seq
+    retained_handles = len(surface.handles)
+    adapter = cast(Any, server.run_adapter)
+    replay = adapter.controller_action(
+        thread_id="thread_1",
+        turn_id=parent_tid,
+        action_id="reply-child",
+        action={"kind": "respond", "message": {"role": "user", "content": "approved child answer"}},
+    )
+    assert replay["accepted"]
+    from vv_agent.app_server.run_adapter import TurnResumeError
+
+    with pytest.raises(TurnResumeError):
+        adapter.controller_action(thread_id="thread_1", turn_id=parent_tid, action_id="reply-child", action={"kind": "cancel"})
+    assert surface.store.read_state("thread_1")[1][-1].seq == retained_head and len(surface.handles) == retained_handles
+    assert not llm.steps
+
+
+def _active_turn_id(server):
+    active = server.state_manager.active_turn("thread_1")
+    assert active is not None
+    return active.turn_id

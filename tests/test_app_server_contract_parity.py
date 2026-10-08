@@ -14,9 +14,11 @@ from vv_agent import (
     BudgetExhaustionReason,
     BudgetUsageSnapshot,
     RunConfig,
+    ScriptedModelProvider,
 )
 from vv_agent.app_server import (
     ApprovalDecision,
+    AppServer,
     AppServerErrorCode,
     ChannelTransport,
     JsonRpcError,
@@ -31,7 +33,7 @@ from vv_agent.app_server import (
     ThreadItem,
     TurnStartParams,
 )
-from vv_agent.app_server.host import AgentResolutionRequest, AppServerHost, RunConfigResolutionRequest
+from vv_agent.app_server.host import AgentResolutionRequest, AppServerHost, DefaultAppServerHost, RunConfigResolutionRequest
 from vv_agent.app_server.item_mapper import map_run_event
 from vv_agent.app_server.run_adapter import RunAdapter, StartedTurn
 from vv_agent.app_server.schema import _schema_bundle, typescript_schema_bundle
@@ -55,6 +57,7 @@ from vv_agent.types import (
     CacheUsage,
     CacheUsageStatus,
     CompletionReason,
+    LLMResponse,
     ModelCallOperation,
     ModelCallRecord,
     ModelCallStatus,
@@ -354,18 +357,19 @@ def _initialized_processor(
     host: AppServerHost | None = None,
     store: ThreadStore | None = None,
     state_manager: ThreadStateManager | None = None,
+    _kernel: Any = None,
 ) -> tuple[MessageProcessor, ChannelTransport, ThreadStore, ThreadStateManager]:
     transport = ChannelTransport(connection_id="conn_1")
     router = OutgoingRouter()
     router.register_transport(transport)
-    resolved_store = store or ThreadStore()
     resolved_state = state_manager or ThreadStateManager()
-    processor = MessageProcessor(
-        router=router,
-        host=host,
-        store=resolved_store,
-        state_manager=resolved_state,
-    )
+    if _kernel is not None:
+        server = AppServer(transport=transport, router=router, host=host, state_manager=resolved_state, _kernel=_kernel)
+        resolved_store = server.store
+        processor = server.processor
+    else:
+        resolved_store = store or ThreadStore()
+        processor = MessageProcessor(router=router, host=host, store=resolved_store, state_manager=resolved_state)
     processor.process_message(
         "conn_1",
         {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "contract-test"}}},
@@ -413,12 +417,12 @@ def test_shared_fixture_enforces_json_rpc_version_and_request_ids() -> None:
     assert error.id.to_wire() is None
 
 
-def test_shared_fixture_requires_object_input_items() -> None:
+def test_shared_fixture_requires_object_input_items(surface) -> None:
     contract = _observable_contract()["input"]
     valid = contract["valid"]
     assert TurnStartParams(thread_id="thread_contract", input=valid).to_dict()["input"] == valid
 
-    processor, transport, store, _state = _initialized_processor()
+    processor, transport, store, _state = _initialized_processor(_kernel=surface)
     thread = store.create_thread(agent_key="default")
     for request_id, invalid_item in enumerate(contract["invalid"], start=1):
         processor.process_message(
@@ -465,9 +469,9 @@ def test_shared_fixture_live_and_replay_item_payloads_match_in_epoch_seconds() -
     assert replay_payload == live_payload
 
 
-def test_shared_fixture_thread_start_order_and_nullability() -> None:
+def test_shared_fixture_thread_start_order_and_nullability(surface) -> None:
     contract = _observable_contract()
-    processor, transport, _store, _state = _initialized_processor()
+    processor, transport, _store, _state = _initialized_processor(_kernel=surface)
     processor.process_message(
         "conn_1",
         {"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {}},
@@ -480,15 +484,12 @@ def test_shared_fixture_thread_start_order_and_nullability() -> None:
     assert response["result"]["cwd"] == contract["nullability"]["threadStartResponse"]["cwd"]
 
 
-def test_shared_fixture_turn_start_and_terminal_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_shared_fixture_turn_start_and_terminal_order(surface) -> None:
     contract = _observable_contract()
-    store = ThreadStore()
-    state = ThreadStateManager()
+    provider = ScriptedModelProvider.new("test", "m", [LLMResponse("done")])
+    host = DefaultAppServerHost(agent=Agent("default", "Work.", model="m"), run_config=RunConfig(model_provider=provider))
+    processor, transport, store, state = _initialized_processor(host=host, _kernel=surface)
     thread = store.create_thread(agent_key="default")
-
-    monkeypatch.setattr(Runner, "start", classmethod(lambda cls, agent, input, run_config=None: object()))
-    monkeypatch.setattr(RunAdapter, "_pump_events", lambda self, connection_id, started: None)
-    processor, transport, _store, _state = _initialized_processor(store=store, state_manager=state)
     state.subscribe(thread.thread_id, "conn_1")
     processor.process_message(
         "conn_1",
@@ -496,31 +497,15 @@ def test_shared_fixture_turn_start_and_terminal_order(monkeypatch: pytest.Monkey
             "jsonrpc": "2.0",
             "id": 1,
             "method": "turn/start",
-            "params": {"threadId": thread.thread_id, "input": []},
+            "params": {"threadId": thread.thread_id, "input": contract["input"]["valid"]},
         },
     )
-    started_messages = [transport.receive_outbound(timeout=1) for _ in range(3)]
+    started_messages = [transport.receive_outbound(timeout=2) for _ in range(3)]
     started_order = ["response" if "result" in message else str(message["method"]) for message in started_messages]
     assert started_order == contract["ordering"]["turnStart"]
-
-    snapshot = store.read_thread(thread.thread_id)
-    active = state.active_turn(thread.thread_id)
-    assert active is not None
-    adapter = RunAdapter(
-        host=_ContractHost(),
-        store=store,
-        state_manager=state,
-        router=processor._router,
-    )
-    adapter._complete_turn(
-        "conn_1",
-        StartedTurn(thread=snapshot.thread, turn=snapshot.turns[0], handle=active.handle),
-        result=None,
-        error=RuntimeError("contract failure"),
-    )
-    terminal_messages: list[dict[str, Any]] = []
+    terminal_messages = []
     while True:
-        message = transport.receive_outbound(timeout=1)
+        message = transport.receive_outbound(timeout=2)
         terminal_messages.append(message)
         if message.get("method") == "turn/completed":
             break
@@ -528,7 +513,10 @@ def test_shared_fixture_turn_start_and_terminal_order(monkeypatch: pytest.Monkey
         str(message["method"]) for message in terminal_messages if message.get("method") in contract["ordering"]["turnTerminal"]
     ]
     assert terminal_order == contract["ordering"]["turnTerminal"]
-    assert state.status(thread.thread_id) == contract["terminal"]["threadStatusAfterTurn"]
+    assert terminal_messages[-1]["params"]["status"] == "completed"
+    snapshot = store.read_thread(thread.thread_id)
+    assert snapshot.turns[0].input == contract["input"]["valid"]
+    assert snapshot.thread.status == contract["terminal"]["threadStatusAfterTurn"]
 
 
 def test_wait_user_turn_projects_as_interrupted_without_failure_error() -> None:
@@ -797,9 +785,16 @@ def test_shared_fixture_duplicate_id_disconnect_cleanup_and_case_sensitivity() -
     assert contract["approval"]["caseSensitive"] is True
 
 
-def test_model_list_forwards_optional_filters_and_emits_canonical_superset() -> None:
+def test_model_list_forwards_optional_filters_and_emits_canonical_superset(surface) -> None:
+    from vv_agent.app_server.server import AppServer
+
     host = _ContractHost()
-    processor, transport, _store, _state = _initialized_processor(host=host)
+    transport = ChannelTransport(connection_id="conn_1")
+    processor = AppServer(transport=transport, host=host, _kernel=surface).processor
+    processor.process_message(
+        "conn_1", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "contract-test"}}}
+    )
+    assert transport.receive_outbound(timeout=1)["id"] == 0
 
     processor.process_message(
         "conn_1",

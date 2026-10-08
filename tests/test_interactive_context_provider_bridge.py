@@ -33,7 +33,7 @@ class _StaticProvider:
         ]
 
 
-def test_interactive_session_options_pass_context_providers_to_run_config(tmp_path) -> None:
+def test_interactive_session_options_pass_context_providers_to_run_config(surface, tmp_path) -> None:
     seen_prompts: list[str] = []
 
     def respond(request: LlmRequest) -> LLMResponse:
@@ -58,7 +58,7 @@ def test_interactive_session_options_pass_context_providers_to_run_config(tmp_pa
     assert seen_prompts == ["assistant\n\nRuntime context from provider."]
 
 
-def test_interactive_agent_definition_passes_session_context_providers_to_run_config(tmp_path) -> None:
+def test_interactive_agent_definition_passes_session_context_providers_to_run_config(surface, tmp_path) -> None:
     seen_prompts: list[str] = []
 
     def respond(request: LlmRequest) -> LLMResponse:

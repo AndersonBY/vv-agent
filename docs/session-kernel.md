@@ -1,9 +1,10 @@
 # Internal session kernel
 
 `vv_agent.session` is an internal, non-default synchronous kernel. Runner,
-interactive sessions, CLI and App Server still use their existing entry points.
-Nothing is exported from the top-level `vv_agent` package, and there is no
-user-selectable kernel mode or experimental App Server adapter. The contract
+interactive sessions, CLI and App Server keep their current public defaults.
+Interactive, CLI and App Server tests can supply one private `_kernel` owner;
+there is no environment switch or user-selectable execution mode. Nothing is
+exported from the top-level `vv_agent` package. The contract
 lock and public wire remain at version 23; this module is not a verified public
 persistence or wire format. Rust remains frozen and is outside this adoption.
 
@@ -32,6 +33,31 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
   session-memory file projections to committed boundaries.
 - `projection.py`, `result.py`, `events.py` and `tracing.py` provide typed host
   projections; events and spans acknowledge through existing consumer cursors.
+- `surfaces.py` assembles the private SQLite owner and host handles; ordinary
+  runs use `:memory:` and retained sessions use a SQLite file. Blocking children
+  drive after releasing the parent lease; background children drive independently.
+- `interactive.py` implements steering, follow-up, user/approval replies,
+  archive and close through inbox items, with transcript/result projections.
+- `app_server.py` projects threads, turns and timeline items from records. It
+  creates no second thread ledger. App Server metadata uses the closed reserved
+  `session_created.attributes.app_server` object (`agent_key`, `cwd`, `metadata`).
+
+The private App Server resumes active turns from retained records and the original
+approval owner. Recovery waits for an existing lease to release or expire. Client
+timeline replay uses stable item IDs and `afterItemId`; notification delivery
+acknowledges the `app_server` consumer cursor only after transport projection.
+Images retain both their wire input and model messages. Child waits expose safe
+session/turn/interaction identities; responses target the child's inbox before
+the parent adopts its terminal. Archive and close use stable control identities:
+equal bytes replay, different bytes conflict, and closed turns never revive.
+The internal wire differences and unchanged schema/model exports are recorded in
+[`session-kernel-f2d-surfaces-report.md`](session-kernel-f2d-surfaces-report.md).
+
+Handles also recover after lease loss: `drive` raises `LeaseLost` on heartbeat
+failure, and the private App Server/interactive handle acquires a fresh epoch
+and rebuilds from retained records. It waits while another writer owns the lease;
+committed model/tool receipts are not dispatched again. A retained terminal
+receipt completes the original handle without admitting another turn.
 
 Logical bytes use the existing `canonical_json.canonical_json_bytes` (RFC 8785)
 with SHA-256 digests. Producer construction validates and freezes each Record's

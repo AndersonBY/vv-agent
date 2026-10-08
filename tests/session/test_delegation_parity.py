@@ -586,7 +586,9 @@ def test_sdk_parent_cancellation_cascades_after_reconstruction(store, database, 
     entered, release = Event(), Event()
 
     def block(_request):
-        entered.set()
+        # Async child startup can precede parent tool finalization; cancel at the parent's next model call.
+        if mode not in {"async", "background"} or _request.model == "parent":
+            entered.set()
         assert release.wait(10)
         return LLMResponse("cancelled child")
 

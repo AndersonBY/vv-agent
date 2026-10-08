@@ -34,7 +34,7 @@ def project_result(
     session_id: str,
     turn_id: str,
     *,
-    runtime: Runtime,
+    runtime: Runtime | None = None,
     snapshot: tuple[ExecutionState, tuple[StoredRecord, ...], int] | None = None,
 ) -> RunResult:
     state, records, _ = snapshot if snapshot is not None else store.read_state(session_id)
@@ -178,7 +178,11 @@ def project_result(
             output = wait_reason
             reason = CompletionReason.WAIT_USER
             completion_tool_name = next((c.name for c in cycles[-1].tool_calls if c.name == "ask_user"), None) if cycles else None
-        if runtime.config.budget_limits and runtime.config.budget_limits.has_limits:
+        if (
+            (runtime.config.budget_limits and runtime.config.budget_limits.has_limits)
+            if runtime
+            else any(turn.start._payload["budget"].values())
+        ):
             from .runtime import budget
 
             evaluator = budget(state, turn_id)
@@ -194,13 +198,16 @@ def project_result(
                     continue
                 child_id = attempt.child_handle["session_id"]
                 transferred = project_result(
-                    store, child_id, attempt.child_handle["turn_id"], runtime=runtime.child_runtime(store, child_id)
+                    store,
+                    child_id,
+                    attempt.child_handle["turn_id"],
+                    runtime=runtime.child_runtime(store, child_id) if runtime else None,
                 )
                 output, shared = transferred.final_output, transferred.raw_result.shared_state
                 reason, completion_tool_name = transferred.completion_reason, transferred.completion_tool_name
                 error = transferred.raw_result.error
                 break
-    if status == AgentStatus.COMPLETED and transferred is None:
+    if status == AgentStatus.COMPLETED and transferred is None and runtime:
         output = Runner._coerce_output_type(agent=runtime.agent, final_output=output)
     partial = cycles[-1].assistant_message or None if cycles and status != AgentStatus.COMPLETED else None
     checked = state.boundaries.get((turn_id, "output_checked", "final"))
@@ -244,6 +251,10 @@ def project_result(
         run_id=turn_id,
         trace_id=turn_id,
         metadata={"session_model_calls": ledger},
-        agent_name=transferred.agent_name if transferred else runtime.agent.name,
-        resolved_model=transferred.resolved_model if transferred else runtime.resolved,
+        agent_name=transferred.agent_name
+        if transferred
+        else runtime.agent.name
+        if runtime
+        else turn.start._payload["definition"]["agent_name"],
+        resolved_model=transferred.resolved_model if transferred else runtime.resolved if runtime else None,
     )

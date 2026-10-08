@@ -21,13 +21,28 @@ class AppServer:
         state_manager: ThreadStateManager | None = None,
         router: OutgoingRouter | None = None,
         processor: MessageProcessor | None = None,
+        _kernel: Any = None,
     ) -> None:
         self.transport = transport or StdioJsonlTransport()
         self.host = host or DefaultAppServerHost()
-        self.store = store or ThreadStore()
+        if _kernel is not None:
+            from vv_agent.session.app_server import _KernelThreadStore
+
+            if store is not None:
+                raise ValueError("kernel threads are projections, not a second ThreadStore")
+            self.store = _KernelThreadStore(_kernel)
+        else:
+            self.store = store or ThreadStore()
         self.state_manager = state_manager or ThreadStateManager()
         self.router = router or OutgoingRouter()
-        self.run_adapter = RunAdapter(host=self.host, store=self.store, state_manager=self.state_manager, router=self.router)
+        if _kernel is not None:
+            from vv_agent.session.app_server import _KernelRunAdapter
+
+            self.run_adapter = _KernelRunAdapter(
+                kernel=_kernel, host=self.host, store=self.store, state_manager=self.state_manager, router=self.router
+            )
+        else:
+            self.run_adapter = RunAdapter(host=self.host, store=self.store, state_manager=self.state_manager, router=self.router)
         self.processor = processor or MessageProcessor(
             router=self.router,
             host=self.host,

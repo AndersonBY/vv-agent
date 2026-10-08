@@ -862,8 +862,9 @@ class AgentSession:
 class InteractiveAgentClient:
     """Session client backed by vv-agent runtime primitives."""
 
-    def __init__(self, *, options: AgentSessionOptions) -> None:
+    def __init__(self, *, options: AgentSessionOptions, _kernel: Any = None) -> None:
         self.options = options
+        self._kernel = _kernel
 
     def create_session(
         self,
@@ -877,6 +878,12 @@ class InteractiveAgentClient:
         definition = self._apply_startup_shell_defaults(agent) if isinstance(agent, InteractiveAgentDefinition) else None
         sdk_agent = agent if isinstance(agent, Agent) else None
         effective_workspace = self._resolve_workspace(workspace)
+        if self._kernel is not None:
+            from vv_agent.session.interactive import _KernelAgentSession
+
+            return _KernelAgentSession(
+                client=self, agent=agent, workspace=effective_workspace, shared_state=shared_state, session_id=session_id
+            )
         session_sub_task_manager = SubTaskManager(
             register_session=register_sub_agent_session,
             unregister_session=unregister_sub_agent_session,
@@ -1037,15 +1044,21 @@ class InteractiveAgentClient:
             cast(_SupportsDebugDumpDir, llm).debug_dump_dir = self.options.debug_dump_dir
 
         tool_registry_factory = self.options.tool_registry_factory or build_default_registry
-        task = self.prepare_task(
-            prompt=prompt,
-            resolved_model_id=resolved.model_id,
-            resolved_context_length=resolved.context_length,
-            resolved_max_output_tokens=resolved.max_output_tokens,
-            agent=definition,
-            task_name=run_name,
-            workspace=effective_workspace,
-            session_id=session_id,
+        retained_state = self._kernel.store.read_state(session_id)[0] if self._kernel is not None else None
+        retained_turn = retained_state.turns.get(retained_state.active_turn_id) if retained_state else None
+        task = (
+            retained_turn.start.task()
+            if retained_turn
+            else self.prepare_task(
+                prompt=prompt,
+                resolved_model_id=resolved.model_id,
+                resolved_context_length=resolved.context_length,
+                resolved_max_output_tokens=resolved.max_output_tokens,
+                agent=definition,
+                task_name=run_name,
+                workspace=effective_workspace,
+                session_id=session_id,
+            )
         )
         context_providers = [
             *self.options.context_providers,
@@ -1055,7 +1068,7 @@ class InteractiveAgentClient:
             *self.options.memory_providers,
             *definition.memory_providers,
         ]
-        if context_providers:
+        if context_providers and retained_turn is None:
             self._apply_context_providers_to_task(
                 task=task,
                 input=prompt,
@@ -1069,6 +1082,7 @@ class InteractiveAgentClient:
             instructions=task.prompt_bundle,
             model=definition.model,
             metadata=dict(task.metadata),
+            sub_agents=dict(definition.sub_agents) if self._kernel is not None else {},
         )
 
         run_config = RunConfig(
@@ -1097,7 +1111,11 @@ class InteractiveAgentClient:
             sub_task_manager=sub_task_manager,
             stream=self._compose_event_handlers(self.options.stream, event_handler),
         )
-        handle = Runner._start_compiled(sdk_agent, prompt, task=task, run_config=run_config)
+        handle = (
+            self._kernel.start(session_id, sdk_agent, run_config, self._kernel_content(session_id, prompt), task=task)
+            if self._kernel is not None
+            else Runner._start_compiled(sdk_agent, prompt, task=task, run_config=run_config)
+        )
         if active_handle_callback is not None:
             active_handle_callback(handle)
         try:
@@ -1150,7 +1168,11 @@ class InteractiveAgentClient:
             sub_task_manager=sub_task_manager,
             stream=self._compose_event_handlers(self.options.stream, event_handler),
         )
-        handle = Runner.start(agent, prompt, run_config=run_config)
+        handle = (
+            self._kernel.start(session_id, agent, run_config, self._kernel_content(session_id, prompt))
+            if self._kernel is not None
+            else Runner.start(agent, prompt, run_config=run_config)
+        )
         if active_handle_callback is not None:
             active_handle_callback(handle)
         try:
@@ -1159,6 +1181,10 @@ class InteractiveAgentClient:
             if active_handle_callback is not None:
                 active_handle_callback(None)
         return AgentSessionRun.from_run_result(result)
+
+    def _kernel_content(self, session_id: str | None, prompt: str) -> str | None:
+        state, _, _ = self._kernel.store.read_state(session_id)
+        return None if state.active_turn_id or not prompt else prompt
 
     def _apply_context_providers_to_task(
         self,

@@ -313,7 +313,7 @@ def test_interactive_definition_preserves_explicit_zero_memory_threshold(tmp_pat
     assert task.memory_compact_threshold == 0
 
 
-def test_interactive_client_create_session_preserves_caller_session_id(tmp_path: Path) -> None:
+def test_interactive_client_create_session_preserves_caller_session_id(surface, tmp_path: Path) -> None:
     client = InteractiveAgentClient(
         options=AgentSessionOptions(
             model_provider=_empty_model_provider(),
@@ -330,7 +330,7 @@ def test_interactive_client_create_session_preserves_caller_session_id(tmp_path:
     assert session.session_id == "caller-session-id"
 
 
-def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> None:
+def test_interactive_client_preserves_complete_public_agent(surface, tmp_path: Path) -> None:
     dynamic_contexts: list[tuple[str, str, Path, dict[str, Any]]] = []
     hook_calls: list[str] = []
     tool_calls: list[str] = []
@@ -417,7 +417,11 @@ def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> N
     assert metadata["agent_marker"] == "kept"
     assert metadata["session_id"] == "public-agent-session"
     assert metadata["trace_id"]
-    assert requests[0].model_settings == ModelSettings(temperature=0.25, max_tokens=321)
+    from vv_agent.model_settings import RetrySettings
+
+    assert requests[0].model_settings == ModelSettings(
+        temperature=0.25, max_tokens=321, retry=RetrySettings(max_attempts=1, backoff_seconds=0) if surface else None
+    )
     assert requests[0].metadata["session_id"] == "public-agent-session"
     assert requests[0].prompt_bundle is not None
     assert [(section.id, section.source) for section in requests[0].prompt_bundle.sections] == [
@@ -427,7 +431,7 @@ def test_interactive_client_preserves_complete_public_agent(tmp_path: Path) -> N
     assert configured_child.description == "Research the request."
 
 
-def test_interactive_client_preserves_public_agent_handoff(tmp_path: Path) -> None:
+def test_interactive_client_preserves_public_agent_handoff(surface, tmp_path: Path) -> None:
     provider = ScriptedModelProvider.new(
         "test",
         "shared-model",
@@ -506,3 +510,193 @@ def test_public_sub_agent_session_registry_wrappers() -> None:
         unregister_sub_agent_session("sub-session", session)
 
     assert get_sub_agent_session(session_id="sub-session") is None
+
+
+def test_interactive_real_same_turn_user_reply(surface, tmp_path):
+    provider = ScriptedModelProvider.new(
+        "test",
+        "m",
+        [
+            LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Choose a value"})]),
+            LLMResponse("resumed"),
+        ],
+    )
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+    session = client.create_session(agent=Agent("assistant", "Ask.", model="m"), session_id="interactive-wait")
+    first = session.prompt("go", auto_follow_up=False)
+    assert first.status == AgentStatus.WAIT_USER
+    second = session.continue_run("value")
+    assert second.final_output == "resumed"
+    assert (second.run_id == first.run_id) is (surface is not None)
+    if surface:
+        state, records, _ = surface.store.read_state(session.session_id)
+        assert len(state.turns) == 1
+        assert sum(r.record.kind == "turn_ended" for r in records) == 1
+
+
+def test_interactive_live_steer_and_durable_follow_up(surface, tmp_path):
+    import threading
+
+    ready, release = threading.Event(), threading.Event()
+    requests = []
+
+    def first(request):
+        ready.set()
+        assert release.wait(3)
+        return LLMResponse("", [ToolCall("todo", "todo_write", {"todos": []})])
+
+    def model(request):
+        requests.append([m.content for m in request.messages if m.role == "user"])
+        return LLMResponse("done")
+
+    callbacks = iter([first, model, model])
+    provider = ScriptedModelProvider.from_callback("test", "m", lambda request: next(callbacks)(request))
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+    session = client.create_session(agent=Agent("assistant", "Work.", model="m"), session_id="interactive-controls")
+    result, errors = [], []
+
+    def prompt():
+        try:
+            result.append(session.prompt("first"))
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=prompt)
+    worker.start()
+    assert ready.wait(3)
+    session.steer("steering")
+    session.follow_up("next")
+    assert session.state().pending_follow_ups == 1
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive() and not errors, errors
+    assert result[0].final_output == "done"
+    assert requests[0] == ["first", "steering"]
+    assert requests[1] == ["first", "steering", "next"]
+    if surface:
+        state, records, _ = surface.store.read_state(session.session_id)
+        assert len(state.turns) == 2
+        assert any(r.record.kind == "input_applied" and r.record._payload["input"]["kind"] == "steer" for r in records)
+        assert any(r.record.kind == "input_applied" and r.record._payload["input"]["kind"] == "follow_up" for r in records)
+
+
+def test_interactive_child_wait_reply_keeps_child_identity(surface, tmp_path):
+    from vv_agent.types import ToolDirective, ToolExecutionResult
+
+    @function_tool
+    def wait_child() -> ToolExecutionResult:
+        return ToolExecutionResult(
+            "", "Need child input", directive=ToolDirective.WAIT_USER, metadata={"question": "Need child input"}
+        )
+
+    child = Agent("worker", "Work.", model="m", tools=[wait_child])
+    provider = ScriptedModelProvider.new(
+        "test",
+        "m",
+        [
+            LLMResponse("", [ToolCall("child", "worker", {"task_description": "work"})]),
+            LLMResponse("", [ToolCall("wait", "wait_child", {})]),
+            LLMResponse("child done"),
+            LLMResponse("parent done"),
+        ],
+    )
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+    session = client.create_session(agent=Agent("assistant", "Delegate.", model="m", tools=[child.as_tool()]))
+    first = session.prompt("go", auto_follow_up=False)
+    if surface is None:
+        assert first.status == AgentStatus.COMPLETED and first.final_output == "child done"
+        return
+    assert first.status == AgentStatus.WAIT_USER
+    wait = first.metadata["session_waits"][0]
+    assert wait["question"] == "Need child input" and wait["session_id"] != session.session_id
+    final = session.continue_run("child answer")
+    assert final.run_id == first.run_id and final.final_output == "parent done"
+    child_state = surface.store.read_state(wait["session_id"])[0]
+    assert len(child_state.turns) == 1 and child_state.active_turn_id is None
+
+
+def test_interactive_sequential_children_complete_in_one_prompt(surface, tmp_path):
+    child = Agent("worker", "Work.", model="m")
+    provider = ScriptedModelProvider.new(
+        "test",
+        "m",
+        [
+            LLMResponse("", [ToolCall("first", "worker", {"task_description": "one"})]),
+            LLMResponse("one done"),
+            LLMResponse("", [ToolCall("second", "worker", {"task_description": "two"})]),
+            LLMResponse("two done"),
+            LLMResponse("parent done"),
+        ],
+    )
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+    session = client.create_session(agent=Agent("parent", "Delegate.", model="m", tools=[child.as_tool()]))
+    assert session.prompt("go").final_output == "parent done"
+    if surface:
+        ids = surface.store.list_sessions()
+        assert len(ids) == 3
+        assert all(surface.store.read_state(sid)[0].active_turn_id is None for sid in ids)
+
+
+def test_interactive_background_child_runs_independently(surface, tmp_path):
+    import threading
+
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def model(request):
+        if any(m.role == "user" and m.content == "background work" for m in request.messages):
+            entered.set()
+            assert release.wait(5)
+            finished.set()
+            return LLMResponse("child done")
+        if not any(m.role == "tool" for m in request.messages):
+            return LLMResponse("", [ToolCall("bg", "worker_background_task", {"task_description": "background work"})])
+        return LLMResponse("parent done")
+
+    child = Agent("worker", "Work.", model="m")
+    provider = ScriptedModelProvider.from_callback("test", "m", model)
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+    session = client.create_session(agent=Agent("parent", "Delegate.", model="m", tools=[child.as_background_task()]))
+    try:
+        result = session.prompt("go", auto_follow_up=False)
+        assert result.final_output == "parent done" and entered.wait(3)
+        assert not finished.is_set()
+    finally:
+        release.set()
+    assert finished.wait(3)
+    if surface:
+        for handle in surface.handles:
+            handle.join(3)
+        children = [sid for sid in surface.store.list_sessions() if sid != session.session_id]
+        assert len(children) == 1
+        state, records, _ = surface.store.read_state(children[0])
+        assert state.active_turn_id is None
+        assert any(r.record.kind == "turn_ended" and r.record._payload["result"] == "child done" for r in records)
+
+
+def test_interactive_close_during_model_call_is_idempotent(surface, tmp_path):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+
+    def model(request):
+        entered.set()
+        assert release.wait(5)
+        return LLMResponse("too late")
+
+    provider = ScriptedModelProvider.from_callback("test", "m", model)
+    client = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path))
+    session = client.create_session(agent=Agent("parent", "Work.", model="m"))
+    results = []
+    worker = threading.Thread(target=lambda: results.append(session.prompt("go")))
+    worker.start()
+    assert entered.wait(3)
+    assert session.close()
+    assert not session.close()
+    release.set()
+    worker.join(5)
+    assert not worker.is_alive() and session.closed
+    if surface:
+        state, records, _ = surface.store.read_state(session.session_id)
+        assert state.closed and len(state.turns) == 1
+        assert sum(r.record.kind == "turn_ended" for r in records) == 1
+        assert next(r.record for r in records if r.record.kind == "turn_ended")._payload["status"] == "cancelled"

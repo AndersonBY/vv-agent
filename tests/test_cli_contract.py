@@ -227,3 +227,81 @@ def test_task_cli_process_uses_contract_exit_codes_and_channels() -> None:
     assert configuration.stdout == ""
     assert missing_path in configuration.stderr
     assert "Traceback" not in configuration.stderr
+
+
+def test_cli_real_single_run_and_stream_channels(surface, monkeypatch, capsys, tmp_path):
+    from support import FixedModelProvider
+
+    from vv_agent.llm import ScriptedLLM
+    from vv_agent.types import LLMResponse
+
+    provider = FixedModelProvider(ScriptedLLM([LLMResponse("done")]), _resolved())
+
+    class ConfiguredProvider:
+        @staticmethod
+        def from_settings_file(path):
+            del path
+            return ConfiguredProvider()
+
+        def with_default_backend(self, backend):
+            del backend
+            return provider
+
+    monkeypatch.setattr(cli, "VvLlmModelProvider", ConfiguredProvider)
+    code = cli._run_task_cli(
+        ["--prompt", "hello", "--model", "deepseek-v4-pro", "--workspace", str(tmp_path), "--verbose"], _kernel=surface
+    )
+    captured = capsys.readouterr()
+    assert code == 0
+    payload = json.loads(captured.out)
+    assert payload["final_answer"] == "done" and payload["status"] == "completed"
+    assert payload["cycles"] == 1
+    assert "[run_started]" in captured.err
+    assert "run_completed" in captured.err
+    if surface:
+        assert surface.path == ":memory:"
+        assert surface.store.connection.execute("SELECT count(*) FROM sk_session").fetchone()[0] == 1
+
+
+def test_cli_kernel_persistent_session_survives_owner_restart(monkeypatch, capsys, tmp_path):
+    from support import FixedModelProvider
+
+    from vv_agent.llm import ScriptedLLM
+    from vv_agent.session.surfaces import _SessionKernel
+    from vv_agent.types import LLMResponse
+
+    requests = []
+
+    def model(request):
+        requests.append([m.content for m in request.messages if m.role == "user"])
+        return LLMResponse("done")
+
+    provider = FixedModelProvider(ScriptedLLM([model, model]), _resolved())
+
+    class ConfiguredProvider:
+        @staticmethod
+        def from_settings_file(path):
+            del path
+            return ConfiguredProvider()
+
+        def with_default_backend(self, backend):
+            del backend
+            return provider
+
+    monkeypatch.setattr(cli, "VvLlmModelProvider", ConfiguredProvider)
+    path = tmp_path / "persistent.sqlite"
+    for prompt in ("first", "second"):
+        kernel = _SessionKernel(path)
+        try:
+            assert (
+                cli._run_task_cli(
+                    ["--prompt", prompt, "--model", "deepseek-v4-pro", "--workspace", str(tmp_path)],
+                    _kernel=kernel,
+                    _session_id="persistent",
+                )
+                == 0
+            )
+            assert json.loads(capsys.readouterr().out)["final_answer"] == "done"
+        finally:
+            kernel.close()
+    assert requests == [["first"], ["first", "second"]]

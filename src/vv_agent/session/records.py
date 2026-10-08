@@ -128,6 +128,8 @@ CHILD_ADMISSION = closed(
     handoff_metadata=JSON_OBJECT,
 )
 
+APP_SERVER_ATTRIBUTES = closed(agent_key={"type": "string"}, cwd=nullable({"type": "string"}), metadata=JSON_OBJECT)
+
 
 BOUNDARY_DATA = {
     "before_memory": closed(messages=array(JSON_OBJECT), shared_state=JSON_OBJECT),
@@ -326,7 +328,15 @@ _StrictValidator = extend(
 )
 _VALIDATORS = {
     id(s): _StrictValidator(s)
-    for s in [RECORD_SCHEMA, INPUT_SCHEMA, CHILD_ADMISSION, *PAYLOADS.values(), *INPUT_PAYLOADS.values(), *BOUNDARY_DATA.values()]
+    for s in [
+        RECORD_SCHEMA,
+        INPUT_SCHEMA,
+        CHILD_ADMISSION,
+        APP_SERVER_ATTRIBUTES,
+        *PAYLOADS.values(),
+        *INPUT_PAYLOADS.values(),
+        *BOUNDARY_DATA.values(),
+    ]
 }
 
 
@@ -635,6 +645,8 @@ class Record:
         if op != (self.operation_id is not None) or op != (self.attempt is not None):
             raise RecordError("operation and attempt required only for operation records")
         encoded_fields = {}
+        if self.kind == "session_created" and "app_server" in self.payload["attributes"]:
+            validate(self.payload["attributes"]["app_server"], APP_SERVER_ATTRIBUTES, canonical=False)
         if self.kind == "session_created" and "child_admission" in self.payload["attributes"]:
             attributes = self.payload["attributes"]
             admission = attributes["child_admission"]

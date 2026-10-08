@@ -414,7 +414,7 @@ def _result_payload(result: AgentResult, resolved: ResolvedModelConfig) -> dict[
     }
 
 
-def _run_task_cli(argv: list[str]) -> int:
+def _run_task_cli(argv: list[str], *, _kernel: Any = None, _session_id: str = "cli") -> int:
     try:
         args = _parse_task_args(argv)
 
@@ -423,17 +423,32 @@ def _run_task_cli(argv: list[str]) -> int:
         resolved = provider.resolve(model_ref)
         llm = provider.client(resolved)
 
-        runtime = AgentRuntime(
-            llm_client=llm,
-            model_provider=provider,
-            tool_registry=build_default_registry(),
-            default_workspace=Path(args.workspace),
-            event_handler=_build_cli_event_handler(enabled=args.verbose),
-            tool_registry_factory=build_default_registry,
-        )
-
         task = _build_cli_task(args, resolved, task_id=f"task_{uuid.uuid4().hex[:8]}")
-        result = runtime.run(task)
+        if _kernel is not None:
+            _kernel.create(_session_id, args.workspace)
+            handle = _kernel.start(
+                _session_id,
+                Agent("cli", task.prompt_bundle, model=args.model),
+                RunConfig(
+                    model_provider=provider,
+                    workspace=Path(args.workspace),
+                    max_cycles=task.max_cycles,
+                    stream=_build_cli_event_handler(enabled=args.verbose),
+                ),
+                args.prompt,
+                task=task,
+            )
+            result = handle.result().raw_result
+        else:
+            runtime = AgentRuntime(
+                llm_client=llm,
+                model_provider=provider,
+                tool_registry=build_default_registry(),
+                default_workspace=Path(args.workspace),
+                event_handler=_build_cli_event_handler(enabled=args.verbose),
+                tool_registry_factory=build_default_registry,
+            )
+            result = runtime.run(task)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

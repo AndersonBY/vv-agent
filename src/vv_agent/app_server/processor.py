@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from vv_agent.app_server.host import AppServerHost, DefaultAppServerHost
 from vv_agent.app_server.outgoing import OutgoingRouter
@@ -107,6 +107,7 @@ class MessageProcessor:
         self._router = router
         self._host = host or DefaultAppServerHost()
         self._store = store or ThreadStore()
+        self._kernel = getattr(self._store, "kernel", None)
         self._state_manager = state_manager or ThreadStateManager()
         self._state_manager.set_active_turn_persister(self._store.set_active_turn)
         self._serialization_queues = serialization_queues or RequestSerializationQueues()
@@ -419,6 +420,12 @@ class MessageProcessor:
         if not thread_id:
             return
         subscribe = params.get("subscribe", True)
+        after_item_id = (
+            self._optional_string_param(connection_id, request, params, "afterItemId") if self._kernel is not None else None
+        )
+        if after_item_id is _INVALID_PARAM:
+            return
+        assert after_item_id is None or isinstance(after_item_id, str)
         if not isinstance(subscribe, bool):
             self._router.send_error(connection_id, request.id, AppServerError.invalid_params("subscribe must be a boolean"))
             return
@@ -427,13 +434,13 @@ class MessageProcessor:
                 snapshot = self._state_manager.subscribe_and_snapshot(
                     thread_id,
                     connection_id,
-                    lambda: self._snapshot_to_dict(thread_id, reopen_closed=True),
+                    lambda: self._snapshot_to_dict(thread_id, after_item_id=after_item_id, reopen_closed=True),
                 )
             else:
-                snapshot = self._snapshot_to_dict(thread_id, reopen_closed=True)
+                snapshot = self._snapshot_to_dict(thread_id, after_item_id=after_item_id, reopen_closed=True)
                 self._state_manager.reopen(thread_id)
                 thread = snapshot.get("thread")
-                if isinstance(thread, dict):
+                if isinstance(thread, dict) and self._kernel is None:
                     thread["status"] = self._state_manager.status(
                         thread_id,
                         archived=thread.get("archivedAt") is not None,
@@ -442,6 +449,9 @@ class MessageProcessor:
             self._router.send_error(connection_id, request.id, AppServerError.thread_not_found())
             return
         self._router.send_response(connection_id, request.id, snapshot)
+
+        if self._kernel is not None and subscribe:
+            cast(Any, self._run_adapter).recover(connection_id, thread_id)
 
     def _handle_thread_list(self, connection_id: str, request: JsonRpcRequest) -> None:
         params = self._params_object(connection_id, request, allow_missing=True)
@@ -516,6 +526,8 @@ class MessageProcessor:
             return
         self._state_manager.unsubscribe(thread_id, connection_id)
         closed = self._state_manager.close_if_idle(thread_id)
+        if closed and self._kernel is not None:
+            self._kernel.control(thread_id, "close", "app_server/close")
         self._router.send_response(connection_id, request.id, {"threadId": thread_id, "subscribed": False, "closed": closed})
         if closed:
             self._router.send_notification(connection_id, "thread/closed", {"threadId": thread_id})
@@ -547,6 +559,9 @@ class MessageProcessor:
         if snapshot.thread.archived_at is not None:
             self._router.send_error(connection_id, request.id, AppServerError.thread_archived())
             return
+        if self._kernel is not None and snapshot.thread.status == "closed":
+            self._router.send_error(connection_id, request.id, AppServerError.invalid_params("Thread is closed"))
+            return
         if self._state_manager.active_turn(thread_id) is not None or snapshot.thread.active_turn_id is not None:
             self._router.send_error(
                 connection_id,
@@ -566,12 +581,16 @@ class MessageProcessor:
         params = self._params_object(connection_id, request)
         if params is None:
             return
-        expected_fields = {"threadId", "turnId", "checkpointKey"}
+        expected_fields = {"threadId", "turnId"} if self._kernel is not None else {"threadId", "turnId", "checkpointKey"}
         if set(params) != expected_fields:
             self._router.send_error(
                 connection_id,
                 request.id,
-                AppServerError.invalid_params("turn/resume requires exactly threadId, turnId, and checkpointKey"),
+                AppServerError.invalid_params(
+                    "turn/resume requires exactly threadId and turnId"
+                    if self._kernel is not None
+                    else "turn/resume requires exactly threadId, turnId, and checkpointKey"
+                ),
             )
             return
         thread_id = self._required_string_param(connection_id, request, params, "threadId")
@@ -580,9 +599,11 @@ class MessageProcessor:
         turn_id = self._required_string_param(connection_id, request, params, "turnId")
         if not turn_id:
             return
-        checkpoint_key = self._required_string_param(connection_id, request, params, "checkpointKey")
-        if not checkpoint_key:
-            return
+        checkpoint_key = None
+        if self._kernel is None:
+            checkpoint_key = self._required_string_param(connection_id, request, params, "checkpointKey")
+            if not checkpoint_key:
+                return
         try:
             snapshot = self._store.read_thread(thread_id)
         except KeyError:
@@ -596,7 +617,7 @@ class MessageProcessor:
                 connection_id=connection_id,
                 thread_id=thread_id,
                 turn_id=turn_id,
-                checkpoint_key=checkpoint_key,
+                checkpoint_key=checkpoint_key or "",
                 request_id=request.id,
             )
         except TurnResumeError as exc:
@@ -616,7 +637,12 @@ class MessageProcessor:
         if control is None:
             return
         thread_id, turn_id, _reason, input_items = control
-        self._state_manager.queue_steering(thread_id, input_items)
+        if self._kernel is not None:
+            cast(Any, self._run_adapter).queue_input(
+                thread_id, turn_id, "steer", input_items, connection_id, str(request.id.require_wire())
+            )
+        else:
+            self._state_manager.queue_steering(thread_id, input_items)
         self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "queued": True})
 
     def _handle_turn_follow_up(self, connection_id: str, request: JsonRpcRequest) -> None:
@@ -624,7 +650,12 @@ class MessageProcessor:
         if control is None:
             return
         thread_id, turn_id, _reason, input_items = control
-        self._state_manager.queue_follow_up(thread_id, input_items)
+        if self._kernel is not None:
+            cast(Any, self._run_adapter).queue_input(
+                thread_id, turn_id, "follow_up", input_items, connection_id, str(request.id.require_wire())
+            )
+        else:
+            self._state_manager.queue_follow_up(thread_id, input_items)
         self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "queued": True})
 
     def _handle_turn_interrupt(self, connection_id: str, request: JsonRpcRequest) -> None:
@@ -647,8 +678,9 @@ class MessageProcessor:
                 request_id=str(pending.request_id.require_wire()),
                 decision=ApprovalDecision.TIMEOUT,
             ).to_dict()
-            for subscriber in self._state_manager.subscribers(thread_id):
-                self._router.send_notification(subscriber, "approval/resolved", params)
+            if self._kernel is None:
+                for subscriber in self._state_manager.subscribers(thread_id):
+                    self._router.send_notification(subscriber, "approval/resolved", params)
         self._router.send_response(connection_id, request.id, {"threadId": thread_id, "turnId": turn_id, "cancelled": cancelled})
 
     def _handle_turn_action(self, connection_id: str, request: JsonRpcRequest) -> None:
@@ -807,7 +839,7 @@ class MessageProcessor:
         snapshot = self._store.read_thread(thread_id)
         reopened_status: str | None = None
         active_turn_id: str | None = None
-        if reopen_closed and snapshot.thread.status == "closed":
+        if reopen_closed and snapshot.thread.status == "closed" and self._kernel is None:
             active = self._state_manager.active_turn(thread_id)
             active_turn_id = active.turn_id if active is not None else None
             reopened_status = "running" if active is not None else "idle"
@@ -904,7 +936,9 @@ class MessageProcessor:
             "createdAt": record.created_at,
             "updatedAt": record.updated_at,
             "archivedAt": record.archived_at,
-            "status": self._state_manager.status(
+            "status": record.status
+            if self._kernel is not None
+            else self._state_manager.status(
                 record.thread_id,
                 archived=archived,
                 persisted_status=record.status,
