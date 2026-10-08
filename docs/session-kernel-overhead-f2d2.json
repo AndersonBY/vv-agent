@@ -7,77 +7,77 @@
     {
       "scenario": "no_tool",
       "runner": {
-        "p50_ms": 3.5056985000000003,
-        "p95_ms": 4.117868,
+        "p50_ms": 3.2509215,
+        "p95_ms": 3.596344,
         "threads_after": 1,
         "leaked_threads": [],
-        "rss_delta_bytes": 32768
+        "rss_delta_bytes": 0
       },
       "kernel": {
-        "p50_ms": 13.338751,
-        "p95_ms": 14.518735,
+        "p50_ms": 12.340114499999999,
+        "p95_ms": 13.134353,
         "threads_after": 1,
         "leaked_threads": [],
-        "rss_delta_bytes": 692224
+        "rss_delta_bytes": 4096
       },
-      "p95_added_ms": 10.400867,
+      "p95_added_ms": 9.538009,
       "target_ms": 50
     },
     {
       "scenario": "two_tools",
       "runner": {
-        "p50_ms": 5.582469,
-        "p95_ms": 6.416047,
+        "p50_ms": 5.2294385,
+        "p95_ms": 5.704626,
         "threads_after": 1,
         "leaked_threads": [],
         "rss_delta_bytes": 0
       },
       "kernel": {
-        "p50_ms": 26.4781485,
-        "p95_ms": 35.101939,
+        "p50_ms": 22.388477,
+        "p95_ms": 23.632897,
         "threads_after": 1,
         "leaked_threads": [],
-        "rss_delta_bytes": 249856
+        "rss_delta_bytes": 217088
       },
-      "p95_added_ms": 28.685892000000003,
+      "p95_added_ms": 17.928271,
       "target_ms": 50
     },
     {
       "scenario": "ten_turns",
       "runner": {
-        "p50_ms": 37.944822,
-        "p95_ms": 46.510332,
+        "p50_ms": 34.6632565,
+        "p95_ms": 37.018186,
         "threads_after": 1,
         "leaked_threads": [],
         "rss_delta_bytes": -962560
       },
       "kernel": {
-        "p50_ms": 106.47640200000001,
-        "p95_ms": 113.136577,
+        "p50_ms": 87.7778165,
+        "p95_ms": 90.816055,
         "threads_after": 1,
         "leaked_threads": [],
-        "rss_delta_bytes": 0
+        "rss_delta_bytes": 630784
       },
-      "p95_added_ms": 66.62624500000001,
+      "p95_added_ms": 53.797869000000006,
       "target_ms": 80
     },
     {
       "scenario": "start_cancel",
       "runner": {
-        "p50_ms": 4.811647,
-        "p95_ms": 5.678823,
+        "p50_ms": 4.294567499999999,
+        "p95_ms": 4.847486,
         "threads_after": 1,
         "leaked_threads": [],
-        "rss_delta_bytes": 249856
+        "rss_delta_bytes": 245760
       },
       "kernel": {
-        "p50_ms": 15.988722,
-        "p95_ms": 17.213924,
+        "p50_ms": 14.367425,
+        "p95_ms": 14.957978,
         "threads_after": 1,
         "leaked_threads": [],
-        "rss_delta_bytes": 90112
+        "rss_delta_bytes": 57344
       },
-      "p95_added_ms": 11.535100999999997,
+      "p95_added_ms": 10.110492,
       "target_ms": 50
     }
   ],

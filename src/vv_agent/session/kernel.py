@@ -27,7 +27,7 @@ from .context import project_context
 from .lifecycle import after_cycle
 from .output import prepare_output, serializable_output
 from .providers import Accepted, Definitive, Outcome, Unknown
-from .records import InboxItem, Record, copy_json, digest, make_record
+from .records import InboxItem, Record, _RetainedTools, copy_json, digest, make_record
 from .reducer import Attempt, ExecutionState, Fold
 from .runtime import Runtime, budget, model_usage, request_from_dict
 from .store import Conflict, Lease, LeaseLost, SequenceConflict, SessionStore, SessionTx, StoredRecord
@@ -291,23 +291,23 @@ class _Driver:
                 from copy import copy
 
                 client = copy(self.runtime.llm)
-                for stored in reversed(self.records):
-                    r = stored.record
-                    if (
-                        r.kind == "op_completed"
-                        and r._payload["execution_started"]
-                        and not r._payload["result"].get("error_code")
-                    ):
-                        op = self.state.operations[r.operation_id or ""]
-                        if op.kind == "model":
-                            dispatch = op.attempts[r.attempt or 1].dispatch
-                            if dispatch and dispatch._payload.get("endpoint_id"):
-                                client._preferred_endpoint_id = dispatch._payload["endpoint_id"]
-                                break
+                if self.state.preferred_endpoint_id:
+                    client._preferred_endpoint_id = self.state.preferred_endpoint_id
                 request = request | {
                     "metadata": request["metadata"]
                     | {"session_endpoint_order": [t.endpoint_id for t in client._ordered_targets()]}
                 }
+        if kind == "model" and self.state.active_turn_id is not None:
+            source = self.state.turns[self.state.active_turn_id].start
+            tools = request.get("tools")
+            frozen = source._payload["definition"].get("tools")
+            if (
+                isinstance(tools, list)
+                and isinstance(frozen, list)
+                and len(tools) == len(frozen)
+                and all(a is b for a, b in zip(tools, frozen, strict=True))
+            ):
+                request = request | {"tools": _RetainedTools(source)}
         binding = "model" if kind == "model" else request["name"] if request["name"] in self.runtime.providers else "function"
         return make_record(
             "op_planned",
@@ -357,7 +357,13 @@ class _Driver:
             },
             plan,
         )
-        records = [result]
+        return [result, *self.completion_effects(plan, outcome, context)]
+
+    def completion_effects(self, plan: Record, outcome: Definitive, context: str) -> list[Record]:
+        assert plan.operation_id is not None and plan.attempt is not None and plan.turn_id is not None
+        records = []
+        op = self.state.operations[plan.operation_id]
+        turn = self.state.turns[plan.turn_id]
         if op.kind == "model" and plan._payload["purpose"] == "primary" and context == "normal":
             if any(
                 r._payload["data"]["exhaustion"]
@@ -724,6 +730,11 @@ class _Driver:
             task = self.runtime.compile(str(item["payload"]["content"]), tid)
             task.task_id = tid
             definition = self.runtime._definition(task)
+            prior = self.runtime._retained_task_key
+            if prior is not None:
+                retained = _RetainedTools(prior[0])
+                if retained.encode() == self.runtime._definition_suffix[len(b',"tools":') : -1]:
+                    definition = definition | {"tools": retained}
             limits = self.runtime.config.budget_limits or RunBudgetLimits()
             self.commit(
                 [
@@ -795,7 +806,8 @@ class _Driver:
         from vv_agent.runtime.lifecycle import read_after_cycle_disallowed_tools
 
         denied = read_after_cycle_disallowed_tools(shared)
-        schemas = [schema for schema in schemas if schema["function"]["name"] not in denied]
+        if denied:
+            schemas = [schema for schema in schemas if schema["function"]["name"] not in denied]
         request = {
             "model": task.model,
             "messages": [m.to_dict() for m in messages],
@@ -1244,7 +1256,7 @@ class _Driver:
                 for op in self.state.operations.values()
             )
             and self.state.turns[self.state.active_turn_id].start._payload["handler_version"] == self.runtime.handler_version
-            and self.runtime.definition_digest(self.task())
+            and self.runtime.definition_digest(self.state.turns[self.state.active_turn_id].start)
             == self.state.turns[self.state.active_turn_id].start._payload["definition_digest"]
             and finish_summary(self)
         ):
@@ -1278,7 +1290,7 @@ class _Driver:
         if task.metadata.get("session_input_blocked"):
             self.close("failed", "agent_failed", task.metadata["session_input_blocked"])
             return True
-        if self.runtime.definition_digest(task) != turn.start._payload["definition_digest"]:
+        if self.runtime.definition_digest(turn.start) != turn.start._payload["definition_digest"]:
             self.close("failed", "handler_schema_or_capability_mismatch")
             return True
         evaluator = self.live_budget()
@@ -1317,14 +1329,15 @@ class _Driver:
             if op.kind == "model" and op.attempts[1].plan._payload["purpose"] == "primary" and op.selected_attempt is not None:
                 known = op.attempts[op.selected_attempt]
                 if known.result and known.context == "normal":
-                    repairs = self.completed(
+                    repairs = self.completion_effects(
                         known.plan,
                         Definitive(
                             known.result._payload["result"],
                             tuple(known.result._payload["evidence"]),
                             known.result._payload["usage"],
                         ),
-                    )[1:]
+                        known.context,
+                    )
                     if repairs:
                         self.commit(repairs, guarded=True)
                         return True

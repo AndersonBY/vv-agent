@@ -1,6 +1,6 @@
 # F2d-2 memory / budgets / events / model 验收报告
 
-日期：2026-10-08。工作树：`/home/makerbi/vectorvein/tmp/wt-f2-vv-agent`，分支 `feat/session-kernel-internal`，基线 `e9194f4`。
+日期：2026-10-08。工作树：`/home/makerbi/vectorvein/tmp/wt-f2-vv-agent`，分支 `feat/session-kernel-internal`，F2d-2 基线 `e9194f4`；F2d-2b 复验基线为已提交 `9c5eafe`。
 
 指定 15 行全部关闭，其中 7 行为 `done (intentional difference)`。整体矩阵为 63 行：50 done、6 partial、7 missing；F3 仍被阻塞。
 
@@ -74,65 +74,112 @@ Token 用例覆盖零额度、usage 前一单位、相等、超额和足够额�
 | missing | CLI single-run / stream / persistent sessions |
 | missing | App Server thread/turn/approval/replay/non-text input |
 
-## Per-turn headroom 与 cProfile
+## Per-turn headroom 与 F2d-2b 复验
 
-A 完整实现后的优化前候选实测 ten_turns added p95 为 99.061 ms（reviewer F2d-1 重测为 98.7 ms）。本轮目标收紧为十轮 80 ms、单轮 50 ms。前后都使用原场景、同一个 driver、10 次 warmup / 200 次测量，包含 SQLite schema、admission、durable writes、final state read 和 connection/thread cleanup。added p95 定义为 kernel p95 减 Runner p95，不是逐次差值的 p95。下面单位均为 ms；Runner 的主机时序差异如实列出。
+F2d-2 的单次 ten_turns added p95 66.626 ms 不能建立独立复跑的 headroom。Reviewer 的三次独立结果为 84.4、104.5、95.1 ms，均超过 80 ms；其中后两次 added p50 为 70.1、71.0 ms，two_tools added p95 范围为 20.7–34.3 ms。
 
-命令：`uv run python scripts/session_kernel_overhead.py --runs 200 --output docs/session-kernel-overhead-f2d2.json`。
+F2d-2b 从已提交基线 `9c5eafe` 开始。本机再次采集了三次改前和三次改后完整数据；改前这组三次碰巧通过，但最窄余量仅 2.520 ms，不能替代 reviewer 的失败证据。两组均逐次启动独立进程，命令完全相同：`uv run python scripts/session_kernel_overhead.py --runs 200 --warmup 10`。最终三次与 pytest、M6 和诊断插桩分开串行执行。脚本没有改动；四个场景、正常 driver、SQLite schema/admission/durable writes/final read/connection/thread cleanup 均在原计时范围内，没有禁用或 freeze GC。
 
-| 场景 | 优化前 added p95 | 最终 Runner p50 / p95 | 最终 kernel p50 / p95 | 最终 added p95 | 目标 | 结果 |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| no_tool | 33.746 | 3.506 / 4.118 | 13.339 / 14.519 | 10.401 | 50 | PASS |
-| two_tools | 41.258 | 5.582 / 6.416 | 26.478 / 35.102 | 28.686 | 50 | PASS |
-| ten_turns | 99.061 | 37.945 / 46.510 | 106.476 / 113.137 | 66.626 | 80 | PASS |
-| start_cancel | 19.307 | 4.812 / 5.679 | 15.989 / 17.214 | 11.535 | 50 | PASS |
+added p50/p95 分别为 kernel 分位数减 Runner 对应分位数，不是逐次差值的分位数。下面单位均为 ms，单轮目标 50 ms，十轮目标 80 ms。每个单元格为 **added p50 / added p95**。
 
-最终十轮 headroom 为 13.374 ms；摊销 added p95 为 6.663 ms/turn。四场景每条路径结束时都仅剩 1 个原始线程，leaked_threads 为空。RSS 是 GC 后整批 current RSS 差值，不能当 peak RSS。
+| 场景 | 改前 1 | 改前 2 | 改前 3 | 改后 1 | 改后 2 | 改后 3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| no_tool | 9.801 / 10.479 | 9.802 / 10.099 | 9.722 / 9.597 | 9.818 / 10.344 | 9.560 / 9.984 | 9.089 / 9.538 |
+| two_tools | 20.181 / 22.920 | 20.480 / 21.677 | 19.369 / 20.629 | 17.059 / 19.254 | 16.932 / 17.697 | 17.159 / 17.928 |
+| ten_turns | 65.247 / 77.480 | 64.873 / 73.143 | 64.933 / 74.340 | 59.006 / 62.082 | 54.138 / 68.990 | 53.115 / 53.798 |
+| start_cancel | 10.565 / 10.944 | 10.947 / 11.944 | 11.141 / 11.890 | 10.572 / 11.342 | 10.312 / 11.311 | 10.073 / 10.110 |
+
+仅做 fragment/receipt 优化但尚未共享 schema 对象图的中间候选也完整跑了三次。其 ten_turns added p95 为 69.048、68.158、86.894 ms，第三次失败，不能作为验收通过。下表保留四场景 added p50 / added p95（ms）：
+
+| 场景 | 中间候选 1 | 中间候选 2 | 中间候选 3 |
+| --- | ---: | ---: | ---: |
+| no_tool | 9.376 / 9.494 | 9.181 / 9.450 | 9.794 / 10.900 |
+| two_tools | 17.848 / 18.544 | 17.988 / 18.525 | 18.012 / 19.639 |
+| ten_turns | 58.271 / 69.048 | 60.036 / 68.158 | 62.605 / 86.894 |
+| start_cancel | 10.300 / 10.824 | 10.846 / 13.104 | 10.780 / 11.836 |
+
+原始分位数如下；R 为 Runner，K 为 kernel，每组数值均为 p50 / p95（ms）。
+
+| 场景 | 轮次 | 改前 R | 改前 K | 改后 R | 改后 K |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| no_tool | 1 | 3.176 / 3.513 | 12.976 / 13.992 | 3.415 / 3.916 | 13.233 / 14.261 |
+| no_tool | 2 | 3.412 / 4.039 | 13.214 / 14.138 | 3.225 / 3.699 | 12.785 / 13.684 |
+| no_tool | 3 | 3.420 / 5.224 | 13.142 / 14.821 | 3.251 / 3.596 | 12.340 / 13.134 |
+| two_tools | 1 | 5.265 / 5.859 | 25.446 / 28.779 | 5.170 / 5.840 | 22.230 / 25.094 |
+| two_tools | 2 | 5.389 / 6.309 | 25.869 / 27.986 | 5.166 / 5.655 | 22.098 / 23.352 |
+| two_tools | 3 | 5.142 / 5.772 | 24.511 / 26.402 | 5.229 / 5.705 | 22.388 / 23.633 |
+| ten_turns | 1 | 35.922 / 39.078 | 101.169 / 116.558 | 34.171 / 36.373 | 93.176 / 98.455 |
+| ten_turns | 2 | 36.219 / 39.542 | 101.093 / 112.685 | 33.799 / 35.077 | 87.937 / 104.067 |
+| ten_turns | 3 | 34.990 / 36.872 | 99.923 / 111.212 | 34.663 / 37.018 | 87.778 / 90.816 |
+| start_cancel | 1 | 4.388 / 4.887 | 14.953 / 15.831 | 4.302 / 4.787 | 14.873 / 16.129 |
+| start_cancel | 2 | 4.558 / 5.219 | 15.504 / 17.163 | 4.252 / 4.735 | 14.564 / 16.046 |
+| start_cancel | 3 | 4.387 / 4.942 | 15.529 / 16.832 | 4.295 / 4.847 | 14.367 / 14.958 |
+
+最终三次十轮 headroom 分别为 17.918, 11.010, 26.202 ms；最小余量 11.010 ms。kernel 的十轮 p95−p50 从改前 15.389, 11.592, 11.290 ms 变为改后 5.278, 16.130, 3.038 ms。所有三次的四个场景均通过；Runner/kernel 结束后均为 1 个原始线程，leaked_threads 均为空。
+
+仅将最后一次完整结果写入既有 `session-kernel-overhead-f2d2.json`。前三次改前、三次改后和 profile 的关键数字保留在本报告中；删除 `session-kernel-overhead-f2d2-before.json` 及 `session-kernel-profile-f2d2-*.txt/json`，没有添加 docs 下的逐轮或 profile 文件。最后一轮 RSS 数据如下；它是整批结束并 GC 后的 current RSS 差值，不是峰值。
 
 | 场景 | Runner / kernel RSS delta (KiB) | Runner / kernel threads after |
 | --- | ---: | ---: |
-| no_tool | +32 / +676 | 1 / 1 |
-| two_tools | +0 / +244 | 1 / 1 |
-| ten_turns | -940 / +0 | 1 / 1 |
-| start_cancel | +244 / +88 | 1 / 1 |
+| no_tool | +0 / +4 | 1 / 1 |
+| two_tools | +0 / +212 | 1 / 1 |
+| ten_turns | -940 / +616 | 1 / 1 |
+| start_cancel | +240 / +56 | 1 / 1 |
 
-Profiling 使用同样的 ten_turns kernel 场景，5 次 warmup 后测 30 次。完整 cumulative top 25 位于 `session-kernel-profile-f2d2-before.txt` 和 `session-kernel-profile-f2d2-after.txt`；机器可读热路径条目位于 `session-kernel-profile-f2d2-summary.json`。profile total_tt 7.566 → 6.924 秒，function calls 9,007,681 → 7,915,021。累计时间嵌套重叠，不能相加。下表列出涉及优化的主要条目。
+### 根因与诊断证据
 
-| cProfile 条目 | 前调用数 → 后调用数 | 前累计秒 | 后累计秒 |
+诊断在两个独立进程中执行相同工作负载：10 次 warmup，200 次 ten_turns 的 `gc.callbacks` 采样，随后 30 次 cProfile，再 100 次方法计时。GC 阈值保持 `(700, 10, 10)`；插桩数字只用于定位，不是上面的验收数字。
+
+1. **GC 确实制造大尖峰，但不是全部 p95 的解释。** 改前 200 个样本发生 1468/133/7 次 generation 0/1/2 collection；gen2 暂停 42.224–50.435 ms，全部 collected=0。含 gen2 的 7 个样本 p50 为 158.664 ms，其余 193 个样本 p50/p95 为 109.620/122.237 ms。最终同样 200 次采样为 770/69/1 次 collection，gen2 仅一次，暂停 44.226 ms；没有改变 GC 配置。
+2. **重复编码是可消除的常态成本。** 每个已完成 primary model 在下一步检查完成 effects 时，原实现再次构造 `op_completed`、校验/编码 result，然后丢弃 `[0]`。现在直接复用 durable receipt 的 effects 检查；30 次 ten_turns 的 make_record 从 3330 次降至 3030 次。Record payload 从逐字段 key/value 调用改为连续字段块 JCS，冻结 task 指纹与 definition 的固定 schema/capability/memory/model-binding 字节分别缓存，变化仍触发重算。
+3. **Schema 对象图被反复编码、复制并长期保留，是减少 GC 频率的关键。** 未过门槛候选在十轮中保存了 20 份相同 schema 的独立根对象，摘要只有 1 个，但实际包含 2240 个独立 dict/list。最终 20 处引用共享 1 个已验证 Record 的只读 JSON 图，只剩 112 个独立容器；缓存其 JCS 字节并复用于 definition/request 的完整 digest 和 envelope。Tracemalloc 的 JSON decoder 存活分配由 955 KiB / 14194 allocations 降到 410 KiB / 6461 allocations；cold tokenizer/import 的整次 peak 约 43.2 MB，基本不变，不能声称总峰值同比下降。Schema 只有在字节完全匹配，或 request 的元素仍是来源 Record 的同一只读对象时才复用。Hooks 修改得到独立副本；源 Record、字段 digest、schema/capability/model-binding drift 和正常 lease/CAS 路径仍被检查。
+4. **快照有小而确定的额外复制。** 原 `Fold.snapshot()` 先 fork 整个 fold，再丢弃 copied history/seen/consumed 索引。现在只 detach ExecutionState；100 次 ten_turns 的 fork 调用 7100 → 6000，state/wait/child handle 的输出隔离继续保留。
+5. **SQL 和线程是保留的常态成本。** SQL append 调用数在两组方法采样中均为 6000，耗时分布见下表；没有通过减少提交或 lease/CAS 校验换取收益。独立线程计时中 100 次十轮 `_invoke` 共 850.285 ms（含 callback）、heartbeat start/join 共 267.648/155.971 ms、external join 共 8.301 ms。没有改变线程/超时/取消机制，也没有证据支持把 join 本身作为主因。
+6. **Endpoint O(records) 扫描有真实代码证据，但不是本基准的来源。** ScriptedLLM 不进入 VvLlmClient 分支。该历史反向扫描另行改为 fold 内的 scalar preference；普通成功与 audit 成功都与原逻辑一致，失败、未 dispatch 和无 endpoint 不替换 preference；fork/snapshot/冷重建及真实端点配对测试覆盖恢复。
+
+GC 采样中的 kernel ten_turns p50/p95 为 109.865/126.093 → 92.992/108.625 ms。原中间候选另有一个不含 gen2 的 220.960 ms 样本，不能归因；没有将它丢弃。最终的 max 为 135.504 ms。验收针对 p95，不建立 max/p99 SLO。
+
+100 次十轮方法计时的每次调用分布如下。不同步骤和阶段混在同一方法中；累计时间包含嵌套调用，不能相加。
+
+| 方法 | 改前调用数 / p50 / p95 ms | 改后调用数 / p50 / p95 ms |
+| --- | ---: | ---: |
+| `_Driver.step` | 6000 / 1.593 / 2.806 | 6000 / 1.250 / 2.671 |
+| `Runtime._definition` | 4000 / 0.099 / 0.614 | 4000 / 0.070 / 0.309 |
+| `_Driver.plan` | 1000 / 0.637 / 0.837 | 1000 / 0.378 / 0.553 |
+| `SQLSessionTx.append` | 6000 / 0.302 / 0.454 | 6000 / 0.302 / 0.450 |
+| `Fold.fork` | 7100 / 0.020 / 0.027 | 6000 / 0.020 / 0.028 |
+| `Fold.snapshot` | 1100 / 0.081 / 0.123 | 1100 / 0.071 / 0.106 |
+| `_Driver.load_state` | 1000 / 0.323 / 0.489 | 1000 / 0.312 / 0.465 |
+
+cProfile 30 次十轮的 total_tt 为 5.956 → 5.122 秒，function calls 为 7,915,304 → 6,493,214。它受插桩和线程交织影响；调用数用于识别重复工作，绝对累计时间不替代验收。
+
+| cProfile 条目 | 改前调用数 → 改后调用数 | 改前累计秒 | 改后累计秒 |
 | --- | ---: | ---: | ---: |
-| `session/kernel.py:step` | 1,800 → 1,800 | 6.813 | 6.143 |
-| `canonical_json.py:canonical_json_bytes` | 18,780 → 42,180 | 2.169 | 1.705 |
-| `session/records.py:make_record` | 3,330 → 3,330 | 1.847 | 1.494 |
-| `session/records.py:encode` | 28,020 → 28,020 | 1.736 | 1.383 |
-| `session/sql.py:append` | 1,800 → 1,800 | 1.221 | 1.069 |
-| `canonical_json.py:_stdlib_compatible` | 886,410 → 625,110 | 1.108 | 0.788 |
-| `canonical_json.py:_jcs_encode` | 54,900 → 33,600 | 1.080 | 0.719 |
-| `session/records.py:_validate` | 3,390 → 3,390 | 0.753 | 0.792 |
-| `session/runtime.py:_definition` | 1,500 → 1,200 | 0.695 | 0.657 |
-| `session/kernel.py:task` | 2,700 → 1,800 | 0.384 | 0.162 |
-| `session/records.py:task` | 2,700 → 1,800 | 0.378 | 0.158 |
+| `canonical_json.py:canonical_json_bytes` | 42,180 → 22,140 | 1.492 | 0.844 |
+| `session/records.py:make_record` | 3,330 → 3,030 | 1.293 | 0.963 |
+| `session/runtime.py:_definition` | 1,200 → 1,200 | 0.581 | 0.319 |
+| `session/records.py:_record_bytes` | 3,390 → 3,090 | 0.274 | 0.182 |
+| `session/records.py:_check_digest` | 1,500 → 1,200 | 0.500 | 0.281 |
 
-优化复用 embedded-digest 检查已经生成的 nested JCS bytes，组合闭合 ASCII-key record envelope，避免再次编码大 definition/request/result。内部只读 definition 检查使用 retained task；host callbacks 仍拿 detached copies。tool context 从冻结 model request 取得 schemas，减少重复 definition preparation；无压缩时推迟 source digest。更多 canonical_json_bytes 调用是小片段编码，累计耗时下降。Record._validate、lease/CAS/fencing 没有删除或放宽，也没有新增执行路径。
-
-`test_record_encoding_reuses_validated_fields_with_identical_jcs` 比较完整 JCS 字节（4 variants × 100 vectors，包含浮点、Unicode/astral key 和 escaping），`test_record_composition_preserves_nested_invalid_json_rejection` 保留嵌套非法 JSON 拒绝；既有 mutation-isolation、篡改、cache invalidation 和跨 writer suites 继续运行。
+`test_definition_composition_matches_full_jcs_across_turns_and_nested_values` 比较组成的 definition digest 与完整 JCS（浮点、Unicode/astral keys、布尔/数字、嵌套 task/tools 名称）；既有 4 variants × 100 vectors 的 record 字节比较及非法嵌套 JSON 拒绝继续通过。新增 frozen task 不重复序列化且 schema/capability/memory/children/model binding 改变会失效的测试，snapshot 索引不复制与 mutation-isolation 测试，receipt 构造计数及 endpoint 冷重建/opaque receipt 测试；新增 schema sharing、host mutation isolation、source full-validation、embedded digest mismatch 与 UTF-16/JCS 等价测试。closed schema、embedded/storage digests、lease/CAS/fencing 与宿主输出隔离均未放宽。
 
 ## M6 capacity
 
-命令：`uv run python scripts/session_kernel_benchmark.py --sizes 5000 20000 --samples 1 --assert-capacity --output docs/session-kernel-capacity-f2d2.json`。真实 PostgreSQL，每个 size 一次测量，保留原有 bounded 1 KiB receipt workload 和断言。单位为 ms。
+命令：`uv run python scripts/session_kernel_benchmark.py --sizes 5000 20000 --samples 1 --assert-capacity --output docs/session-kernel-capacity-f2d2.json`。真实 PostgreSQL，原有 bounded 1 KiB receipt workload，每个 size 一次采样。单位为 ms。
 
 | Records | Cold drive | Steady append | Full fold | 额外 provider calls | Lease failures |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5000 | 582.823 | 9.298 | 36.036 | 0 | 0 |
-| 20000 | 2289.341 | 16.770 | 301.343 | 0 | 0 |
+| 5000 | 580.316 | 11.423 | 41.942 | 0 | 0 |
+| 20000 | 2326.007 | 17.993 | 326.863 | 0 | 0 |
 
 | Catalog sessions | Runnable items | Full pagination ms | 目标 ms | 结果 |
 | ---: | ---: | ---: | ---: | --- |
-| 1000 | 1500 | 16.420 | 1000 | PASS |
-| 10000 | 15000 | 208.137 | 1000 | PASS |
+| 1000 | 1500 | 20.462 | 1000 | PASS |
+| 10000 | 15000 | 237.248 | 1000 | PASS |
 
-两种规模的 cold drive、steady append ≤50 ms、完整 catalog pagination ≤1 秒均通过 `--assert-capacity`。这是请求的一次容量采样，不能当长期生产负载分布。
+`--assert-capacity` 全部通过；没有追加 provider 调用或 lease failure。这是一次容量采样，不是持续生产负载分布。
 
-## 最终门禁
+## 最终门禁（F2d-2b）
 
 | 门禁 | 结果 |
 | --- | --- |
@@ -140,15 +187,15 @@ Profiling 使用同样的 ten_turns kernel 场景，5 次 warmup 后测 30 次�
 | `uv run ruff format --check .` | PASS：386 files |
 | `uv run ruff check` | PASS |
 | `uv run ty check` | PASS |
-| `uv run pytest tests/session -q`（本地 PG） | PASS：1187 passed in 281.48s (0:04:41) |
-| `VV_AGENT_TEST_REDIS_URL=redis://127.0.0.1:6400/15 uv run pytest` | PASS：3662 passed, 20 skipped, 18 warnings in 427.71s (0:07:07) |
-| Overhead，10 warmups / 200 runs | PASS：4/4，single-turn ≤50 ms，ten_turns ≤80 ms，无新存活线程 |
-| M6 5000 / 20000，`--samples 1 --assert-capacity` | PASS：cold drive / append / catalog 扫描均通过 |
-| `git diff --check` / 公共与默认入口边界 | PASS：无 exports/default wiring/contract lock/fixture/local_settings/Rust 变更，HEAD e9194f4，无提交 |
-| 测试 Redis 6400 清理 | PASS：核验 gate-owned PID 后 shutdown nosave，端口不再响应 |
+| `uv run pytest tests/session -q`（本地 PG） | PASS：1221 passed in 276.52s (0:04:36) |
+| `VV_AGENT_TEST_REDIS_URL=redis://127.0.0.1:6400/15 uv run pytest` | PASS：3696 passed, 20 skipped, 18 warnings in 431.63s (0:07:11) |
+| 三次独立 overhead，`--runs 200 --warmup 10` | PASS：每次四场景均满足 single-turn ≤50 ms、ten_turns ≤80 ms，无新存活线程 |
+| M6 5000 / 20000，`--samples 1 --assert-capacity` | PASS：cold drive / steady append / catalog 全部断言通过 |
+| `git diff --check` / 公共与默认入口边界 | PASS：HEAD `9c5eafe`，仅当前树内部 product/tests/docs 改动，无提交 |
+| 测试 Redis 6400 清理 | PASS：核对 gate-owned process ID 后 `shutdown nosave`，端口不再响应 |
 
-全量 20 个 skip 为 6 个未开启 live provider 用例、4 个跨 runtime/store 用例、9 个不适用所选非 Redis backend 的参数变体、1 个环境 symlink 用例。没有因缺少 Redis 或 PG 而跳过适用用例。18 个 warning 来自既有 distributed checkpoint 的多线程 fork DeprecationWarning。
+命令从 repo root 使用 repo-managed uv 环境执行；`UV_CACHE_DIR=/tmp/f2d2b-uv-cache`。Redis 用 `redis-server --port 6400 --daemonize yes --save ""` 启动，额外绑定 loopback、目录/日志/PID 指向 `/tmp`；只关闭这一实例。PG fixtures 建立并删除独立 disposable databases。
 
-命令从 repo root 使用 repo-managed uv 环境执行；`UV_CACHE_DIR=/tmp/f2d2-uv-cache`。Redis 用 `redis-server --port 6400 --daemonize yes --save ""` 启动，额外绑定 loopback 并保存 gate PID，等待 PONG 后运行全量测试，结束核验 PID 后关闭；PG fixture 为每个用例建立/删除独立 disposable database。
+全量 20 个 skip 为 6 个未开启 live provider 用例、4 个跨 runtime/store 用例、9 个不适用所选非 Redis backend 的参数变体、1 个环境 symlink 用例。没有因缺少适用的 Redis 或 PG 而跳过测试。18 个 warning 来自既有 distributed checkpoint 的多线程 fork DeprecationWarning。
 
-未运行 opt-in 真实模型、跨语言探针或 Rust/cargo。未提交回调仍为至少一次；tracing ACK 后可能丢 telemetry，外部 event sink 可重复交付；上述 13 行缺口和 F3 切换仍未完成。
+未运行 opt-in 真实模型、跨语言探针或 Rust/cargo；没有提交、push 或部署。gen2 GC 和未归因的极端延迟仍存在，三次 p95 验收不代表 max/p99 或未来 F3 的 headroom 保证。上述 13 行缺口与 F3 切换仍未完成。

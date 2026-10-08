@@ -2,7 +2,7 @@
   "schema_version": 1,
   "python": "3.12.12",
   "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.35",
-  "started_unix_s": 1791473680.301677,
+  "started_unix_s": 1791482675.6866112,
   "samples": 1,
   "cold_samples": 1,
   "method": "Single active turn with retained final model receipt before terminal commit, completed tool triples with bounded 1KiB receipts; append is committed; steady append uses consecutive heads; fresh connection/runtime for cold drive through terminal commit; OS/PG buffers remain warm.",
@@ -12,44 +12,44 @@
       "logical_bytes": 4241706,
       "append": {
         "samples_ms": [
-          6.405649000953417
+          8.069006995356176
         ],
-        "median_ms": 6.405649000953417,
-        "max_ms": 6.405649000953417
+        "median_ms": 8.069006995356176,
+        "max_ms": 8.069006995356176
       },
       "steady_append": {
         "samples_ms": [
-          9.29820100282086
+          11.423270996601786
         ],
-        "median_ms": 9.29820100282086,
-        "max_ms": 9.29820100282086,
+        "median_ms": 11.423270996601786,
+        "max_ms": 11.423270996601786,
         "lease_ttl_ms": 15000,
         "heartbeat_seconds": 0.25
       },
       "full_fold": {
         "samples_ms": [
-          36.035502002050634
+          41.942017000110354
         ],
-        "median_ms": 36.035502002050634,
-        "max_ms": 36.035502002050634
+        "median_ms": 41.942017000110354,
+        "max_ms": 41.942017000110354
       },
       "read_and_fold": {
         "samples_ms": [
-          474.1067849972751
+          456.5392049989896
         ],
-        "median_ms": 474.1067849972751,
-        "max_ms": 474.1067849972751
+        "median_ms": 456.5392049989896,
+        "max_ms": 456.5392049989896
       },
       "cold_drive": {
         "samples_ms": [
-          582.8231640043668
+          580.3161450021435
         ],
-        "median_ms": 582.8231640043668,
-        "max_ms": 582.8231640043668,
+        "median_ms": 580.3161450021435,
+        "max_ms": 580.3161450021435,
         "failures": []
       },
       "reset_samples_ms": [
-        1.9486439996398985
+        3.1217079958878458
       ],
       "provider_call_increment": 0
     },
@@ -58,44 +58,44 @@
       "logical_bytes": 16958334,
       "append": {
         "samples_ms": [
-          12.853977998020127
+          12.056629006110597
         ],
-        "median_ms": 12.853977998020127,
-        "max_ms": 12.853977998020127
+        "median_ms": 12.056629006110597,
+        "max_ms": 12.056629006110597
       },
       "steady_append": {
         "samples_ms": [
-          16.76992600550875
+          17.992747001699172
         ],
-        "median_ms": 16.76992600550875,
-        "max_ms": 16.76992600550875,
+        "median_ms": 17.992747001699172,
+        "max_ms": 17.992747001699172,
         "lease_ttl_ms": 15000,
         "heartbeat_seconds": 0.25
       },
       "full_fold": {
         "samples_ms": [
-          301.3430220016744
+          326.8627360012033
         ],
-        "median_ms": 301.3430220016744,
-        "max_ms": 301.3430220016744
+        "median_ms": 326.8627360012033,
+        "max_ms": 326.8627360012033
       },
       "read_and_fold": {
         "samples_ms": [
-          2071.6788830031874
+          1918.9327330022934
         ],
-        "median_ms": 2071.6788830031874,
-        "max_ms": 2071.6788830031874
+        "median_ms": 1918.9327330022934,
+        "max_ms": 1918.9327330022934
       },
       "cold_drive": {
         "samples_ms": [
-          2289.3409059979604
+          2326.0072080011014
         ],
-        "median_ms": 2289.3409059979604,
-        "max_ms": 2289.3409059979604,
+        "median_ms": 2326.0072080011014,
+        "max_ms": 2326.0072080011014,
         "failures": []
       },
       "reset_samples_ms": [
-        2.737686001637485
+        2.1312800017767586
       ],
       "provider_call_increment": 0
     }
@@ -107,24 +107,24 @@
       "page_size": 100,
       "first_page": {
         "samples_ms": [
-          2.7268099947832525
+          2.4010500055737793
         ],
-        "median_ms": 2.7268099947832525,
-        "max_ms": 2.7268099947832525
+        "median_ms": 2.4010500055737793,
+        "max_ms": 2.4010500055737793
       },
       "late_page": {
         "samples_ms": [
-          1.6830469976412132
+          1.8145909998565912
         ],
-        "median_ms": 1.6830469976412132,
-        "max_ms": 1.6830469976412132
+        "median_ms": 1.8145909998565912,
+        "max_ms": 1.8145909998565912
       },
       "full_scan": {
         "samples_ms": [
-          16.42013099626638
+          20.46160799363861
         ],
-        "median_ms": 16.42013099626638,
-        "max_ms": 16.42013099626638
+        "median_ms": 20.46160799363861,
+        "max_ms": 20.46160799363861
       }
     },
     {
@@ -133,24 +133,24 @@
       "page_size": 100,
       "first_page": {
         "samples_ms": [
-          2.0176860052742995
+          2.160792995709926
         ],
-        "median_ms": 2.0176860052742995,
-        "max_ms": 2.0176860052742995
+        "median_ms": 2.160792995709926,
+        "max_ms": 2.160792995709926
       },
       "late_page": {
         "samples_ms": [
-          1.3880530023016036
+          1.61193899839418
         ],
-        "median_ms": 1.3880530023016036,
-        "max_ms": 1.3880530023016036
+        "median_ms": 1.61193899839418,
+        "max_ms": 1.61193899839418
       },
       "full_scan": {
         "samples_ms": [
-          208.1369680017815
+          237.24756600131514
         ],
-        "median_ms": 208.1369680017815,
-        "max_ms": 208.1369680017815
+        "median_ms": 237.24756600131514,
+        "max_ms": 237.24756600131514
       }
     }
   ],

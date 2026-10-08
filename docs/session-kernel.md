@@ -138,7 +138,10 @@ against a fork of that prefix inside the same transaction and retains head/inbox
 CAS and both lease checks. Forks copy index containers and clone only operations
 or turns that a transition will modify. This avoids allocating an entire old
 operation graph for a one-record append. Public state snapshots still detach all
-mutable operations, attempts, waits and child handles. Commit replay and overlap use indexed identity lookups.
+mutable operations, attempts, waits and child handles without copying the fold's
+history and record/input identity indexes. Successful model dispatch endpoints are
+folded into a scalar preference, including audit receipts, so planning does not
+scan the full log to recover that preference. Commit replay and overlap use indexed identity lookups.
 Rollback/conflict, head rollback or a changed head digest discard the cache;
 an outer host rollback is caught by the next database binding check. A new lease
 epoch rebinds the immutable prefix only after its stored head bytes and digest
@@ -200,7 +203,16 @@ stop with an explicit reason. Each Runtime constructs its registry once, or reus
 the registry supplied by its factory. Bounded definition/digest and schema caches
 include task controls, model binding, memory settings, child names, registry
 revision, exposure and detached capability declarations. Type-sensitive JSON
-fingerprints prevent bool/integer cache-key collisions. Failed canonical validation
+fingerprints prevent bool/integer cache-key collisions. Frozen Record tasks reuse a
+bounded task fingerprint. Unchanged tool schemas share their validated Record's
+private JSON graph and cached JCS bytes across definitions and requests. Reuse
+requires exact schema bytes or the same retained schema objects; mutable hook
+inputs still detach, and source/digest validation remains mandatory. Persisted
+bytes keep the complete schemas, so cold readers use the same wire shape.
+The definition's schema/capability/memory/model-binding
+JCS fragments are cached separately from the task and rebuilt whenever those
+bindings or task tool controls change. Every composed definition digest equals
+full JCS encoding; live binding checks still run on every driver step. Failed canonical validation
 preserves the last valid definition cache. Dynamic `is_enabled`
 predicates are reevaluated when compiling each new turn. Dispatch reevaluates
 current authorization and retains frozen policy denials. The internal runtime exposes the policy-filtered built-in planner surface and registered
@@ -626,7 +638,10 @@ retained result data. Host assembly supplies processors explicitly; no default
 wiring changed.
 
 Record encoding reuses the exact nested JCS bytes already checked for an embedded
-digest when composing the closed ASCII-key record envelope. Parsing and production
+digest when composing the closed ASCII-key record envelope. Other payload fields
+are encoded in contiguous sorted groups instead of separate key/value calls.
+Recovery of completion effects reuses the committed model receipt without
+constructing and discarding another receipt. Parsing and production
 retain the same schema, identity, digest and nested I-JSON rejection checks. The
 byte-equivalence suite compares composed bytes against the shared full JCS encoder,
 including floats, Unicode key ordering and invalid nested values. Task copies remain

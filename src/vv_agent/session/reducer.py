@@ -108,6 +108,7 @@ class ExecutionState:
     usage_values: dict[str, Record] = field(default_factory=dict)
     compactions: list[Record] = field(default_factory=list)
     boundaries: dict[tuple[str, str, str], Record] = field(default_factory=dict)
+    preferred_endpoint_id: str | None = None
 
     @property
     def waits(self) -> dict[tuple[str, int], dict[str, Any]]:
@@ -602,15 +603,27 @@ class Fold:
             self._shared_turns.remove(tid)
 
     def snapshot(self) -> ExecutionState:
-        result = self.fork()
-        for oid in result.state.operations:
-            result._own_operation(oid)
-            for attempt in result.state.operations[oid].attempts.values():
-                attempt.wait = copy_json(attempt.wait)
-                attempt.child_handle = copy_json(attempt.child_handle)
-        for tid in result.state.turns:
-            result._own_turn(tid)
-        return result.state
+        # Detach state only; a snapshot does not need the fold's history or identity indexes.
+        return replace(
+            self.state,
+            operations={
+                oid: replace(
+                    op,
+                    attempts={
+                        n: Attempt(**(vars(a) | {"wait": copy_json(a.wait), "child_handle": copy_json(a.child_handle)}))
+                        for n, a in op.attempts.items()
+                    },
+                )
+                for oid, op in self.state.operations.items()
+            },
+            turns={tid: copy(turn) for tid, turn in self.state.turns.items()},
+            applied_inputs=self.state.applied_inputs.copy(),
+            admitted_inputs=self.state.admitted_inputs.copy(),
+            usage_observations=self.state.usage_observations.copy(),
+            usage_values=self.state.usage_values.copy(),
+            compactions=self.state.compactions.copy(),
+            boundaries=self.state.boundaries.copy(),
+        )
 
     def extend(
         self, records: Iterable[Record], *, consumed_inputs: Iterable[InboxItem] = (), bodies: Iterable[bytes] | None = None
@@ -671,6 +684,18 @@ class Fold:
             elif kind.startswith("op_"):
                 self._own_operation(record.operation_id)
                 _operation(state, record)
+                if (
+                    kind == "op_completed"
+                    and p["execution_started"]
+                    and isinstance(p["result"], dict)
+                    and not p["result"].get("error_code")
+                ):
+                    assert record.operation_id is not None and record.attempt is not None
+                    op = state.operations[record.operation_id]
+                    if op.kind == "model":
+                        dispatch = op.attempts[record.attempt].dispatch
+                        if dispatch and dispatch._payload.get("endpoint_id"):
+                            state.preferred_endpoint_id = dispatch._payload["endpoint_id"]
             elif kind == "turn_parked":
                 require(tid == state.active_turn_id and tid in state.turns, "wait outside active turn")
                 assert tid is not None

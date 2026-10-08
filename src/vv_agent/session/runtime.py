@@ -8,6 +8,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from copy import copy
 from dataclasses import dataclass, field, fields, replace
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -48,7 +49,7 @@ from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .children import ChildSession
 from .providers import FunctionProvider, Provider
-from .records import Record, copy_json, digest
+from .records import Record, copy_json
 from .reducer import ExecutionState
 from .store import SessionStore
 
@@ -103,9 +104,14 @@ class Runtime:
             from vv_agent.approval import ApprovalBroker
 
             self.approval_broker = ApprovalBroker()
-        self._definition_key: str | bytes | None = None
+        self._definition_key: tuple[str | bytes, str | bytes] | None = None
         self._definition_value: dict[str, Any] = {}
         self._definition_digest = ""
+        self._retained_task_key: tuple[Record, str | bytes] | None = None
+        self._definition_binding_key: tuple | None = None
+        self._definition_binding: dict[str, Any] = {}
+        self._definition_prefix = b""
+        self._definition_suffix = b""
         self._schema_key: tuple | None = None
         self._schemas: list[dict[str, Any]] = []
 
@@ -256,12 +262,28 @@ class Runtime:
     def definition(self, task: AgentTask) -> dict[str, Any]:
         return copy_json(self._definition(task))
 
-    def definition_digest(self, task: AgentTask) -> str:
+    def definition_digest(self, task: AgentTask | Record) -> str:
         self._definition(task)
         return self._definition_digest
 
-    def _definition(self, task: AgentTask) -> dict[str, Any]:
-        # One bounded cache; task controls, manager settings and registry changes invalidate it.
+    def _definition(self, task: AgentTask | Record) -> dict[str, Any]:
+        # Retained tasks are immutable; mutable runtime bindings are checked on every step.
+        retained = task if isinstance(task, Record) else None
+        if retained is not None:
+            task_value = retained._payload["definition"]["task"]
+            task = retained._task()
+        else:
+            assert isinstance(task, AgentTask)
+            task_value = task.to_dict()
+        if retained is not None and self._retained_task_key is not None and self._retained_task_key[0] is retained:
+            task_key = self._retained_task_key[1]
+        else:
+            try:
+                task_key = json.dumps(task_value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            except TypeError:
+                task_key = canonical_json_bytes(task_value)
+            if retained is not None:
+                self._retained_task_key = (retained, task_key)
         memory_settings = {
             f.name: getattr(self.memory_manager, f.name)
             for f in fields(self.memory_manager)
@@ -278,7 +300,6 @@ class Runtime:
         value: dict[str, Any] = {
             "agent_name": self.agent.name,
             "memory_settings": memory_settings,
-            "task": task.to_dict(),
             "child_tools": sorted(self.children),
             "model_binding": {
                 "backend": self.resolved.backend,
@@ -289,9 +310,10 @@ class Runtime:
         signature = self.registry.planning_signature()
         # JSON fingerprints distinguish True from 1 and detach mutable cache inputs.
         try:
-            key = json.dumps([value, signature], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            binding_key = json.dumps([value, signature], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         except TypeError:
-            key = canonical_json_bytes([value, signature])
+            binding_key = canonical_json_bytes([value, signature])
+        key = (task_key, binding_key)
         if key == self._definition_key:
             return self._definition_value
         schema_key = (
@@ -312,25 +334,33 @@ class Runtime:
         if schema_key != self._schema_key:
             self._schemas = plan_tool_schemas(registry=self.registry, task=task, include_dynamic_hints=False)
             self._schema_key = schema_key
-        schemas = self._schemas
-        names = [s["function"]["name"] for s in schemas]
-        retentions = dict(self.memory_manager.tool_result_retentions)
-        for name in names:
-            metadata = self.registry.tool_metadata(name)
-            if metadata is not None:
-                retentions[name] = (
-                    ToolResultRetention.PRESERVE
-                    if ToolResultRetention.PRESERVE in (retentions.get(name), metadata.result_retention)
-                    else metadata.result_retention
-                )
-        memory_settings["tool_result_retentions"] = retentions
-        value["tools"] = schemas
-        value["capabilities"] = {
-            n: metadata.to_dict()
-            for n in names
-            if self.registry.has_executor(n) and (metadata := self.registry.tool_metadata(n)) is not None
-        }
-        self._definition_digest = digest(value)
+        if (binding_key, schema_key) != self._definition_binding_key:
+            schemas = self._schemas
+            names = [s["function"]["name"] for s in schemas]
+            retentions = dict(self.memory_manager.tool_result_retentions)
+            for name in names:
+                metadata = self.registry.tool_metadata(name)
+                if metadata is not None:
+                    retentions[name] = (
+                        ToolResultRetention.PRESERVE
+                        if ToolResultRetention.PRESERVE in (retentions.get(name), metadata.result_retention)
+                        else metadata.result_retention
+                    )
+            memory_settings["tool_result_retentions"] = retentions
+            value["capabilities"] = {
+                n: metadata.to_dict()
+                for n in names
+                if self.registry.has_executor(n) and (metadata := self.registry.tool_metadata(n)) is not None
+            }
+            # These closed keys precede task, and tools follows it in JCS order.
+            prefix = canonical_json_bytes(value)[:-1] + b',"task":'
+            suffix = b',"tools":' + canonical_json_bytes(schemas) + b"}"
+            self._definition_binding = value | {"tools": schemas}
+            self._definition_prefix, self._definition_suffix = prefix, suffix
+            self._definition_binding_key = (binding_key, schema_key)
+        task_bytes = canonical_json_bytes(task_value)
+        value = self._definition_binding | {"task": task_value}
+        self._definition_digest = sha256(self._definition_prefix + task_bytes + self._definition_suffix).hexdigest()
         self._definition_value = value
         self._definition_key = key
         return value

@@ -335,3 +335,209 @@ def test_failed_definition_validation_preserves_last_valid_cache(tmp_path, inval
     del task.metadata["invalid"]
     assert rt.definition(task) == definition
     assert rt.definition_digest(task) == definition_digest
+
+
+def test_snapshot_does_not_copy_fold_history_or_identity_indexes(monkeypatch):
+    baseline = Fold()
+    baseline.extend([record(kind) for kind in ("session_created", "turn_started", "op_planned", "op_started")])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a state snapshot must not fork the whole log")
+
+    monkeypatch.setattr(Fold, "fork", unexpected)
+    snapshot = baseline.snapshot()
+    snapshot.operations["o"].attempts.clear()
+    assert baseline.state.operations["o"].state == "started"
+
+
+@pytest.mark.parametrize("change", ["schema", "capability", "memory", "children", "model_binding"])
+def test_retained_definition_checks_live_bindings_without_serializing_task(database, monkeypatch, change):
+    rt = runtime(database, [], tools=[cached_tool])
+    task = rt.compile("go", "t")
+    definition = rt.definition(task)
+    retained = make_record(
+        "turn_started",
+        session_id="s",
+        turn_id="t",
+        payload=record("turn_started").payload | {"definition": definition, "definition_digest": digest(definition)},
+    )
+    before = rt.definition_digest(retained)
+    assert before == digest(definition)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a frozen task must use its retained JSON")
+
+    monkeypatch.setattr(type(task), "to_dict", unexpected)
+    assert rt.definition_digest(retained) == before
+    if change == "schema":
+        schema = rt.registry.get_schema("cached_tool")
+        schema["function"]["description"] = "updated"
+        rt.registry.register_schema("cached_tool", schema)
+    elif change == "capability":
+        rt.registry.get_executor("cached_tool").tool_metadata.capability_tags.append("new-tag")
+    elif change == "memory":
+        rt.memory_manager.tool_result_retentions["cached_tool"] = "preserve"
+    elif change == "children":
+        rt.children["new-child"] = lambda plan: None
+    else:
+        rt.resolved = replace(rt.resolved, model_id="changed")
+    assert rt.definition_digest(retained) != before
+
+
+def test_recovered_completion_does_not_construct_a_second_receipt(store, database, monkeypatch):
+    from vv_agent.session import kernel
+
+    completed = []
+    make = kernel.make_record
+
+    def counted(kind, **kwargs):
+        if kind == "op_completed":
+            completed.append(kwargs["operation_id"])
+        return make(kind, **kwargs)
+
+    monkeypatch.setattr(kernel, "make_record", counted)
+    start(store)
+    rt = runtime(database, [LLMResponse("done")])
+    drive(store, "s", runtime=rt)
+    state, rows, _ = store.read_state("s")
+    assert state.active_turn_id is None
+    assert completed == [r.record.operation_id for r in rows if r.record.kind == "op_completed"]
+    assert len(completed) == 1
+
+
+@pytest.mark.parametrize("context", ["normal", "audit"])
+def test_preferred_endpoint_is_folded_from_successful_dispatch_and_survives_recovery(context):
+    baseline = Fold()
+    definition = {"model_binding": {"endpoints": ["a", "b"]}}
+    request = {"messages": [], "metadata": {"session_endpoint_order": ["b", "a"]}}
+    rows = [
+        record("session_created"),
+        record("turn_started", definition=definition, definition_digest=digest(definition)),
+        record("op_planned", request=request, request_digest=digest(request)),
+        record("op_started", endpoint_id="b"),
+    ]
+    baseline.extend(rows)
+    assert baseline.state.preferred_endpoint_id is None
+    if context == "audit":
+        control = InboxItem("cancel", "control", {"action": "cancel"}, "t", 1)
+        applied = record("input_applied", input=control.to_dict(), input_digest=control.digest)
+        baseline.extend([applied], consumed_inputs=[control])
+        rows.append(applied)
+    completed = record("op_completed", request_digest=digest(request), context=context)
+    provisional = baseline.fork()
+    provisional.extend([completed])
+    assert baseline.state.preferred_endpoint_id is None
+    assert provisional.snapshot().preferred_endpoint_id == "b"
+    recovered = Fold()
+    recovered.extend(
+        [*rows, completed],
+        consumed_inputs=[InboxItem(**r._payload["input"]) for r in rows if r.kind == "input_applied"],
+    )
+    assert recovered.state == provisional.state
+
+
+@pytest.mark.parametrize("result", [None, True, 7, "opaque", [], {"error_code": "failed"}])
+def test_fold_keeps_opaque_receipts_and_does_not_prefer_failed_endpoints(result):
+    definition = {"model_binding": {"endpoints": ["a"]}}
+    request = {"messages": [], "metadata": {"session_endpoint_order": ["a"]}}
+    baseline = Fold()
+    baseline.extend(
+        [
+            record("session_created"),
+            record("turn_started", definition=definition, definition_digest=digest(definition)),
+            record("op_planned", request=request, request_digest=digest(request)),
+            record("op_started", endpoint_id="a"),
+            record("op_completed", request_digest=digest(request), result=result, result_digest=digest(result)),
+        ]
+    )
+    assert baseline.state.operations["o"].state == "completed"
+    assert baseline.state.preferred_endpoint_id is None
+
+
+def test_definition_composition_matches_full_jcs_across_turns_and_nested_values(tmp_path):
+    from vv_agent.types import Message
+
+    rt = runtime(tmp_path / "unused.sqlite", [], tools=[cached_tool])
+    for i in range(3):
+        task = rt.compile("go", f"turn/{i}")
+        task.metadata["nested"] = {"task": None, "tools": {"😀": [-0.0, 1e-27, True, i], "\uffff": '"task":null'}}
+        task.initial_messages = [Message("user", "汉字")]
+        definition = rt.definition(task)
+        assert rt.definition_digest(task) == digest(definition)
+        retained = make_record(
+            "turn_started",
+            session_id="s",
+            turn_id=task.task_id,
+            payload=record("turn_started").payload | {"definition": definition, "definition_digest": digest(definition)},
+        )
+        assert rt.definition_digest(retained) == digest(retained._payload["definition"])
+
+
+def test_tool_schemas_share_only_validated_json_across_turns_and_host_copies(store, database):
+    start(store)
+    rt = runtime(database, [LLMResponse("done") for _ in range(3)], tools=[cached_tool])
+    for i in range(3):
+        if i:
+            with store.atomic() as tx:
+                tx.push("s", InboxItem(str(i), "user", {"content": "again"}))
+        drive(store, "s", runtime=rt)
+    state, rows, _ = store.read_state("s")
+    sources = [r.record for r in rows if r.record.kind in {"turn_started", "op_planned"}]
+    schemas = [r._payload["definition" if r.kind == "turn_started" else "request"]["tools"] for r in sources]
+    assert len(schemas) == 6 and len({id(value) for value in schemas}) == 1
+    logical = [r.record.to_dict() for r in rows]
+    for r in sources:
+        container = "definition" if r.kind == "turn_started" else "request"
+        r.payload[container]["tools"].clear()
+        r.to_dict()["payload"][container]["tools"][0]["function"]["description"] = "host mutation"
+        assert digest(r.to_dict()["payload"][container]) == r._payload[f"{container}_digest"]
+    store._fold_cache = None
+    cold, reread, _ = store.read_state("s")
+    assert cold == state and [r.record.to_dict() for r in reread] == logical
+
+
+@pytest.mark.parametrize("container", ["definition", "request"])
+def test_retained_schema_encoding_matches_full_jcs_and_checks_embedded_digest(tmp_path, container):
+    from vv_agent.session.records import Record, RecordError, _RetainedTools
+
+    rt = runtime(tmp_path / "unused.sqlite", [], tools=[cached_tool])
+    definition = rt.definition(rt.compile("go", "t"))
+    source = make_record(
+        "turn_started",
+        session_id="s",
+        turn_id="t",
+        payload=record("turn_started").payload | {"definition": definition, "definition_digest": digest(definition)},
+    )
+    value = {"tools": _RetainedTools(source), "😀": [-0.0, 1e-27], "\uffff": '"tools":null'}
+    kind = "turn_started" if container == "definition" else "op_planned"
+    payload = record(kind).payload | {container: value, f"{container}_digest": digest(value)}
+    retained = make_record(
+        kind,
+        session_id="s",
+        turn_id="t",
+        operation_id="o" if container == "request" else None,
+        attempt=1 if container == "request" else None,
+        payload=payload,
+    )
+    assert retained.encode() == records.canonical_json_bytes(retained.to_dict())
+    assert retained._payload[container]["tools"] is source._payload["definition"]["tools"]
+    assert Record.parse(retained.encode()).to_dict() == retained.to_dict()
+    with pytest.raises(RecordError, match=f"{container} digest mismatch"):
+        make_record(
+            kind,
+            session_id="s",
+            turn_id="t",
+            operation_id="o" if container == "request" else None,
+            attempt=1 if container == "request" else None,
+            payload=payload | {f"{container}_digest": "0" * 64},
+        )
+
+
+def test_retained_schema_source_requires_full_validation_before_reuse():
+    from vv_agent.session.records import Record, RecordError, _RetainedTools
+
+    value = record("turn_started").to_dict()
+    value["payload"]["definition"] = {"tools": []}
+    unvalidated = Record(**value)
+    with pytest.raises(RecordError, match="definition digest mismatch"):
+        digest({"tools": _RetainedTools(unvalidated)})

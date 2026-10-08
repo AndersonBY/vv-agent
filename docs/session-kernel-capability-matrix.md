@@ -386,7 +386,8 @@ The new T suite contains 25 test functions / 222 parameterized cases. The skip
 and warning breakdown matches the F2b/F2c breakdown: all applicable Redis and PG
 variants ran; live providers and cross-runtime probes remain opt-in.
 
-Values below are milliseconds; added p95 is kernel p95 minus Runner p95.
+The following table is the historical F2d-2 single run, superseded by F2d-2b.
+Values are milliseconds; added p95 is kernel p95 minus Runner p95.
 
 | Scenario | Runner p50 / p95 | Kernel p50 / p95 | Added p95 | Limit | Result |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -424,17 +425,18 @@ can be lost after acknowledgement and remains an explicit reviewer decision.
 | --- | --- |
 | Contract snapshot | PASS: 23.0.0, 55 fixture files, unchanged manifest |
 | Ruff format / check and ty | PASS: 386 Python files |
-| `uv run pytest tests/session -q`, real local PG | PASS: 1187 passed, no skips, 281.48 seconds |
-| Full pytest, real Redis 6400 DB 15 and local PG | PASS: 3662 passed, 20 skipped, 18 warnings, 427.71 seconds |
-| Overhead, 10 warmups / 200 samples per path/scenario | PASS: single-turn <=50 ms, ten turns <=80 ms; no leaked threads |
+| `uv run pytest tests/session -q`, real local PG | PASS: 1221 passed in 276.52s (0:04:36) |
+| Full pytest, real Redis 6400 DB 15 and local PG | PASS: 3696 passed, 20 skipped, 18 warnings in 431.63s (0:07:11) |
+| Overhead, 10 warmups / 200 samples per path/scenario | PASS: three independent F2d-2b processes, each single-turn <=50 ms and ten turns <=80 ms; no leaked threads |
 | M6 5k/20k, one sample, `--assert-capacity` | PASS: cold drive, steady append and 1k/10k catalog scans |
-| Scope / diff / cleanup | PASS: no default wiring, public exports, lock/fixture or Rust changes; HEAD e9194f4, no commits; gate-owned Redis stopped |
+| Scope / diff / cleanup | PASS: no default wiring, public exports, lock/fixture or Rust changes; HEAD 9c5eafe, no new commits; gate-owned Redis stopped |
 
 The full-suite skip/warning breakdown matches F2d-1. All applicable Redis and PG
 variants ran. Shared MemoryProvider callback helpers moved to the retained memory
 module without changing Runner behavior; session no longer depends on CycleRunner.
 
-Values below are milliseconds; added p95 is kernel p95 minus Runner p95.
+The following table is the historical F2d-2 single run, superseded by F2d-2b.
+Values are milliseconds; added p95 is kernel p95 minus Runner p95.
 
 | Scenario | Runner p50 / p95 | Kernel p50 / p95 | Added p95 | Limit | Result |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -443,10 +445,16 @@ Values below are milliseconds; added p95 is kernel p95 minus Runner p95.
 | ten_turns | 37.94 / 46.51 | 106.48 / 113.14 | 66.63 | 80 | PASS |
 | start_cancel | 4.81 / 5.68 | 15.99 / 17.21 | 11.54 | 50 | PASS |
 
-The A-complete pre-optimization candidate measured 99.061 ms ten-turn added p95;
-the final candidate measures 66.626 ms (13.374 ms headroom). The shared driver
-reuses nested JCS bytes already produced by digest validation, avoids redundant
-read-only task/definition preparation, and defers unused compaction digests.
-Schema validation, JCS equivalence, nested-invalid rejection, lease/CAS/fencing
-and the original benchmark workload remain in force. Raw before/after timings
-include their Runner measurements; host timing differences are not hidden.
+The A-complete pre-optimization candidate measured 99.061 ms ten-turn added p95.
+F2d-2's single 66.626 ms result did not establish independent-run headroom:
+reviewer reruns measured 84.4, 104.5 and 95.1 ms. F2d-2b's three independent
+200-run / 10-warmup processes measure 62.082, 68.990, 53.798 ms,
+with a minimum 11.010 ms headroom. The linked report retains added p50
+and p95 for every scenario and all three before/after runs, GC pause evidence,
+method timing distributions, profile call counts, and the renewed M6 capacity data.
+The same driver shares validated schema graphs and JCS bytes, reuses committed
+completion receipts and immutable definition JCS fragments, groups record encoding,
+copies only state in host snapshots, and folds endpoint preference instead of
+scanning the log. Schema validation, embedded and
+storage digests, output isolation, lease/CAS/fencing and the original benchmark
+workload remain in force. GC is unchanged; the p95 gate is not a max/p99 guarantee.

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from jsonschema import Draft202012Validator, ValidationError
 from jsonschema.validators import extend
 
-from vv_agent.canonical_json import canonical_json_bytes
+from vv_agent.canonical_json import canonical_json_bytes, utf16_sort_key
 
 if TYPE_CHECKING:
     from vv_agent.types import AgentTask
@@ -35,7 +35,7 @@ def copy_json(value: Any) -> Any:
 
 
 def digest(value: Any) -> str:
-    return sha256(canonical_json_bytes(value)).hexdigest()
+    return sha256(_json_bytes(value)).hexdigest()
 
 
 def closed(**fields: Any) -> dict[str, Any]:
@@ -377,24 +377,59 @@ def _load(body: bytes) -> dict[str, Any]:
 
 
 def _check_digest(payload: dict[str, Any], field: str) -> bytes:
-    encoded = canonical_json_bytes(payload[field])
+    encoded = _json_bytes(payload[field])
     if payload[f"{field}_digest"] != sha256(encoded).hexdigest():
         raise RecordError(f"{field} digest mismatch")
     return encoded
 
 
+@dataclass(frozen=True)
+class _RetainedTools:
+    """Producer-only reference to a validated, read-only schema subtree."""
+
+    source: Record
+
+    def encode(self) -> bytes:
+        self.source.encode()
+        if self.source._tools_body is None:
+            object.__setattr__(self.source, "_tools_body", canonical_json_bytes(self.value))
+        assert self.source._tools_body is not None
+        return self.source._tools_body
+
+    @property
+    def value(self) -> list[dict[str, Any]]:
+        return self.source._payload["definition"]["tools"]
+
+
+def _json_bytes(value: Any) -> bytes:
+    if isinstance(value, dict):
+        retained = {key: item.encode() for key, item in value.items() if isinstance(item, _RetainedTools)}
+        if retained:
+            return _object_bytes(value, retained)
+    return canonical_json_bytes(value)
+
+
+def _object_bytes(value: dict[str, Any], encoded_fields: dict[str, bytes]) -> bytes:
+    parts = []
+    pending = {}
+    keys = sorted(value) if all(type(key) is str and key.isascii() for key in value) else sorted(value, key=utf16_sort_key)
+    for key in keys:
+        if key in encoded_fields:
+            if pending:
+                parts.append(canonical_json_bytes(pending)[1:-1])
+                pending.clear()
+            parts.append(canonical_json_bytes(key) + b":" + encoded_fields[key])
+        else:
+            pending[key] = value[key]
+    if pending:
+        parts.append(canonical_json_bytes(pending)[1:-1])
+    return b"{" + b",".join(parts) + b"}"
+
+
 def _record_bytes(value: dict[str, Any], encoded_fields: dict[str, bytes]) -> bytes:
     if not encoded_fields:
         return canonical_json_bytes(value)
-    # Both closed envelope and payload keys are ASCII; nested values retain full JCS validation.
-    payload = (
-        b"{"
-        + b",".join(
-            canonical_json_bytes(key) + b":" + (encoded_fields[key] if key in encoded_fields else canonical_json_bytes(item))
-            for key, item in sorted(value["payload"].items())
-        )
-        + b"}"
-    )
+    payload = _object_bytes(value["payload"], encoded_fields)
     envelope = canonical_json_bytes(value | {"payload": None})
     return envelope.replace(b'"payload":null', b'"payload":' + payload, 1)
 
@@ -481,6 +516,7 @@ class Record:
     _digest: str | None = field(default=None, init=False, repr=False, compare=False)
     _value: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
     _task_value: AgentTask | None = field(default=None, init=False, repr=False, compare=False)
+    _tools_body: bytes | None = field(default=None, init=False, repr=False, compare=False)
 
     def _task(self) -> AgentTask:
         from vv_agent.types import AgentTask
@@ -537,7 +573,15 @@ class Record:
         return self._value["payload"] if self._value is not None else self.payload
 
     def _retain(self, body: bytes, value: dict[str, Any] | None = None) -> None:
-        object.__setattr__(self, "_value", value if value is not None else json.loads(body))
+        value = value if value is not None else json.loads(body)
+        for container_field in ("definition", "request"):
+            container = self._payload.get(container_field)
+            if isinstance(container, dict) and isinstance(container.get("tools"), _RetainedTools):
+                retained = container["tools"]
+                value["payload"][container_field]["tools"] = retained.value
+                if container_field == "definition":
+                    object.__setattr__(self, "_tools_body", retained.encode())
+        object.__setattr__(self, "_value", value)
         object.__setattr__(self, "payload", {})
         object.__setattr__(self, "_digest", sha256(body).hexdigest())
         object.__setattr__(self, "_body", body)
