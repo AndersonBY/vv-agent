@@ -14,7 +14,8 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from vv_agent.checkpoint import CheckpointError, canonical_json_sha256
+from vv_agent.canonical_json import canonical_json_sha256
+from vv_agent.checkpoint import CheckpointError
 
 DISPATCH_OUTBOX_SCHEMA = "vv-agent.distributed-dispatch.v1"
 DispatchState = Literal["pending", "claimed", "delivered", "ambiguous"]

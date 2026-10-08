@@ -11,8 +11,9 @@ from vv_agent.app_server.outgoing import OutgoingRouter
 from vv_agent.app_server.run_adapter import RunAdapter, TurnResumeError
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadStore
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict
-from vv_agent.runtime.controller import HostInteractionAdmissionContext, HostInteractionRequest
+from vv_agent.runtime.controller import HostInteractionAdmissionContext
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 

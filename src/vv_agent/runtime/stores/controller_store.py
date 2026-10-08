@@ -9,7 +9,8 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import vv_agent.events as run_events
-from vv_agent.checkpoint import CheckpointError, OperationState, ResumeObservation, canonical_json_sha256
+from vv_agent.canonical_json import canonical_json_sha256
+from vv_agent.checkpoint import CheckpointError, OperationState, ResumeObservation
 from vv_agent.events import (
     CheckpointResumedEvent,
     HostInteractionRequestedEvent,
@@ -18,6 +19,7 @@ from vv_agent.events import (
     RunFailedEvent,
     RunStateChangedEvent,
 )
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.runtime.checkpoint_codec import clone_checkpoint
 from vv_agent.runtime.controller import (
     HOST_NOTIFICATION_SCHEMA,
@@ -30,7 +32,6 @@ from vv_agent.runtime.controller import (
     HostInteractionOutcome,
     HostInteractionRecoveryEnvelope,
     HostInteractionRecoveryResult,
-    HostInteractionRequest,
     HostInteractionResponse,
     derive_controller_receipt_outbox_id,
     derive_host_interaction_notification_id,
@@ -754,7 +755,7 @@ def _outcome_for_record(
 
 
 def _host_tool_result(snapshot: Checkpoint, request: HostInteractionRequest) -> ToolExecutionResult:
-    from vv_agent.deferred import ToolCallOutcome
+    from vv_agent.tools.outcomes import ToolCallOutcome
 
     cycle = next((cycle for cycle in snapshot.cycles if cycle.index == request.logical_cycle), None)
     if cycle is None or [call.id for call in cycle.tool_calls] != [result.tool_call_id for result in cycle.tool_results]:

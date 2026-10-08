@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 
 from vv_agent.checkpoint import CheckpointConfig, CheckpointError, OperationState, ResumePolicy
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.runtime.backends.celery import CeleryBackend
 from vv_agent.runtime.backends.distributed import DistributedRunEnvelope, DistributedRunHandle
 from vv_agent.runtime.cancellation import CancelledError
@@ -26,7 +27,6 @@ from vv_agent.runtime.controller import (
     DistributedBackend,
     HostInteractionAdmissionContext,
     HostInteractionRecoveryEnvelope,
-    HostInteractionRequest,
     HostInteractionResponse,
     derive_controller_command_id,
     derive_host_response_digest,

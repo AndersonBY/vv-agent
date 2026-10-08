@@ -8,6 +8,7 @@ import pytest
 from support import model_call_context
 
 from vv_agent.llm import LlmRequest, ScriptedLLM
+from vv_agent.llm.errors import MAX_PTL_RETRIES, is_prompt_too_long_error
 from vv_agent.memory import (
     CompactionExhaustedError,
     MemoryManager,
@@ -17,7 +18,7 @@ from vv_agent.memory import (
 from vv_agent.memory.microcompact import COMPACT_MARKER_OPENING
 from vv_agent.microcompaction import MicrocompactionPolicy
 from vv_agent.prompt import build_raw_system_prompt_bundle
-from vv_agent.runtime.cycle_runner import MAX_PTL_RETRIES, CycleRunner
+from vv_agent.runtime.cycle_runner import CycleRunner
 from vv_agent.tools import build_default_registry
 from vv_agent.types import AgentTask, LLMResponse, Message
 from vv_agent.workspace import MemoryWorkspaceBackend
@@ -212,9 +213,9 @@ def test_cycle_runner_does_not_swallow_non_ptl_errors() -> None:
 
 
 def test_cycle_runner_recognizes_prompt_too_long_patterns() -> None:
-    assert CycleRunner._is_prompt_too_long_error(RuntimeError("maximum context length exceeded")) is True
-    assert CycleRunner._is_prompt_too_long_error(RuntimeError("request too large")) is True
-    assert CycleRunner._is_prompt_too_long_error(RuntimeError("network down")) is False
+    assert is_prompt_too_long_error(RuntimeError("maximum context length exceeded")) is True
+    assert is_prompt_too_long_error(RuntimeError("request too large")) is True
+    assert is_prompt_too_long_error(RuntimeError("network down")) is False
 
 
 def test_cycle_runner_recognizes_prompt_too_long_in_exception_chain() -> None:
@@ -222,7 +223,17 @@ def test_cycle_runner_recognizes_prompt_too_long_in_exception_chain() -> None:
     outer = ValueError("API call failed")
     outer.__cause__ = inner
 
-    assert CycleRunner._is_prompt_too_long_error(outer) is True
+    assert is_prompt_too_long_error(outer) is True
+
+    argument_wrapper = RuntimeError("API call failed", inner)
+    assert is_prompt_too_long_error(argument_wrapper) is True
+
+    cycle = RuntimeError("network down")
+    cycle.__cause__ = cycle
+    cycle.__context__ = outer
+    assert is_prompt_too_long_error(cycle) is True
+    cycle.__context__ = None
+    assert is_prompt_too_long_error(cycle) is False
 
 
 def test_cycle_runner_preemptively_microcompacts_before_threshold() -> None:

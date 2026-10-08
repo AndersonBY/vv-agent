@@ -8,7 +8,6 @@ from typing import Any, cast
 
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalProvider, ApprovalRequest, bind_request_cancellation
 from vv_agent.checkpoint import CheckpointError
-from vv_agent.deferred import ToolCallOutcome
 from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
@@ -28,6 +27,7 @@ from vv_agent.tools.executor import (
 )
 from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
 from vv_agent.tools.metadata import metadata_policy_denial_source
+from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 

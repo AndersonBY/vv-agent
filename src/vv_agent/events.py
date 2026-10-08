@@ -13,18 +13,12 @@ from vv_agent.budget import (
     BudgetExhaustionReason,
     BudgetUsageSnapshot,
 )
-from vv_agent.checkpoint import (
-    OperationKind,
-    OperationState,
-    ReconciliationDecisionKind,
-    ResumeObservation,
-    ToolIdempotency,
-    canonical_json_sha256,
-)
+from vv_agent.canonical_json import canonical_json_sha256
+from vv_agent.checkpoint import OperationKind, OperationState, ReconciliationDecisionKind, ResumeObservation
 from vv_agent.types import CompletionReason, ModelCallOperation, TokenUsage
 
 if TYPE_CHECKING:
-    from vv_agent.tools.metadata import ToolMetadata
+    from vv_agent.tools.metadata import ToolIdempotency, ToolMetadata
 
 RUN_EVENT_VERSION = "v5"
 ApprovalAction = Literal["allow", "allow_session", "deny", "timeout"]
@@ -1931,7 +1925,7 @@ class ToolCallDeferredEvent(RunEvent):
         created_at: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        from vv_agent.deferred import DeferredToolHandle
+        from vv_agent.tools.outcomes import DeferredToolHandle
 
         _set_run_event_fields(
             self,
@@ -2873,6 +2867,8 @@ class OperationAmbiguousEvent(RunEvent):
             metadata=metadata,
         )
         kind = OperationKind(operation_kind)
+        from vv_agent.tools.metadata import ToolIdempotency
+
         support = ToolIdempotency(idempotency_support) if idempotency_support is not None else None
         if kind is OperationKind.TOOL and support is None:
             raise ValueError("ambiguous tool event requires idempotency_support")
@@ -3275,7 +3271,7 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
     if payload["type"] == "tool_call_deferred":
         _required_event_text(payload.get("operation_id"), "operation_id")
         _positive_event_integer(payload.get("attempt"), "attempt")
-        from vv_agent.deferred import DeferredToolHandle
+        from vv_agent.tools.outcomes import DeferredToolHandle
 
         try:
             handle_payload = payload.get("handle")
@@ -3416,6 +3412,8 @@ def _validate_event_wire(payload: dict[str, Any]) -> None:
         if operation_kind is OperationKind.TOOL:
             if support is None:
                 raise ValueError("ambiguous tool event requires idempotency_support")
+            from vv_agent.tools.metadata import ToolIdempotency
+
             ToolIdempotency(support)
         elif support is not None:
             raise ValueError("ambiguous model event idempotency_support must be null")
@@ -3602,7 +3600,7 @@ def event_from_dict(payload: dict[str, Any]) -> RunEvent:
             **_with_cycle_and_agent(payload, common),
         )
     if event_type == "tool_call_deferred":
-        from vv_agent.deferred import DeferredToolHandle
+        from vv_agent.tools.outcomes import DeferredToolHandle
 
         return ToolCallDeferredEvent(
             tool_name=payload["tool_name"],

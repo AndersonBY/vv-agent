@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
+from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.types import (
     SubTaskOutcome,
     SubTaskRequest,
@@ -70,7 +70,7 @@ class ToolContext:
         handle that could later be mistaken for durable state.
         """
 
-        from vv_agent.deferred import DeferredToolHandle
+        from vv_agent.tools.outcomes import DeferredToolHandle
 
         runtime = self.ctx
         metadata: dict[str, Any] = {}

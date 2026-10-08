@@ -6,7 +6,7 @@ import math
 import re
 from typing import Any, Protocol, cast
 
-from vv_agent.checkpoint import canonical_json_bytes
+from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.types import Message, Role, ToolArtifactRef, validate_compaction_metadata
 
 SESSION_COMMIT_SCHEMA = "vv-agent.session-commit.v1"

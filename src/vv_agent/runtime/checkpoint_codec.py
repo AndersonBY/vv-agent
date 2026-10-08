@@ -5,13 +5,13 @@ from collections.abc import Iterable
 from typing import Any
 
 from vv_agent.budget import BudgetUsageSnapshot
+from vv_agent.canonical_json import canonical_json_bytes
 from vv_agent.checkpoint import (
     DEFAULT_MAX_EXTENSION_STATE_BYTES,
     MAX_EXTENSION_ENTRY_BYTES,
     RUN_DEFINITION_SCHEMA,
     CheckpointError,
     EventCursor,
-    canonical_json_bytes,
     validate_checkpoint_extension,
 )
 from vv_agent.types import AgentResult, AgentStatus, CycleRecord, Message, ModelCallRecord

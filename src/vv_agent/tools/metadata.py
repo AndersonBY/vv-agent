@@ -5,8 +5,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from vv_agent.checkpoint import ToolIdempotency
-
 _PORTABLE_WHITESPACE = frozenset({"\t", "\n", "\r", " "})
 _MAX_COLLECTION_ITEMS = 32
 _MAX_LABEL_CODE_POINTS = 128
@@ -20,6 +18,12 @@ _TOOL_METADATA_FIELDS = frozenset(
         "cost_dimensions",
     }
 )
+
+
+class ToolIdempotency(StrEnum):
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
 
 
 class ToolSideEffect(StrEnum):
@@ -186,6 +190,7 @@ def metadata_policy_denial_source(
 
 
 __all__ = [
+    "ToolIdempotency",
     "ToolMetadata",
     "ToolResultRetention",
     "ToolSideEffect",

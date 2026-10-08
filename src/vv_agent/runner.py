@@ -13,9 +13,8 @@ from vv_agent.agent import Agent, RunContext
 from vv_agent.approval import ApprovalBroker, ApprovalError, ApprovalRequest, bind_request_cancellation
 from vv_agent.background_task import BackgroundAgentTask
 from vv_agent.budget import BudgetEnforcementBoundary, BudgetEvaluator, BudgetUsageSnapshot
-from vv_agent.checkpoint import CheckpointError, ResumePolicy, ToolIdempotency
+from vv_agent.checkpoint import CheckpointError, ResumePolicy
 from vv_agent.config import ResolvedModelConfig
-from vv_agent.deferred import ToolCallOutcome
 from vv_agent.events import (
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
@@ -62,11 +61,12 @@ from vv_agent.sessions.base import checkpoint_session_commit_id, session_commit_
 from vv_agent.tools import ToolContext, ToolExposure, ToolSpec, build_default_registry
 from vv_agent.tools.executor import RegistryToolExecutor, ToolExecutor, is_tool_executor
 from vv_agent.tools.function import FunctionTool, Tool, adapt_tool
-from vv_agent.tools.metadata import ToolSideEffect, metadata_policy_denial_source
+from vv_agent.tools.metadata import ToolIdempotency, ToolSideEffect, metadata_policy_denial_source
 from vv_agent.tools.orchestrator import (
     _TOOL_DISPATCH_CALLBACK_METADATA_KEY,
     mark_external_tool_execution_started,
 )
+from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.tracing import Span, TraceProcessor
 from vv_agent.types import (

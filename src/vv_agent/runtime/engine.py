@@ -21,7 +21,8 @@ from vv_agent.budget import (
     HostCostMeter,
     RunBudgetLimits,
 )
-from vv_agent.checkpoint import CheckpointError, utf16_sort_key
+from vv_agent.canonical_json import utf16_sort_key
+from vv_agent.checkpoint import CheckpointError
 from vv_agent.config import ResolvedModelConfig, project_resolved_model_limits
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME, SUB_TASK_STATUS_TOOL_NAME
 from vv_agent.events import (

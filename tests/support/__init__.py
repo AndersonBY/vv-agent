@@ -1,6 +1,6 @@
 from support.model_calls import model_call_context
 from support.model_providers import FactoryModelProvider, FixedModelProvider, ModelMapProvider
-from vv_agent.deferred import ToolCallOutcome
+from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.types import ToolExecutionResult
 
 

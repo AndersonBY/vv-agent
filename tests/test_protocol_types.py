@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-from vv_agent.deferred import DeferredResolutionResultInvalid, validate_definitive_result
 from vv_agent.prompt import build_raw_system_prompt_bundle
 from vv_agent.runtime.cycle_runner import CycleRunner
+from vv_agent.tools.outcomes import DeferredResolutionResultInvalid, validate_definitive_result
 from vv_agent.types import AgentTask, CycleStatus, Message, SubAgentConfig, ToolCall, ToolExecutionResult, ToolResultStatus
 
 BOUNDED_RESULT_FIXTURE = Path(__file__).parent / "fixtures" / "parity" / "bounded_tool_result.json"

@@ -8,11 +8,7 @@ from typing import Any, Literal, cast
 
 import vv_agent.events as run_events
 from vv_agent.checkpoint import CheckpointError, EventCursor
-from vv_agent.deferred import (
-    DeferredResolutionReceipt,
-    DeferredResolveDecision,
-    DeferredToolHandle,
-)
+from vv_agent.deferred import DeferredResolutionReceipt, DeferredResolveDecision
 from vv_agent.runtime.checkpoint_codec import clone_checkpoint
 from vv_agent.runtime.checkpoint_history import CheckpointHistory, compact_checkpoint, decode_history_batches
 from vv_agent.runtime.dispatch_outbox import (
@@ -48,6 +44,7 @@ from vv_agent.runtime.state import (
     validate_model_journal_accounting,
 )
 from vv_agent.runtime.stores.controller_store import ControllerStoreMixin
+from vv_agent.tools.outcomes import DeferredToolHandle
 from vv_agent.types import AgentStatus, ToolExecutionResult
 
 

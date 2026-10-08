@@ -1,10 +1,10 @@
-from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.base import ToolContext, ToolHandler, ToolSpec
 from vv_agent.tools.dispatcher import dispatch_tool_call
 from vv_agent.tools.executor import FunctionToolExecutor, RegistryToolExecutor, ToolExecutor, ToolExposure
 from vv_agent.tools.function import FunctionTool, Tool, function_tool
 from vv_agent.tools.metadata import ToolMetadata, ToolResultRetention, ToolSideEffect
 from vv_agent.tools.orchestrator import ToolOrchestrator
+from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.tools.outputs import (
     ToolOutput,
     ToolOutputError,

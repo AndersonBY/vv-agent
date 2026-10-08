@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from vv_agent.checkpoint import canonical_json_sha256
+from vv_agent.canonical_json import canonical_json_sha256
 from vv_agent.prompt.templates import (
     ASK_USER_PROMPT,
     COMPUTER_AGENT_ENV_PROMPT,

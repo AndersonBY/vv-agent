@@ -24,6 +24,7 @@ from vv_agent.checkpoint import (
     validate_checkpoint_extension,
 )
 from vv_agent.events import RunEvent
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.model import ModelRef, VvLlmModelProvider
 from vv_agent.run_config import ToolPolicy
 from vv_agent.runtime.backends.distributed import (
@@ -41,12 +42,7 @@ from vv_agent.runtime.checkpoint_resume import (
     _checkpoint_control_result,
 )
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.controller import (
-    DistributedBackend,
-    HostInteractionRecoveryEnvelope,
-    HostInteractionRequest,
-    derive_host_interaction_record_id,
-)
+from vv_agent.runtime.controller import DistributedBackend, HostInteractionRecoveryEnvelope, derive_host_interaction_record_id
 from vv_agent.runtime.engine import (
     AgentRuntime,
     _RunBudgetController,

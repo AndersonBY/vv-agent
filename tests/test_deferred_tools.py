@@ -36,19 +36,21 @@ from vv_agent.deferred import (
     AcceptDeferredDecision,
     DeferredCheckpointClaimed,
     DeferredResolutionConflict,
-    DeferredResolutionResultInvalid,
     DeferredResolveDecision,
+)
+from vv_agent.events import ToolCallCompletedEvent
+from vv_agent.interaction import HostInteractionRequest
+from vv_agent.llm import ScriptedLLM
+from vv_agent.runtime.checkpoint_codec import checkpoint_to_dict
+from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
+from vv_agent.runtime.state import compute_tool_identity_key
+from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+from vv_agent.tools.outcomes import (
+    DeferredResolutionResultInvalid,
     DeferredToolHandle,
     _is_ambiguous_tool_error,
     validate_definitive_result,
 )
-from vv_agent.events import ToolCallCompletedEvent
-from vv_agent.llm import ScriptedLLM
-from vv_agent.runtime.checkpoint_codec import checkpoint_to_dict
-from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
-from vv_agent.runtime.controller import HostInteractionRequest
-from vv_agent.runtime.state import compute_tool_identity_key
-from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.types import LLMResponse, ToolCall, ToolResultStatus
 from vv_agent.workspace import MemoryWorkspaceBackend
 
@@ -1355,9 +1357,10 @@ def _deferred_checkpoint(
     tool_name: str = "defer",
     admit: bool = True,
 ):
-    from vv_agent.checkpoint import OperationKind, OperationState, ToolIdempotency
+    from vv_agent.checkpoint import OperationKind, OperationState
     from vv_agent.runtime.checkpoint_codec import checkpoint_from_dict
     from vv_agent.runtime.state import OperationJournalEntry
+    from vv_agent.tools.metadata import ToolIdempotency
 
     fixture = json.loads((Path(__file__).parent / "fixtures" / "parity" / "checkpoint_codec.json").read_text(encoding="utf-8"))
     payload = deepcopy(next(case["payload"] for case in fixture["valid_cases"] if case["name"] == "minimal_running"))

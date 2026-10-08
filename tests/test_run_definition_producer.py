@@ -22,7 +22,6 @@ from vv_agent.checkpoint import (
     AmbiguousToolPolicy,
     CheckpointConfig,
     CheckpointError,
-    ToolIdempotency,
     validate_run_definition,
 )
 from vv_agent.config import ResolvedModelConfig
@@ -32,6 +31,7 @@ from vv_agent.runtime.checkpoint_codec import _strict_json_loads
 from vv_agent.runtime.run_definition import build_run_definition
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.tools import build_default_registry
+from vv_agent.tools.metadata import ToolIdempotency
 from vv_agent.tools.registry import ToolRegistry
 from vv_agent.types import AgentTask, ToolExecutionResult
 
