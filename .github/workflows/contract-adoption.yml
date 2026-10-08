@@ -81,7 +81,7 @@ jobs:
           git add contract.lock.json "$snapshot"
           git commit -m "chore: adopt vv-agent-contract $version"
           git push --force-with-lease origin "$branch"
-          body="Adopts vv-agent-contract $version from https://github.com/AndersonBY/vv-agent-contract/releases/tag/v$version. The vendored snapshot and lock were generated automatically. Real producer or runtime changes may still be required before this PR passes; pair it with the vv-agent-rs adoption PR and central cross-repository run."
+          body="Adopts vv-agent-contract $version from https://github.com/AndersonBY/vv-agent-contract/releases/tag/v$version. The vendored snapshot and lock were generated automatically. Real producer or runtime changes may still be required before this PR passes; verify Python adoption through the central cross-repository run. Python is the required implementation; vv-agent-rs is frozen at contract 23.0.0 / package series 0.21.x and does not require an adoption PR."
           existing="$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
             gh pr edit "$existing" --title "chore: adopt vv-agent-contract $version" --body "$body"

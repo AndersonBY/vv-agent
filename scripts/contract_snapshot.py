@@ -326,18 +326,35 @@ def verify_adoption(
 ) -> dict[str, Any]:
     _, lock = load_lock(repo_root, lock_name)
     matrix = load_json_location(matrix_location)
-    if not isinstance(matrix, dict) or matrix.get("schema_version") != 1:
-        raise SnapshotError("support matrix must be a schema_version=1 object")
-    if matrix.get("contract_version") != lock["contract_version"]:
-        raise SnapshotError("support matrix version does not match contract.lock.json")
-    if matrix.get("status") != "verified":
-        raise SnapshotError(f"contract {lock['contract_version']} is not centrally verified")
+    if not isinstance(matrix, dict) or type(matrix.get("schema_version")) is not int or matrix["schema_version"] != 2:
+        raise SnapshotError("support matrix must be a schema_version=2 object")
     implementations = matrix.get("implementations")
     if not isinstance(implementations, dict) or not isinstance(implementations.get(implementation), dict):
         raise SnapshotError(f"support matrix has no {implementation} implementation record")
+    required = matrix.get("required_implementations")
+    if (
+        not isinstance(required, list)
+        or not required
+        or not all(isinstance(name, str) and name in implementations for name in required)
+        or len(set(required)) != len(required)
+    ):
+        raise SnapshotError("invalid required_implementations")
     record = implementations[implementation]
+    if record.get("contract_version") != lock["contract_version"]:
+        raise SnapshotError(f"{implementation} pinned version does not match contract.lock.json")
+    frozen = record.get("status") == "frozen"
+    if frozen:
+        series = record.get("package_series")
+        if (
+            implementation in required
+            or not isinstance(series, str)
+            or re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.x", series) is None
+        ):
+            raise SnapshotError("frozen implementation must be non-required and pin its package_series")
+    elif matrix.get("contract_version") != lock["contract_version"] or matrix.get("status") != "verified":
+        raise SnapshotError(f"contract {lock['contract_version']} is not centrally verified")
     verified_revision = record.get("verified_revision")
-    if record.get("status") != "verified" or not isinstance(verified_revision, str):
+    if record.get("status") not in ("verified", "frozen") or not isinstance(verified_revision, str):
         raise SnapshotError(f"{implementation} implementation is not centrally verified")
     if REVISION_RE.fullmatch(verified_revision) is None:
         raise SnapshotError(f"{implementation} verified revision is not a full Git commit")
@@ -359,9 +376,10 @@ def verify_adoption(
     return {
         "contract_version": lock["contract_version"],
         "implementation": implementation,
+        "status": record["status"],
         "verified_revision": verified_revision,
         "release_revision": revision,
-        "cross_repository_run": matrix.get("cross_repository_run"),
+        "cross_repository_run": None if frozen else matrix.get("cross_repository_run"),
     }
 
 

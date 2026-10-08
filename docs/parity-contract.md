@@ -10,8 +10,15 @@ that repository.
 `contract.lock.json` selects the contract version, Git revision, and artifact.
 The current adoption state is not duplicated in this document. Treat
 [`vv-agent-contract/support-matrix.json`](https://github.com/AndersonBY/vv-agent-contract/blob/main/support-matrix.json)
-as the machine-readable source for the current verified Python and Rust
-revisions, verification timestamp, and cross-repository run URL.
+as the machine-readable source for required implementation revisions,
+verification timestamp, central CI run URL, and frozen implementation baselines.
+Schema 2 lists `required_implementations` explicitly and records each
+implementation's own `contract_version`; schema 1 is rejected. Python is the
+required implementation. `vv-agent-rs` is frozen at contract 23.0.0 / package
+series 0.21.x for maintenance only and does not follow new contract releases.
+A newer global contract version or Python verification run does not establish
+newer Rust support. Reactivation requires a new Maker decision and full adoption
+of the then-current contract through the central workflow.
 
 The lock records the exact release artifact, artifact digest, vendored fixture
 path, and canonical fixture-manifest digest. `tests/fixtures/parity/` is a
@@ -24,9 +31,11 @@ For any shared public, model-visible, runtime, persistence, or wire change:
 1. Read this repository's lock and `../vv-agent-contract/AGENTS.md`.
 2. Read the central parity, versioning, and change-workflow documents.
 3. Change canonical docs and fixtures in `vv-agent-contract` first.
-4. Sync both implementation snapshots with `scripts/contract_snapshot.py`.
-5. Update real Python and Rust producers, not only fixture parsers.
-6. Run both full repository gates and central cross-repository CI.
+4. Sync required implementation snapshots with `scripts/contract_snapshot.py`.
+   Preserve the frozen Rust lock and fixtures.
+5. Update real Python producers and behavior tests, not only fixture parsers.
+6. Run Python's full repository gates and central cross-repository CI with the
+   contract and Python refs. Rust adoption and gates are not required.
 
 Never edit a vendored parity fixture or digest directly.
 
@@ -60,14 +69,13 @@ Public producer tests establish the canonical API, runtime decisions, events,
 strict wire readers, and recovery semantics under the locked contract. Passing
 fixture or snapshot checks alone does not establish those behaviors.
 
-The SQLite and Redis exchange probes separately exercise the current physical
-storage representations with real writers, readers, and recovery controllers.
-Their evidence covers the named operations and failure windows, not arbitrary
-mixed-language takeover of a running deployment. A full mixed-runtime failure
-campaign requires a deployment that actually switches language within one run;
-it is not a prerequisite for a single-language host integration. Both existing
-exchange probes and the complete public conformance gates remain required by
-the central cross-repository workflow.
+The SQLite and Redis exchange probes provide evidence for the physical storage
+representations, named operations, and failure windows at the pinned Python/Rust
+baseline, not arbitrary mixed-language takeover of a running deployment. Rust
+is frozen at contract 23.0.0 / 0.21.x; these probes do not establish compatibility
+with later Python contracts. Rust gates and cross-language exchange probes are
+not prerequisites for active Python adoption. Python's real producer tests and
+full quality gates remain required by the central workflow.
 
 ## Python Producer Map
 
@@ -406,9 +414,23 @@ uv run ty check
 uv build
 ```
 
-Then run the Rust gate and central cross-repository workflow with exact refs.
-Record final revisions and the workflow URL in the central support matrix only
-after every gate passes.
+Then run the central cross-repository workflow with exact contract and Python
+refs. Recording adoption requires `main` refs and passing all required gates;
+feature refs are allowed only for non-recording review runs. Record the Python
+revision and workflow URL while preserving the complete frozen Rust record.
+
+Before release, verify adoption with the schema-2 canonical client:
+
+```bash
+python3 scripts/contract_snapshot.py adoption --implementation python --revision "$(git rev-parse HEAD)"
+```
+
+Python must be `verified` for the locked contract version. The release revision
+must contain the recorded Python verified revision; it need not equal it.
+This ancestry check does not certify later commits through central CI. Frozen
+Rust is not required for Python adoption. Refresh `scripts/contract_snapshot.py`
+from `vv-agent-contract/clients/contract_snapshot.py` when the client changes;
+syncing fixtures alone does not update the client.
 
 ## Contract 23.0.0 Adoption
 
@@ -431,9 +453,9 @@ Deleted manager settings and restoration APIs have no compatibility readers or
 aliases. Resume sanitization remains separate from compaction. Existing policy,
 model-call, event and checkpoint discriminators remain unchanged.
 
-Open parity gap: Rust adoption of this draft, bidirectional live checkpoint
-exchange, both full gates and central cross-repository verification remain
-required. Python-only results do not mark this contract verified.
+Contract 23.0.0 remains verified by its recorded adoption evidence. Rust retains
+that verified baseline as its frozen 0.21.x maintenance line. Later contract
+adoption requires Python and central CI verification, not renewed Rust adoption.
 
 Prefix images use the canonical text placeholder and never pin later history in
 the raw tail. The summary route remains text-only. A final tool block containing
