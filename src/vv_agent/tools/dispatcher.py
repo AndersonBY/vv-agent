@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.base import ToolContext
+from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.tools.registry import ToolNotFoundError, ToolRegistry
 from vv_agent.types import ToolCall, ToolDirective, ToolExecutionResult, ToolResultStatus
 

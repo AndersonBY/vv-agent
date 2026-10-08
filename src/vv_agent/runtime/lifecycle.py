@@ -8,7 +8,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from vv_agent.checkpoint import utf16_sort_key
+from vv_agent.canonical_json import utf16_sort_key
 from vv_agent.types import CompletionReason, CycleRecord, Message, TaskTokenUsage, TaskTokenUsageTotals
 
 AFTER_CYCLE_CONTROL_STATE_KEY = "_vv_agent_after_cycle_control"

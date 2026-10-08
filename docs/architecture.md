@@ -103,6 +103,11 @@ cache total only when every included cycle reports that metric.
 
 | Path | Responsibility |
 | --- | --- |
+| `src/vv_agent/canonical_json.py` | RFC 8785 encoding, UTF-16 key ordering, canonical SHA-256 digests, and digest validation. |
+| `src/vv_agent/interaction.py` | Host-interaction request values, closed wire validation, and request digests. |
+| `src/vv_agent/tools/metadata.py` | Tool capability metadata and idempotency declarations. |
+| `src/vv_agent/tools/outcomes.py` | Tool-call outcomes, deferred handle identity, and definitive-result validation; stores own admission and receipts. |
+| `src/vv_agent/llm/errors.py` | Provider prompt-too-long classification and its retry limit, shared by model callers and compaction. |
 | `src/vv_agent/config.py` | Settings-file loading, provider/backend lookup, endpoint resolution, and `vv-llm` settings construction. |
 | `src/vv_agent/cli.py` | Command-line argument parsing and one-shot runtime execution. |
 | `src/vv_agent/agent.py` | Public `Agent` definition and agent-as-tool helpers. |

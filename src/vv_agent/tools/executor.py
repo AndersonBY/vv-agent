@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
-from vv_agent.deferred import ToolCallOutcome
 from vv_agent.tools.argument_validation import (
     assert_valid_tool_schema,
     close_object_schemas,
@@ -13,6 +12,7 @@ from vv_agent.tools.argument_validation import (
 )
 from vv_agent.tools.base import ToolContext, ToolSpec
 from vv_agent.tools.metadata import ToolMetadata, normalize_tool_metadata
+from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.types import ToolCall, ToolExecutionResult
 
 if TYPE_CHECKING:

@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-MAX_WIRE_INTEGER = (1 << 53) - 1
+from vv_agent import canonical_json
+
+if TYPE_CHECKING:
+    from vv_agent.tools.metadata import ToolIdempotency
+
 MAX_CHECKPOINT_KEY_BYTES = 512
 MAX_EXTENSION_NAMESPACE_BYTES = 128
 MAX_EXTENSION_ENTRY_BYTES = 65_536
 DEFAULT_MAX_EXTENSION_STATE_BYTES = 262_144
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EXTENSION_NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*\.[a-z0-9._-]+$")
 _CAPABILITY_SLOT_RE = re.compile(r"^[a-z][a-z0-9_.:-]*$")
 _JSON_POINTER_ESCAPE_RE = re.compile(r"~(?:0|1)")
@@ -141,12 +143,6 @@ class AmbiguousToolPolicy(StrEnum):
     SURFACE_TO_MODEL = "surface_to_model"
 
 
-class ToolIdempotency(StrEnum):
-    SUPPORTED = "supported"
-    UNSUPPORTED = "unsupported"
-    UNKNOWN = "unknown"
-
-
 class OperationKind(StrEnum):
     MODEL = "model"
     TOOL = "tool"
@@ -187,7 +183,7 @@ class EventCursor:
         if self.schema_version != "vv-agent.event-cursor.v1":
             raise ValueError("unsupported event cursor schema_version")
         _validate_capability_ref(self.store_ref, "event cursor store_ref")
-        _canonical_json(self.value, "event cursor value")
+        canonical_json._canonical_json(self.value, "event cursor value")
         if self.last_event_id is not None and (not isinstance(self.last_event_id, str) or not self.last_event_id.strip()):
             raise ValueError("event cursor last_event_id must be a non-empty string or None")
 
@@ -231,6 +227,8 @@ class ResumeObservation:
     idempotency_support: ToolIdempotency | None = None
 
     def __post_init__(self) -> None:
+        from vv_agent.tools.metadata import ToolIdempotency
+
         if not isinstance(self.operation_kind, OperationKind):
             object.__setattr__(self, "operation_kind", OperationKind(self.operation_kind))
         if not isinstance(self.state, OperationState):
@@ -261,6 +259,8 @@ class ResumeObservation:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ResumeObservation:
+        from vv_agent.tools.metadata import ToolIdempotency
+
         if not isinstance(payload, Mapping):
             raise ValueError("resume observation must be an object")
         if set(payload) != {
@@ -338,7 +338,7 @@ class ReconciliationDecision:
         elif self.error is not None:
             raise ValueError(f"{self.kind.value} does not accept an error")
         if self.kind is ReconciliationDecisionKind.ACCEPT_DEFERRED:
-            from vv_agent.deferred import DeferredToolHandle
+            from vv_agent.tools.outcomes import DeferredToolHandle
 
             if not isinstance(self.handle, DeferredToolHandle):
                 raise ValueError("accept_deferred requires an exact DeferredToolHandle")
@@ -433,10 +433,10 @@ class CheckpointConfig:
         if (
             isinstance(self.max_extension_state_bytes, bool)
             or not isinstance(self.max_extension_state_bytes, int)
-            or not 0 <= self.max_extension_state_bytes <= MAX_WIRE_INTEGER
+            or not 0 <= self.max_extension_state_bytes <= canonical_json.MAX_WIRE_INTEGER
         ):
             raise CheckpointError(
-                f"max_extension_state_bytes must be between 0 and {MAX_WIRE_INTEGER}",
+                f"max_extension_state_bytes must be between 0 and {canonical_json.MAX_WIRE_INTEGER}",
                 code="checkpoint_extension_limit_invalid",
             )
         normalized: list[str] = []
@@ -454,13 +454,13 @@ class CheckpointConfig:
                 "required_extension_namespaces must be unique",
                 code="checkpoint_extension_namespace_duplicate",
             )
-        self.required_extension_namespaces = sorted(normalized, key=utf16_sort_key)
+        self.required_extension_namespaces = sorted(normalized, key=canonical_json.utf16_sort_key)
         if not isinstance(self.credential_slots, list) or not all(isinstance(pointer, str) for pointer in self.credential_slots):
             raise CheckpointError(
                 "CheckpointConfig.credential_slots must be an array of strings",
                 code="checkpoint_credential_slots_invalid",
             )
-        normalized_slots = sorted(set(self.credential_slots), key=utf16_sort_key)
+        normalized_slots = sorted(set(self.credential_slots), key=canonical_json.utf16_sort_key)
         if self.credential_slots != normalized_slots:
             raise CheckpointError(
                 "CheckpointConfig.credential_slots must be sorted and unique",
@@ -495,7 +495,7 @@ class CheckpointConfig:
                     code="checkpoint_capability_ref_invalid",
                 ) from exc
             normalized_refs[slot] = dict(reference)
-        self.capability_refs = dict(sorted(normalized_refs.items(), key=lambda item: utf16_sort_key(item[0])))
+        self.capability_refs = dict(sorted(normalized_refs.items(), key=lambda item: canonical_json.utf16_sort_key(item[0])))
         if self.store is not None:
             required_methods = (
                 "create_checkpoint",
@@ -568,14 +568,6 @@ def validate_checkpoint_extension(extension: Any) -> None:
         )
 
 
-def canonical_json_bytes(value: Any, field_name: str = "value") -> bytes:
-    return _canonical_json(value, field_name).encode("utf-8")
-
-
-def canonical_json_sha256(value: Any, field_name: str = "value") -> str:
-    return hashlib.sha256(canonical_json_bytes(value, field_name)).hexdigest()
-
-
 def validate_run_definition(run_definition: Any) -> dict[str, Any]:
     if not isinstance(run_definition, Mapping):
         raise CheckpointError(
@@ -610,7 +602,7 @@ def validate_run_definition(run_definition: Any) -> dict[str, Any]:
     credential_slot_values: list[str] = credential_slots
     if credential_slot_values != sorted(
         set(credential_slot_values),
-        key=utf16_sort_key,
+        key=canonical_json.utf16_sort_key,
     ):
         raise CheckpointError(
             "run_definition credential_slots must be sorted and unique",
@@ -632,7 +624,7 @@ def validate_run_definition(run_definition: Any) -> dict[str, Any]:
                 code="checkpoint_credential_value_not_redacted",
             )
     try:
-        canonical_json_bytes(definition, "run_definition")
+        canonical_json.canonical_json_bytes(definition, "run_definition")
     except ValueError as exc:
         raise CheckpointError(
             str(exc),
@@ -793,7 +785,7 @@ def _validate_run_definition_shape(definition: dict[str, Any]) -> None:
         namespaces.append(namespace)
         _non_empty_definition_string(extension["version"], f"{label}.version")
         _definition_boolean(extension["required"], f"{label}.required")
-    if namespaces != sorted(set(namespaces), key=utf16_sort_key):
+    if namespaces != sorted(set(namespaces), key=canonical_json.utf16_sort_key):
         raise ValueError("run_definition.extensions must be sorted by unique namespace")
 
     refs = _open_definition_object(definition["capability_refs"], "run_definition.capability_refs")
@@ -839,8 +831,8 @@ def _validate_prompt_bundle_shape(value: Any) -> None:
         if section["stable"] is True:
             stable_sections.append(dict(section))
     stable_hash = _non_empty_definition_string(bundle["stable_hash"], "run_definition.prompt_bundle.stable_hash")
-    validate_sha256(stable_hash, "run_definition.prompt_bundle.stable_hash")
-    if canonical_json_sha256(stable_sections, "stable prompt sections") != stable_hash:
+    canonical_json.validate_sha256(stable_hash, "run_definition.prompt_bundle.stable_hash")
+    if canonical_json.canonical_json_sha256(stable_sections, "stable prompt sections") != stable_hash:
         raise ValueError("run_definition.prompt_bundle.stable_hash does not match stable sections")
 
 
@@ -876,9 +868,9 @@ def _validate_run_definition_message(value: Any, *, index: int) -> None:
             artifact["size_bytes"],
             f"{label}.artifact_ref.size_bytes",
             minimum=0,
-            maximum=MAX_WIRE_INTEGER,
+            maximum=canonical_json.MAX_WIRE_INTEGER,
         )
-        validate_sha256(artifact["sha256"], f"{label}.artifact_ref.sha256")
+        canonical_json.validate_sha256(artifact["sha256"], f"{label}.artifact_ref.sha256")
     if "tool_calls" not in message:
         return
     calls = _definition_array(message["tool_calls"], f"{label}.tool_calls")
@@ -1078,7 +1070,7 @@ def _definition_integer(
     field_name: str,
     *,
     minimum: int = 0,
-    maximum: int = MAX_WIRE_INTEGER,
+    maximum: int = canonical_json.MAX_WIRE_INTEGER,
 ) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ValueError(f"{field_name} must be an integer between {minimum} and {maximum}")
@@ -1106,7 +1098,7 @@ def _definition_string_array(
     typed_values = list(values)
     if unique and len(typed_values) != len(set(typed_values)):
         raise ValueError(f"{field_name} must contain unique values")
-    if sorted_unique and typed_values != sorted(set(typed_values), key=utf16_sort_key):
+    if sorted_unique and typed_values != sorted(set(typed_values), key=canonical_json.utf16_sort_key):
         raise ValueError(f"{field_name} must be sorted and unique")
     return typed_values
 
@@ -1119,7 +1111,7 @@ def _optional_capability_ref(value: Any, field_name: str) -> None:
 
 def compute_run_definition_digest(run_definition: Any) -> str:
     definition = validate_run_definition(run_definition)
-    return canonical_json_sha256(definition, "run_definition")
+    return canonical_json.canonical_json_sha256(definition, "run_definition")
 
 
 def compute_operation_request_digest(request: Any) -> str:
@@ -1172,7 +1164,7 @@ def compute_operation_request_digest(request: Any) -> str:
             code="operation_request_invalid",
         )
     try:
-        return canonical_json_sha256(projection, "operation request")
+        return canonical_json.canonical_json_sha256(projection, "operation request")
     except ValueError as exc:
         raise CheckpointError(
             str(exc),
@@ -1187,133 +1179,12 @@ def compute_event_payload_digest(event: Any) -> str:
             code="checkpoint_event_invalid",
         )
     try:
-        return canonical_json_sha256(dict(event), "checkpoint event")
+        return canonical_json.canonical_json_sha256(dict(event), "checkpoint event")
     except ValueError as exc:
         raise CheckpointError(
             str(exc),
             code="checkpoint_event_not_i_json",
         ) from exc
-
-
-def validate_sha256(value: str, field_name: str) -> str:
-    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
-        raise ValueError(f"{field_name} must be a lowercase SHA-256 hex digest")
-    return value
-
-
-def _canonical_json(value: Any, field_name: str) -> str:
-    try:
-        return _jcs_encode(value)
-    except (TypeError, ValueError, UnicodeError) as exc:
-        raise ValueError(f"{field_name} must be RFC 8785 I-JSON: {exc}") from exc
-
-
-def _jcs_encode(value: Any) -> str:
-    if value is None:
-        return "null"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, str):
-        return _jcs_quote(value)
-    if isinstance(value, int):
-        if not -MAX_WIRE_INTEGER <= value <= MAX_WIRE_INTEGER:
-            raise ValueError("integer is outside the I-JSON safe range")
-        return str(value)
-    if isinstance(value, float):
-        return _jcs_float(value)
-    if isinstance(value, Mapping):
-        items: list[str] = []
-        keys: list[str] = []
-        for key in value:
-            if not isinstance(key, str):
-                raise TypeError("object keys must be strings")
-            keys.append(key)
-        for key in sorted(keys, key=utf16_sort_key):
-            items.append(f"{_jcs_quote(key)}:{_jcs_encode(value[key])}")
-        return "{" + ",".join(items) + "}"
-    if isinstance(value, list | tuple):
-        return "[" + ",".join(_jcs_encode(item) for item in value) + "]"
-    raise TypeError(f"unsupported JSON value type {type(value).__name__}")
-
-
-def _jcs_quote(value: str) -> str:
-    parts = ['"']
-    escapes = {
-        0x08: "\\b",
-        0x09: "\\t",
-        0x0A: "\\n",
-        0x0C: "\\f",
-        0x0D: "\\r",
-    }
-    for character in value:
-        codepoint = ord(character)
-        if 0xD800 <= codepoint <= 0xDFFF:
-            raise UnicodeError("unpaired UTF-16 surrogate")
-        if character == '"':
-            parts.append('\\"')
-        elif character == "\\":
-            parts.append("\\\\")
-        elif codepoint in escapes:
-            parts.append(escapes[codepoint])
-        elif codepoint <= 0x1F:
-            parts.append(f"\\u{codepoint:04x}")
-        else:
-            parts.append(character)
-    parts.append('"')
-    return "".join(parts)
-
-
-def _jcs_float(value: float) -> str:
-    if not math.isfinite(value):
-        raise ValueError("non-finite number")
-    if value == 0:
-        return "0"
-    negative = value < 0
-    absolute = -value if negative else value
-    source = repr(absolute).lower()
-    if "e" in source:
-        mantissa, exponent_text = source.split("e", 1)
-        exponent = int(exponent_text)
-        digits = mantissa.replace(".", "").rstrip("0")
-        digits = digits or "0"
-    else:
-        exponent = 0
-        digits = source
-
-    if 1e-6 <= absolute < 1e21:
-        if "e" in source:
-            decimal_at = exponent + 1
-            if decimal_at <= 0:
-                rendered = "0." + ("0" * -decimal_at) + digits
-            elif decimal_at >= len(digits):
-                rendered = digits + ("0" * (decimal_at - len(digits)))
-            else:
-                rendered = digits[:decimal_at] + "." + digits[decimal_at:]
-        else:
-            rendered = source.removesuffix(".0")
-    else:
-        if "e" not in source:
-            integer, _, fraction = source.partition(".")
-            all_digits = (integer + fraction).lstrip("0")
-            first_index = next(index for index, char in enumerate(source) if char not in "0.")
-            dot_index = source.find(".")
-            exponent = (dot_index if dot_index >= 0 else len(source)) - first_index - 1
-            digits = all_digits.rstrip("0")
-        mantissa = digits[0]
-        if len(digits) > 1:
-            mantissa += "." + digits[1:]
-        sign = "+" if exponent >= 0 else ""
-        rendered = f"{mantissa}e{sign}{exponent}"
-    return "-" + rendered if negative else rendered
-
-
-def utf16_sort_key(value: str) -> tuple[int, ...]:
-    if not isinstance(value, str):
-        raise TypeError("object keys must be strings")
-    _jcs_quote(value)
-    return tuple(value.encode("utf-16-be"))
 
 
 def _resolve_json_pointer(document: Any, pointer: str) -> Any:
@@ -1355,8 +1226,8 @@ def _validate_capability_ref(value: Mapping[str, Any], field_name: str) -> None:
 
 
 def _positive_wire_integer(value: Any, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_WIRE_INTEGER:
-        raise ValueError(f"{field_name} must be between 1 and {MAX_WIRE_INTEGER}")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= canonical_json.MAX_WIRE_INTEGER:
+        raise ValueError(f"{field_name} must be between 1 and {canonical_json.MAX_WIRE_INTEGER}")
     return value
 
 

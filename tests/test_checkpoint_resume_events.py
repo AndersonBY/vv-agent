@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from vv_agent.deferred import DeferredToolHandle
 from vv_agent.events import (
     CheckpointCreatedEvent,
     CheckpointResumedEvent,
@@ -19,6 +18,7 @@ from vv_agent.events import (
     ToolCallDeferredEvent,
     event_from_dict,
 )
+from vv_agent.tools.outcomes import DeferredToolHandle
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "resume_events.jsonl"
 

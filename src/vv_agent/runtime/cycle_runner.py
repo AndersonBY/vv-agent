@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from vv_agent.constants import READ_FILE_TOOL_NAME
 from vv_agent.events import MemoryCompactTrigger, RunEvent, _project_provider_stream_payload
+from vv_agent.llm import errors
 from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.memory import CompactionExhaustedError, MemoryManager
 from vv_agent.memory.manager import CompactionMode
@@ -23,16 +24,6 @@ from vv_agent.types import AgentTask, CycleRecord, LLMResponse, Message, ModelCa
 
 if TYPE_CHECKING:
     from vv_agent.runtime.context import ExecutionContext
-
-MAX_PTL_RETRIES = 3
-_PTL_ERROR_PATTERNS = (
-    "prompt is too long",
-    "prompt_too_long",
-    "context_length_exceeded",
-    "maximum context length",
-    "request too large",
-    "too many tokens",
-)
 
 
 class CycleRunner:
@@ -214,11 +205,11 @@ class CycleRunner:
                 llm_response = dispatch.response
                 break
             except Exception as exc:
-                if not self._is_prompt_too_long_error(exc):
+                if not errors.is_prompt_too_long_error(exc):
                     raise
 
                 ptl_retries += 1
-                if ptl_retries > MAX_PTL_RETRIES:
+                if ptl_retries > errors.MAX_PTL_RETRIES:
                     raise CompactionExhaustedError(ptl_retries, exc) from exc
 
                 if ptl_retries == 1:
@@ -320,32 +311,6 @@ class CycleRunner:
             ),
         )
         return next_messages, cycle_record
-
-    @staticmethod
-    def _is_prompt_too_long_error(error: Exception) -> bool:
-        visited: set[int] = set()
-        stack: list[Any] = [error]
-        while stack:
-            current = stack.pop()
-            identifier = id(current)
-            if identifier in visited:
-                continue
-            visited.add(identifier)
-
-            current_text = str(current).lower()
-            if any(pattern in current_text for pattern in _PTL_ERROR_PATTERNS):
-                return True
-
-            cause = getattr(current, "__cause__", None)
-            context = getattr(current, "__context__", None)
-            if cause is not None:
-                stack.append(cause)
-            if context is not None:
-                stack.append(context)
-            args = getattr(current, "args", ())
-            if isinstance(args, tuple):
-                stack.extend(arg for arg in args if isinstance(arg, BaseException))
-        return False
 
     def _complete_llm(
         self,

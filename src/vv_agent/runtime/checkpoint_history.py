@@ -10,7 +10,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vv_agent.checkpoint import MAX_WIRE_INTEGER, CheckpointError, canonical_json_sha256, validate_sha256
+from vv_agent.canonical_json import MAX_WIRE_INTEGER, canonical_json_sha256, validate_sha256
+from vv_agent.checkpoint import CheckpointError
 from vv_agent.types import (
     AgentResult,
     CacheUsage,

@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, NoReturn
 
 from vv_agent.budget import BudgetUsageSnapshot
+from vv_agent.canonical_json import canonical_json_sha256
 from vv_agent.checkpoint import (
     AmbiguousModelPolicy,
     AmbiguousToolPolicy,
@@ -25,17 +26,10 @@ from vv_agent.checkpoint import (
     ReconciliationProvider,
     ResumeObservation,
     ResumePolicy,
-    ToolIdempotency,
-    canonical_json_sha256,
     compute_operation_request_digest,
     compute_run_definition_digest,
 )
-from vv_agent.deferred import (
-    AcceptDeferredDecision,
-    ToolCallOutcome,
-    _is_ambiguous_tool_error,
-    validate_definitive_result,
-)
+from vv_agent.deferred import AcceptDeferredDecision
 from vv_agent.event_store import IdempotentRunEventStore, RunEventStore
 from vv_agent.events import (
     CheckpointCreatedEvent,
@@ -77,6 +71,8 @@ from vv_agent.runtime.state import (
     operation_error_from_tool_result,
 )
 from vv_agent.runtime.token_usage import normalize_token_usage, summarize_task_token_usage
+from vv_agent.tools.metadata import ToolIdempotency
+from vv_agent.tools.outcomes import ToolCallOutcome, _is_ambiguous_tool_error, validate_definitive_result
 from vv_agent.types import (
     AgentResult,
     AgentStatus,

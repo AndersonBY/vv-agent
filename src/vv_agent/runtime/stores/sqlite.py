@@ -12,8 +12,10 @@ from threading import RLock
 from typing import Any, Literal, cast
 
 import vv_agent.events as run_events
-from vv_agent.checkpoint import CheckpointError, EventCursor, canonical_json_bytes, canonical_json_sha256
-from vv_agent.deferred import DeferredResolutionReceipt, DeferredResolveDecision, DeferredToolHandle
+from vv_agent.canonical_json import canonical_json_bytes, canonical_json_sha256
+from vv_agent.checkpoint import CheckpointError, EventCursor
+from vv_agent.deferred import DeferredResolutionReceipt, DeferredResolveDecision
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.runtime.checkpoint_codec import (
     _strict_json_loads,
     checkpoint_from_dict,
@@ -32,7 +34,6 @@ from vv_agent.runtime.controller import (
     HostInteractionOutcome,
     HostInteractionRecoveryEnvelope,
     HostInteractionRecoveryResult,
-    HostInteractionRequest,
     derive_controller_receipt_outbox_id,
     derive_host_interaction_notification_id,
     validate_host_interaction_notification,
@@ -80,6 +81,7 @@ from vv_agent.runtime.stores.controller_store import (
     prepare_host_response_consumption,
     validate_host_tool_receipt_replay,
 )
+from vv_agent.tools.outcomes import DeferredToolHandle
 from vv_agent.types import AgentStatus
 
 

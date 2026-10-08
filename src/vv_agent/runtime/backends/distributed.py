@@ -11,16 +11,14 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from vv_agent.budget import RunBudgetLimits
+from vv_agent.canonical_json import MAX_WIRE_INTEGER, canonical_json_bytes, utf16_sort_key
 from vv_agent.checkpoint import (
     MAX_CHECKPOINT_KEY_BYTES,
-    MAX_WIRE_INTEGER,
     RUN_DEFINITION_SCHEMA,
     AmbiguousModelPolicy,
     AmbiguousToolPolicy,
     CheckpointConfig,
     ResumePolicy,
-    canonical_json_bytes,
-    utf16_sort_key,
     validate_extension_namespace,
 )
 from vv_agent.model_settings import ModelSettings

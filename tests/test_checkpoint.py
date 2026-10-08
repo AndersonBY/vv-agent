@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 
+from vv_agent.canonical_json import canonical_json_bytes, canonical_json_sha256
 from vv_agent.checkpoint import (
     AmbiguousModelPolicy,
     AmbiguousToolPolicy,
@@ -27,9 +28,6 @@ from vv_agent.checkpoint import (
     ReconciliationDecisionKind,
     ResumeObservation,
     ResumePolicy,
-    ToolIdempotency,
-    canonical_json_bytes,
-    canonical_json_sha256,
     compute_event_payload_digest,
     compute_operation_request_digest,
     compute_run_definition_digest,
@@ -71,6 +69,7 @@ from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
 from vv_agent.runtime.stores.redis import RedisCheckpointStore
 from vv_agent.runtime.stores.sqlite import SqliteCheckpointStore
 from vv_agent.runtime.token_usage import summarize_task_token_usage
+from vv_agent.tools.metadata import ToolIdempotency
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -412,7 +411,7 @@ def _minimal_checkpoint(*, key: str = "fresh") -> Checkpoint:
 
 @pytest.mark.parametrize("field_name", ["active_host_interaction", "suspended_origin"])
 def test_checkpoint_preserves_host_prompt(field_name: str) -> None:
-    from vv_agent.runtime.controller import HostInteractionRequest
+    from vv_agent.interaction import HostInteractionRequest
 
     request = HostInteractionRequest(
         interaction_id="unsanitized-interaction",
@@ -562,8 +561,9 @@ def test_redis_checkpoint_payload_key_binding_fails_closed(store_kind: str) -> N
 
 @pytest.mark.parametrize("store_kind", ["fake", "real"])
 def test_redis_delete_rejects_foreign_deferred_index_member(store_kind: str) -> None:
-    from vv_agent.deferred import DeferredResolutionReceipt, DeferredToolHandle
+    from vv_agent.deferred import DeferredResolutionReceipt
     from vv_agent.runtime.stores.redis import _receipt_to_storage
+    from vv_agent.tools.outcomes import DeferredToolHandle
 
     if store_kind == "real":
         redis_url = os.environ.get("VV_AGENT_TEST_REDIS_URL")
@@ -2324,7 +2324,8 @@ def test_host_interaction_rejects_receipt_from_released_owner(
     from copy import deepcopy
     from dataclasses import replace
 
-    from vv_agent.runtime.controller import HostInteractionAdmissionContext, HostInteractionRequest
+    from vv_agent.interaction import HostInteractionRequest
+    from vv_agent.runtime.controller import HostInteractionAdmissionContext
 
     store = _store(store_kind, tmp_path, f"released-owner-{store_kind}")
     checkpoint = _minimal_checkpoint(key=f"released-owner-{store_kind}-{uuid4().hex}")
@@ -4384,10 +4385,11 @@ def test_accept_deferred_batch_replays_identity_before_revision_and_claim_fences
 
 
 def test_redis_cleanup_retries_when_resolution_adds_receipt_after_smembers() -> None:
-    from vv_agent.checkpoint import canonical_json_sha256
-    from vv_agent.deferred import DeferredResolutionReceipt, DeferredToolHandle
+    from vv_agent.canonical_json import canonical_json_sha256
+    from vv_agent.deferred import DeferredResolutionReceipt
     from vv_agent.runtime.state import compute_tool_identity_key
     from vv_agent.runtime.stores.redis import _receipt_to_storage
+    from vv_agent.tools.outcomes import DeferredToolHandle
     from vv_agent.types import ToolExecutionResult, ToolResultStatus
 
     class RacingPipeline(_FakeRedisPipeline):
@@ -4557,8 +4559,9 @@ def test_deferred_receipt_index_tamper_is_rejected_without_checkpoint_write(
     store_kind: str,
     tmp_path: Path,
 ) -> None:
-    from vv_agent.deferred import DeferredResolutionReceipt, DeferredToolHandle, ToolCallOutcome
+    from vv_agent.deferred import DeferredResolutionReceipt
     from vv_agent.runtime.stores.redis import _strict_json_loads
+    from vv_agent.tools.outcomes import DeferredToolHandle, ToolCallOutcome
     from vv_agent.types import ToolCall
 
     key = f"deferred-receipt-tamper-{store_kind}"
@@ -4679,8 +4682,8 @@ def test_deferred_receipt_index_tamper_is_rejected_without_checkpoint_write(
 
 
 def test_redis_resolution_retries_to_receipt_replay_after_concurrent_winner() -> None:
-    from vv_agent.deferred import DeferredToolHandle, ToolCallOutcome
     from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
+    from vv_agent.tools.outcomes import DeferredToolHandle, ToolCallOutcome
     from vv_agent.types import ToolCall, ToolExecutionResult, ToolResultStatus
 
     handle = DeferredToolHandle(
@@ -4852,7 +4855,7 @@ def test_incomplete_deferred_batch_reconciles_unclassified_wait_user_across_stor
     store_kind: str,
     tmp_path: Path,
 ) -> None:
-    from vv_agent.deferred import DeferredToolHandle, ToolCallOutcome
+    from vv_agent.tools.outcomes import DeferredToolHandle, ToolCallOutcome
 
     key = f"incomplete-deferred-wait-user-{store_kind}"
     store = _store(store_kind, tmp_path, key)

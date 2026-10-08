@@ -1,3 +1,4 @@
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.runtime.backends import ExecutionBackend, InlineBackend
 from vv_agent.runtime.cancellation import CancellationToken, CancelledError
 from vv_agent.runtime.context import ExecutionContext
@@ -11,7 +12,6 @@ from vv_agent.runtime.controller import (
     HostInteractionOutcome,
     HostInteractionRecoveryEnvelope,
     HostInteractionRecoveryResult,
-    HostInteractionRequest,
     HostInteractionResponse,
     derive_controller_command_id,
     derive_controller_receipt_outbox_id,

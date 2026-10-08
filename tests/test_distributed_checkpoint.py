@@ -23,9 +23,10 @@ from vv_agent import (
 )
 from vv_agent.approval import ApprovalBroker, ApprovalDecision, ApprovalProvider, ApprovalRequest
 from vv_agent.budget import HostCost, RunBudgetLimits
-from vv_agent.checkpoint import AmbiguousModelPolicy, AmbiguousToolPolicy, CheckpointError, ResumePolicy, ToolIdempotency
+from vv_agent.checkpoint import AmbiguousModelPolicy, AmbiguousToolPolicy, CheckpointError, ResumePolicy
 from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.guardrails import GuardrailResult
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.llm import ScriptedLLM
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.model_settings import ModelSettings, RetrySettings
@@ -56,7 +57,7 @@ from vv_agent.runtime.backends.inline import InlineBackend
 from vv_agent.runtime.checkpoint_resume import CheckpointResumeController
 from vv_agent.runtime.compiler import AgentCompiler
 from vv_agent.runtime.context import ExecutionContext
-from vv_agent.runtime.controller import ControllerCommand, HostInteractionAdmissionContext, HostInteractionRequest
+from vv_agent.runtime.controller import ControllerCommand, HostInteractionAdmissionContext
 from vv_agent.runtime.run_definition import build_run_definition
 from vv_agent.runtime.state import CheckpointRenewal
 from vv_agent.runtime.stores.memory import InMemoryCheckpointStore
@@ -69,6 +70,7 @@ from vv_agent.tools import (
     build_default_registry,
 )
 from vv_agent.tools.executor import FunctionToolExecutor
+from vv_agent.tools.metadata import ToolIdempotency
 from vv_agent.types import AgentResult, AgentStatus, AgentTask, LLMResponse, Message, SubAgentConfig, ToolArtifactRef, ToolCall
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "parity" / "distributed_run_envelope.json"

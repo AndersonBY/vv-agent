@@ -5,12 +5,12 @@ from dataclasses import MISSING, fields, is_dataclass
 from typing import Any
 
 from vv_agent.agent import Agent
+from vv_agent.canonical_json import utf16_sort_key
 from vv_agent.checkpoint import (
     CREDENTIAL_REDACTION_VALUE,
     RUN_DEFINITION_SCHEMA,
     CheckpointError,
     compute_run_definition_digest,
-    utf16_sort_key,
     validate_checkpoint_extension,
     validate_run_definition,
 )

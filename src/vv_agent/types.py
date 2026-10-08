@@ -10,7 +10,8 @@ from enum import StrEnum
 from typing import Any, Literal, cast
 
 from vv_agent.budget import MAX_WIRE_INTEGER, BudgetExhaustion, BudgetUsageSnapshot
-from vv_agent.checkpoint import ResumeObservation, canonical_json_bytes, validate_sha256
+from vv_agent.canonical_json import canonical_json_bytes, validate_sha256
+from vv_agent.checkpoint import ResumeObservation
 from vv_agent.microcompaction import MicrocompactionPolicy, normalize_microcompaction_policy
 from vv_agent.model_settings import ModelSettings
 from vv_agent.prompt import PromptBundle

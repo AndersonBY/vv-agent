@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 from vv_agent.budget import BudgetUsageSnapshot
+from vv_agent.canonical_json import canonical_json_bytes, canonical_json_sha256, validate_sha256
 from vv_agent.checkpoint import (
     RUN_DEFINITION_SCHEMA,
     CheckpointError,
@@ -14,14 +15,10 @@ from vv_agent.checkpoint import (
     OperationKind,
     OperationState,
     ResumeObservation,
-    ToolIdempotency,
-    canonical_json_bytes,
-    canonical_json_sha256,
     compute_event_payload_digest,
     compute_operation_request_digest,
     compute_run_definition_digest,
     validate_extension_namespace,
-    validate_sha256,
 )
 from vv_agent.deferred import (
     DeferredCheckpointClaimed,
@@ -29,11 +26,10 @@ from vv_agent.deferred import (
     DeferredResolutionReceipt,
     DeferredResolutionStale,
     DeferredResolveDecision,
-    DeferredToolHandle,
-    ToolCallOutcome,
-    validate_definitive_result,
 )
 from vv_agent.runtime.checkpoint_history import CheckpointHistory, empty_history, validate_history
+from vv_agent.tools.metadata import ToolIdempotency
+from vv_agent.tools.outcomes import DeferredToolHandle, ToolCallOutcome, validate_definitive_result
 from vv_agent.types import (
     AgentResult,
     AgentStatus,
@@ -2021,7 +2017,7 @@ def prepare_tool_receipt(
     claimed_cycle: int,
     created_at: float,
 ) -> Checkpoint | None:
-    from vv_agent.deferred import validate_definitive_result
+    from vv_agent.tools.outcomes import validate_definitive_result
 
     validate_definitive_result(result)
     if result.tool_call_id != tool_call_id:
@@ -2349,7 +2345,7 @@ def prepare_deferred_resolution(
         and item.tool_call_id == entry.tool_call_id
         and item.request_digest == entry.request_digest
     )
-    from vv_agent.checkpoint import canonical_json_sha256
+    from vv_agent.canonical_json import canonical_json_sha256
 
     identity_key = compute_tool_identity_key(
         snapshot.checkpoint_key,

@@ -24,13 +24,7 @@ from vv_agent.budget import (
     RunBudgetLimits,
     UnavailableMetricPolicy,
 )
-from vv_agent.checkpoint import (
-    CheckpointConfig,
-    CheckpointExtension,
-    ReconciliationProvider,
-    ResumeObservation,
-    ToolIdempotency,
-)
+from vv_agent.checkpoint import CheckpointConfig, CheckpointExtension, ReconciliationProvider, ResumeObservation
 from vv_agent.config import (
     ConfigError,
     EndpointConfig,
@@ -52,15 +46,10 @@ from vv_agent.context_providers import (
 from vv_agent.deferred import (
     AcceptDeferredDecision,
     DeferredCheckpointClaimed,
-    DeferredHandleError,
     DeferredResolutionConflict,
-    DeferredResolutionError,
     DeferredResolutionReceipt,
-    DeferredResolutionResultInvalid,
     DeferredResolutionStale,
     DeferredResolveDecision,
-    DeferredToolHandle,
-    ToolCallOutcome,
 )
 from vv_agent.event_store import (
     EventStoreError,
@@ -182,6 +171,14 @@ from vv_agent.tools import (
     ToolSideEffect,
     build_default_registry,
     function_tool,
+)
+from vv_agent.tools.metadata import ToolIdempotency
+from vv_agent.tools.outcomes import (
+    DeferredHandleError,
+    DeferredResolutionError,
+    DeferredResolutionResultInvalid,
+    DeferredToolHandle,
+    ToolCallOutcome,
 )
 from vv_agent.tracing import JsonlTraceExporter, Span, TraceProcessor, TraceSink
 from vv_agent.types import (

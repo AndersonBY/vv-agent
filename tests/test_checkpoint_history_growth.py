@@ -13,7 +13,7 @@ from test_checkpoint import _minimal_checkpoint
 from test_checkpoint_history_stores import _candidate, _commit
 from test_checkpoint_runner import _config, _provider
 
-import vv_agent.checkpoint as canonical
+import vv_agent.canonical_json as canonical
 import vv_agent.runtime.checkpoint_codec as codec
 import vv_agent.runtime.stores.redis as redis_store
 import vv_agent.runtime.stores.sqlite as sqlite_store

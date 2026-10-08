@@ -18,8 +18,10 @@ from vv_agent.app_server.protocol import (
 from vv_agent.app_server.thread_state import ThreadStateManager
 from vv_agent.app_server.thread_store import ThreadRecord, ThreadStore, TurnRecord
 from vv_agent.app_server.usage_projection import task_token_usage_to_wire
-from vv_agent.checkpoint import CheckpointError, ResumeObservation, ResumePolicy, canonical_json_sha256
+from vv_agent.canonical_json import canonical_json_sha256
+from vv_agent.checkpoint import CheckpointError, ResumeObservation, ResumePolicy
 from vv_agent.events import HostInteractionRequestedEvent
+from vv_agent.interaction import HostInteractionRequest
 from vv_agent.result import RunResult
 from vv_agent.run_handle import RunHandle
 from vv_agent.runner import Runner
@@ -27,7 +29,6 @@ from vv_agent.runtime.backends.distributed import DistributedRunHandle
 from vv_agent.runtime.controller import (
     ControllerCommand,
     DistributedBackend,
-    HostInteractionRequest,
     derive_controller_command_id,
     derive_host_interaction_notification_id,
     derive_host_interaction_record_id,

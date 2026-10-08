@@ -6,9 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from vv_agent.checkpoint import CheckpointError, OperationState, ToolIdempotency
+from vv_agent.checkpoint import CheckpointError, OperationState
 from vv_agent.constants import CREATE_SUB_TASK_TOOL_NAME
-from vv_agent.deferred import ToolCallOutcome
 from vv_agent.events import RunEvent, ToolCallCompletedEvent
 from vv_agent.memory.microcompact import EXCERPT_METADATA_KEY
 from vv_agent.result import _PendingToolApproval
@@ -17,10 +16,12 @@ from vv_agent.runtime.checkpoint_resume import CheckpointResumeController, ToolO
 from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.runtime.tool_planner import plan_tool_names
 from vv_agent.tools import ToolContext, ToolRegistry
+from vv_agent.tools.metadata import ToolIdempotency
 from vv_agent.tools.orchestrator import (
     _TOOL_DISPATCH_CALLBACK_METADATA_KEY,
     ToolOrchestrator,
 )
+from vv_agent.tools.outcomes import ToolCallOutcome
 from vv_agent.types import (
     AgentTask,
     CompletionReason,
