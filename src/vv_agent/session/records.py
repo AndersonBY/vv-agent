@@ -4,20 +4,34 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from hashlib import sha256
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jsonschema import Draft202012Validator, ValidationError
 from jsonschema.validators import extend
 
 from vv_agent.canonical_json import canonical_json_bytes
 
+if TYPE_CHECKING:
+    from vv_agent.types import AgentTask
+
 
 class RecordError(ValueError):
     pass
+
+
+def copy_json(value: Any) -> Any:
+    """Detach validated JSON at mutable input/output boundaries, without reparsing."""
+    if isinstance(value, dict):
+        return {key: copy_json(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [copy_json(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: copy_json(item) for key, item in value.items()}
+    return value
 
 
 def digest(value: Any) -> str:
@@ -364,13 +378,46 @@ class Record:
 
     _body: bytes | None = field(default=None, init=False, repr=False, compare=False)
     _digest: str | None = field(default=None, init=False, repr=False, compare=False)
-    _payload_json: str | None = field(default=None, init=False, repr=False, compare=False)
+    _value: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
+    _task_value: AgentTask | None = field(default=None, init=False, repr=False, compare=False)
+
+    def _task(self) -> AgentTask:
+        from vv_agent.types import AgentTask
+
+        if self._task_value is None:
+            object.__setattr__(self, "_task_value", AgentTask.from_dict(copy_json(self._payload["definition"]["task"])))
+        assert self._task_value is not None
+        return self._task_value
+
+    def task(self) -> AgentTask:
+        from vv_agent.model_settings import ResponseFormat
+
+        task = self._task()
+        settings = task.model_settings
+        if settings is not None and (
+            any(
+                value is not None
+                for value in (settings.reasoning, settings.extra_headers, settings.extra_body, settings.extra_args)
+            )
+            or (isinstance(settings.response_format, ResponseFormat) and settings.response_format.json_schema is not None)
+        ):
+            settings = deepcopy(settings)
+        return replace(
+            task,
+            metadata=copy_json(task.metadata),
+            initial_shared_state=copy_json(task.initial_shared_state),
+            initial_messages=deepcopy(task.initial_messages),
+            sub_agents=deepcopy(task.sub_agents),
+            model_settings=settings,
+            extra_tool_names=list(task.extra_tool_names),
+            exclude_tools=list(task.exclude_tools),
+        )
 
     def __getattribute__(self, name: str) -> Any:
         if name == "payload":
-            payload_json = object.__getattribute__(self, "_payload_json")
-            if payload_json is not None:
-                return json.loads(payload_json)
+            value = object.__getattribute__(self, "_value")
+            if value is not None:
+                return copy_json(value["payload"])
         return object.__getattribute__(self, name)
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Record:
@@ -380,12 +427,16 @@ class Record:
 
     def to_dict(self) -> dict[str, Any]:
         if self._body is not None:
-            return json.loads(self._body)
+            return copy_json(self._value)
         return {f.name: deepcopy(getattr(self, f.name)) for f in fields(self) if f.init}
 
-    def _retain(self, body: bytes) -> None:
-        value = json.loads(body)
-        object.__setattr__(self, "_payload_json", json.dumps(value["payload"], ensure_ascii=True))
+    @property
+    def _payload(self) -> dict[str, Any]:
+        # Private read-only view; detach before passing nested data to host callbacks.
+        return self._value["payload"] if self._value is not None else self.payload
+
+    def _retain(self, body: bytes, value: dict[str, Any] | None = None) -> None:
+        object.__setattr__(self, "_value", value if value is not None else json.loads(body))
         object.__setattr__(self, "payload", {})
         object.__setattr__(self, "_digest", sha256(body).hexdigest())
         object.__setattr__(self, "_body", body)
@@ -413,7 +464,8 @@ class Record:
             if self.kind == kind:
                 _check_digest(self.payload, digest_field)
         if self.kind == "input_applied":
-            InboxItem.parse(canonical_json_bytes(self.payload["input"]))
+            incoming = self.payload["input"]
+            validate(incoming["payload"], INPUT_PAYLOADS[incoming["kind"]], canonical=False)
         if self.kind == "op_planned" and (self.payload["op_kind"] == "model") != (self.payload["purpose"] is not None):
             raise RecordError("purpose required only for model operations")
 
@@ -444,7 +496,8 @@ class Record:
             raise RecordError(str(exc)) from exc
         record._validate(value)
         try:
-            record._retain(canonical_json_bytes(value))
+            canonical = canonical_json_bytes(value)
+            record._retain(canonical, value if canonical == body else None)
         except (ValueError, TypeError) as exc:
             raise RecordError(str(exc)) from exc
         return record

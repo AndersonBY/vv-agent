@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
-from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
@@ -181,8 +180,7 @@ class SQLStore:
                 (session_id,),
             )
             prefix = self._prefix(session_id, row)
-            state, records = deepcopy((prefix.reducer.state, prefix.records))
-            return state, records, row[1]
+            return prefix.reducer.snapshot(), prefix.records, row[1]
 
     def _schedule(self, session_id: str, state: ExecutionState) -> None:
         self._rows(
@@ -194,9 +192,9 @@ class SQLStore:
         with self._transaction():
             row = self._lock(session_id)
             self._fold_cache = None
-            state = self._prefix(session_id, row).reducer.state
-            self._schedule(session_id, state)
-            return deepcopy(state)
+            reducer = self._prefix(session_id, row).reducer
+            self._schedule(session_id, reducer.state)
+            return reducer.snapshot()
 
     def read(self, session_id: str, *, after_seq: int = 0, through_seq: int | None = None, limit: int = 1024) -> ReadPage:
         _positive(limit, "limit")
@@ -486,7 +484,7 @@ class SQLSessionTx:
                     head += 1
                     sequences.append((record.record_id, head))
                     new.append((position, record, head))
-            applications = {r.payload["input"]["input_id"]: (r, seq) for _, r, seq in new if r.kind == "input_applied"}
+            applications = {r._payload["input"]["input_id"]: (r, seq) for _, r, seq in new if r.kind == "input_applied"}
             if set(applications) != set(consume_input_ids):
                 raise Conflict("new input_applied and consume_input_ids must match exactly")
             consumed = []
@@ -497,7 +495,7 @@ class SQLSessionTx:
                     (session_id, input_id),
                 )
                 applied = applications[input_id][0]
-                if incoming[1] is not None or incoming[2] > now or incoming[0] != canonical_json_bytes(applied.payload["input"]):
+                if incoming[1] is not None or incoming[2] > now or incoming[0] != canonical_json_bytes(applied._payload["input"]):
                     raise Conflict("input already consumed, unavailable, or different bytes")
                 consumed.append(InboxItem.parse(incoming[0]))
             reducer = prefix.reducer.fork()
@@ -507,12 +505,12 @@ class SQLSessionTx:
             commit_digest = sha256(body).hexdigest()
             for position, record, seq in new:
                 if record.kind == "op_started":
-                    if record.payload["epoch"] != lease.epoch:
+                    if record._payload["epoch"] != lease.epoch:
                         raise Conflict("dispatch epoch does not match writer")
                     assert record.operation_id is not None and record.attempt is not None
                     op = state.operations[record.operation_id]
                     planned = op.attempts[record.attempt].plan
-                    if (planned.payload["not_before_ms"] or 0) > now:
+                    if (planned._payload["not_before_ms"] or 0) > now:
                         raise Conflict("dispatch before not-before")
                 self._write(
                     record,

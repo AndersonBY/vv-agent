@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 def manager_for(driver: _Driver) -> MemoryManager:
     task = driver.task()
-    definition = driver.state.turns[task.task_id].start.payload["definition"]
+    definition = driver.state.turns[task.task_id].start._payload["definition"]
     return MemoryManager(
         **(definition["memory_settings"] | {"artifact_scope": f"session/{driver.sid}/{task.task_id}"}),
         workspace_backend=(
@@ -72,26 +72,26 @@ def replacement_record(
 def finish_summary(driver: _Driver) -> bool:
     """Accept a saved receipt before consuming inputs that could change its source view."""
     tid = driver.state.active_turn_id
-    accepted = {r.payload["summary_operation_id"] for r in driver.state.compactions}
+    accepted = {r._payload["summary_operation_id"] for r in driver.state.compactions}
     for oid, op in driver.state.operations.items():
         if op.turn_id != tid or op.kind != "model" or op.selected_attempt is None or oid in accepted:
             continue
         a = op.attempts[op.selected_attempt]
-        if a.plan.payload["purpose"] != "compaction" or a.result is None or a.context != "normal":
+        if a.plan._payload["purpose"] != "compaction" or a.result is None or a.context != "normal":
             continue
         # The source is an immutable log prefix, not the present transcript after late inputs.
-        prefix = tuple(r for r in driver.records if r.seq <= int(a.plan.payload["context_version"]))
+        prefix = tuple(r for r in driver.records if r.seq <= int(a.plan._payload["context_version"]))
         logical = [r.record for r in prefix]
-        consumed = [InboxItem(**r.payload["input"]) for r in logical if r.kind == "input_applied"]
+        consumed = [InboxItem(**r._payload["input"]) for r in logical if r.kind == "input_applied"]
         source = project_context(prefix, fold(logical, consumed_inputs=consumed))
-        meta = a.plan.payload["request"]["metadata"]
+        meta = a.plan._payload["request"]["metadata"]
         if digest([m.to_dict() for m in driver.transcript()]) != meta["source_digest"]:
             continue
         manager = manager_for(driver)
         plan = manager.plan_summary(source, keep_recent=meta["keep_recent"])
         if plan is None:
             continue
-        replacement, accepted_result = manager.accept_summary(plan, a.result.payload["result"]["content"], notify=False)
+        replacement, accepted_result = manager.accept_summary(plan, a.result._payload["result"]["content"], notify=False)
         if accepted_result:
             record = replacement_record(driver, manager, source, replacement, mode=meta["mode"], summary=a.result, plan=plan)
             driver.commit([record], guarded=True)
@@ -108,12 +108,12 @@ def compact_context(driver: _Driver) -> bool:
         for op in driver.state.operations.values()
         if op.turn_id == driver.state.active_turn_id
         and op.kind == "model"
-        and op.attempts[1].plan.payload["purpose"] == "primary"
+        and op.attempts[1].plan._payload["purpose"] == "primary"
     ]
     failures = 0
     for op in reversed(primary):
         result = op.attempts[op.selected_attempt].result if op.selected_attempt else None
-        if result is None or result.payload["result"].get("error_code") != "prompt_too_long":
+        if result is None or result._payload["result"].get("error_code") != "prompt_too_long":
             break
         failures += 1
     if failures:
@@ -130,9 +130,9 @@ def compact_context(driver: _Driver) -> bool:
     source_digest = digest([m.to_dict() for m in source])
     if not failures and any(
         op.turn_id == driver.state.active_turn_id
-        and op.attempts[1].plan.payload["purpose"] == "compaction"
-        and op.attempts[1].plan.payload["request"]["metadata"]["source_digest"] == source_digest
-        and op.attempts[1].plan.payload["request"]["metadata"]["mode"] == mode
+        and op.attempts[1].plan._payload["purpose"] == "compaction"
+        and op.attempts[1].plan._payload["request"]["metadata"]["source_digest"] == source_digest
+        and op.attempts[1].plan._payload["request"]["metadata"]["mode"] == mode
         for op in driver.state.operations.values()
     ):
         return False
@@ -144,12 +144,12 @@ def compact_context(driver: _Driver) -> bool:
             or (
                 r.record.kind == "op_completed"
                 and r.record.operation_id
-                and driver.state.operations[r.record.operation_id].attempts[1].plan.payload["purpose"] != "compaction"
+                and driver.state.operations[r.record.operation_id].attempts[1].plan._payload["purpose"] != "compaction"
             )
         ),
         None,
     )
-    if last_change and last_change.kind == "context_compacted" and last_change.payload["mode"] != "micro":
+    if last_change and last_change.kind == "context_compacted" and last_change._payload["mode"] != "micro":
         return False
     try:
         manager.compaction_evidence(source)

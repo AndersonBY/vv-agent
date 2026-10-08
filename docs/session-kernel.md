@@ -29,13 +29,24 @@ persistence or wire format. Rust remains frozen and is outside this adoption.
 
 Logical bytes use the existing `canonical_json.canonical_json_bytes` (RFC 8785)
 with SHA-256 digests. Producer construction validates and freezes each Record's
-canonical bytes and digest once. `payload` and `to_dict()` return detached JSON
-values; edit by constructing a replacement Record, never by mutating a returned
+canonical bytes and digest once. Parsed JSON is retained privately for read-only
+kernel use; already parsed canonical storage bytes are not parsed a second time.
+`payload`, `to_dict()`, typed task copies and projected messages detach mutable
+values at host boundaries, including tool hooks replayed from a retained model
+receipt. Immutable prompt and scalar-only model settings can
+be shared. Edit by constructing a replacement Record, never by mutating a returned
 payload. Direct dataclass construction is checked by `encode()` before admission.
 The closed record schemas compile to checks for their exact keyword vocabulary;
 unsupported keywords fail at import, and invalid values use the original
 jsonschema validator for diagnostics. Equivalence tests exercise all schema and
 handle variants as well as the unchanged invalid-record tests.
+
+The shared JCS encoder uses the stdlib C encoder for safe integers, valid Unicode
+strings, arrays and objects with BMP keys and no floats. Other values use the full
+encoder, with the same guarded optimization for eligible nested subtrees. Lone
+surrogates and unsafe integers retain their rejection boundaries; astral keys
+retain UTF-16 ordering. Vendored JCS golden vectors, literal escaping checks and
+6,000 generated nested-value comparisons test fast/full byte equivalence.
 
 Storage sequence, receiving time, and writer epoch are excluded. Record IDs derive from semantic positions; input and commit IDs must
 be stable caller-owned source/transaction identities. No retry generates an ID.
@@ -120,7 +131,10 @@ head sequence, lease epoch and the stored head digest. Cold recovery checks stor
 byte digests, closed schemas, embedded digests and every reducer transition. A
 warm refresh reads and folds only the new tail. Append validates new records
 against a fork of that prefix inside the same transaction and retains head/inbox
-CAS and both lease checks. Commit replay and overlap use indexed identity lookups.
+CAS and both lease checks. Forks copy index containers and clone only operations
+or turns that a transition will modify. This avoids allocating an entire old
+operation graph for a one-record append. Public state snapshots still detach all
+mutable operations, attempts, waits and child handles. Commit replay and overlap use indexed identity lookups.
 Rollback/conflict, head rollback or a changed head digest discard the cache;
 an outer host rollback is caught by the next database binding check. A new lease
 epoch rebinds the immutable prefix only after its stored head bytes and digest
@@ -177,8 +191,14 @@ stopped unless the handler confirms cooperative cancellation.
 The immutable definition contains the compiled AgentTask/PromptBundle, tool
 schemas/capabilities, model binding and handler version. Resume does not rerun
 instruction/context providers. Version/schema/capability/model-binding changes
-stop with an explicit reason. Dispatch reevaluates current authorization and
-retains frozen policy denials. The internal runtime exposes the policy-filtered built-in planner surface and registered
+stop with an explicit reason. Each Runtime constructs its registry once, or reuses
+the registry supplied by its factory. Bounded definition/digest and schema caches
+include task controls, model binding, memory settings, child names, registry
+revision, exposure and detached capability declarations. Type-sensitive JSON
+fingerprints prevent bool/integer cache-key collisions. Failed canonical validation
+preserves the last valid definition cache. Dynamic `is_enabled`
+predicates are reevaluated when compiling each new turn. Dispatch reevaluates
+current authorization and retains frozen policy denials. The internal runtime exposes the policy-filtered built-in planner surface and registered
 executors, honoring FunctionTool `is_enabled` and registry exposure. The capability
 matrix in `session-kernel-capability-matrix.md` distinguishes paired evidence from
 unimplemented lifecycle and SDK adapters. It does not run the old checkpoint controller or

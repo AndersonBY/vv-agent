@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from vv_agent.runtime.tool_call_runner import ToolCallRunner
-from vv_agent.types import AgentTask, Message, ToolExecutionResult
+from vv_agent.types import Message, ToolExecutionResult
 
-from .records import digest
+from .records import copy_json, digest
 from .store import StoredRecord
 
 if TYPE_CHECKING:
@@ -21,14 +22,14 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
         r = stored.record
         if r.kind not in {"context_compacted", "turn_started", "input_applied", "op_completed"}:
             continue
-        p = r.payload
+        p = r._payload
         if r.kind == "context_compacted":
-            messages = [Message.from_dict(m) for m in p["replacement"]]
+            messages = [Message.from_dict(copy_json(m)) for m in p["replacement"]]
         elif r.kind == "turn_started":
-            task = AgentTask.from_dict(p["definition"]["task"])
-            history = task.initial_messages or messages
+            task = r._task()
+            history = deepcopy(task.initial_messages) if task.initial_messages else messages
             messages = [
-                Message("system", task.prompt_bundle.flatten(), metadata=dict(task.metadata)),
+                Message("system", task.prompt_bundle.flatten(), metadata=copy_json(task.metadata)),
                 *[m for m in history if m.role != "system"],
             ]
             messages.append(Message("user", task.user_prompt))
@@ -50,7 +51,7 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                 op.kind != "model"
                 or p["context"] != "normal"
                 or op.selected_attempt != r.attempt
-                or op.attempts[r.attempt].plan.payload["purpose"] != "primary"
+                or op.attempts[r.attempt].plan._payload["purpose"] != "primary"
                 or p["result"].get("error_code")
             ):
                 continue
@@ -69,7 +70,7 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                                 "name": c["name"],
                                 "arguments": json.dumps(c["arguments"], ensure_ascii=False, separators=(",", ":")),
                             },
-                            **({"extra_content": c["extra_content"]} if "extra_content" in c else {}),
+                            **({"extra_content": copy_json(c["extra_content"])} if "extra_content" in c else {}),
                         }
                         for c in calls
                     ]
@@ -82,7 +83,7 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                     continue
                 a = tool.attempts[tool.selected_attempt or max(tool.attempts)]
                 if a.result and a.context == "normal":
-                    result = ToolExecutionResult.from_dict(a.result.payload["result"])
+                    result = ToolExecutionResult.from_dict(copy_json(a.result._payload["result"]))
                     message = result.to_tool_message()
                     messages.append(message)
                     image = ToolCallRunner._build_image_notification(result=result, include_image=task.native_multimodal)
