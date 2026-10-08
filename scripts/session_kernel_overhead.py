@@ -14,12 +14,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from vv_agent import Agent, MemorySession, RunConfig, Runner
+from vv_agent.app_server import AppServer, ChannelTransport, DefaultAppServerHost
 from vv_agent.llm.scripted import ScriptedLLM
 from vv_agent.model import ScriptedModelProvider
 from vv_agent.session.children import child_delivery
 from vv_agent.session.kernel import Runtime, drive, read_state
 from vv_agent.session.records import InboxItem, SessionSpec
 from vv_agent.session.sqlite import SQLiteStore
+from vv_agent.session.surfaces import _SessionKernel
 from vv_agent.tools.function import function_tool
 from vv_agent.types import LLMResponse, SubAgentConfig, ToolCall
 
@@ -29,7 +31,7 @@ def echo(text: str) -> str:
     return text
 
 
-def run_case(path: str, scenario: str, workspace: Path) -> None:
+def run_case(path: str, scenario: str, workspace: Path) -> float | None:
     ready, release = threading.Event(), threading.Event()
 
     def blocking(_request):
@@ -54,6 +56,41 @@ def run_case(path: str, scenario: str, workspace: Path) -> None:
     agent = Agent("bench", "Be concise.", tools=[echo])
     if scenario == "children":
         agent.sub_agents = {"worker": SubAgentConfig(model="m", description="Be concise.")}
+    if scenario == "app_server_turn":
+        kernel = _SessionKernel() if path == "kernel" else None
+        transport = ChannelTransport(connection_id="benchmark")
+        server = AppServer(transport=transport, host=DefaultAppServerHost(agent=agent, run_config=config), _kernel=kernel)
+        try:
+            server.processor.process_message(
+                "benchmark", {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "benchmark"}}}
+            )
+            server.processor.process_message("benchmark", {"jsonrpc": "2.0", "method": "initialized"})
+            server.processor.process_message("benchmark", {"jsonrpc": "2.0", "id": 1, "method": "thread/start"})
+            while transport.receive_outbound(timeout=5).get("method") != "thread/started":
+                pass
+            started_ns = time.perf_counter_ns()
+            server.processor.process_message(
+                "benchmark",
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "turn/start",
+                    "params": {"threadId": "thread_1", "input": [{"type": "text", "text": "go"}]},
+                },
+            )
+            while (message := transport.receive_outbound(timeout=5)).get("method") != "turn/completed":
+                pass
+            elapsed_ms = (time.perf_counter_ns() - started_ns) / 1e6
+            assert message["params"]["status"] == "completed" and message["params"]["finalOutput"] == "done"
+            if kernel:
+                server.run_adapter.join()
+            else:
+                assert server.state_manager.active_turn("thread_1") is None
+            assert not llm.steps
+            return elapsed_ms
+        finally:
+            if kernel:
+                kernel.close()
     if path == "runner":
         if scenario == "start_cancel":
             handle = Runner.start(agent, "go", run_config=config)
@@ -129,7 +166,7 @@ def benchmark(runs: int, warmup: int) -> dict:
     rows = []
     with TemporaryDirectory(prefix="vv-kernel-bench-") as temporary:
         workspace = Path(temporary)
-        for scenario in ("no_tool", "two_tools", "ten_turns", "start_cancel", "children"):
+        for scenario in ("no_tool", "two_tools", "ten_turns", "start_cancel", "children", "app_server_turn"):
             measurements = {}
             for path in ("runner", "kernel"):
                 for _ in range(warmup):
@@ -140,8 +177,8 @@ def benchmark(runs: int, warmup: int) -> dict:
                 samples = []
                 for _ in range(runs):
                     start = time.perf_counter_ns()
-                    run_case(path, scenario, workspace)
-                    samples.append((time.perf_counter_ns() - start) / 1e6)
+                    elapsed = run_case(path, scenario, workspace)
+                    samples.append(elapsed if elapsed is not None else (time.perf_counter_ns() - start) / 1e6)
                 gc.collect()
                 remaining = set(threading.enumerate())
                 measurements[path] = {

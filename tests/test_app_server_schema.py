@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import vv_agent.app_server.schema as schema_module
-from vv_agent.app_server import ChannelTransport, MessageProcessor, OutgoingRouter
+from vv_agent.app_server import ChannelTransport, OutgoingRouter
 from vv_agent.app_server.processor import CLIENT_METHODS
 from vv_agent.app_server.schema import (
     _schema_bundle,
@@ -148,11 +148,13 @@ def test_every_internal_schema_reference_resolves() -> None:
             assert reference.removeprefix("#/$defs/") in definitions, f"{name}: {reference}"
 
 
-def test_schema_export_request_returns_json_and_typescript_bundles() -> None:
+def test_schema_export_request_returns_json_and_typescript_bundles(surface) -> None:
+    from vv_agent.app_server.server import AppServer
+
     transport = ChannelTransport(connection_id="conn_1")
     router = OutgoingRouter()
     router.register_transport(transport)
-    processor = MessageProcessor(router=router)
+    processor = AppServer(transport=transport, router=router, _kernel=surface).processor
     processor.process_message(
         "conn_1",
         {
@@ -167,6 +169,7 @@ def test_schema_export_request_returns_json_and_typescript_bundles() -> None:
     processor.process_message("conn_1", {"jsonrpc": "2.0", "id": 2, "method": "schema/export", "params": {}})
 
     result = transport.receive_outbound(timeout=1)["result"]
+    assert result == {"jsonSchema": json_schema_bundle(), "typescript": typescript_schema_bundle()}
     assert json.loads(result["jsonSchema"]["ClientRequest"])["title"] == "ClientRequest"
     assert "export type ClientRequest" in result["typescript"]["ClientRequest.ts"]
     assert len(result["jsonSchema"]) == 19

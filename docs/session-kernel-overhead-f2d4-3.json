@@ -1,0 +1,123 @@
+{
+  "runs": 200,
+  "warmup": 10,
+  "single_turn_target_ms": 50,
+  "per_turn_target_ms": 8,
+  "rows": [
+    {
+      "scenario": "no_tool",
+      "runner": {
+        "p50_ms": 3.4274240000000002,
+        "p95_ms": 3.917545,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 4096
+      },
+      "kernel": {
+        "p50_ms": 13.1324325,
+        "p95_ms": 13.976038,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 815104
+      },
+      "p95_added_ms": 10.058493,
+      "target_ms": 50
+    },
+    {
+      "scenario": "two_tools",
+      "runner": {
+        "p50_ms": 5.3640345,
+        "p95_ms": 5.86775,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 12288
+      },
+      "kernel": {
+        "p50_ms": 23.729925,
+        "p95_ms": 25.102074,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 8192
+      },
+      "p95_added_ms": 19.234324,
+      "target_ms": 50
+    },
+    {
+      "scenario": "ten_turns",
+      "runner": {
+        "p50_ms": 35.0873725,
+        "p95_ms": 38.631736,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": -962560
+      },
+      "kernel": {
+        "p50_ms": 91.91237699999999,
+        "p95_ms": 96.638811,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 0
+      },
+      "p95_added_ms": 58.00707500000001,
+      "target_ms": 80
+    },
+    {
+      "scenario": "start_cancel",
+      "runner": {
+        "p50_ms": 4.4418735,
+        "p95_ms": 4.981741,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 237568
+      },
+      "kernel": {
+        "p50_ms": 14.8568435,
+        "p95_ms": 16.152189,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 65536
+      },
+      "p95_added_ms": 11.170448,
+      "target_ms": 50
+    },
+    {
+      "scenario": "children",
+      "runner": {
+        "p50_ms": 7.75149,
+        "p95_ms": 8.500549,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 0
+      },
+      "kernel": {
+        "p50_ms": 51.155932500000006,
+        "p95_ms": 53.323386,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 0
+      },
+      "p95_added_ms": 44.822837,
+      "target_ms": 50
+    },
+    {
+      "scenario": "app_server_turn",
+      "runner": {
+        "p50_ms": 7.4914085,
+        "p95_ms": 8.840605,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 2940928
+      },
+      "kernel": {
+        "p50_ms": 32.4379115,
+        "p95_ms": 34.84678,
+        "threads_after": 1,
+        "leaked_threads": [],
+        "rss_delta_bytes": 7495680
+      },
+      "p95_added_ms": 26.006175000000002,
+      "target_ms": 50
+    }
+  ],
+  "passed": true
+}

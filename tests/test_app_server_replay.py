@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from support import FixedModelProvider
@@ -16,6 +16,8 @@ from vv_agent.llm import LlmRequest, ScriptedLLM
 from vv_agent.llm.scripted import ScriptStep
 from vv_agent.types import LLMResponse
 
+pytestmark = pytest.mark.usefixtures("surface")
+
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
     endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
@@ -28,7 +30,12 @@ def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
     )
 
 
-def test_thread_read_replays_emitted_items() -> None:
+def test_thread_read_replays_emitted_items(surface, monkeypatch) -> None:
+    if surface:
+        from vv_agent.session.events import SessionRunEventStore
+
+        consume = SessionRunEventStore.consume
+        monkeypatch.setattr(SessionRunEventStore, "consume", lambda self, sink, **kwargs: consume(self, sink, limit=1))
     server, transport = _server_with_steps([_finish_response("first")])
     _initialize_and_start_thread(server, transport)
     outbound = _start_turn_and_drain(server, transport, text="hello")
@@ -47,6 +54,12 @@ def test_thread_read_replays_emitted_items() -> None:
     replayed_items = cast(list[dict[str, object]], result["items"])
 
     assert replayed_items == emitted_items
+    if surface:
+        cast(Any, server.run_adapter).join()
+        cursor = surface.store.connection.execute(
+            "SELECT last_seq FROM sk_consumer WHERE session_id='thread_1' AND consumer='app_server'"
+        ).fetchone()[0]
+        assert cursor == surface.store.read_state("thread_1")[1][-1].seq
 
 
 def test_thread_resume_replays_timeline_and_subscribes_to_live_events() -> None:
@@ -71,7 +84,7 @@ def test_thread_resume_replays_timeline_and_subscribes_to_live_events() -> None:
     assert methods[-1] == "turn/completed"
 
 
-def test_resume_during_active_turn_subscribes_before_later_notifications() -> None:
+def test_resume_during_active_turn_subscribes_before_later_notifications(surface) -> None:
     first_step_ready = threading.Event()
     first_step_can_finish = threading.Event()
 
@@ -109,6 +122,15 @@ def test_resume_during_active_turn_subscribes_before_later_notifications() -> No
         "conn_2", {"jsonrpc": "2.0", "id": 11, "method": "thread/resume", "params": {"threadId": "thread_1"}}
     )
     resume_response = second_transport.receive_outbound(timeout=1)
+    if surface:
+        tid = resume_response["result"]["turns"][0]["turnId"]
+        handles = len(surface.handles)
+        server.processor.process_message(
+            "conn_2", {"jsonrpc": "2.0", "id": 12, "method": "turn/resume", "params": {"threadId": "thread_1", "turnId": tid}}
+        )
+        active_response = second_transport.receive_outbound(timeout=1)
+        assert active_response["id"] == 12 and active_response["result"]["status"] == "running"
+        assert len(surface.handles) == handles
 
     first_step_can_finish.set()
     messages = []
@@ -121,6 +143,14 @@ def test_resume_during_active_turn_subscribes_before_later_notifications() -> No
     assert resume_response["id"] == 11
     assert resume_response["result"]["thread"]["threadId"] == "thread_1"
     assert any(message.get("method") == "turn/completed" for message in messages)
+    if surface:
+        cast(Any, server.run_adapter).join()
+        server.processor.process_message(
+            "conn_2", {"jsonrpc": "2.0", "id": 13, "method": "turn/resume", "params": {"threadId": "thread_1", "turnId": tid}}
+        )
+        terminal_response = second_transport.receive_outbound(timeout=1)
+        assert terminal_response["id"] == 13 and terminal_response["result"]["finalOutput"] == "done"
+        assert len(surface.handles) == handles
 
 
 def test_resume_subscription_and_reopen_are_installed_before_snapshot() -> None:

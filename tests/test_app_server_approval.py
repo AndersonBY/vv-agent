@@ -15,6 +15,8 @@ from vv_agent.config import EndpointConfig, EndpointOption, ResolvedModelConfig
 from vv_agent.llm import ScriptedLLM
 from vv_agent.types import LLMResponse, ToolCall
 
+pytestmark = pytest.mark.usefixtures("surface")
+
 
 def _resolved_model(model: str = "test-model") -> ResolvedModelConfig:
     endpoint = EndpointConfig(endpoint_id="fake", api_key="k", api_base="https://example.invalid/v1")
@@ -259,7 +261,9 @@ def test_app_server_approval_allow_session_can_be_resolved_by_client_request() -
 
     approval_request = _start_and_wait_for_approval(server, transport)
     approval_params = cast(dict[str, object], approval_request["params"])
-    requested = _drain_until(transport, lambda message: message.get("method") == "approval/requested")
+    requested = cast(dict[str, object], approval_request.get("_requested")) or _drain_until(
+        transport, lambda message: message.get("method") == "approval/requested"
+    )
     assert cast(dict[str, object], requested["params"])["requestId"] == approval_params["requestId"]
 
     _send(
@@ -377,7 +381,15 @@ def _start_and_wait_for_approval(server: AppServer, transport: ChannelTransport)
             "params": {"threadId": thread_id, "input": [{"type": "text", "text": "run tool"}]},
         },
     )
-    return _drain_until(transport, lambda message: message.get("method") == "approval/request")
+    requested = None
+    while True:
+        message = transport.receive_outbound(timeout=10)
+        if message.get("method") == "approval/requested":
+            requested = message
+        if message.get("method") == "approval/request":
+            if requested is not None:
+                message["_requested"] = requested
+            return message
 
 
 def _initialize(

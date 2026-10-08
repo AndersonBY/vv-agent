@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from support import FixedModelProvider
@@ -291,3 +291,49 @@ def test_custom_run_replaces_rewritten_history_without_duplicate_continuations(t
     has_duplicate_history = len(contents) != len(set(contents))
     assert has_duplicate_history is contract["duplicate_history_allowed"]
     assert [message.metadata.get("revision") for message in persisted[:4]] == [2, 2, 2, 2]
+
+
+def test_kernel_file_facade_rebuild_resume_and_control_identity(tmp_path):
+    from vv_agent import Agent, ScriptedModelProvider
+    from vv_agent.session.interactive import _KernelAgentSession
+    from vv_agent.session.store import Conflict
+    from vv_agent.session.surfaces import _SessionKernel
+    from vv_agent.types import ToolCall
+
+    path = tmp_path / "interactive.sqlite"
+    provider = ScriptedModelProvider.new(
+        "test",
+        "m",
+        [
+            LLMResponse("", [ToolCall("ask", "ask_user", {"question": "Need input"})]),
+            LLMResponse("done"),
+        ],
+    )
+    first_kernel = _SessionKernel(path)
+    first = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path), _kernel=first_kernel)
+    first_facade = first.create_session(agent=Agent("a", "Ask.", model="m"), session_id="persistent")
+    waiting = first_facade.prompt("go", auto_follow_up=False)
+    assert waiting.status == AgentStatus.WAIT_USER
+    first_kernel.close()
+    kernel = _SessionKernel(path)
+    try:
+        rebuilt = InteractiveAgentClient(options=AgentSessionOptions(model_provider=provider, workspace=tmp_path), _kernel=kernel)
+        facade = cast(_KernelAgentSession, rebuilt.create_session(agent=Agent("a", "Ask.", model="m"), session_id="persistent"))
+        latest = facade.latest_run
+        assert latest is not None and latest.run_id == waiting.run_id
+        assert facade.messages == first_facade.messages
+        final = facade.continue_run("answer")
+        assert final.run_id == waiting.run_id and final.final_output == "done"
+        assert facade.archive(input_id="archive").replayed is False
+        assert facade.archive(input_id="archive").replayed is True
+        with pytest.raises(Conflict):
+            kernel.control("persistent", "close", "archive")
+        assert facade.close(input_id="close") is True
+        assert facade.close(input_id="close") is False
+        with pytest.raises(Conflict):
+            kernel.control("persistent", "archive", "close")
+        assert kernel.store.read_state("persistent")[0].closed
+        with pytest.raises(RuntimeError, match="closed"):
+            facade.prompt("late")
+    finally:
+        kernel.close()

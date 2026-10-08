@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from vv_agent.app_server import AppServerErrorCode, ChannelTransport, MessageProcessor, OutgoingRouter
+import pytest
+
+from vv_agent.app_server import AppServer, AppServerErrorCode, ChannelTransport, MessageProcessor, OutgoingRouter
+
+pytestmark = pytest.mark.usefixtures("surface")
 
 
 def _processor_with_transport() -> tuple[MessageProcessor, ChannelTransport]:
     transport = ChannelTransport(connection_id="conn_1")
     router = OutgoingRouter()
     router.register_transport(transport)
-    return MessageProcessor(router=router), transport
+    return AppServer(transport=transport, router=router).processor, transport
 
 
 def test_requests_before_initialize_are_rejected() -> None:

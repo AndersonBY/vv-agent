@@ -37,9 +37,17 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                 Message("system", task.prompt_bundle.flatten(), metadata=copy_json(task.metadata)),
                 *[m for m in history if m.role != "system"],
             ]
-            messages.append(Message("user", task.user_prompt))
+            initial_input = task.metadata.get("session_input_messages")
+            messages.extend(
+                [Message.from_dict(m) for m in initial_input] if initial_input else [Message("user", task.user_prompt)]
+            )
         elif r.kind == "input_applied" and p["disposition"] == "applied" and p["input"]["kind"] == "steer":
-            messages.append(Message("user", str(p["input"]["payload"]["content"])))
+            content = p["input"]["payload"]["content"]
+            messages.extend(
+                [Message.from_dict(m) for m in content["messages"]]
+                if isinstance(content, dict) and "messages" in content
+                else [Message("user", str(content))]
+            )
         elif (
             r.kind == "input_applied"
             and p["disposition"] == "applied"

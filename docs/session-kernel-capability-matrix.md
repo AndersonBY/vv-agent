@@ -1,14 +1,17 @@
 # Internal session kernel capability gate
 
 Date: 2026-10-09. Scope: `feat/session-kernel-internal`, internal assembly only.
-Runner, interactive, CLI and App Server still use their existing entry points.
-No top-level exports, default selection, public contract change, or Rust work.
+Public defaults retain their current execution path. Interactive, CLI and App Server
+accept one private, non-exported `_kernel` owner for internal producer checks.
+No top-level exports, default selection, contract lock/fixture change, or Rust work.
 
-**F3 is blocked.** Inventory: **63 rows — 59 done, 2 partial, 2 missing**. `done` means the bounded behavior named in that row has a
-same-scenario Runner / SQLite `:memory:` comparison. `partial` means some
-implementation exists but the whole row is not proved. `missing` means no
-kernel adapter implements the capability. Existing Runner tests and F2a fault
-suites alone are not evidence of Runner/kernel parity.
+**The F3 capability gate is complete.** Inventory: **63 rows — 63 done
+(including intentional differences), 0 partial, 0 missing**. `done` means the
+bounded behavior named in that row has a paired producer or an explicitly
+asserted kernel difference. Public cut-over still requires the canonical C1
+artifact and the F3 deletion/extraction work; internal evidence does not mark
+contract 24 verified. F2d-4 surface, wire and deletion details are in
+[`session-kernel-f2d-surfaces-report.md`](session-kernel-f2d-surfaces-report.md).
 
 Paths in the owner column are relative to `src/vv_agent/`. `P` below means
 `tests/session/test_runner_parity.py`. Other test paths are under `tests/`.
@@ -75,10 +78,10 @@ Paths in the owner column are relative to `src/vv_agent/`. `P` below means
 | Cancellation: cooperative / unknown / descendants | `runtime/cancellation.py`, `run_handle.py` | done (intentional difference) | T `test_cancellation_control_result_event_parity`, `test_cancellation_descendant_control_result_events_parity`; SDK cancellation/exception versus durable confirmed/unknown receipts, targeted descendant controls and terminal events |
 | Completed RunResult fields and cycle/tool history | `result.py`, `runner.py` | done (intentional difference) | C typed output/repair/budget/hook suites, `test_wait_result_fields_parity`, `test_completed_result_compaction_flags_are_per_cycle`, `test_endpoint_routing_preference_logged_attempts_parity`; errors, partial output, waits, logical cycles, repair calls and fixed terminal prefix |
 | Event store replay and durable consumer acknowledgement | `event_store.py`, `run_handle.py` | done | C `test_lifecycle_events_replay_ack_and_rollback_parity`, `test_delegation_events_and_child_replay_paired_producer`; RunEventStore bridge, SQL cursor rollback/replay, child query and identical append assertion |
-| Interactive steer/follow-up/resume/archive/close | `interactive.py`, `sessions/` | partial | Inbox controls exist; interactive session facade not wired (F3) and parity absent |
-| CLI single-run, stream and persistent sessions | `cli.py` | missing | No internal CLI scenario adapter; defaults intentionally unchanged |
-| App Server thread/turn/approval/replay/non-text input | `app_server/server.py`, `app_server/run_adapter.py` | missing | No full internal App Server scenario adapter; public wire unchanged |
-| App Server model/list, schema and TypeScript export | `app_server/protocol/`, `app_server/schema.py` | partial | Existing independent public paths retained; cut-over compatibility needs F3 producer |
+| Interactive steer/follow-up/resume/archive/close | `interactive.py`, `sessions/`, `session/interactive.py` | done (intentional difference) | `test_interactive_real_same_turn_user_reply`, `test_interactive_live_steer_and_durable_follow_up`, `test_interactive_child_wait_reply_keeps_child_identity`, `test_kernel_file_facade_rebuild_resume_and_control_identity`, `test_interactive_close_during_model_call_is_idempotent`; records/inbox facade, same-turn/child reply, durable archive/close |
+| CLI single-run, stream and persistent sessions | `cli.py`, `session/surfaces.py` | done | `test_cli_real_single_run_and_stream_channels[current/kernel]`, `test_cli_kernel_persistent_session_survives_owner_restart`; SQLite memory/file owners, unchanged default and output channels |
+| App Server thread/turn/approval/replay/non-text input | `app_server/server.py`, `session/app_server.py` | done (intentional difference) | Existing thread/turn/approval/replay suites parametrized; `test_kernel_process_restart_retains_calls_approval_image_and_client_cursor`, `test_child_wait_user_is_exposed_and_reply_targets_child`, `test_kernel_controller_suspend_reply_resume_and_terminal_are_inbox_items`; no second ledger; exact C1 wire items in F2d-4 report |
+| App Server model/list, schema and TypeScript export | `app_server/protocol/`, `app_server/schema.py` | done | `test_model_list_forwards_optional_filters_and_emits_canonical_superset`, `test_schema_export_request_returns_json_and_typescript_bundles[current/kernel]`; full result/bundle identity; v23 export remains unchanged |
 
 ## Comparison projection
 
@@ -464,3 +467,37 @@ workload remain in force. GC is unchanged; the p95 gate is not a max/p99 guarant
 
 F2d-3 row mapping, C1 candidates and three independent overhead runs are recorded in
 [`session-kernel-f2d-children-report.md`](session-kernel-f2d-children-report.md).
+
+## F2d-4 surface validation results (2026-10-09)
+
+The final four surface rows are closed: **63 done, 0 partial, 0 missing**.
+The public default remains unchanged; one private `_kernel` owner selects the
+interactive, CLI and App Server producer. The App Server has no second thread
+ledger. Restart, retained approval ownership, child WAIT_USER routing, image
+replay, cursor replay and archive/close identity are covered in the existing
+surface suites. Model/list and the complete schema/TypeScript bundles remain
+identical. The explicit C1 wire items and F3 deletion/extraction inventory are in
+[`session-kernel-f2d-surfaces-report.md`](session-kernel-f2d-surfaces-report.md).
+
+| Gate | Result |
+| --- | --- |
+| Contract snapshot | PASS: 23.0.0, 55 fixture files, unchanged lock and manifest |
+| Ruff format / check and ty | PASS: 393 Python files formatted |
+| `uv run pytest tests/session -q`, real local PG | PASS: 1397 passed in 305.52s |
+| Full pytest, real Redis 6400 DB 15 and local PG | PASS: 3944 passed, 20 skipped, 18 warnings in 449.95s |
+| Overhead, three independent `--runs 200 --warmup 10` processes | PASS: all six scenarios, no leaked threads |
+| M6 5k/20k history, 1k/10k sessions, one sample, `--assert-capacity` | PASS: cold drive 503.28 / 2059.30 ms; steady append 9.70 / 15.44 ms; catalog scan 18.59 / 226.15 ms |
+| Scope and cleanup | PASS: default/exports/lock/fixtures/Rust unchanged, no commits; gate-owned Redis stopped |
+
+Added p95 values in milliseconds, from the three independent F2d-4 JSON artifacts:
+
+| Scenario | Run 1 | Run 2 | Run 3 | Limit |
+| --- | ---: | ---: | ---: | ---: |
+| ten_turns | 56.577 | 59.842 | 58.007 | 80 |
+| children | 43.996 | 43.316 | 44.823 | 50 |
+| app_server_turn | 25.869 | 24.520 | 26.006 | 50 |
+
+The detailed report retains current/kernel p50 and p95 for every scenario and
+run. Live-provider and cross-runtime opt-in probes were not run; applicable
+Redis/PG cases ran. M6 is one bounded sample, not a p95 or soak claim. Canonical
+C1 adoption and removal of shared dependencies from the old stack remain F3 work.

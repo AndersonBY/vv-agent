@@ -662,7 +662,9 @@ class _Driver:
                 if item.payload["action"] not in {"archive", "close"} and (tid is None or target_tid != tid):
                     disposition, reason = "rejected", "control requires active target"
             elif item.kind == "steer":
-                if tid is None or target_tid != tid:
+                if tid is None and target_tid is None:
+                    continue
+                if tid is None or target_tid not in {None, tid}:
                     disposition, reason = "rejected", "steer requires active target"
             else:
                 disposition, reason = "rejected", "unsupported input"
@@ -735,12 +737,18 @@ class _Driver:
         return target, self.completed(a.execution_plan, outcome), "applied", None
 
     def start_turn(self) -> bool:
-        for input_id, applied in self.state.applied_inputs.items():
+        inputs = sorted(self.state.applied_inputs.items(), key=lambda pair: pair[1]._payload["input"]["kind"] == "follow_up")
+        for input_id, applied in inputs:
             if applied._payload["disposition"] != "queued" or input_id in self.state.admitted_inputs:
                 continue
             item = applied._payload["input"]
             tid = item["target_turn_id"] or f"{self.sid}/turn/{input_id}"
-            task = self.runtime.compile(str(item["payload"]["content"]), tid)
+            content = item["payload"]["content"]
+            task = self.runtime.compile(
+                content["text"] if isinstance(content, dict) and "messages" in content else str(content), tid
+            )
+            if isinstance(content, dict) and "messages" in content:
+                task.metadata["session_input_messages"] = content["messages"]
             task.task_id = tid
             definition = self.runtime._definition(task)
             prior = self.runtime._retained_task_key
@@ -1553,8 +1561,13 @@ class _Driver:
         return True
 
 
-def drive(store: SessionStore, session_id: str, *, runtime: Runtime) -> None:
+def drive(
+    store: SessionStore, session_id: str, *, runtime: Runtime, _one_turn: bool = False, _wait_for_lease: bool = False
+) -> None:
     lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=runtime.ttl_ms)
+    while lease is None and _wait_for_lease:
+        time.sleep(0.01)
+        lease = store.acquire(session_id, owner=uuid4().hex, ttl_ms=runtime.ttl_ms)
     if lease is None:
         return
     scope = _Scope(lease, runtime)
@@ -1565,8 +1578,12 @@ def drive(store: SessionStore, session_id: str, *, runtime: Runtime) -> None:
             try:
                 if not driver.step():
                     break
+                if _one_turn and driver.records[-1].record.kind == "turn_ended":
+                    break
             except SequenceConflict:
                 continue
+        if scope.lost:
+            raise LeaseLost("heartbeat lost ownership")
     finally:
         scope.stop.set()
         scope.thread.join(timeout=2)
