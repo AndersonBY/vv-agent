@@ -5,12 +5,13 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from copy import copy
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-from vv_agent.agent import Agent
+from vv_agent.agent import Agent, RunContext
 from vv_agent.budget import (
     BudgetDimension,
     BudgetEvaluator,
@@ -26,19 +27,21 @@ from vv_agent.llm.base import LLMClient, LlmRequest
 from vv_agent.llm.vv_llm_client import VvLlmClient
 from vv_agent.memory import MemoryManager
 from vv_agent.model_settings import ModelSettings, RetrySettings
-from vv_agent.prompt import PromptBundle
+from vv_agent.prompt import PromptBundle, PromptSection
 from vv_agent.run_config import RunConfig, ToolPolicy, merge_tool_policies
 from vv_agent.runtime.cancellation import CancellationToken
 from vv_agent.runtime.compiler import AgentCompiler, _apply_tool_policy_metadata
 from vv_agent.runtime.context import ExecutionContext
+from vv_agent.runtime.hooks import RuntimeHookManager
 from vv_agent.runtime.token_usage import normalize_token_usage
 from vv_agent.runtime.tool_planner import plan_tool_schemas
 from vv_agent.tools.base import ToolContext
 from vv_agent.tools.builtins import build_default_registry
-from vv_agent.tools.function import adapt_tool
+from vv_agent.tools.executor import ToolExposure, is_tool_executor
+from vv_agent.tools.function import FunctionTool, adapt_tool
 from vv_agent.tools.metadata import ToolResultRetention
 from vv_agent.tools.orchestrator import ToolOrchestrator
-from vv_agent.types import AgentTask, Message, ToolCall
+from vv_agent.types import AgentTask, LLMResponse, Message, ToolCall
 from vv_agent.workspace.local import LocalWorkspaceBackend
 
 from .children import ChildSession
@@ -71,14 +74,61 @@ class Runtime:
     def __post_init__(self) -> None:
         if not 0 < self.heartbeat_seconds <= 1 or self.ttl_ms <= self.heartbeat_seconds * 2000:
             raise ValueError("heartbeat must be <=1s and less than half the lease TTL")
-        if isinstance(self.llm, VvLlmClient) and len(self.llm.endpoint_targets) != 1:
-            raise ValueError("session kernel requires one bound model endpoint; retries belong to the log")
-        self.registry = build_default_registry()
-        for tool in self.agent.tools:
-            self.registry.register_executor(adapt_tool(tool).to_executor())
+        from vv_agent.runner import Runner
+
+        self.config = Runner._effective_run_config(self.agent, self.config)
+        self.registry = self.config.tool_registry_factory() if self.config.tool_registry_factory else build_default_registry()
+        for candidate in self.agent.tools:
+            if is_tool_executor(candidate):
+                executor = candidate
+            else:
+                tool = candidate if isinstance(candidate, FunctionTool) else adapt_tool(candidate)
+                if not Runner._tool_is_enabled(tool=tool, agent=self.agent, run_config=self.config):
+                    continue
+                executor = tool.to_executor()
+            visible = executor.exposure == ToolExposure.DIRECT
+            self.registry.register_executor(executor, expose_to_model=visible, planner_extra=visible)
         self.functions = FunctionProvider(ToolOrchestrator.from_registry(self.registry))
+        self.hooks = RuntimeHookManager([*self.agent.hooks, *self.config.hooks])
+
+    def run_context(self, tid: str) -> RunContext:
+        return RunContext(
+            context=self.config.context,
+            run_id=tid,
+            agent_name=self.agent.name,
+            model=self.resolved.model_id,
+            workspace=self.config.workspace,
+            metadata={**self.agent.metadata, **self.config.metadata},
+        )
+
+    def complete(self, request: LlmRequest, attempt: int) -> LLMResponse:
+        client = self.llm
+        if isinstance(client, VvLlmClient):
+            # One endpoint per logged attempt; never stack client fallback and kernel retries.
+            targets = client.endpoint_targets
+            if not targets:
+                raise ValueError("No endpoint targets configured")
+            client = copy(client)
+            client.endpoint_targets = [targets[(attempt - 1) % len(targets)]]
+            client.max_retries_per_endpoint = 1
+            client.randomize_endpoints = False
+        return client.complete(request)
 
     def compile(self, content: str, tid: str) -> AgentTask:
+        from vv_agent.runner import Runner
+
+        guardrail = Runner._apply_input_guardrails(agent=self.agent, run_context=self.run_context(tid), user_input=content)
+        if guardrail.outcome == "rewrite":
+            content = str(guardrail.value)
+        if guardrail.outcome in {"block", "require_approval"}:
+            return AgentTask(
+                task_id=tid,
+                model=self.resolved.model_id,
+                prompt_bundle=PromptBundle((PromptSection(id="blocked", text="Input blocked", stable=True),)),
+                user_prompt=content,
+                use_workspace=False,
+                metadata={"session_input_blocked": guardrail.message or "Input blocked by guardrail."},
+            )
         policy = merge_tool_policies(self.agent.tool_policy, self.config.tool_policy)
         task = AgentCompiler().compile(
             agent=self.agent,
@@ -90,12 +140,26 @@ class Runtime:
         )
         task.metadata["_vv_agent_tool_policy_approval"] = policy.approval if policy else "default"
 
+        defaults = self.config.model_provider.default_settings(self.resolved) if self.config.model_provider else ModelSettings()
         task.model_settings = replace(
-            task.model_settings or ModelSettings(), retry=RetrySettings(max_attempts=1, backoff_seconds=0)
+            defaults.resolve(task.model_settings), retry=RetrySettings(max_attempts=1, backoff_seconds=0)
         )
+        task.initial_shared_state.setdefault("todo_list", [])
+        for key in ("available_skills", "active_skills"):
+            if key in task.metadata:
+                task.initial_shared_state.setdefault(key, task.metadata[key])
+        task.extra_tool_names = list(dict.fromkeys([*task.extra_tool_names, *self.registry.list_planner_extra_tool_names()]))
         return task
 
-    def context(self, task: AgentTask, plan: Record, token: CancellationToken, *, approved: bool = False) -> ToolContext:
+    def context(
+        self,
+        task: AgentTask,
+        plan: Record,
+        token: CancellationToken,
+        *,
+        approved: bool = False,
+        shared_state: dict[str, Any] | None = None,
+    ) -> ToolContext:
         metadata = dict(task.metadata)
         frozen = ToolPolicy(
             allowed_tools=metadata.get("_vv_agent_allowed_tools"),
@@ -125,7 +189,8 @@ class Runtime:
         assert source is not None
         return ToolContext(
             workspace=workspace,
-            shared_state=dict(task.initial_shared_state),
+            shared_state=shared_state if shared_state is not None else dict(task.initial_shared_state),
+            run_context=self.run_context(task.task_id),
             cycle_index=(
                 plan.payload["request"]["metadata"]["cycle_index"]
                 if plan.payload["purpose"] == "compaction"
@@ -145,12 +210,8 @@ class Runtime:
 
     def definition(self, task: AgentTask) -> dict[str, Any]:
         # Freeze schema + capabilities with the task; current bindings are checked on resume.
-        names = [*task.extra_tool_names, "ask_user", *(["read_file"] if task.use_workspace else [])]
-        schemas = [
-            s
-            for s in plan_tool_schemas(registry=self.registry, task=task, include_dynamic_hints=False)
-            if s["function"]["name"] in names
-        ]
+        schemas = plan_tool_schemas(registry=self.registry, task=task, include_dynamic_hints=False)
+        names = [s["function"]["name"] for s in schemas]
         memory_settings = {
             f.name: getattr(self.memory_manager, f.name)
             for f in fields(self.memory_manager)
@@ -203,6 +264,13 @@ def request_from_dict(value: dict[str, Any]) -> LlmRequest:
     )
 
 
+def model_usage(value: dict[str, Any] | None):
+    # Framework receipt annotations are not provider token-usage fields.
+    return normalize_token_usage(
+        {k: v for k, v in (value or {}).items() if k not in {"session_shared_state", "session_completion_reason"}}
+    )
+
+
 def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
     limits = state.turns[tid].start.payload["budget"]
     parsed = RunBudgetLimits.from_dict(limits)
@@ -240,5 +308,5 @@ def budget(state: ExecutionState, tid: str) -> BudgetEvaluator | None:
     for kind, attempt in started:
         if kind == "model":
             usage = attempt.result.payload["usage"] if attempt.result else {}
-            evaluator.model_call_complete(normalize_token_usage(usage))
+            evaluator.model_call_complete(model_usage(usage))
     return evaluator

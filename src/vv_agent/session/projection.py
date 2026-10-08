@@ -24,10 +24,10 @@ from vv_agent.events import (
     ToolCallStartedEvent,
 )
 from vv_agent.interaction import HostInteractionRequest
-from vv_agent.runtime.token_usage import normalize_token_usage
 from vv_agent.types import ModelCallOperation, ToolExecutionResult
 
 from .records import digest
+from .runtime import model_usage
 from .store import StoredRecord
 
 
@@ -48,6 +48,8 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
         }
         event: RunEvent | None = None
         if r.kind == "turn_started":
+            if p["definition"]["task"].get("metadata", {}).get("session_input_blocked"):
+                continue
             event = RunStartedEvent(**common, input=p["definition"]["task"]["user_prompt"])
         elif r.kind == "turn_ended":
             if p["status"] == "completed":
@@ -121,15 +123,15 @@ def project_records(records: Iterable[StoredRecord]) -> list[RunEvent]:
                         event = ModelCallFailedEvent(
                             **identity,
                             outcome="definitive",
-                            usage=normalize_token_usage(p["usage"]),
+                            usage=model_usage(p["usage"]),
                             error_code=p["result"].get("error_code", "not_executed"),
                         )
                     elif p["context"] != "audit":
-                        event = ModelCallCompletedEvent(**identity, usage=normalize_token_usage(p["usage"]))
+                        event = ModelCallCompletedEvent(**identity, usage=model_usage(p["usage"]))
                 elif r.kind == "op_unknown":
                     events.append(
                         ModelCallFailedEvent(
-                            **identity, outcome="ambiguous", usage=normalize_token_usage(None), error_code="model_outcome_unknown"
+                            **identity, outcome="ambiguous", usage=model_usage(None), error_code="model_outcome_unknown"
                         )
                     )
                     common["event_id"] = f"sk/{identity_digest}/duplicate-risk"

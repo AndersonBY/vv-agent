@@ -173,7 +173,10 @@ class SQLStore:
                 (session_id,),
             )
             prefix = self._prefix(session_id, row)
-            state, records = deepcopy((prefix.reducer.state, prefix.records))
+            # Validated log payloads are JSON trees. Clone them in C while preserving the
+            # shared Record references between the detached state and detached history.
+            memo = {id(r.record.payload): json.loads(json.dumps(r.record.payload)) for r in prefix.records}
+            state, records = deepcopy((prefix.reducer.state, prefix.records), memo)
             return state, records, row[1]
 
     def _schedule(self, session_id: str, state: ExecutionState) -> None:
@@ -322,9 +325,18 @@ class SQLSessionTx:
         )
 
     def _write(
-        self, record: Record, *, seq: int, commit_id: str, commit_digest: str, position: int, epoch: int, now: int
+        self,
+        record: Record,
+        *,
+        seq: int,
+        commit_id: str,
+        commit_digest: str,
+        position: int,
+        epoch: int,
+        now: int,
+        body: bytes | None = None,
     ) -> None:
-        body = record.encode()
+        body = record.encode() if body is None else body
         self.store._rows(
             "INSERT INTO sk_record VALUES (%s,%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
@@ -430,7 +442,7 @@ class SQLSessionTx:
         # Cache the same JSON values that a cold reader sees, detached from caller-owned payloads.
         records = tuple(Record(**json.loads(body)) for body in encoded)
         # CAS/lease are admission facts, not logical commit bytes: replay cannot renew authority.
-        body = canonical_json_bytes({"records": [r.to_dict() for r in records], "consume_input_ids": list(consume_input_ids)})
+        body = b'{"consume_input_ids":' + canonical_json_bytes(consume_input_ids) + b',"records":[' + b",".join(encoded) + b"]}"
         manifest = canonical_json_bytes(
             {"record_ids": [r.record_id for r in records], "consume_input_ids": list(consume_input_ids)}
         )
@@ -485,7 +497,7 @@ class SQLSessionTx:
                     raise Conflict("input already consumed, unavailable, or different bytes")
                 consumed.append(InboxItem.parse(incoming[0]))
             reducer = prefix.reducer.fork()
-            state = reducer.extend((r for _, r, _ in new), consumed_inputs=consumed)
+            state = reducer.extend((r for _, r, _ in new), consumed_inputs=consumed, bodies=(encoded[p] for p, _, _ in new))
             now = s._now()
             s._check_lease(session_id, lease, row, now)  # Validation may outlive the lease.
             commit_digest = sha256(body).hexdigest()
@@ -506,6 +518,7 @@ class SQLSessionTx:
                     position=position,
                     epoch=lease.epoch,
                     now=now,
+                    body=encoded[position],
                 )
             for input_id, (_, seq) in applications.items():
                 s._rows("UPDATE sk_inbox SET consumed_seq=%s WHERE session_id=%s AND input_id=%s", (seq, session_id, input_id))
@@ -514,7 +527,7 @@ class SQLSessionTx:
             receipt = CommitReceipt(commit_id, tuple(sequences), head)
             self._commit(session_id, commit_id, body, manifest, receipt.record_sequences, head, now)
             added = tuple(StoredRecord(r, seq, commit_id, lease.epoch, now) for _, r, seq in new)
-            checksum = sha256(new[-1][1].encode()).hexdigest() if new else prefix.head_digest
+            checksum = sha256(encoded[new[-1][0]]).hexdigest() if new else prefix.head_digest
             s._fold_cache = _Prefix(session_id, lease.epoch, checksum, reducer, prefix.records + added)
             return receipt
 

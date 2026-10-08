@@ -161,10 +161,10 @@ The immutable definition contains the compiled AgentTask/PromptBundle, tool
 schemas/capabilities, model binding and handler version. Resume does not rerun
 instruction/context providers. Version/schema/capability/model-binding changes
 stop with an explicit reason. Dispatch reevaluates current authorization and
-retains frozen policy denials. The internal runtime currently exposes explicitly registered
-FunctionTools, `ask_user`, and the policy-filtered built-in `read_file` when workspace
-use is enabled; additional managed provider tools require a
-session provider adapter. It does not run the old checkpoint controller or
+retains frozen policy denials. The internal runtime exposes the policy-filtered built-in planner surface and registered
+executors, honoring FunctionTool `is_enabled` and registry exposure. The capability
+matrix in `session-kernel-capability-matrix.md` distinguishes paired evidence from
+unimplemented lifecycle and SDK adapters. It does not run the old checkpoint controller or
 its deferred lifecycle.
 
 | Need | Existing implementation called |
@@ -180,10 +180,9 @@ its deferred lifecycle.
 
 `CycleRunner._complete_llm` couples request construction to the old coordinator.
 The kernel builds the same LlmRequest and uses the same client, replacing only
-operation admission/persistence. It freezes `RetrySettings(max_attempts=1)` and
-requires exactly one endpoint on VvLlmClient: transport retries or endpoint
-fallback must not multiply the two logged attempts. Custom clients must also
-perform exactly one provider attempt per `complete` call. No network/provider
+operation admission/persistence. It freezes `RetrySettings(max_attempts=1)` and binds one VvLlmClient endpoint per
+logged attempt, in configured order. Custom clients must also perform exactly one
+provider attempt per `complete` call. No network/provider
 credentials are needed by the scripted recovery tests.
 
 `FunctionProvider.preflight` runs the actual ToolOrchestrator up to its existing

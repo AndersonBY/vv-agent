@@ -157,7 +157,8 @@ def compact_context(driver: _Driver) -> bool:
         # The full pipeline rejects malformed blocks before any artifact writes.
         return False
     if not failures:
-        prune = manager.plan_microcompaction(source, cycle_index=len(primary) + 1, current_tokens=tokens(manager, source))
+        current_tokens = tokens(manager, source)
+        prune = manager.plan_microcompaction(source, cycle_index=len(primary) + 1, current_tokens=current_tokens)
         if prune and prune.candidates and not (last_change and last_change.kind == "context_compacted"):
             result = manager.apply_microcompaction(source, plan=prune)
             if result.archived_count:
@@ -165,7 +166,7 @@ def compact_context(driver: _Driver) -> bool:
                 driver.runtime.hook("after_microcompact_artifacts", record)
                 driver.commit([record], guarded=True)
                 return True
-        if tokens(manager, source) <= manager.autocompact_threshold:
+        if current_tokens <= manager.autocompact_threshold:
             return False
     plan = manager.plan_summary(source, drop_ratio=0.2 * failures)
     if plan is None:

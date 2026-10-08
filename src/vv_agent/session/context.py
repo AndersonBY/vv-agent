@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from vv_agent.runtime.tool_call_runner import ToolCallRunner
 from vv_agent.types import AgentTask, Message, ToolExecutionResult
 
 from .records import digest
@@ -22,7 +23,11 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
             messages = [Message.from_dict(m) for m in p["replacement"]]
         elif r.kind == "turn_started":
             task = AgentTask.from_dict(p["definition"]["task"])
-            messages.extend(task.initial_messages)
+            history = task.initial_messages or messages
+            messages = [
+                Message("system", task.prompt_bundle.flatten(), metadata=dict(task.metadata)),
+                *[m for m in history if m.role != "system"],
+            ]
             messages.append(Message("user", task.user_prompt))
         elif r.kind == "input_applied" and p["disposition"] == "applied" and p["input"]["kind"] == "steer":
             messages.append(Message("user", str(p["input"]["payload"]["content"])))
@@ -57,7 +62,11 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                         {
                             "id": c["id"],
                             "type": "function",
-                            "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])},
+                            "function": {
+                                "name": c["name"],
+                                "arguments": json.dumps(c["arguments"], ensure_ascii=False, separators=(",", ":")),
+                            },
+                            **({"extra_content": c["extra_content"]} if "extra_content" in c else {}),
                         }
                         for c in calls
                     ]
@@ -72,8 +81,10 @@ def project_context(records: tuple[StoredRecord, ...], state: ExecutionState) ->
                 if a.result and a.context == "normal":
                     result = ToolExecutionResult.from_dict(a.result.payload["result"])
                     message = result.to_tool_message()
-                    message.name = call["name"]
                     messages.append(message)
+                    image = ToolCallRunner._build_image_notification(result=result, include_image=task.native_multimodal)
+                    if image is not None:
+                        messages.append(image)
                 else:
                     content = json.dumps({"error": "tool_outcome_unknown", "retryable": False})
                     messages.append(Message("tool", content, tool_call_id=call["id"], name=call["name"]))
