@@ -11,6 +11,13 @@ C = `test_capability_parity.py`, D = `test_delegation_parity.py`,
 R = `test_recovery_matrix.py`. Persistent cases use PostgreSQL, SQLite files
 and SQLite `:memory:`; process-kill cases use durable stores only.
 
+The 2026-10-10 full gate passed **3067 tests**, with seven environment/opt-in
+skips and no PostgreSQL skips. It includes 1572 session tests, with 440 PostgreSQL,
+440 SQLite file and 356 SQLite memory cases. All 63 capabilities below remain
+covered; the single default execution path has no outstanding adoption gap at
+the centrally verified Python baseline 53bdf32 / contract 24.0.1. Verification
+of a newer release commit is a separate central record.
+
 | Capability | Current owner module | Kernel status | Evidence / remaining requirement |
 | --- | --- | --- | --- |
 | Basic synchronous no-tool completion | `runner.py`, `session/kernel.py` | done | P `test_basic_runner_parity` |
@@ -92,3 +99,17 @@ extra or missing exports. Snapshot checks establish artifact integrity separatel
 Performance methodology and current absolute measurements live in
 [session-kernel-baseline.md](session-kernel-baseline.md); host API migration lives
 in [migration-v8.md](migration-v8.md).
+
+## Release validation
+
+| Boundary | Current evidence |
+| --- | --- |
+| Duplicate/reordered/lost delivery, concurrency, lease expiry, exit races, approvals, children, cancellation and delayed inbox | `test_dispatch.py`: 44 cases per durable store; real `drive`/`tick`, shared at-least-once transport |
+| Accepted query schedule | Same suite: first `poll_at_ms`, SQL deferral despite unrelated input, immediate authenticated results, original deadline; 10 polls within the unchanged bound 11 over 10250 ms |
+| In-process Accepted park and continuation | `test_local_accepted_returns_parked_until_due_drive`: Runner.run_sync / handle return in <1 s with a 60 s poll interval, typed WAIT_USER result and parked event, zero early queries and no waiting thread; tick / Runner.resume at the due time queries once and completes the same turn on each durable store |
+| Seeded fault repetition | `test_soak.py`: 3 cases per durable store; `session_kernel_soak.py --assert` supplies release-scale repetition and unchanged poll/identity/fold bounds; sizes and results in the baseline |
+| M6 capacity | `session_kernel_benchmark.py --assert-capacity`, real PostgreSQL, 100–20000 records / 1000–10000 sessions |
+| Built distribution and optional dependencies | `install_matrix.py`, base / postgres / s3 / postgres,s3 fresh venvs; SQLite memory/file, configured PG, package data and removed-extra checks; CI PG service |
+| Examples and public API | 28 example compile/import cases without network calls; public API v8 resolves 239 capabilities / 281 members, 182 root exports with extra/missing = 0 |
+| Fixture provenance and current wire | One generation of 45 fixtures matches v24.0.1 byte-for-byte; snapshot/manifest check is separate; generator v23 wording is retained provenance |
+| Release preparation | [0.22.0 notes](releases/0.22.0.md), migration and host transport ownership; release workflow checks central verified ancestry |

@@ -55,17 +55,6 @@ def _digest(value: Any, label: str) -> str:
     return value
 
 
-def _request_without_digest(request: HostInteractionRequest) -> dict[str, Any]:
-    return {
-        "interaction_id": request.interaction_id,
-        "logical_cycle": request.logical_cycle,
-        "operation_id": request.operation_id,
-        "prompt": request.prompt,
-        "schema_version": HOST_REQUEST_SCHEMA,
-        "tool_call_id": request.tool_call_id,
-    }
-
-
 @dataclass(frozen=True, slots=True)
 class HostInteractionRequest:
     interaction_id: str

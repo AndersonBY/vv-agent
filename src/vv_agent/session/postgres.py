@@ -67,6 +67,14 @@ CREATE TABLE sk_commit (
 """
 
 
+def _connection_conninfo(connection: Connection[Any]) -> str:
+    from psycopg.conninfo import make_conninfo
+
+    info = connection.info
+    # ConnectionInfo.dsn deliberately omits the password.
+    return make_conninfo(info.dsn, password=info.password) if info.password else info.dsn
+
+
 class PostgresStore(SQLStore):
     """One connection per thread. atomic() nests as a savepoint in host transactions."""
 

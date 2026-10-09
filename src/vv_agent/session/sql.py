@@ -210,10 +210,11 @@ class SQLStore:
             prefix = self._prefix(session_id, row)
             return prefix.reducer.snapshot(), prefix.records, row[1]
 
-    def _schedule(self, session_id: str, state: ExecutionState) -> None:
+    def _schedule(self, session_id: str, state: ExecutionState, *, preserve_due: bool = False) -> None:
         self._rows(
-            "UPDATE sk_session SET phase=%s,next_drive_ms=%s,active_turn_id=%s,terminal_seq=%s WHERE session_id=%s",
-            (state.phase, state.next_drive_ms, state.active_turn_id, state.terminal_seq, session_id),
+            "UPDATE sk_session SET phase=%s,next_drive_ms=CASE WHEN %s THEN next_drive_ms ELSE %s END,"
+            "active_turn_id=%s,terminal_seq=%s WHERE session_id=%s",
+            (state.phase, preserve_due, state.next_drive_ms, state.active_turn_id, state.terminal_seq, session_id),
         )
 
     def rebuild_schedule(self, session_id: str) -> ExecutionState:
@@ -299,6 +300,16 @@ class SQLStore:
                 return False
             self._rows("UPDATE sk_session SET lease_owner=NULL,lease_until_ms=NULL WHERE session_id=%s", (lease.session_id,))
             return True
+
+    def next_drive_delay_ms(self, session_id: str, *, lease: Lease | None = None) -> int | None:
+        """Read the SQL schedule using database time; provider queries require the held lease."""
+        with self._transaction():
+            row = self._lock(session_id)
+            now = self._now()
+            if lease is not None:
+                self._check_lease(session_id, lease, row, now)
+            due = self._one("SELECT next_drive_ms FROM sk_session WHERE session_id=%s", (session_id,))[0]
+            return None if due is None else max(0, due - now)
 
     def defer_idle_drive(self, lease: Lease, *, poll_ms: int) -> bool:
         """Defer a stale idle schedule without changing execution facts or future due work."""
@@ -588,7 +599,14 @@ class SQLSessionTx:
             for input_id, (_, seq) in applications.items():
                 s._rows("UPDATE sk_inbox SET consumed_seq=%s WHERE session_id=%s AND input_id=%s", (seq, session_id, input_id))
             s._rows("UPDATE sk_session SET head_seq=%s WHERE session_id=%s", (head, session_id))
-            s._schedule(session_id, state)
+            # Consuming unrelated input must not erase an idle provider's SQL deferral.
+            s._schedule(
+                session_id,
+                state,
+                preserve_due=state.active_turn_id == prefix.reducer.state.active_turn_id
+                and state.due_ms == prefix.reducer.state.due_ms
+                and all(r.kind in {"input_applied", "usage_observed"} for _, r, _ in new),
+            )
             added = tuple(StoredRecord(r, seq, commit_id, lease.epoch, now) for _, r, seq in new)
             receipt = CommitReceipt(commit_id, tuple(sequences), head, records=added, inbox_seq=row[1])
             self._commit(session_id, commit_id, body, manifest, receipt.record_sequences, head, now)

@@ -21,6 +21,9 @@ Install the `postgres` extra for PostgreSQL SessionStore or the `s3` extra
 for S3 workspace storage. Repository `HEAD` is forward-only: current readers
 accept only the current strict public and wire shapes.
 
+For both extras: `python -m pip install 'vv-agent[postgres,s3]'`.
+See the [0.22.0 release notes](docs/releases/0.22.0.md) for breaking changes.
+
 Current HEAD uses contract v24, public API v8 and one session kernel execution path.
 Older runtime behavior is retained in Git tags. See [v8 migration](docs/migration-v8.md)
 for API replacements and host seed examples.

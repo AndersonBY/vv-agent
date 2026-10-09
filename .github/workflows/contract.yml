@@ -9,6 +9,31 @@ permissions:
   contents: read
 
 jobs:
+  install-matrix:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: [5432:5432]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      UV_NO_SOURCES: "1"
+      VV_AGENT_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v8.2.0
+      - name: Verify built distributions and every extra
+        run: uv run --no-project python scripts/install_matrix.py
+
   conformance:
     runs-on: ubuntu-latest
     env:

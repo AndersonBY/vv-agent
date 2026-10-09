@@ -5,80 +5,27 @@ from contextlib import contextmanager
 from dataclasses import replace
 from itertools import pairwise
 from threading import Event
+from time import monotonic
 
 import pytest
 
-from vv_agent.run_handle import RunHandle
-from vv_agent.session.children import child_delivery
+from vv_agent.events import RunStateChangedEvent
+from vv_agent.run_handle import RunHandle, RunHandleState
+from vv_agent.runner import Runner
 from vv_agent.session.kernel import _Driver, drive, read_state
-from vv_agent.session.providers import Definitive
-from vv_agent.session.records import InboxItem, SessionSpec
+from vv_agent.session.records import InboxItem
 from vv_agent.session.store import LeaseLost
-from vv_agent.session.supervisor import tick
 from vv_agent.session.surfaces import SessionDriver
 from vv_agent.tools.function import function_tool
-from vv_agent.types import LLMResponse, ToolCall, ToolExecutionResult
+from vv_agent.types import AgentStatus, LLMResponse, ToolCall
 
 from .conftest import open_store
-from .controlled import ControlledProvider
 from .helpers import record
 from .test_children import parent_runtime
 from .test_recovery_matrix import runtime
+from .transport import PollingProvider, Transport, WorkerKilled
 
 pytestmark = pytest.mark.persistent_store
-
-
-class Transport:
-    def __init__(self, store, database):
-        self.store, self.database = store, database
-        self.queue = []
-        self.wakes = []
-        self.runtimes = {}
-        self.projections = []
-
-    def wake(self, sid):
-        self.wakes.append(sid)
-        self.queue.append(sid)
-
-    def create(self, sid="s", steps=(), tools=(), consumers=("host",)):
-        with self.store.atomic() as tx:
-            tx.create(SessionSpec(sid, "test", "/tmp"), consumers=consumers)
-        self.runtimes[sid] = runtime(self.database, steps, tools, wake=self.wake)
-
-    def push(self, sid, item):
-        with self.store.atomic() as tx:
-            tx.push(sid, item)
-        self.wake(sid)
-
-    def deliver(self, index=0):
-        sid = self.queue.pop(index)
-        drive(self.store, sid, runtime=self.runtimes[sid])
-
-    def drain(self):
-        for _ in range(20):
-            if not self.queue:
-                return
-            self.deliver()
-        pytest.fail("transport did not reach quiescence")
-
-    def project(self, sid, consumer):
-        parent = None
-        with self.store.atomic() as tx:
-            batch = tx.consumer_batch(sid, consumer, limit=256 if consumer == "child_delivery" else 2)
-            if batch is None:
-                return
-            self.projections.append((sid, consumer, batch.from_seq, batch.through_seq))
-            if consumer == "child_delivery":
-                child_delivery(self.store, tx, sid)
-                if any(r.record.kind == "turn_ended" for r in batch.records):
-                    parent = self.store.read(sid, limit=1).records[0].record.payload["parent_session_id"]
-            else:
-                tx.ack(batch)
-        if parent:
-            self.wake(parent)
-
-    def tick(self, page_size=100):
-        return tick(self.store, runtime=self.runtimes.__getitem__, project=self.project, page_size=page_size)
 
 
 @pytest.fixture
@@ -217,10 +164,6 @@ def test_input_racing_holder_exit_is_seen_after_release(transport, monkeypatch, 
     assert transport.wakes == ["s", "s", "s"]
     transport.drain()
     assert len(records(store, kind="turn_ended")) == 2
-
-
-class WorkerKilled(BaseException):
-    pass
 
 
 @pytest.mark.parametrize("committed", [False, True])
@@ -451,25 +394,8 @@ def test_post_release_check_and_scan_share_drive_predicate(transport, clock):
     agree(True)
 
 
-class PollingProvider(ControlledProvider):
-    def __init__(self, database):
-        super().__init__(database, "accepted")
-        self.queries = []
-        self.deadline = None
-
-    def query(self, handle):
-        with open_store(self.database) as store:
-            now = store._now()
-        self.queries.append(now)
-        if self.deadline is not None and now >= self.deadline:
-            return Definitive(
-                ToolExecutionResult(tool_call_id="job", content="deadline handled").to_dict(), (handle["evidence"],)
-            )
-        return super().query(handle)
-
-
 @pytest.fixture
-def provider_wait(transport, clock):
+def provider_wait(transport):
     @function_tool
     def effect() -> str:
         return "unused synchronous handler"
@@ -512,9 +438,8 @@ def test_accepted_provider_poll_cadence_and_zero_immediate_rewakes(transport, cl
                     "queue_length": len(transport.queue),
                 }
             )
-    # Include the existing query immediately following submission at time zero.
-    assert provider_wait.queries == [1_000_000 + n * period for n in range(1 + duration // period)]
-    assert len(provider_wait.queries) == 1 + duration // period == 11
+    assert provider_wait.queries == [1_000_000 + n * period for n in range(1, 1 + duration // period)]
+    assert len(provider_wait.queries) == 10 <= 1 + duration // period == 11
     assert scheduled(transport.store) == 1_011_000
     record_property("poll_queries_ms", provider_wait.queries)
     record_property("poll_count_bound", "1 + floor(T/P) = 11; T=10250ms, P=1000ms")
@@ -538,7 +463,7 @@ def test_provider_deadline_caps_idle_deferral(transport, clock, provider_wait, m
     assert scheduled(transport.store) == provider_wait.deadline
     clock(249)
     transport.tick()
-    assert provider_wait.queries == [1_000_000, 1_001_000]
+    assert provider_wait.queries == [1_001_000]
     clock(1)
     transport.tick()
     assert provider_wait.queries[-1] == provider_wait.deadline
@@ -557,8 +482,151 @@ def test_input_during_deferred_provider_wait_is_immediate(transport, clock, prov
     assert transport.store.is_runnable("s")
     transport.drain()
     assert records(transport.store, kind="turn_ended")[0].payload["status"] == "cancelled"
-    assert provider_wait.queries == [1_000_000, 1_001_000]
+    assert provider_wait.queries == [1_001_000]
     assert transport.queue == []
+
+
+def test_first_provider_poll_obeys_poll_at_even_with_early_drives(transport, clock, provider_wait):
+    transport.push("s", prompt())
+    transport.drain()
+    assert provider_wait.queries == []
+    park = records(transport.store, kind="op_parked")[-1]
+    assert scheduled(transport.store) == park.payload["poll_at_ms"] == 1_001_000
+    clock(999)
+    transport.wake("s")
+    transport.drain()
+    assert provider_wait.queries == []
+    clock(1)
+    transport.wake("s")
+    transport.drain()
+    assert provider_wait.queries == [park.payload["poll_at_ms"]]
+
+
+@pytest.mark.parametrize("kind", ["user", "follow_up", "stale"])
+def test_unrelated_input_preserves_provider_deferral(transport, clock, provider_wait, kind):
+    transport.push("s", prompt())
+    transport.drain()
+    clock(1000)
+    transport.tick()
+    due = scheduled(transport.store)
+    clock(1)
+    item = (
+        InboxItem("unrelated", "control", {"action": "cancel"}, target_turn_id="stale")
+        if kind == "stale"
+        else InboxItem("unrelated", kind, {"content": "next"})
+    )
+    transport.push("s", item)
+    transport.drain()
+    assert read_state(transport.store, "s")[0].applied_inputs["unrelated"].payload["disposition"] == (
+        "queued" if kind == "follow_up" else "rejected"
+    )
+    assert not transport.store.peek_inbox("s")
+    assert provider_wait.queries == [1_001_000]
+    assert scheduled(transport.store) == due == 1_002_000
+    assert transport.queue == []
+    clock(999)
+    transport.tick()
+    assert provider_wait.queries == [1_001_000, due]
+
+
+def test_authenticated_provider_result_is_immediate_before_poll_due(transport, clock, provider_wait):
+    transport.push("s", prompt())
+    transport.drain()
+    clock(1)
+    transport.push("s", provider_wait.callback())
+    transport.drain()
+    assert provider_wait.queries == []
+    assert records(transport.store, kind="turn_ended")[0].payload["status"] == "completed"
+
+
+@pytest.mark.parametrize("surface", ["run_sync", "handle"])
+@pytest.mark.parametrize("continuation", ["tick", "resume"])
+def test_local_accepted_returns_parked_until_due_drive(
+    transport, clock, provider_wait, monkeypatch, surface, continuation, record_property
+):
+    rt = transport.runtimes["s"]
+    rt.poll_ms = 60_000
+    kernel = SessionDriver(store=transport.store)
+    monkeypatch.setattr("vv_agent.session.surfaces.SessionDriver", lambda: kernel)
+    monkeypatch.setattr(kernel, "runtime", lambda agent, config, task=None: rt)
+
+    def run():
+        if surface == "run_sync":
+            return Runner.run_sync(rt.agent, "go", run_config=rt.config)
+        return Runner.start(rt.agent, "go", run_config=rt.config).result(timeout=1)
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            started = monotonic()
+            pending = pool.submit(run)
+            try:
+                result = pending.result(timeout=1)
+            finally:
+                # Release a regressed blocking driver without waiting for the real poll interval.
+                if any(h._thread.is_alive() for h in kernel.handles):
+                    with transport.store.atomic():
+                        transport.store._rows("UPDATE provider_jobs SET ready=true")
+                    clock(rt.poll_ms)
+                    for h in kernel.handles:
+                        h.join(2)
+            elapsed = monotonic() - started
+        assert elapsed < 1 < rt.poll_ms / 1000
+        record_property("parked_return_wall_ms", elapsed * 1000)
+        handle = kernel.handles[0]
+        assert handle.done() and not handle._thread.is_alive()
+        assert handle.state() == RunHandleState("wait_user", True)
+        assert result.status is result.raw_result.status is AgentStatus.WAIT_USER
+        assert result.raw_result.wait_reason == result.final_output == "provider_pending"
+        assert any(isinstance(event, RunStateChangedEvent) and event.state == "parked" for event in result.events)
+        sid, tid = handle.session_id, handle.run_id
+        state, _, _ = read_state(transport.store, sid)
+        assert state.active_turn_id == tid and not state.turns[tid].ended
+        parked = records(transport.store, sid, "op_parked")[0]
+        assert parked.payload["poll_at_ms"] == 1_000_000 + rt.poll_ms
+        assert provider_wait.queries == []
+
+        with transport.store.atomic():
+            transport.store._rows("UPDATE provider_jobs SET ready=true")
+        clock(rt.poll_ms - 1)
+        drive(transport.store, sid, runtime=rt)
+        assert provider_wait.queries == []
+        assert not records(transport.store, sid, "turn_ended")
+        clock(1)
+        if continuation == "tick":
+            transport.runtimes[sid] = rt
+            transport.tick()
+            completed = handle.result(timeout=1)
+        else:
+            completed = Runner.resume(sid, tid)
+        assert provider_wait.queries == [parked.payload["poll_at_ms"]]
+        assert completed.status is AgentStatus.COMPLETED
+        assert completed.final_output == "done"
+        assert completed.raw_result.session_id == sid and completed.raw_result.turn_id == tid
+        assert len(records(transport.store, sid, "turn_ended")) == 1
+        assert provider_wait.counts() == (1, 1)
+        assert all(h.done() and not h._thread.is_alive() for h in kernel.handles)
+    finally:
+        kernel.close()
+
+
+@pytest.mark.parametrize("loss", ["expired", "replaced", "released"])
+def test_schedule_read_is_fenced_and_uses_database_time(transport, clock, loss):
+    transport.create()
+    store = transport.store
+    lease = store.acquire("s", owner="worker", ttl_ms=1000)
+    with store.atomic():
+        store._rows("UPDATE sk_session SET next_drive_ms=%s WHERE session_id='s'", (1_000_500,))
+    assert store.next_drive_delay_ms("s", lease=lease) == 500
+    clock(100)
+    assert store.next_drive_delay_ms("s", lease=lease) == 400
+    if loss == "released":
+        store.release(lease)
+    else:
+        clock(1000)
+        if loss == "replaced":
+            assert store.acquire("s", owner="other", ttl_ms=1000)
+    with pytest.raises(LeaseLost):
+        store.next_drive_delay_ms("s", lease=lease)
 
 
 @pytest.mark.parametrize("surface", ["one_turn", "run_handle"])
